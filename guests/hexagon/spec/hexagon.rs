@@ -151,6 +151,57 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ai8", 12, 5),  // 8 ビット即値（combine・mux・cmpb/cmph・累積・cmp.eq→Rd）
         ("iu9", 13, 5),  // 9 ビット即値（cmp.gtu #u9）
         ("pc6", 12, 7),  // add(pc,#u6) の u6
+        // ---- HX6: ロード/ストア ----
+        // sz3: アクセスサイズの 3 ビット（b=000 ub=001 h=010
+        // uh=011 w=100 w.h=101 d=110）。`.new` ストア値形は
+        // 101 を共有するため、通常形は wheres で 101 を除く。
+        ("sz3", 23, 21),
+        // sz2: `.new` ストア値形のアクセスサイズ（b=00 h=01 w=10）。
+        ("sz2", 12, 11),
+        // nt2: `.new` 値の生産者距離（bits[10:9] = Nt>>1。
+        // bit8 は 0 固定でパターン側が担う）。
+        ("nt2", 10, 9),
+        // mu1: 修飾レジスタ M0/M1 の選択（bit13）。
+        ("mu1", 13, 13),
+        // mo2: memop の演算選択（bits[6:5]。即値形は
+        // 0=+ 1=- 2=clrbit 3=setbit、レジスタ形は 0=+ 1=- 2=& 3=|）。
+        ("mo2", 6, 5),
+        // pd2m: ストア即値形・述語付 reg-offset の述語選択
+        // （bits[6:5]）。
+        ("pd2m", 6, 5),
+        // sz2i: ストア即値形・memop の 2 ビットサイズ
+        // （bits[22:21]。b=00 h=01 w=10）。
+        ("sz2i", 22, 21),
+        // sz2r/nt2r: reg-offset `.new` ストア値形のサイズ（bits[4:3]）
+        // と生産者距離（bits[2:1] = Nt>>1。bit0 は 0 固定）。
+        ("sz2r", 4, 3),
+        ("nt2r", 2, 1),
+        // sz3m: memop の 3 ビットサイズ（bits[23:21]。
+        // b=000 h=001 w=010。0b011 以降は予約）。
+        ("sz3m", 23, 21),
+        // pv2l/pv2pi: 述語付メモリ形の述語番号 Pv
+        // （io ロードは bits[12:11]、post-inc/abs ロードは
+        // bits[10:9]）。
+        ("pv2l", 12, 11),
+        ("pv2pi", 10, 9),
+        // q2v/q2r/q2p/q2ps/q2st: 述語付形の qualifier 選択
+        // 2 ビット。値の意味は全形式で共通（bit1=.new、
+        // bit0=否定: 0=if 1=if! 2=if.new 3=if!.new）。
+        // io 形は {bit25=.new,bit26=!}、ro/st_ip 形は
+        // {[25]/[24]},{[24]/[23]}、post-inc/abs ロードは
+        // bits[12:11]、post-inc/abs ストアは {bit7/bit13,bit2}。
+        ("q2r", 25, 24),
+        ("q2p", 12, 11),
+        ("q2st", 24, 23),
+        // ps4q/ps4p: 述語付 post-inc の s4（ストアは
+        // bits[6:3]、ロードは {bit8}+{bits[7:5]}）。
+        ("ps4q", 6, 3),
+        // ps4/ps4s: post-increment 即値 s4（LD: bits[8:5]、
+        // ST: bits[6:3]）。
+        ("ps4", 8, 5),
+        ("ps4s", 6, 3),
+        // ssa6: ST shifted-abs の即値（bits[5:0]）。
+        ("ssa6", 5, 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -198,6 +249,47 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("xu8", vec![(23, 21), (13, 13), (7, 5), (3, 3)], 0),
         // lsl6: lsl(#s6,Rt) の s6（bits{20:16}+{5}）。
         ("lsl6", vec![(20, 16), (5, 5)], 0),
+        // ---- HX6: ロード/ストアの分割即値 ----
+        // lu11/su11: scaled でない s11（ls11/ss11 と同じ桁、zfill 0。
+        // サイズは sz3 が指すのでスケーリングは実行側で行う）。
+        ("lu11", vec![(26, 25), (13, 5)], 0),
+        ("su11", vec![(26, 25), (13, 13), (7, 0)], 0),
+        // post-increment 即値 s4（LD: bits[8:5]、ST: bits[6:3]。
+        // 単一範囲なので Bits 宣言側にある）。
+        // reg-offset/shifted-abs のシフト量 u2（LD: bits{13}+{7}、
+        // ST: bits{13}+{6}）。
+        ("u2", vec![(13, 13), (7, 7)], 0),
+        ("u2a", vec![(13, 13), (6, 6)], 0),
+        // LD shifted-abs/absolute-set の即値（bits{11:8}+{6:5}）。
+        ("sa6", vec![(11, 8), (6, 5)], 0),
+        // ST shifted-abs の即値（bits[5:0]。Bits 宣言側）。
+        // 述語付ロードの u6 即値（bits{10:8}+{7:5}）。
+        ("lu6", vec![(10, 8), (7, 5)], 0),
+        // 述語付ストアの u6 即値（bits{13}+{7:3}）。
+        ("su6", vec![(13, 13), (7, 3)], 0),
+        // GP 相対の 16 ビットオフセット（LD: bits{26:25}+{20:16}
+        // +{13:5}、ST: 同 +{7:0}）。fEA_GP の素の u16。
+        ("ldgp16", vec![(26, 25), (20, 16), (13, 5)], 0),
+        ("stgp16", vec![(26, 25), (20, 16), (13, 13), (7, 0)], 0),
+        // ストア即値形・memop のオフセット u6（bits{12:8}+{7}）。
+        ("stiu6", vec![(12, 8), (7, 7)], 0),
+        // ストア即値形の値（非述語 s8: bits{13}+{6:0}、
+        // 述語付き s6: bits{13}+{4:0}）。
+        ("si8", vec![(13, 13), (6, 0)], 0),
+        ("si6", vec![(13, 13), (4, 0)], 0),
+        // q2v: io 述語付形の qualifier（{bit25=.new}+{bit26=!}）。
+        ("q2v", vec![(25, 25), (26, 26)], 0),
+        // q2ps: post-inc/abs ストア述語付形の qualifier
+        // （{bit7=.new}+{bit2=!}）。
+        ("q2ps", vec![(7, 7), (2, 2)], 0),
+        // ps4p: post-inc ロード述語付形の s4（{bit8}+{bits[7:5]}）。
+        ("ps4p", vec![(8, 8), (7, 5)], 0),
+        // u6a: 述語付 abs ロードの u6（{bits[20:16]}+{bit8}）。
+        ("u6a", vec![(20, 16), (8, 8)], 0),
+        // u6b: 述語付 abs ストアの u6（{bits[17:16]}+{bits[6:3]}）。
+        ("u6b", vec![(17, 16), (6, 3)], 0),
+        // q2a: 述語付 abs ストアの qualifier（{bit13=.new}+{bit2=!}）。
+        ("q2a", vec![(13, 13), (2, 2)], 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -314,24 +406,477 @@ pub fn build_model() -> polyisa_isadl::Model {
         &["x5", "ui16"],
         vec![gpr("x", "x5", Access::ReadWrite), val("imm", "ui16")],
     ));
-    // Rd = memw(Rs+#s11:2)。
+    // ---- HX6: ロード/ストアの形式 ----
+    // サイズは全形式とも sz3/sz2 が供給し、構文・パターンから
+    // 型名が落ちるため Insn 名はアドレッシングモードを指す
+    // （Ref: SPEC-HEXAGON-PRM (V79) mem* 各節）。
+    // Rd = memXX(Rs+#s11)。
     m.formats.push(fmt(
-        "FLDW",
-        &["s5", "d5", "ls11"],
+        "FLDR",
+        &["s5", "d5", "sz3", "lu11"],
         vec![
             gpr("d", "d5", Access::Write),
             gpr("s", "s5", Access::Read),
-            val("imm", "ls11"),
+            val("sz", "sz3"),
+            val("imm", "lu11"),
         ],
     ));
-    // memw(Rs+#s11:2) = Rt。
+    // Rd = memXX(Rx++#s4)。
     m.formats.push(fmt(
-        "FSTW",
-        &["s5", "t5", "ss11"],
+        "FLDPI",
+        &["s5", "d5", "sz3", "ps4"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz", "sz3"),
+            val("s4", "ps4"),
+        ],
+    ));
+    // Rd = memXX(Rx++Mu) / brev / I:circ。
+    m.formats.push(fmt(
+        "FLDMU",
+        &["s5", "d5", "sz3", "mu1"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz", "sz3"),
+            val("mu", "mu1"),
+        ],
+    ));
+    // Rd = memXX(Rx++#s4:circ(Mu))。
+    m.formats.push(fmt(
+        "FLDCI",
+        &["s5", "d5", "sz3", "mu1", "ps4"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz", "sz3"),
+            val("mu", "mu1"),
+            val("s4", "ps4"),
+        ],
+    ));
+    // Rd = memXX(gp+#s11) / memXX(##address)。
+    m.formats.push(fmt(
+        "FLDGP",
+        &["d5", "sz3", "ldgp16"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("sz", "sz3"),
+            val("imm", "ldgp16"),
+        ],
+    ));
+    // Rd = memXX(Re=##address)（absolute-set。Re も更新）。
+    m.formats.push(fmt(
+        "FLDAS",
+        &["s5", "d5", "sz3", "sa6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("e", "s5", Access::ReadWrite),
+            val("sz", "sz3"),
+            val("imm", "sa6"),
+        ],
+    ));
+    // Rd = memXX(Ru<<#u2+##address)（shifted absolute）。
+    m.formats.push(fmt(
+        "FLDSA",
+        &["s5", "d5", "sz3", "u2", "sa6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("u", "s5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2"),
+            val("imm", "sa6"),
+        ],
+    ));
+    // Rd = memXX(Rs+Ru<<#u2)（register offset）。
+    m.formats.push(fmt(
+        "FLDRO",
+        &["s5", "t5", "d5", "sz3", "u2"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2"),
+        ],
+    ));
+    // if ([!]Pv[.new]) Rd = memXX(Rs+#u6)。
+    m.formats.push(fmt(
+        "FLDPQ",
+        &["s5", "d5", "sz3", "lu6", "pv2l", "q2v"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("sz", "sz3"),
+            val("u", "lu6"),
+            preg("p", "pv2l", Access::Read),
+            val("q", "q2v"),
+        ],
+    ));
+    // if ([!]Pv[.new]) Rd = memXX(Rx++#s4)。
+    m.formats.push(fmt(
+        "FLDPQI",
+        &["s5", "d5", "sz3", "ps4p", "pv2pi", "q2p"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz", "sz3"),
+            val("s4", "ps4p"),
+            preg("p", "pv2pi", Access::Read),
+            val("q", "q2p"),
+        ],
+    ));
+    // if ([!]Pv[.new]) Rd = memXX(Rs+Ru<<#u2)。
+    m.formats.push(fmt(
+        "FLDPQR",
+        &["s5", "t5", "d5", "sz3", "u2", "pd2m", "q2r"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2"),
+            preg("p", "pd2m", Access::Read),
+            val("q", "q2r"),
+        ],
+    ));
+    // if ([!]Pv[.new]) Rd = memXX(#u6)（述語付 abs。実質
+    // ## 拡張専用。u6 は {bits[20:16]}+{bit8}）。
+    m.formats.push(fmt(
+        "FLDABS",
+        &["d5", "sz3", "u6a", "pv2pi", "q2p"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("sz", "sz3"),
+            val("u", "u6a"),
+            preg("p", "pv2pi", Access::Read),
+            val("q", "q2p"),
+        ],
+    ));
+    // memXX(Rs+#s11) = Rt。
+    m.formats.push(fmt(
+        "FSTR",
+        &["s5", "t5", "sz3", "su11"],
         vec![
             gpr("s", "s5", Access::Read),
             gpr("t", "t5", Access::Read),
-            val("imm", "ss11"),
+            val("sz", "sz3"),
+            val("imm", "su11"),
+        ],
+    ));
+    // memXX(Rx++#s4) = Rt。
+    m.formats.push(fmt(
+        "FSTPI",
+        &["s5", "t5", "sz3", "ps4s"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("s4", "ps4s"),
+        ],
+    ));
+    // memXX(Rx++Mu) = Rt / brev / I:circ。
+    m.formats.push(fmt(
+        "FSTMU",
+        &["s5", "t5", "sz3", "mu1"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("mu", "mu1"),
+        ],
+    ));
+    // memXX(Rx++#s4:circ(Mu)) = Rt。
+    m.formats.push(fmt(
+        "FSTCI",
+        &["s5", "t5", "sz3", "mu1", "ps4s"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("mu", "mu1"),
+            val("s4", "ps4s"),
+        ],
+    ));
+    // memXX(gp+#s11) = Rt / memXX(##address) = Rt。
+    m.formats.push(fmt(
+        "FSTGP",
+        &["t5", "sz3", "stgp16"],
+        vec![
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("imm", "stgp16"),
+        ],
+    ));
+    // memXX(Re=##address) = Rt（absolute-set）。
+    m.formats.push(fmt(
+        "FSTAS",
+        &["s5", "t5", "sz3", "ssa6"],
+        vec![
+            gpr("e", "s5", Access::ReadWrite),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("imm", "ssa6"),
+        ],
+    ));
+    // memXX(Ru<<#u2+##address) = Rt（shifted absolute）。
+    m.formats.push(fmt(
+        "FSTSA",
+        &["s5", "t5", "sz3", "u2a", "ssa6"],
+        vec![
+            gpr("u", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2a"),
+            val("imm", "ssa6"),
+        ],
+    ));
+    // memXX(Rs+Ru<<#u2) = Rt（register offset）。
+    m.formats.push(fmt(
+        "FSTRO",
+        &["s5", "t5", "d5", "sz3", "u2"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            gpr("t", "d5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rs+#u6) = Rt。
+    m.formats.push(fmt(
+        "FSTPQ",
+        &["s5", "t5", "sz3", "su6", "pd2", "q2v"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("u", "su6"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2v"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rx++#s4) = Rt。
+    m.formats.push(fmt(
+        "FSTPQI",
+        &["s5", "t5", "sz3", "ps4q", "pd2", "q2ps"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("s4", "ps4q"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2ps"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rs+Ru<<#u2) = Rt。
+    m.formats.push(fmt(
+        "FSTPQR",
+        &["s5", "t5", "d5", "sz3", "u2", "pd2m", "q2r"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            gpr("t", "d5", Access::Read),
+            val("sz", "sz3"),
+            val("sh", "u2"),
+            preg("p", "pd2m", Access::Read),
+            val("q", "q2r"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(#u6) = Rt（述語付 abs。
+    // u6 は {bits[17:16]}+{bits[6:3]}、qualifier は
+    // {bit13=.new}+{bit2=!}）。
+    m.formats.push(fmt(
+        "FSTQABS",
+        &["t5", "sz3", "u6b", "pd2", "q2a"],
+        vec![
+            gpr("t", "t5", Access::Read),
+            val("sz", "sz3"),
+            val("u", "u6b"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2a"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(#u6) = Rt.new（述語付 abs の
+    // .new 値形。SRC は sz2[12:11]+nt2[10:9]+bit8=0）。
+    m.formats.push(fmt(
+        "FSTQABSNT",
+        &["sz3", "sz2", "nt2", "u6b", "pd2", "q2a"],
+        vec![
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("u", "u6b"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2a"),
+        ],
+    ));
+    // memXX(Rs+#u6) = #s8（ストア即値形。サイズは sz2i の
+    // 2 ビットで d はない）。
+    m.formats.push(fmt(
+        "FSTI",
+        &["s5", "sz2i", "stiu6", "si8"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz", "sz2i"),
+            val("off", "stiu6"),
+            val("imm", "si8"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rs+#u6) = #s6。
+    m.formats.push(fmt(
+        "FSTIP",
+        &["s5", "sz2i", "stiu6", "si6", "pd2m", "q2st"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz", "sz2i"),
+            val("off", "stiu6"),
+            val("imm", "si6"),
+            preg("p", "pd2m", Access::Read),
+            val("q", "q2st"),
+        ],
+    ));
+    // memXX(Rs+#u6) op= #u5 / op= Rt（read-modify-write）。
+    m.formats.push(fmt(
+        "FMOPI",
+        &["s5", "sz3m", "stiu6", "mo2", "d5"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz", "sz3m"),
+            val("off", "stiu6"),
+            val("op", "mo2"),
+            val("imm", "d5"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FMOPR",
+        &["s5", "sz3m", "stiu6", "mo2", "d5"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz", "sz3m"),
+            val("off", "stiu6"),
+            val("op", "mo2"),
+            gpr("t", "d5", Access::Read),
+        ],
+    ));
+    // ---- .new ストア値形 ----
+    // [23:21] は通常ストアと共用の sz3 で、値 101 が .new を
+    // 指す。宣言の where で sz3==5 を固定して通常形と排他にする。
+    // サイズは sz2（b=00 h=01 w=10、d はない）。
+    // memXX(Rs+#s11) = Rt.new。
+    m.formats.push(fmt(
+        "FSTNT",
+        &["s5", "sz3", "sz2", "nt2", "su11"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("imm", "su11"),
+        ],
+    ));
+    // memXX(Rx++#s4) = Rt.new。
+    m.formats.push(fmt(
+        "FSTPNT",
+        &["s5", "sz3", "sz2", "nt2", "ps4s"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("s4", "ps4s"),
+        ],
+    ));
+    // memXX(Rx++Mu) = Rt.new / brev / I:circ。
+    m.formats.push(fmt(
+        "FSTMNT",
+        &["s5", "sz3", "sz2", "nt2", "mu1"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("mu", "mu1"),
+        ],
+    ));
+    // memXX(Rx++#s4:circ(Mu)) = Rt.new。
+    m.formats.push(fmt(
+        "FSTCNT",
+        &["s5", "sz3", "sz2", "nt2", "mu1", "ps4s"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("mu", "mu1"),
+            val("s4", "ps4s"),
+        ],
+    ));
+    // memXX(gp+#s16)/memXX(##address) = Rt.new。
+    m.formats.push(fmt(
+        "FSTGNT",
+        &["sz3", "sz2", "nt2", "stgp16"],
+        vec![
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("imm", "stgp16"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rs+#u6) = Rt.new。
+    m.formats.push(fmt(
+        "FSTQNT",
+        &["s5", "sz3", "sz2", "nt2", "su6", "pd2", "q2v"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("u", "su6"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2v"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rx++#s4) = Rt.new。
+    m.formats.push(fmt(
+        "FSTPQINT",
+        &["s5", "sz3", "sz2", "nt2", "ps4q", "pd2", "q2ps"],
+        vec![
+            gpr("x", "s5", Access::ReadWrite),
+            val("sz3", "sz3"),
+            val("sz", "sz2"),
+            val("nt", "nt2"),
+            val("s4", "ps4q"),
+            preg("p", "pd2", Access::Read),
+            val("q", "q2ps"),
+        ],
+    ));
+    // memXX(Rs+Ru<<#u2) = Rt.new。
+    m.formats.push(fmt(
+        "FSTRNT",
+        &["s5", "t5", "sz3", "sz2r", "nt2r", "u2"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            val("sz3", "sz3"),
+            val("sz", "sz2r"),
+            val("nt", "nt2r"),
+            val("sh", "u2"),
+        ],
+    ));
+    // if ([!]Pv[.new]) memXX(Rs+Ru<<#u2) = Rt.new。
+    m.formats.push(fmt(
+        "FSTQRNT",
+        &["s5", "t5", "sz3", "sz2r", "nt2r", "u2", "pd2m", "q2r"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("u", "t5", Access::Read),
+            val("sz3", "sz3"),
+            val("sz", "sz2r"),
+            val("nt", "nt2r"),
+            val("sh", "u2"),
+            preg("p", "pd2m", Access::Read),
+            val("q", "q2r"),
         ],
     ));
     // jump/call の PC 相対形。
@@ -916,10 +1461,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Rx.L = #u16 / Rx.H = #u16。Ref: ALU32 transfer immediate.
         ("immlo", "FX16", "01110001........................", "{x}.l=#{imm}", "alu"),
         ("immhi", "FX16", "01110010........................", "{x}.h=#{imm}", "alu"),
-        // Rd = memw(Rs+#s11:2)。Ref: LD load word.
-        ("ldw_ri", "FLDW", "10010..1100.....................", "{d}=memw({s}+#{imm})", "load"),
-        // memw(Rs+#s11:2) = Rt。Ref: ST store word.
-        ("stw_ri", "FSTW", "10100..1100.....................", "memw({s}+#{imm})={t}", "store"),
+
         // jump/call の PC 相対形。Ref: J jump/call.
         ("jump_pcrel", "FJ", "0101100.........................", "jump #{target}", "branch"),
         ("call_pcrel", "FJ", "0101101........................0", "call #{target}", "branch"),
@@ -938,6 +1480,200 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmpgt_rr", "FCMP", "11110010010.............000000..", "p{d}=cmp.gt({s},{t})", "alu"),
     ] {
         m.insns.push(ins(name, format, pattern, base(), syntax, timing));
+    }
+
+    // ---- HX6: ロード/ストア ----
+    // アクセスサイズはパターンではなく sz3/sz2 桁が運び、Insn 名は
+    // アドレッシングモードを指す（型名でなく中身の契約）。実符号は
+    // 参照アセンブラ（V73 プロファイル）と照合済み。
+    // - LD（ICLASS9 = LD{0,1}、GP 相対は ICLASS4）: 基底+即値・
+    //   post-inc 即値/M0M1/円環/brev・GP 相対・absolute-set・
+    //   shifted-abs・reg-offset・述語付き。
+    // - ST（ICLASS10 = ST{0}、GP 相対・述語付きは ICLASS4）: 同構成 +
+    //   ストア即値形（ICLASS3）・memop（read-modify-write）・
+    //   `.new` ストア値（sz3=101 + sz2 + Nt）。
+    // - sz3 はロード 0-4,6、ストア 0,2,3(hh),4,6、memop/ストア
+    //   即値形は 0,2,4。`.new` 値形は sz3=101 で通常形と排他
+    //   （wheres で切る）。
+    // Ref: SPEC-HEXAGON-PRM (V79) mem* / memop* / addressing modes.
+    let weq = |f: &str, v: u128| WhereClause {
+        field: f.to_string(),
+        op: WhereOp::Eq,
+        rhs: WhereRhs::Lit(v),
+    };
+    // LD: 許容サイズ 0,1,2,3,4,6（5,7 を禁止）。
+    const LD_NE: &[u128] = &[5, 7];
+    // ST: 許容サイズ 0,2,3(memf),4,6（1,5,7 を禁止）。
+    const ST_NE: &[u128] = &[1, 5, 7];
+    for (name, format, pattern, ne, syntax, timing) in [
+        // Rd = memXX(Rs+#s11)。
+        ("ld_ri", "FLDR", "10010..1........................", LD_NE, "{d}=memx({s}+#{imm})", "load"),
+        // Rd = memXX(Rx++#s4)。
+        ("ld_pi", "FLDPI", "10011011..........00............", LD_NE, "{d}=memx({x}++#{s4})", "load"),
+        // Rd = memXX(Rx++Mu)。
+        ("ld_pr", "FLDMU", "10011101...........0....0.......", LD_NE, "{d}=memx({x}++m{mu})", "load"),
+        // Rd = memXX(Rx++Mu:brev)。
+        ("ld_pbr", "FLDMU", "10011111...........0....0.......", LD_NE, "{d}=memx({x}++m{mu}:brev)", "load"),
+        // Rd = memXX(Rx++#s4:circ(Mu))。
+        ("ld_pci", "FLDCI", "10011001...........0..0.........", LD_NE, "{d}=memx({x}++#{s4}:circ(m{mu}))", "load"),
+        // Rd = memXX(Rx++I:circ(Mu))。
+        ("ld_pcr", "FLDMU", "10011001...........0..1.0.......", LD_NE, "{d}=memx({x}++i:circ(m{mu}))", "load"),
+        // Rd = memXX(gp+#s16) / memXX(##imm)。
+        ("ld_gp", "FLDGP", "01001..1........................", LD_NE, "{d}=memx(gp+#{imm})", "load"),
+        // Rd = memXX(Re=##imm)。
+        ("ld_as", "FLDAS", "10011011..........01............", LD_NE, "{d}=memx({e}=##{imm})", "load"),
+        // Rd = memXX(Ru<<#u2+##imm)。
+        ("ld_sa", "FLDSA", "10011101...........1............", LD_NE, "{d}=memx({u}<<#{sh}+##{imm})", "load"),
+        // Rd = memXX(Rs+Ru<<#u2)。
+        ("ld_rro", "FLDRO", "00111010........................", LD_NE, "{d}=memx({s}+{u}<<#{sh})", "load"),
+        // if ([!]Pv[.new]) Rd = memXX(Rs+#u6)。
+        ("ld_pq", "FLDPQ", "01000..1..........0.............", LD_NE, "{d}=memx({s}+#{u})", "load"),
+        // if ([!]Pv[.new]) Rd = memXX(Rx++#s4)。
+        ("ld_pq_pi", "FLDPQI", "10011011..........1.............", LD_NE, "{d}=memx({x}++#{s4})", "load"),
+        // if ([!]Pv[.new]) Rd = memXX(Rs+Ru<<#u2)。
+        ("ld_pq_ro", "FLDPQR", "001100..........................", LD_NE, "{d}=memx({s}+{u}<<#{sh})", "load"),
+        // if ([!]Pv[.new]) Rd = memXX(#u6)（abs。## 拡張前提）。
+        ("ld_pq_abs", "FLDABS", "10011111..........1.....1.......", LD_NE, "{d}=memx(#{u})", "load"),
+    ] {
+        m.insns.push({
+            let mut i = ins(name, format, pattern, base(), syntax, timing);
+            for &v in ne {
+                i.wheres.push(WhereClause {
+                    field: "sz3".to_string(),
+                    op: WhereOp::Ne,
+                    rhs: WhereRhs::Lit(v),
+                });
+            }
+            i
+        });
+    }
+    for (name, format, pattern, ne, syntax, timing) in [
+        // memXX(Rs+#s11) = Rt。
+        ("st_ri", "FSTR", "10100..1........................", ST_NE, "memx({s}+#{imm})={t}", "store"),
+        // memXX(Rx++#s4) = Rt。
+        ("st_pi", "FSTPI", "10101011..........0.....0.....0.", ST_NE, "memx({x}++#{s4})={t}", "store"),
+        // memXX(Rx++Mu) = Rt。
+        ("st_pr", "FSTMU", "10101101................0.......", ST_NE, "memx({x}++m{mu})={t}", "store"),
+        // memXX(Rx++Mu:brev) = Rt。
+        ("st_pbr", "FSTMU", "10101111................0.......", ST_NE, "memx({x}++m{mu}:brev)={t}", "store"),
+        // memXX(Rx++#s4:circ(Mu)) = Rt。
+        ("st_pci", "FSTCI", "10101001................0.....0.", ST_NE, "memx({x}++#{s4}:circ(m{mu}))={t}", "store"),
+        // memXX(Rx++I:circ(Mu)) = Rt。
+        ("st_pcr", "FSTMU", "10101001................0.....1.", ST_NE, "memx({x}++i:circ(m{mu}))={t}", "store"),
+        // memXX(gp+#s16) = Rt / memXX(##imm) = Rt。
+        ("st_gp", "FSTGP", "01001..0........................", ST_NE, "memx(gp+#{imm})={t}", "store"),
+        // memXX(Re=##imm) = Rt。
+        ("st_as", "FSTAS", "10101011..........0.....1.......", ST_NE, "memx({e}=##{imm})={t}", "store"),
+        // memXX(Ru<<#u2+##imm) = Rt。
+        ("st_sa", "FSTSA", "10101101................1.......", ST_NE, "memx({u}<<#{sh}+##{imm})={t}", "store"),
+        // memXX(Rs+Ru<<#u2) = Rt。
+        ("st_rro", "FSTRO", "00111011........................", ST_NE, "memx({s}+{u}<<#{sh})={t}", "store"),
+        // if ([!]Pv[.new]) memXX(Rs+#u6) = Rt。
+        ("st_pq", "FSTPQ", "01000..0.....................0..", ST_NE, "memx({s}+#{u})={t}", "store"),
+        // if ([!]Pv[.new]) memXX(Rx++#s4) = Rt。
+        ("st_pq_pi", "FSTPQI", "10101011..........1.............", ST_NE, "memx({x}++#{s4})={t}", "store"),
+        // if ([!]Pv[.new]) memXX(Rs+Ru<<#u2) = Rt。
+        ("st_pq_ro", "FSTPQR", "001101..........................", ST_NE, "memx({s}+{u}<<#{sh})={t}", "store"),
+        // if ([!]Pv[.new]) memXX(#u6) = Rt（abs。## 拡張前提）。
+        ("st_pq_abs", "FSTQABS", "10101111................1.......", ST_NE, "memx(#{u})={t}", "store"),
+    ] {
+        m.insns.push({
+            let mut i = ins(name, format, pattern, base(), syntax, timing);
+            for &v in ne {
+                i.wheres.push(WhereClause {
+                    field: "sz3".to_string(),
+                    op: WhereOp::Ne,
+                    rhs: WhereRhs::Lit(v),
+                });
+            }
+            i
+        });
+    }
+    // ストア即値形・述語付き即値形・memop。サイズは sz2i の
+    // 2 ビット（b=0 h=1 w=2、d=3 を禁止）。memop は
+    // read-modify-write でスロット 0 専用・slot1 ストア禁止
+    // （packet::expand が担う）。
+    for (name, format, pattern, syntax) in [
+        // memXX(Rs+#u6) = #s8。
+        ("st_i", "FSTI", "0011110.........................", "memx({s}+#{off})=#{imm}"),
+        // if ([!]Pv[.new]) memXX(Rs+#u6) = #s6。
+        ("st_ip", "FSTIP", "0011100.........................", "memx({s}+#{off})=#{imm}"),
+        // memXX(Rs+#u6) op= #u5（imm 形は 2=clrbit 3=setbit）。
+        ("mop_i", "FMOPI", "00111111..........0.............", "memx({s}+#{off})op=#{imm}"),
+        // memXX(Rs+#u6) op= Rt（reg 形は 2=& 3=|）。
+        ("mop_r", "FMOPR", "00111110..........0.............", "memx({s}+#{off})op={t}"),
+    ] {
+        m.insns.push({
+            let mut i = ins(name, format, pattern, base(), syntax, "store");
+            i.wheres.push(WhereClause {
+                field: "sz2i".to_string(),
+                op: WhereOp::Ne,
+                rhs: WhereRhs::Lit(3),
+            });
+            i
+        });
+    }
+    // ---- `.new` ストア値形 ----
+    // sz3=101 を where で固定して通常形と排他にし、サイズは
+    // sz2（0=b,1=h,2=w。3 は memd に相当し禁止）、Nt は
+    // bits[10]=0 固定＋[9:8] が距離 1-3（nt2、0 禁止）。
+    // reg-offset 形は [4:3]=sz2r・bit2=0 固定・[1:0]=nt2r。
+    for (name, format, pattern, syntax) in [
+        // memXX(Rs+#s11) = Rt.new。
+        ("st_nt", "FSTNT", "10100..1101............0........", "memx({s}+#{imm})=r.new"),
+        // memXX(Rx++#s4) = Rt.new。
+        ("st_pi_nt", "FSTPNT", "10101011101.......0....00.....0.", "memx({x}++#{s4})=r.new"),
+        // memXX(Rx++Mu) = Rt.new。
+        ("st_pr_nt", "FSTMNT", "10101101101............00.......", "memx({x}++m{mu})=r.new"),
+        // memXX(Rx++Mu:brev) = Rt.new。
+        ("st_pbr_nt", "FSTMNT", "10101111101............00.......", "memx({x}++m{mu}:brev)=r.new"),
+        // memXX(Rx++#s4:circ(Mu)) = Rt.new。
+        ("st_pci_nt", "FSTCNT", "10101001101............00.....0.", "memx({x}++#{s4}:circ(m{mu}))=r.new"),
+        // memXX(Rx++I:circ(Mu)) = Rt.new。
+        ("st_pcr_nt", "FSTMNT", "10101001101............00.....1.", "memx({x}++i:circ(m{mu}))=r.new"),
+        // memXX(gp+#s16)/##imm = Rt.new。
+        ("st_gp_nt", "FSTGNT", "01001..0101............0........", "memx(gp+#{imm})=r.new"),
+        // if ([!]Pv[.new]) memXX(Rs+#u6) = Rt.new。
+        ("st_pq_nt", "FSTQNT", "01000..0101............0.....0..", "memx({s}+#{u})=r.new"),
+        // if ([!]Pv[.new]) memXX(Rx++#s4) = Rt.new。
+        ("st_pq_pi_nt", "FSTPQINT", "10101011101.......1....0........", "memx({x}++#{s4})=r.new"),
+        // if ([!]Pv[.new]) memXX(#u6) = Rt.new（述語付 abs。
+        // ## 拡張前提）。
+        ("st_pq_abs_nt", "FSTQABSNT", "10101111101............01.......", "memx(#{u})=r.new"),
+    ] {
+        let mut i = ins(name, format, pattern, base(), syntax, "store");
+        i.wheres.push(weq("sz3", 5));
+        i.wheres.push(WhereClause {
+            field: "sz2".to_string(),
+            op: WhereOp::Ne,
+            rhs: WhereRhs::Lit(3),
+        });
+        i.wheres.push(WhereClause {
+            field: "nt2".to_string(),
+            op: WhereOp::Ne,
+            rhs: WhereRhs::Lit(0),
+        });
+        m.insns.push(i);
+    }
+    for (name, format, pattern, syntax) in [
+        // memXX(Rs+Ru<<#u2) = Rt.new。
+        ("st_ro_nt", "FSTRNT", "00111011101....................0", "memx({s}+{u}<<#{sh})=r.new"),
+        // if ([!]Pv[.new]) memXX(Rs+Ru<<#u2) = Rt.new。
+        ("st_pq_ro_nt", "FSTQRNT", "001101..101....................0", "memx({s}+{u}<<#{sh})=r.new"),
+    ] {
+        let mut i = ins(name, format, pattern, base(), syntax, "store");
+        i.wheres.push(weq("sz3", 5));
+        i.wheres.push(WhereClause {
+            field: "sz2r".to_string(),
+            op: WhereOp::Ne,
+            rhs: WhereRhs::Lit(3),
+        });
+        i.wheres.push(WhereClause {
+            field: "nt2r".to_string(),
+            op: WhereOp::Ne,
+            rhs: WhereRhs::Lit(0),
+        });
+        m.insns.push(i);
     }
 
     // ---- HX5: 整数算術・論理・シフト・combine/mux 系。

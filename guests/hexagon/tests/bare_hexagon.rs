@@ -41,7 +41,10 @@ fn state_layout_pinned() {
     assert_eq!(core::mem::offset_of!(CpuState, pkt_r_ok), pkt + 32 * 4);
     assert_eq!(core::mem::offset_of!(CpuState, pkt_p), pkt + 32 * 4 + 4);
     assert_eq!(core::mem::offset_of!(CpuState, pkt_p_ok), pkt + 32 * 4 + 8);
-    assert_eq!(core::mem::size_of::<CpuState>(), pkt + 32 * 4 + 12);
+    let prod = pkt + 32 * 4 + 12;
+    assert_eq!(core::mem::offset_of!(CpuState, pkt_prod), prod);
+    assert_eq!(core::mem::offset_of!(CpuState, nv_pos), prod + 16);
+    assert_eq!(core::mem::size_of::<CpuState>(), prod + 20);
 }
 
 #[test]
@@ -380,14 +383,15 @@ fn insn32_decode() {
     assert_eq!(decode(0x7f00_c000, 32), Some(Insn::Nop));
     assert_eq!(decode(0x7809_c683, 32), Some(Insn::EqS16));
     assert_eq!(extract_ops(Insn::EqS16, 0x7809_c683), vec![3, 0x1234]);
-    assert_eq!(decode(0x9184_c003, 32), Some(Insn::LdwRi));
-    assert_eq!(extract_ops(Insn::LdwRi, 0x9184_c003), vec![3, 4, 0]);
-    // scaled 即値（#1024 → 256<<2）。
-    assert_eq!(extract_ops(Insn::LdwRi, 0x9184_e003), vec![3, 4, 1024]);
-    assert_eq!(decode(0xa184_c500, 32), Some(Insn::StwRi));
-    assert_eq!(extract_ops(Insn::StwRi, 0xa184_c500), vec![4, 5, 0]);
-    // ST の負の scaled 即値（#-8 → 0x7fe<<2 の生値）。
-    assert_eq!(extract_ops(Insn::StwRi, 0xa784_e5fe), vec![4, 5, 0x1ff8]);
+    assert_eq!(decode(0x9184_c003, 32), Some(Insn::LdRi));
+    // ops は [d, s, sz3, 生即値]（sz3=4 が memw、生値 0）。
+    assert_eq!(extract_ops(Insn::LdRi, 0x9184_c003), vec![3, 4, 4, 0]);
+    // scaled 即値（#1024 → 生値 256。<<2 は実行側で掛ける）。
+    assert_eq!(extract_ops(Insn::LdRi, 0x9184_e003), vec![3, 4, 4, 256]);
+    assert_eq!(decode(0xa184_c500, 32), Some(Insn::StRi));
+    assert_eq!(extract_ops(Insn::StRi, 0xa184_c500), vec![4, 5, 4, 0]);
+    // ST の負の scaled 即値（#-8 → 生値 0x7fe）。
+    assert_eq!(extract_ops(Insn::StRi, 0xa784_e5fe), vec![4, 5, 4, 0x7fe]);
     assert_eq!(decode(0x5800_c004, 32), Some(Insn::JumpPcrel));
     assert_eq!(extract_ops(Insn::JumpPcrel, 0x5800_c004), vec![8]);
     assert_eq!(decode(0x5a00_c004, 32), Some(Insn::CallPcrel));
@@ -417,10 +421,10 @@ fn encode_decode_roundtrip() {
     assert_eq!(w & !0xc000, 0xf304_0503);
     let w = rt(Insn::EqS16, &[3, 0x1234]);
     assert_eq!(w & !0xc000, 0x7809_0683);
-    let w = rt(Insn::LdwRi, &[3, 4, 1024]);
-    assert_eq!(extract_ops(Insn::LdwRi, u128::from(w)), vec![3, 4, 1024]);
-    let w = rt(Insn::StwRi, &[4, 5, 16]);
-    assert_eq!(extract_ops(Insn::StwRi, u128::from(w)), vec![4, 5, 16]);
+    let w = rt(Insn::LdRi, &[3, 4, 4, 256]);
+    assert_eq!(extract_ops(Insn::LdRi, u128::from(w)), vec![3, 4, 4, 256]);
+    let w = rt(Insn::StRi, &[4, 5, 4, 4]);
+    assert_eq!(extract_ops(Insn::StRi, u128::from(w)), vec![4, 5, 4, 4]);
     rt(Insn::Nop, &[]);
     rt(Insn::Jumpr, &[4]);
     rt(Insn::CmpeqRr, &[1, 3, 4]);
@@ -766,7 +770,7 @@ fn disasm_representative() {
 
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_hexagon::run;
-use polyisa_mem::{Perms, VirtAddr};
+use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
 const BASE: u64 = 0x1_0000;
@@ -1896,4 +1900,601 @@ fn hx5_misc() {
     sem::r_set(&mut env.backend, 3, 1);
     exec1(&mut env, 0xda84c243);
     assert_eq!(sem::r_get(&env.backend, 3), 1 | (10 | 0x12));
+}
+
+// ---- HX6: load/store・memop・`.new` 値ストア ----
+
+/// HX6 の復号対応表（llvm-mc hexagonv73 実符号）。
+/// （word, Insn, extract_ops の生値）
+const HX6_WORDS: &[(u32, Insn, &[u64])] = &[
+    (0x9104c003, Insn::LdRi, &[3, 4, 0, 0]),     // r3=memb(r4+#0)
+    (0x9124c003, Insn::LdRi, &[3, 4, 1, 0]),     // r3=memub(r4+#0)
+    (0x9144c003, Insn::LdRi, &[3, 4, 2, 0]),     // r3=memh(r4+#0)
+    (0x9164c003, Insn::LdRi, &[3, 4, 3, 0]),     // r3=memuh(r4+#0)
+    (0x9184c003, Insn::LdRi, &[3, 4, 4, 0]),     // r3=memw(r4+#0)
+    (0x91c4c004, Insn::LdRi, &[4, 4, 6, 0]),     // r5:4=memd(r4+#0)
+    (0xa104c500, Insn::StRi, &[4, 5, 0, 0]),     // memb(r4+#0)=r5
+    (0xa144c500, Insn::StRi, &[4, 5, 2, 0]),     // memh(r4+#0)=r5
+    (0xa184c500, Insn::StRi, &[4, 5, 4, 0]),     // memw(r4+#0)=r5
+    (0xa1c4c601, Insn::StRi, &[4, 6, 6, 1]),     // memd(r4+#8)=r7:6
+    (0xa164c500, Insn::StRi, &[4, 5, 3, 0]),     // memh(r4+#0)=r5.h
+    (0x9b84c043, Insn::LdPi, &[3, 4, 4, 2]),     // r3=memw(r4++#8)
+    (0xab84c510, Insn::StPi, &[4, 5, 4, 2]),     // memw(r4++#8)=r5
+    (0x9d84e003, Insn::LdPr, &[3, 4, 4, 1]),     // r3=memw(r4++m1)
+    (0x9984c043, Insn::LdPci, &[3, 4, 4, 0, 2]), // r3=memw(r4++#8:circ(m0))
+    (0x9984c203, Insn::LdPcr, &[3, 4, 4, 0]),    // r3=memw(r4++i:circ(m0))
+    (0x9f84c003, Insn::LdPbr, &[3, 4, 4, 0]),    // r3=memw(r4++m0:brev)
+    (0xaf84c500, Insn::StPbr, &[4, 5, 4, 0]),    // memw(r4++m0:brev)=r5
+    (0x4980c803, Insn::LdGp, &[3, 4, 64]),       // r3=memw(gp+#0x100)
+    (0x4880c540, Insn::StGp, &[5, 4, 64]),       // memw(gp+#0x100)=r5
+    (0x9b84dd03, Insn::LdAs, &[3, 4, 4, 52]),    // r3=memw(r4=##x)
+    (0xab84c5b4, Insn::StAs, &[4, 5, 4, 52]),    // memw(r4=##x)=r5
+    (0x9d84fd03, Insn::LdSa, &[3, 4, 4, 2, 52]), // r3=memw(r4<<#2+##x)
+    (0xad84e5b0, Insn::StSa, &[4, 5, 4, 2, 48]), // memw(r4<<#2+##x)=r5
+    (0x3a85e603, Insn::LdRro, &[3, 5, 6, 4, 2]), // r3=memw(r5+r6<<#2)
+    (0x3b85e607, Insn::StRro, &[5, 6, 7, 4, 2]), // memw(r5+r6<<#2)=r7
+    (0x3c44c012, Insn::StI, &[4, 2, 0, 18]),     // memw(r4+#0)=#0x12
+    (0x3c44df12, Insn::StI, &[4, 2, 62, 18]),    // memw(r4+#0xf8)=#0x12
+    (0x3844c012, Insn::StIp, &[4, 2, 0, 18, 0, 0]), // if(p0)同上
+    (0x3f44c001, Insn::MopI, &[4, 2, 0, 0, 1]),  // memw(r4+#0)+=#1
+    (0x3e44c065, Insn::MopR, &[4, 2, 0, 3, 5]),  // memw(r4+#0)|=r5
+    (0x4184c023, Insn::LdPq, &[3, 4, 4, 1, 0, 0]), // if(p0)r3=memw(r4+#4)
+    (0x4584c023, Insn::LdPq, &[3, 4, 4, 1, 0, 1]), // if(!p0)同上
+    (0x4084c508, Insn::StPq, &[4, 5, 4, 1, 0, 0]), // if(p0)memw(r4+#4)=r5
+    (0x9b84e043, Insn::LdPqPi, &[3, 4, 4, 2, 0, 0]), // if(p0) post-inc
+    (0xab84e510, Insn::StPqPi, &[4, 5, 4, 2, 0, 0]),
+    (0x9f80e083, Insn::LdPqAbs, &[3, 4, 0, 0, 0]), // if(p0)r3=memw(#u6)
+    (0xaf80c580, Insn::StPqAbs, &[5, 4, 0, 0, 0]),
+    (0x3085e603, Insn::LdPqRo, &[3, 5, 6, 4, 2, 0, 0]),
+    (0x3485e607, Insn::StPqRo, &[5, 6, 7, 4, 2, 0, 0]),
+    (0xa1a4d200, Insn::StNt, &[4, 5, 2, 1, 0]), // memw(r4+#0)=r.new
+    (0xaba4d210, Insn::StPiNt, &[4, 5, 2, 1, 2]), // post-inc .new
+    (0xada4d200, Insn::StPrNt, &[4, 5, 2, 1, 0]), // ++m0 .new
+    (0xa9a4d210, Insn::StPciNt, &[4, 5, 2, 1, 0, 2]), // circ .new
+    (0xa9a4d202, Insn::StPcrNt, &[4, 5, 2, 1, 0]), // i:circ .new
+    (0x48a0d240, Insn::StGpNt, &[5, 2, 1, 64]), // gp .new
+    (0x40a4d208, Insn::StPqNt, &[4, 5, 2, 1, 1, 0, 0]), // if(p0) .new
+    (0xaba4f210, Insn::StPqPiNt, &[4, 5, 2, 1, 2, 0, 0]),
+    (0x3ba6e712, Insn::StRoNt, &[6, 7, 5, 2, 1, 2]), // reg-off .new
+    (0x34a6e712, Insn::StPqRoNt, &[6, 7, 5, 2, 1, 2, 0, 0]),
+    (0xafa0d280, Insn::StPqAbsNt, &[5, 2, 1, 0, 0, 0]), // if(p0) abs .new
+];
+
+#[test]
+fn hx6_decode_map() {
+    for &(w, insn, ops) in HX6_WORDS {
+        assert_eq!(decode(w.into(), 32), Some(insn), "word {w:#010x}");
+        assert_eq!(extract_ops(insn, u128::from(w)), ops, "ops {w:#010x}");
+    }
+}
+
+/// パケットを実行する（put + pc + step）。
+fn exec_pkt(env: &mut BareEnv, words: &[u32]) {
+    put(env, BASE, words);
+    env.pc = BASE;
+    step(env).unwrap();
+}
+
+/// メモリを `n` バイト読む。
+fn peek(env: &mut BareEnv, addr: u64, n: usize) -> u64 {
+    let acc = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    env.backend.mem.read_value(VirtAddr(addr), n, acc).unwrap()
+}
+
+/// メモリに `n` バイト書く。
+fn poke(env: &mut BareEnv, addr: u64, v: u64, n: usize) {
+    env.backend
+        .mem
+        .write(VirtAddr(addr), &v.to_le_bytes()[..n])
+        .unwrap();
+}
+
+/// コードページ（BASE・RWX）内のデータ領域。
+const DATA: u64 = BASE + 0x800;
+
+#[test]
+fn hx6_ld_sizes() {
+    // memb/memub/memh/memuh/memw/memd の符号・ゼロ拡張。
+    let mut env = run_env();
+    poke(&mut env, DATA, 0x6677_8899_2211_ff80, 8);
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    exec1(&mut env, 0x9104c003); // memb → 0x80 の符号拡張
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ff80);
+    exec1(&mut env, 0x9124c003); // memub → 0x80 のゼロ拡張
+    assert_eq!(sem::r_get(&env.backend, 3), 0x80);
+    exec1(&mut env, 0x9144c003); // memh → 0xff80 の符号拡張
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ff80);
+    exec1(&mut env, 0x9164c003); // memuh → ゼロ拡張
+    assert_eq!(sem::r_get(&env.backend, 3), 0xff80);
+    exec1(&mut env, 0x9184c003); // memw
+    assert_eq!(sem::r_get(&env.backend, 3), 0x2211_ff80);
+    exec1(&mut env, 0x91c4c004); // memd → r5:4（偶数側が下位）
+    assert_eq!(sem::r_get(&env.backend, 4), 0x2211_ff80);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x6677_8899);
+    // r29 相対（SP ベース。レジスタ+即値形と同じ形で s5=29）。
+    sem::r_set(&mut env.backend, 29, (DATA - 64) as u32);
+    exec1(&mut env, 0x919d_c203); // r3 = memw(r29+#64)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x2211_ff80);
+}
+
+#[test]
+fn hx6_st_sizes() {
+    // memb/memh/memw/memd/memh(=Rt.h) のストア幅。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 0xaabb_ccdd);
+    sem::r_set(&mut env.backend, 6, 0x1122_3344);
+    sem::r_set(&mut env.backend, 7, 0x5566_7788);
+    exec1(&mut env, 0xa104c500); // memb = r5
+    assert_eq!(peek(&mut env, DATA, 1), 0xdd);
+    exec1(&mut env, 0xa144c500); // memh = r5
+    assert_eq!(peek(&mut env, DATA, 2), 0xccdd);
+    exec1(&mut env, 0xa184c500); // memw = r5
+    assert_eq!(peek(&mut env, DATA, 4), 0xaabb_ccdd);
+    exec1(&mut env, 0xa1c4c601); // memd(r4+#8) = r7:6
+    assert_eq!(peek(&mut env, DATA + 8, 8), 0x5566_7788_1122_3344);
+    exec1(&mut env, 0xa164c500); // memh = r5.h（上位半語）
+    assert_eq!(peek(&mut env, DATA, 2), 0xaabb);
+    // r29 相対ストア。
+    sem::r_set(&mut env.backend, 29, DATA as u32);
+    exec1(&mut env, 0xa19d_c500); // memw(r29+#0) = r5
+    assert_eq!(peek(&mut env, DATA, 4), 0xaabb_ccdd);
+}
+
+#[test]
+fn hx6_post_incr() {
+    // Rx++#s4（符号付き・サイズスケール）と Rx++Mu。
+    // EA は更新前の Rx、ポストインクリメント分は commit 時に確定。
+    let mut env = run_env();
+    poke(&mut env, DATA, 0x1111_1111, 4);
+    poke(&mut env, DATA + 8, 0x2222_2222, 4);
+    poke(&mut env, DATA + 16, 0x3333_3333, 4);
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 0xdead_beef);
+    exec1(&mut env, 0x9b84c043); // r3 = memw(r4++#8)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1111_1111);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 8) as u32);
+    exec1(&mut env, 0x9b84c043); // 2 回目は +8 の位置を読む
+    assert_eq!(sem::r_get(&env.backend, 3), 0x2222_2222);
+    exec1(&mut env, 0x9b84c1c3); // r3 = memw(r4++#-8)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x3333_3333);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 8) as u32);
+    exec1(&mut env, 0xab84c510); // memw(r4++#8) = r5
+    assert_eq!(peek(&mut env, DATA + 8, 4), 0xdead_beef);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 16) as u32);
+    // Rx++Mu は Mu 全値が増分量（m1 に 16 を設定）。
+    sem::c_set(&mut env.backend, cnum::M1.into(), 16).unwrap();
+    exec1(&mut env, 0x9d84e003); // r3 = memw(r4++m1)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x3333_3333);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 32) as u32);
+    // ストアも同じ（m0 に -4）。
+    sem::c_set(&mut env.backend, cnum::M0.into(), -4i32 as u32).unwrap();
+    exec1(&mut env, 0xad84c500); // memw(r4++m0) = r5
+    assert_eq!(peek(&mut env, DATA + 32, 4), 0xdead_beef);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 28) as u32);
+}
+
+#[test]
+fn hx6_circ() {
+    // 円環アドレッシング: M0 = {I<<17 | length[16:0]}、
+    // CS0 = バッファ開始。EA は更新前の Rx、折り返しは
+    // [cs0, cs0+len) 内の新しい Rx だけに掛かる。
+    let mut env = run_env();
+    poke(&mut env, DATA, 0xaaaa_0001, 4);
+    poke(&mut env, DATA + 4, 0xaaaa_0002, 4);
+    poke(&mut env, DATA + 8, 0xaaaa_0003, 4);
+    // length=16、I=2 → M0 = (2<<17)|16。
+    sem::c_set(&mut env.backend, cnum::M0.into(), (2 << 17) | 16).unwrap();
+    sem::c_set(&mut env.backend, cnum::CS0.into(), DATA as u32).unwrap();
+    // r4 = cs0+8 で ++#8 → 新しい r4 = cs0+16 は範囲外 → cs0 に
+    // 折り返し。EA は更新前の cs0+8。
+    sem::r_set(&mut env.backend, 4, (DATA + 8) as u32);
+    exec1(&mut env, 0x9984c043); // r3 = memw(r4++#8:circ(m0))
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_0003);
+    assert_eq!(sem::r_get(&env.backend, 4), DATA as u32);
+    // i:circ は M0 の I 桁<<scale が増分量（I=2 → +8）。
+    // r4 = cs0+4 → +8 = cs0+12 で範囲内。
+    sem::r_set(&mut env.backend, 4, (DATA + 4) as u32);
+    exec1(&mut env, 0x9984c203); // r3 = memw(r4++i:circ(m0))
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_0002);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 12) as u32);
+    // ストアの円環: r4 = cs0+8 で ++#8 → cs0 に折り返し。
+    sem::r_set(&mut env.backend, 4, (DATA + 8) as u32);
+    sem::r_set(&mut env.backend, 5, 0xbbbb_0003);
+    exec1(&mut env, 0xa984c510); // memw(r4++#8:circ(m0)) = r5
+    assert_eq!(peek(&mut env, DATA + 8, 4), 0xbbbb_0003);
+    assert_eq!(sem::r_get(&env.backend, 4), DATA as u32);
+    // length=0 は折り返しなし（素の加算）。
+    sem::c_set(&mut env.backend, cnum::M0.into(), 0).unwrap();
+    exec1(&mut env, 0x9984c043);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_0001);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 8) as u32);
+}
+
+#[test]
+fn hx6_brev() {
+    // brev: EA = Rx.H | bit_reverse(Rx.L)。下位 16 ビットの
+    // ビット反転オフセット＋上位 16 ビットの基底。
+    // brev16(0x2010) = 0x0804 → r4 = 0x1_2010 で EA = DATA+4。
+    let mut env = run_env();
+    poke(&mut env, DATA + 4, 0xcccc_dddd, 4);
+    sem::r_set(&mut env.backend, 4, 0x1_2010);
+    sem::r_set(&mut env.backend, 5, 0x5555_6666);
+    sem::c_set(&mut env.backend, cnum::M0.into(), 4).unwrap();
+    exec1(&mut env, 0x9f84c003); // r3 = memw(r4++m0:brev)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xcccc_dddd);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x1_2014);
+    // ストアも同じ EA 規則（rx は同じく 0x1_2010 に戻す）。
+    sem::r_set(&mut env.backend, 4, 0x1_2010);
+    exec1(&mut env, 0xaf84c500); // memw(r4++m0:brev) = r5
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x5555_6666);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x1_2014);
+}
+
+#[test]
+fn hx6_gp_and_abs() {
+    // gp 相対（u16:scale オフセット）と ## 絶対。
+    let mut env = run_env();
+    sem::c_set(&mut env.backend, cnum::GP.into(), DATA as u32).unwrap();
+    poke(&mut env, DATA + 0x100, 0x9999_8888, 4);
+    exec1(&mut env, 0x4980c803); // r3 = memw(gp+#0x100)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x9999_8888);
+    sem::r_set(&mut env.backend, 5, 0x7777_6666);
+    exec1(&mut env, 0x4880c540); // memw(gp+#0x100) = r5
+    assert_eq!(peek(&mut env, DATA + 0x100, 4), 0x7777_6666);
+    // extender + gp 形 = ## 絶対（gp は見ない）。
+    // r3 = memw(##0x1_0804)（imm26=0x2041 → 0x10804>>6=0x201+? の
+    // 併合は apply_ext(e, raw6)。ここでは DATA=0x1_0800+4）。
+    let addr = DATA + 4;
+    let ext_hi = (addr >> 6) & 0x3ff_ffff;
+    let raw6 = addr & 0x3f;
+    // ld_gp の素語（ldgp16 の下位 6 ビットに raw6 が入る）。
+    let base = encode(Insn::LdGp, &[3, 4, raw6]).unwrap() as u32;
+    let extw = encode(Insn::Immext, &[ext_hi]).unwrap() as u32;
+    poke(&mut env, addr, 0x5555_4444, 4);
+    exec_pkt(&mut env, &[extw | (1 << 14), base | (3 << 14)]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x5555_4444);
+    // absolute-set: r4 = memw(r4=##addr) — ロードして Re に EA を
+    // 残す（sa6 も ##imm の下位 6 ビット）。
+    let base = encode(Insn::LdAs, &[3, 4, 4, raw6]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw | (1 << 14), base | (3 << 14)]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x5555_4444);
+    assert_eq!(sem::r_get(&env.backend, 4), addr as u32);
+    // shifted-abs: r3 = memw(r4<<#2 + ##addr)。
+    sem::r_set(&mut env.backend, 4, 0x10);
+    poke(&mut env, addr + 0x40, 0x3333_2222, 4);
+    let base = encode(Insn::LdSa, &[3, 4, 4, 2, raw6]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw | (1 << 14), base | (3 << 14)]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x3333_2222);
+    // ストア版 absolute-set / shifted-abs。
+    sem::r_set(&mut env.backend, 5, 0x1111_0000);
+    let base = encode(Insn::StAs, &[4, 5, 4, raw6]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw | (1 << 14), base | (3 << 14)]);
+    assert_eq!(peek(&mut env, addr, 4), 0x1111_0000);
+    assert_eq!(sem::r_get(&env.backend, 4), addr as u32);
+    // StAs が r4 = ea に更新するため Ru を再設定する。
+    sem::r_set(&mut env.backend, 5, 0x9999_0000);
+    sem::r_set(&mut env.backend, 4, 0x10);
+    let base = encode(Insn::StSa, &[4, 5, 4, 2, raw6]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw | (1 << 14), base | (3 << 14)]);
+    assert_eq!(peek(&mut env, addr + 0x40, 4), 0x9999_0000);
+}
+
+#[test]
+fn hx6_reg_offset() {
+    // memXX(Rs+Ru<<#u2)。
+    let mut env = run_env();
+    poke(&mut env, DATA + 0x80, 0xf0f0_e0e0, 4);
+    sem::r_set(&mut env.backend, 5, DATA as u32);
+    sem::r_set(&mut env.backend, 6, 0x20);
+    sem::r_set(&mut env.backend, 7, 0x1234_abcd);
+    exec1(&mut env, 0x3a85e603); // r3 = memw(r5+r6<<#2)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xf0f0_e0e0);
+    exec1(&mut env, 0x3b85e607); // memw(r5+r6<<#2) = r7
+    assert_eq!(peek(&mut env, DATA + 0x80, 4), 0x1234_abcd);
+}
+
+#[test]
+fn hx6_store_imm() {
+    // memXX(Rs+#u6) = #s8 — 全サイズと符号なしオフセット。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    exec1(&mut env, 0x3c44c012); // memw(r4+#0) = #0x12
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    // u6 の符号なし上限（62<<2 = 0xf8。符号解釈なら負になる
+    // 領域）。Ref: memop/store-imm のオフセットは #u6。
+    exec1(&mut env, 0x3c44df12); // memw(r4+#0xf8) = #0x12
+    assert_eq!(peek(&mut env, DATA + 0xf8, 4), 0x12);
+    exec1(&mut env, 0x3c04df92); // memb(r4+#0x3f) = #0x12
+    assert_eq!(peek(&mut env, DATA + 0x3f, 1), 0x12);
+    exec1(&mut env, 0x3c24df92); // memh(r4+#0x7e) = #0x12
+    assert_eq!(peek(&mut env, DATA + 0x7e, 2), 0x12);
+    // 負の即値は符号拡張で書く（si8 = s8）。
+    let w = encode(Insn::StI, &[4, 2, 0, 0x80]).unwrap() as u32;
+    exec1(&mut env, with_pp(w, 3));
+    assert_eq!(peek(&mut env, DATA, 4), 0xffff_ff80);
+}
+
+#[test]
+fn hx6_memop() {
+    // memXX(Rs+#u6) op= — read-modify-write。slot0 専用。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 0x100);
+    poke(&mut env, DATA, 0x100, 4);
+    exec1(&mut env, 0x3f44c001); // += #1
+    assert_eq!(peek(&mut env, DATA, 4), 0x101);
+    exec1(&mut env, 0x3f44c021); // -= #1
+    assert_eq!(peek(&mut env, DATA, 4), 0x100);
+    exec1(&mut env, 0x3f44c063); // = setbit(#3)
+    assert_eq!(peek(&mut env, DATA, 4), 0x108);
+    exec1(&mut env, 0x3f44c043); // = clrbit(#3)
+    assert_eq!(peek(&mut env, DATA, 4), 0x100);
+    exec1(&mut env, 0x3e44c005); // += r5（0x100）
+    assert_eq!(peek(&mut env, DATA, 4), 0x200);
+    exec1(&mut env, 0x3e44c025); // -= r5
+    assert_eq!(peek(&mut env, DATA, 4), 0x100);
+    exec1(&mut env, 0x3e44c045); // &= r5
+    assert_eq!(peek(&mut env, DATA, 4), 0x100);
+    exec1(&mut env, 0x3e44c065); // |= r5
+    assert_eq!(peek(&mut env, DATA, 4), 0x100);
+    // 大きいオフセット（31<<2 = 0x7c）でも符号なし。
+    exec1(&mut env, 0x3f44cf81); // memw(r4+#0x7c) += #1
+    assert_eq!(peek(&mut env, DATA + 0x7c, 4), 1);
+}
+
+#[test]
+fn hx6_pred_mem() {
+    // 述語付き load/store: if ([!]pX[.new])。
+    let mut env = run_env();
+    poke(&mut env, DATA + 4, 0xaaaa_bbbb, 4);
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 0x1234_5678);
+    // if (p0): p0=0 → 抑制（レジスタもメモリも変わらない）。
+    sem::p_set(&mut env.backend, 0, 0);
+    exec1(&mut env, 0x4184c023);
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    exec1(&mut env, 0x4084c508);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0xaaaa_bbbb);
+    // p0=1 → 実行。
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec1(&mut env, 0x4184c023);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_bbbb);
+    exec1(&mut env, 0x4084c508);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x1234_5678);
+    // if (!p0): p0=1 → 抑制。
+    exec1(&mut env, 0x4584c023);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_bbbb); // 前値のまま
+    sem::p_set(&mut env.backend, 0, 0);
+    exec1(&mut env, 0x4584c023);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1234_5678);
+    // post-inc の抑制: if (!p0) で p0=1 → Rx 更新も起きない。
+    sem::p_set(&mut env.backend, 0, 0xff);
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    exec1(&mut env, 0x9b84e843); // if (!p0) r3 = memw(r4++#8)
+    assert_eq!(sem::r_get(&env.backend, 4), DATA as u32);
+    exec1(&mut env, 0xab84e514); // if (!p0) memw(r4++#8) = r5
+    assert_eq!(sem::r_get(&env.backend, 4), DATA as u32);
+    // reg-offset 述語付き。
+    sem::r_set(&mut env.backend, 5, DATA as u32);
+    sem::r_set(&mut env.backend, 6, 0x20);
+    sem::r_set(&mut env.backend, 7, 0x7777_8888);
+    poke(&mut env, DATA + 0x80, 0x5555_6666, 4);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec1(&mut env, 0x3085e603); // if (p0) r3 = memw(r5+r6<<#2)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x5555_6666);
+    exec1(&mut env, 0x3485e607); // if (p0) memw(r5+r6<<#2) = r7
+    assert_eq!(peek(&mut env, DATA + 0x80, 4), 0x7777_8888);
+    // 述語付きストア即値（if (p0) memw(r4+#0) = #0x12）。
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::p_set(&mut env.backend, 0, 0);
+    exec1(&mut env, 0x3844c012);
+    assert_eq!(peek(&mut env, DATA, 4), 0);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec1(&mut env, 0x3844c012);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    // if (p0.new): 生産側と同じパケットでだけ発火。
+    // { p0 = cmp.eq(r1,r2) ; if (p0.new) r3 = memw(r4+#4) }
+    sem::r_set(&mut env.backend, 1, 7);
+    sem::r_set(&mut env.backend, 2, 7);
+    exec_pkt(&mut env, &[0xf201_4200, 0x4384_c023]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1234_5678);
+    sem::r_set(&mut env.backend, 3, 0);
+    sem::r_set(&mut env.backend, 2, 8); // cmp.eq → p0.new = 偽
+    exec_pkt(&mut env, &[0xf201_4200, 0x4384_c023]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    // { p0 = cmp.eq(r1,r2) ; if (p0.new) memw(r4+#4) = r5 }
+    // （r5 は reg-offset の確認で別値になっているため再設定）。
+    sem::r_set(&mut env.backend, 2, 7);
+    sem::r_set(&mut env.backend, 5, 0x8765_4321);
+    exec_pkt(&mut env, &[0xf201_4200, 0x4284_c508]);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x8765_4321);
+}
+
+#[test]
+fn hx6_pred_abs() {
+    // 述語付き abs（#u6 はバイトアドレス、拡張は ##imm 全体）。
+    let mut env = run_env();
+    let addr = DATA + 0x40;
+    let ext_hi = (addr >> 6) & 0x3ff_ffff;
+    let raw6 = addr & 0x3f;
+    let extw = encode(Insn::Immext, &[ext_hi]).unwrap() as u32 | (1 << 14);
+    poke(&mut env, addr, 0xabcd_0001, 4);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    // if (p0) r3 = memw(#addr)（u6a は符号なし絶対アドレス）。
+    let base = encode(Insn::LdPqAbs, &[3, 4, raw6, 0, 0]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw, base | (3 << 14)]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xabcd_0001);
+    // if (p0) memw(#addr) = r5。
+    sem::r_set(&mut env.backend, 5, 0xabcd_0002);
+    let base = encode(Insn::StPqAbs, &[5, 4, raw6, 0, 0]).unwrap() as u32;
+    exec_pkt(&mut env, &[extw, base | (3 << 14)]);
+    assert_eq!(peek(&mut env, addr, 4), 0xabcd_0002);
+    // p0=0 では抑制。
+    sem::p_set(&mut env.backend, 0, 0);
+    sem::r_set(&mut env.backend, 3, 0);
+    exec_pkt(&mut env, &[extw, base | (3 << 14)]);
+    assert_eq!(peek(&mut env, addr, 4), 0xabcd_0002);
+}
+
+#[test]
+fn hx6_new_store() {
+    // `.new` 値ストア: 生産距離 Nt の位置の命令が書く最初の
+    // gpr の未確定値がソース。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    // { r5 = #0x12 ; memw(r4+#0) = r5.new }（nt=1）。
+    exec_pkt(&mut env, &[0x7800_4245, 0xa1a4_d200]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x12);
+    // 生産はパケットの古い値でなく未確定値: r5 に先に別値を置き、
+    // 生産命令の書き込みがストアに届く（上で確認済み）。
+    // nt=2（2 個前の生産命令）。
+    exec_pkt(&mut env, &[0x7800_4245, 0x7800_4686, 0xa1a4_d400]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    // nt=3。
+    exec_pkt(
+        &mut env,
+        &[0x7800_4245, 0xb000_4026, 0xb000_4047, 0xa1a4_d600],
+    );
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    // post-inc .new（memw(r4++#8) = r5.new）。
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    exec_pkt(&mut env, &[0x7800_4245, 0xaba4_d210]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 8) as u32);
+    // 述語付き .new（if (p0) memw(r4+#4) = r5.new）。p0 偽では
+    // 抑制（nv_src に到達しない）。post-inc で r4 が進むため
+    // 基底を戻す。
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::p_set(&mut env.backend, 0, 0);
+    exec_pkt(&mut env, &[0x7800_4245, 0x40a4_d208]);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec_pkt(&mut env, &[0x7800_4245, 0x40a4_d208]);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x12);
+    // reg-offset .new（memw(r6+r7<<#2) = r5.new）。
+    sem::r_set(&mut env.backend, 6, DATA as u32);
+    sem::r_set(&mut env.backend, 7, 0x40);
+    exec_pkt(&mut env, &[0x7800_4245, 0x3ba6_e712]);
+    assert_eq!(peek(&mut env, DATA + 0x100, 4), 0x12);
+    // 述語付き abs .new（if (p0) memw(##addr) = r5.new）。
+    // u6b は ##addr の下位 6 ビット（DATA+0x80 → 0）。
+    let addr = DATA + 0x80;
+    let ext_hi = (addr >> 6) & 0x3ff_ffff;
+    let extw = encode(Insn::Immext, &[ext_hi]).unwrap() as u32 | (1 << 14);
+    exec_pkt(&mut env, &[0x7800_4245, extw, 0xafa0_d280]);
+    assert_eq!(peek(&mut env, addr, 4), 0x12);
+    // memb/memh の .new（sz2 の全幅）。
+    exec_pkt(&mut env, &[0x7800_4245, 0xa1a4_c204]); // memb(r4+#4)
+    assert_eq!(peek(&mut env, DATA + 4, 1), 0x12);
+    exec_pkt(&mut env, &[0x7800_4245, 0xa1a4_ca02]); // memh(r4+#4)
+    assert_eq!(peek(&mut env, DATA + 4, 2), 0x12);
+    // Mu 修飾 .new（m1 = +16）。
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::c_set(&mut env.backend, cnum::M1.into(), 16).unwrap();
+    exec_pkt(&mut env, &[0x7800_4245, 0xada4_f200]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 16) as u32);
+    // 円環 .new（cs0+8 → +8 で cs0 に折り返し）。
+    sem::c_set(&mut env.backend, cnum::M0.into(), (2 << 17) | 16).unwrap();
+    sem::c_set(&mut env.backend, cnum::CS0.into(), DATA as u32).unwrap();
+    sem::r_set(&mut env.backend, 4, (DATA + 8) as u32);
+    exec_pkt(&mut env, &[0x7800_4245, 0xa9a4_d210]);
+    assert_eq!(peek(&mut env, DATA + 8, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), DATA as u32);
+    // i:circ .new（I=2 → +8。cs0+4 → cs0+12）。
+    sem::r_set(&mut env.backend, 4, (DATA + 4) as u32);
+    exec_pkt(&mut env, &[0x7800_4245, 0xa9a4_d202]);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 12) as u32);
+    // brev .new（rx = 0x1_2010 → EA = DATA+4）。
+    sem::c_set(&mut env.backend, cnum::M0.into(), 4).unwrap();
+    sem::r_set(&mut env.backend, 4, 0x1_2010);
+    exec_pkt(&mut env, &[0x7800_4245, 0xafa4_d200]);
+    assert_eq!(peek(&mut env, DATA + 4, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x1_2014);
+    // gp 相対 .new。
+    sem::c_set(&mut env.backend, cnum::GP.into(), DATA as u32).unwrap();
+    exec_pkt(&mut env, &[0x7800_4245, 0x48a0_d240]); // memw(gp+#0x100)
+    assert_eq!(peek(&mut env, DATA + 0x100, 4), 0x12);
+    // 述語付き reg-offset .new（if (p0) memw(r6+r7<<#2) = r5.new）。
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec_pkt(&mut env, &[0x7800_4245, 0x34a6_e712]);
+    assert_eq!(peek(&mut env, DATA + 0x100, 4), 0x12);
+    // 3 命令パケット: {p0 = cmp.eq ; r5 = #imm ; if (p0.new)
+    // memw(r4++#8) = r5.new}。述語も .new で読み、値は nt=1 の
+    // 生産（pos1）から取る。
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 1, 7);
+    sem::r_set(&mut env.backend, 2, 7);
+    exec_pkt(&mut env, &[0xf201_4200, 0x7800_4245, 0xaba4_f290]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x12);
+    assert_eq!(sem::r_get(&env.backend, 4), (DATA + 8) as u32);
+}
+
+#[test]
+fn hx6_new_store_errors() {
+    // 生産側がいない（単独の .new ストア）は構成エラー →
+    // illegal パケット。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    put(&mut env, BASE, &[0xa1a4_d200]);
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+    // 生産距離にいる命令が gpr を書かない（ストア同士）も
+    // 実行時 illegal。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 1);
+    put(&mut env, BASE, &[with_pp(0xa104_c500, 1), 0xa1a4_d200]);
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+}
+
+#[test]
+fn hx6_dual_store_order() {
+    // 同一パケットの 2 ストアは slot1 → slot0 の順で処理される。
+    // 重なる領域は slot0（後ろの語）が勝つ。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, DATA as u32);
+    sem::r_set(&mut env.backend, 5, 0x1122_3344);
+    sem::r_set(&mut env.backend, 6, 0xee);
+    // { memw(r4+#0) = r5 ; memb(r4+#0) = r6 }
+    // （先の語が slot1 → 先に処理 → slot0 の byte が残る）。
+    let stw = with_pp(encode(Insn::StRi, &[4, 5, 4, 0]).unwrap() as u32, 1);
+    let stb = with_pp(encode(Insn::StRi, &[4, 6, 0, 0]).unwrap() as u32, 3);
+    exec_pkt(&mut env, &[stw, stb]);
+    assert_eq!(peek(&mut env, DATA, 4), 0x1122_33ee);
+    // mem_noshuf（slot1 store + slot0 load）: ロードはストア
+    // 済みの値を読む（実行順どおり）。
+    let ldw = with_pp(encode(Insn::LdRi, &[3, 4, 4, 0]).unwrap() as u32, 3);
+    exec_pkt(&mut env, &[stw, ldw]);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1122_3344);
+}
+
+#[test]
+fn hx6_alignment() {
+    // 非整列アクセスは例外（illegal パケットへ畳まれる）。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, (DATA + 1) as u32);
+    put(&mut env, BASE, &[0x9184_c003]); // r3 = memw(r4+#0)、奇数 EA
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+    // memh の奇数アドレスも同じ。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, (DATA + 1) as u32);
+    put(&mut env, BASE, &[0x9144_c003]);
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+    // memb は常に整列。
+    let mut env = run_env();
+    poke(&mut env, DATA + 1, 0x5a, 1);
+    sem::r_set(&mut env.backend, 4, (DATA + 1) as u32);
+    exec1(&mut env, 0x9104c003);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x5a);
 }

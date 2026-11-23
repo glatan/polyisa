@@ -223,6 +223,73 @@ pub enum Class {
     Xtype,
 }
 
+/// NV クラス（`.new` 値ストア + memop）の判定。これらは
+/// slot 0 専用（PRM の実行スロット表）。
+/// Ref: SPEC-HEXAGON-PRM (V79) Table 10-6 / new-value stores.
+fn nv_slot0(w: u32) -> bool {
+    match iclass(w) {
+        // memop は `0011 111x`。ro 系 `.new` ストアは
+        // `0011 1n11 01` / `0011 01nv 101`（[23:21]=101 が
+        // `.new` 値標識）。
+        3 => (w >> 24) & 0xf >= 0xe || ((w >> 21) & 7 == 5 && matches!((w >> 25) & 7, 2 | 3 | 5)),
+        // V2LDST 述語付 io `.new` ストア（bit27=0 で述語付、
+        // bit24=0 でストア、[23:21]=101）。
+        4 => w >> 27 & 1 == 0 && w >> 24 & 1 == 0 && (w >> 21) & 7 == 5,
+        // ICLASS10 の `.new` ストアはすべて [23:21]=101。
+        10 => (w >> 21) & 7 == 5,
+        _ => false,
+    }
+}
+
+/// `.new` ストアの生産距離 Nt（エンコード値。通常形は
+/// bits[10:9] の nt2、reg-offset 形は bits[2:1] の nt2r）。
+/// `.new` ストアでなければ None。
+fn nt_of(w: u32) -> Option<u32> {
+    match iclass(w) {
+        3 if (w >> 21) & 7 == 5 && matches!((w >> 25) & 7, 2 | 3 | 5) => Some((w >> 1) & 3),
+        4 if w >> 27 & 1 == 0 && w >> 24 & 1 == 0 && (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
+        10 if (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
+        _ => None,
+    }
+}
+
+/// 32 ビット述語付きメモリ形の `pX.new` 消費判定。`.new`
+/// 条件を読む述語番号を返す（非 `.new` 条件や無条件は None）。
+/// qualifier の配置は形ごとに異なるためパターン別に拾う
+/// （実符号は参照アセンブラの V73 プロファイルと照合済み）。
+/// Ref: SPEC-HEXAGON-PRM (V79) conditional load/store.
+fn pred_new32(w: u32) -> Option<u8> {
+    let p = match iclass(w) {
+        // V2LDST io 述語付形（new=bit25。load なら bit24=1 で
+        // 述語は [12:11]、store なら bit24=0 で述語は [1:0]）。
+        4 if w >> 27 & 1 == 0 && w >> 25 & 1 != 0 => {
+            if w >> 24 & 1 != 0 {
+                (w >> 11) & 3
+            } else {
+                w & 3
+            }
+        }
+        // LD post-inc（`1001 1011` + bit13=1）・LD abs 述語付形
+        // （`1001 1111` + bit13=1 + bit7=1）。new=bit12、述語は
+        // [10:9]。
+        9 if matches!((w >> 24) & 0xf, 0xb | 0xf) && w >> 13 & 1 != 0 && w >> 12 & 1 != 0 => {
+            (w >> 9) & 3
+        }
+        // ST post-inc 述語付形（`1010 1011` + bit13=1）。
+        // new=bit7、述語は [1:0]。
+        10 if (w >> 24) & 0xf == 0xb && w >> 13 & 1 != 0 && w >> 7 & 1 != 0 => w & 3,
+        // ST abs 述語付形（`1010 1111` + bit7=1）。new=bit13、
+        // 述語は [1:0]。
+        10 if (w >> 24) & 0xf == 0xf && w >> 7 & 1 != 0 && w >> 13 & 1 != 0 => w & 3,
+        // V4LDST ro 述語付形（`0011 0xnv` → new=bit25 で
+        // [27:24]∈{2,3,6,7}）と st_ip（`0011 100n` → new=
+        // bit24 で [27:24]=9）。述語はどちらも [6:5]。
+        3 if matches!((w >> 24) & 0xf, 2 | 3 | 6 | 7 | 9) => (w >> 5) & 3,
+        _ => return None,
+    };
+    Some(p as u8)
+}
+
 /// ICLASS → 命令クラス。
 /// Gap: GAP-0069（パケット組立規則は手書き表で持つ）
 /// Ref: SPEC-HEXAGON-PRM (V79) Table 10-6.
@@ -664,6 +731,15 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
             }
         }
     }
+    // 2f. NV クラス（`.new` 値ストア + memop）は slot 0 専用。
+    for (i, c) in cands.iter().enumerate() {
+        if c.len == 32 && c.fixed.is_none() && nv_slot0(c.word as u32) {
+            masks[i] &= 0b0001;
+            if masks[i] == 0 {
+                return Err(ComposeError::NoSlotAssign);
+            }
+        }
+    }
     // 2e. プログラムフロー命令の個数・組合せ（Section 9.7 の
     //     dual-jump 表）。先頭（アドレスが小さい側）のジャンプは
     //     条件付き jump・compare-jump に限り、JR 系は dual を
@@ -732,6 +808,9 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
                     _ => None,
                 }
             }
+            // 32 ビット述語付きメモリ形（HX6）: 形ごとの
+            // qualifier 桁から `pX.new` 消費を拾う。
+            (32, _) => pred_new32(c.word as u32),
             _ => None,
         }
     };
@@ -756,7 +835,21 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
     };
     for c in &cands {
         if let Some(p) = pred_new(c)
-            && !cands.iter().any(|d| pred_prod(d) == Some(p))
+            && !cands
+                .iter()
+                .any(|d| pred_prod(d) == Some(p) && d.pos < c.pos)
+        {
+            return Err(ComposeError::NewProducer);
+        }
+    }
+    // `.new` ストアの生産距離 Nt。消費命令の pos より前に
+    // 生産命令が要る（pos < nt なら生産側がパケット先頭を
+    // 遡って存在しない）。生産命令が gpr を書くかどうかは
+    // 実行時の pkt_prod ログで確かめる。
+    for c in &cands {
+        if c.len == 32
+            && let Some(nt) = nt_of(c.word as u32)
+            && u32::from(c.pos) < nt
         {
             return Err(ComposeError::NewProducer);
         }

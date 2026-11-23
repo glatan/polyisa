@@ -82,9 +82,37 @@ fn unimpl_insn(
 }
 
 /// スロット命令の `if ([!]pX[.new])` 条件。duplex subinsn は述語
-/// 選択桁（dprd/dprd3）から読む。32 ビット側の dot-if 形は HX7
-/// で足す。
+/// 選択桁（dprd/dprd3）から読み、HX6 の述語付きメモリ形は
+/// (p, q) オペランド末尾 2 つから読む（q = .new*2+否定）。
 fn cond_of(si: &packet::SlotInsn, insn: Insn) -> Option<sem::DotIf> {
+    match insn {
+        // HX6 述語付き load/store。extract_ops の末尾 2 オペランド
+        // は常に (述語番号 p, qualifier q)。q = {bit1=.new,
+        // bit0=否定}（実符号は参照アセンブラの V73 プロファイルと照合済み）。
+        Insn::LdPq
+        | Insn::LdPqPi
+        | Insn::LdPqRo
+        | Insn::LdPqAbs
+        | Insn::StPq
+        | Insn::StPqPi
+        | Insn::StPqRo
+        | Insn::StPqAbs
+        | Insn::StIp
+        | Insn::StPqNt
+        | Insn::StPqPiNt
+        | Insn::StPqRoNt
+        | Insn::StPqAbsNt => {
+            let ops = extract_ops(insn, si.word);
+            let n = ops.len();
+            let q = ops[n - 1];
+            return Some(sem::DotIf {
+                p: ops[n - 2] as u8,
+                neg: q & 1 != 0,
+                new: q & 2 != 0,
+            });
+        }
+        _ => {}
+    }
     let sel = match insn {
         // A-type 条件クリア（dprd: 4/5=p0.new/!p0.new、6/7=p0/!p0、
         // 0 は無条件の `Rd=#-1`）。
@@ -164,6 +192,7 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             ext: si.ext,
             pc,
             next,
+            pos: u32::from(si.pos),
         };
         match sem::exec(&mut env.backend, insn, si.word, cx) {
             Ok(_) => {

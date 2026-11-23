@@ -179,11 +179,25 @@ fn pkt_p_ok_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, pkt_p_ok))
 }
 
+fn pkt_prod_ref(pos: u32) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, pkt_prod) + (pos as usize) * 4)
+}
+
+fn nv_pos_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, nv_pos))
+}
+
 /// スロット命令の r_i への書き込み。パケット終端の commit まで
-/// 確定値（r）には反映されない。
+/// 確定値（r）には反映されない。同じパケット内位置の最初の
+/// 書き込みは `.new` ストア値の生産者として pkt_prod に記録
+/// する。
 pub fn pkt_w(b: &mut InterpBackend, i: u32, v: u32) {
     set32(b, pkt_r_ref(i), v);
     set32(b, pkt_r_ok_ref(), get32(b, pkt_r_ok_ref()) | (1 << i));
+    let pos = get32(b, nv_pos_ref());
+    if pos < 4 && get32(b, pkt_prod_ref(pos)) & 0x20 == 0 {
+        set32(b, pkt_prod_ref(pos), i | 0x20);
+    }
 }
 
 /// スロット命令の p_i への書き込み（8 ビット値）。
@@ -214,6 +228,23 @@ pub fn p_new(b: &InterpBackend, i: u32) -> Option<bool> {
     }
 }
 
+/// `.new` ストア値（`memXX(...) = Rt.new`）のソース。`pos` は
+/// 消費命令のパケット内位置、`nt` はエンコードされた生産距離。
+/// 生産命令の最初の gpr 書き込みの未確定値を返す。距離が
+/// 無効、生産命令が gpr を書かない、書き込みが未確定域に
+/// ないときは illegal。
+/// Ref: SPEC-HEXAGON-PRM (V79) new-value stores.
+fn nv_src(b: &InterpBackend, pos: u32, nt: u64) -> Result<u32, InterpExit> {
+    if nt == 0 || nt > u64::from(pos) {
+        return Err(trap(TRAP_ILL));
+    }
+    let e = get32(b, pkt_prod_ref(pos - nt as u32));
+    if e & 0x20 == 0 {
+        return Err(trap(TRAP_ILL));
+    }
+    r_new(b, e & 0x1f).ok_or_else(|| trap(TRAP_ILL))
+}
+
 /// 現在のパケットがハードウェアループの終端かを保持する面
 /// （bit0 = endloop0、bit1 = endloop1）。commit での LC 減算と
 /// SA 復帰は HX8 が足す。
@@ -227,6 +258,9 @@ pub fn endloop_ref() -> StateRef<W32> {
 pub fn pkt_clear(b: &mut InterpBackend) {
     set32(b, pkt_r_ok_ref(), 0);
     set32(b, pkt_p_ok_ref(), 0);
+    for i in 0..4 {
+        set32(b, pkt_prod_ref(i), 0);
+    }
 }
 
 /// パケットの終わりで書き込みをまとめて反映する。pkt_*_ok の
@@ -252,6 +286,9 @@ pub fn commit(b: &mut InterpBackend) -> Result<(), InterpExit> {
         set32(b, p_ref(), p);
     }
     set32(b, pkt_p_ok_ref(), 0);
+    for i in 0..4 {
+        set32(b, pkt_prod_ref(i), 0);
+    }
     Ok(())
 }
 
@@ -280,6 +317,9 @@ pub struct Ctx {
     pub pc: u32,
     /// 次のパケットのアドレス（call 系のリンク値）。
     pub next: u32,
+    /// パケット内位置（pkt_prod の索引。`.new` ストア値の生産
+    /// 距離 Nt の基準点）。
+    pub pos: u32,
 }
 
 /// extender 併合済みの即値。`raw` は extract_ops の値（zfill
@@ -293,11 +333,167 @@ fn ximm(ext: Option<u32>, raw: u64, shift: u32, bits: u32) -> u32 {
     }
 }
 
+// ---- HX6: ロード/ストアの共用ヘルパ ----
+
+/// sz3 のバイト数 log2（ロード 0-4,6・ストア 0,2,3,4,6 で共通。
+/// 0=b/ub 1=h/uh 2=w 3=d）。フィールド値ではなく実サイズの表。
+fn sc3(sz: u64) -> u32 {
+    match sz {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        4 => 2,
+        6 => 3,
+        _ => 0,
+    }
+}
+
+/// sz2/sz2i/sz2r のバイト数 log2（0=b 1=h 2=w で値そのもの）。
+fn sc2(sz: u64) -> u32 {
+    (sz as u32) & 3
+}
+
+/// 符号付きスケール即値。拡張時は apply_ext の生値（バイト
+/// オフセットそのもの）、非拡張時は `符号拡張(bits) << scale`。
+fn offi(cx: &Ctx, raw: u64, bits: u32, scale: u32) -> u32 {
+    match cx.ext {
+        Some(e) => packet::apply_ext(e, raw as u32 & 0x3f),
+        None => sext(raw, bits) << scale,
+    }
+}
+
+/// 符号なしスケール即値（GP 相対・u6 オフセット・abs）。
+fn offu(cx: &Ctx, raw: u64, scale: u32) -> u32 {
+    match cx.ext {
+        Some(e) => packet::apply_ext(e, raw as u32 & 0x3f),
+        None => (raw as u32) << scale,
+    }
+}
+
+/// M 修飾レジスタの値（mu1: 0=m0, 1=m1）。
+fn mu(b: &InterpBackend, sel: u64) -> u32 {
+    get32(b, c_ref(u64::from(cnum::M0) + sel).expect("m"))
+}
+
+/// 円環バッファ開始レジスタの値（mu 選択に追随する cs0/cs1）。
+fn cs(b: &InterpBackend, sel: u64) -> u32 {
+    get32(b, c_ref(u64::from(cnum::CS0) + sel).expect("cs"))
+}
+
+/// Mu の I フィールド（bits{31:28}=I[10:7] + bits{23:17}=I[6:0]
+/// の 10 ビット符号なし。`Rx++I:circ(Mu)` の増分量）。
+/// Ref: SPEC-HEXAGON-PRM (V79) modifier registers.
+fn mu_i(b: &InterpBackend, sel: u64) -> u32 {
+    let m = mu(b, sel);
+    ((m >> 17) & 0x7f) | ((m >> 21) & 0x780)
+}
+
+/// circ_add: 円環バッファ内で rx + inc を折り返す。境界は
+/// [cs, cs+length)。length=0 は折り返しなし。inc が length を
+/// 超える入力も剰余で収める。
+/// Ref: SPEC-HEXAGON-PRM (V79) circular addressing.
+fn circ_add(b: &InterpBackend, rx: u32, inc: u32, sel: u64) -> u32 {
+    let len = i64::from(mu(b, sel) & 0x1_ffff);
+    let n = rx.wrapping_add(inc) as i64;
+    if len == 0 {
+        return n as u32;
+    }
+    let lo = i64::from(cs(b, sel));
+    (lo + (n - lo).rem_euclid(len)) as u32
+}
+
+/// brev EA の下位 16 ビットのビット反転。
+/// `EA = Rx.H + bit_reverse(Rx.L)`。
+fn brev16(v: u32) -> u32 {
+    u32::from((v as u16).reverse_bits())
+}
+
+/// ロード実行（sz3: 0=memb 1=memub 2=memh 3=memuh 4=memw
+/// 6=memd（対レジスタ。偶数側が下位））。
+fn do_ld(b: &mut InterpBackend, d: u32, ea: u32, sz: u64) -> Result<(), InterpExit> {
+    let ea = u64::from(ea);
+    match sz {
+        0 => {
+            let v = sext(u64::from(b.load::<W8>(ea, DRD)?), 8);
+            pkt_w(b, d, v);
+        }
+        1 => {
+            let v = u32::from(b.load::<W8>(ea, DRD)?);
+            pkt_w(b, d, v);
+        }
+        2 => {
+            let v = sext(u64::from(b.load::<W16>(ea, DRD)?), 16);
+            pkt_w(b, d, v);
+        }
+        3 => {
+            let v = u32::from(b.load::<W16>(ea, DRD)?);
+            pkt_w(b, d, v);
+        }
+        4 => {
+            let v = b.load::<W32>(ea, DRD)?;
+            pkt_w(b, d, v);
+        }
+        6 => {
+            let v = b.load::<W64>(ea, DRD)?;
+            pkt_w64(b, d & !1, v);
+        }
+        _ => return Err(trap(TRAP_ILL)),
+    }
+    Ok(())
+}
+
+/// ストア実行（sz3: 0=memb 2=memh 3=memh（Rt.H 上位半語）
+/// 4=memw 6=memd）。
+fn do_st(b: &mut InterpBackend, ea: u32, sz: u64, v: u64) -> Result<(), InterpExit> {
+    let ea = u64::from(ea);
+    match sz {
+        0 => b.store::<W8>(ea, v as u8, DWR)?,
+        2 => b.store::<W16>(ea, v as u16, DWR)?,
+        3 => b.store::<W16>(ea, (v >> 16) as u16, DWR)?,
+        4 => b.store::<W32>(ea, v as u32, DWR)?,
+        6 => b.store::<W64>(ea, v, DWR)?,
+        _ => return Err(trap(TRAP_ILL)),
+    }
+    Ok(())
+}
+
+/// sz2 ストア（ストア即値形・memop・`.new` 値形。0=b 1=h 2=w）。
+fn do_st2(b: &mut InterpBackend, ea: u32, sz: u64, v: u64) -> Result<(), InterpExit> {
+    let ea = u64::from(ea);
+    match sz {
+        0 => b.store::<W8>(ea, v as u8, DWR)?,
+        1 => b.store::<W16>(ea, v as u16, DWR)?,
+        2 => b.store::<W32>(ea, v as u32, DWR)?,
+        _ => return Err(trap(TRAP_ILL)),
+    }
+    Ok(())
+}
+
+/// sz2i ロード（memop の RMW 読み側。ゼロ拡張）。
+fn do_ld2(b: &mut InterpBackend, ea: u32, sz: u64) -> Result<u32, InterpExit> {
+    let ea = u64::from(ea);
+    Ok(match sz {
+        0 => u32::from(b.load::<W8>(ea, DRD)?),
+        1 => u32::from(b.load::<W16>(ea, DRD)?),
+        2 => b.load::<W32>(ea, DRD)?,
+        _ => return Err(trap(TRAP_ILL)),
+    })
+}
+
 // ---- HX5: 整数意味論の共用ヘルパ ----
 
 /// 対レジスタの値（偶数側が下位ワード、奇数側が上位ワード）。
 fn r64(b: &InterpBackend, i: u32) -> u64 {
     u64::from(r_get(b, i)) | (u64::from(r_get(b, i + 1)) << 32)
+}
+
+/// ストア値。sz3=6（memd）のときソースは対レジスタ
+/// r(t+1):r(t) の 64 ビット、それ以外は r_t の 32 ビット。
+fn st_val(b: &InterpBackend, t: u32, sz: u64) -> u64 {
+    if sz == 6 {
+        r64(b, t)
+    } else {
+        u64::from(r_get(b, t))
+    }
 }
 
 /// 対レジスタへの書き込み（パケット未確定域経由）。
@@ -562,6 +758,7 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             return Ok(false);
         }
     }
+    set32(b, nv_pos_ref(), cx.pos);
     let ops = extract_ops(insn, word);
     let jump_off = |raw: u64, shift: u32, bits: u32| -> u32 { ximm(cx.ext, raw, shift, bits) };
     match insn {
@@ -589,15 +786,287 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             let v = (r_get(b, x) & 0xffff) | (ximm(cx.ext, ops[1], 0, 16) << 16);
             pkt_w(b, x, v);
         }
-        Insn::LdwRi => {
-            let ea = r_get(b, ops[1] as u32).wrapping_add(jump_off(ops[2], 2, 13));
-            let v = b.load::<W32>(u64::from(ea), DRD)?;
-            pkt_w(b, ops[0] as u32, v);
+        // ---- HX6: ロード ----
+        Insn::LdRi => {
+            let ea = r_get(b, ops[1] as u32).wrapping_add(offi(&cx, ops[3], 11, sc3(ops[2])));
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
         }
-        Insn::StwRi => {
-            let ea = r_get(b, ops[0] as u32).wrapping_add(jump_off(ops[2], 2, 13));
-            let v = r_get(b, ops[1] as u32);
-            b.store::<W32>(u64::from(ea), v, DWR)?;
+        Insn::LdPi => {
+            let ea = r_get(b, ops[1] as u32);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            pkt_w(
+                b,
+                ops[1] as u32,
+                ea.wrapping_add(offi(&cx, ops[3], 4, sc3(ops[2]))),
+            );
+        }
+        Insn::LdPr => {
+            let ea = r_get(b, ops[1] as u32);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            pkt_w(b, ops[1] as u32, ea.wrapping_add(mu(b, ops[3])));
+        }
+        Insn::LdPbr => {
+            let rx = r_get(b, ops[1] as u32);
+            let ea = (rx & 0xffff_0000) | brev16(rx);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            pkt_w(b, ops[1] as u32, rx.wrapping_add(mu(b, ops[3])));
+        }
+        Insn::LdPci => {
+            let ea = r_get(b, ops[1] as u32);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            let inc = offi(&cx, ops[4], 4, sc3(ops[2]));
+            pkt_w(b, ops[1] as u32, circ_add(b, ea, inc, ops[3]));
+        }
+        Insn::LdPcr => {
+            let ea = r_get(b, ops[1] as u32);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            let inc = mu_i(b, ops[3]) << sc3(ops[2]);
+            pkt_w(b, ops[1] as u32, circ_add(b, ea, inc, ops[3]));
+        }
+        Insn::LdGp => {
+            // 非拡張は gp+#{u16<<scale}、extender 付きは ## 絶対。
+            let ea = match cx.ext {
+                Some(e) => packet::apply_ext(e, ops[2] as u32 & 0x3f),
+                None => get32(b, c_ref(u64::from(cnum::GP)).expect("gp"))
+                    .wrapping_add((ops[2] as u32) << sc3(ops[1])),
+            };
+            do_ld(b, ops[0] as u32, ea, ops[1])?;
+        }
+        Insn::LdAs => {
+            // sa6 は ##imm の下位 6 ビット（バイトアドレスその
+            // もの。scale しない）。
+            let ea = offu(&cx, ops[3], 0);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            pkt_w(b, ops[1] as u32, ea);
+        }
+        Insn::LdSa => {
+            let ea = offu(&cx, ops[4], 0).wrapping_add(r_get(b, ops[1] as u32) << ops[3]);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+        }
+        Insn::LdRro => {
+            let ea = r_get(b, ops[1] as u32).wrapping_add(r_get(b, ops[2] as u32) << ops[4]);
+            do_ld(b, ops[0] as u32, ea, ops[3])?;
+        }
+        Insn::LdPq => {
+            let ea = r_get(b, ops[1] as u32).wrapping_add(offu(&cx, ops[3], sc3(ops[2])));
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+        }
+        Insn::LdPqPi => {
+            let ea = r_get(b, ops[1] as u32);
+            do_ld(b, ops[0] as u32, ea, ops[2])?;
+            pkt_w(
+                b,
+                ops[1] as u32,
+                ea.wrapping_add(offi(&cx, ops[3], 4, sc3(ops[2]))),
+            );
+        }
+        Insn::LdPqRo => {
+            let ea = r_get(b, ops[1] as u32).wrapping_add(r_get(b, ops[2] as u32) << ops[4]);
+            do_ld(b, ops[0] as u32, ea, ops[3])?;
+        }
+        Insn::LdPqAbs => {
+            // u6a はバイトアドレスそのもの（scale しない）。
+            let ea = offu(&cx, ops[2], 0);
+            do_ld(b, ops[0] as u32, ea, ops[1])?;
+        }
+        // ---- HX6: ストア ----
+        Insn::StRi => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offi(&cx, ops[3], 11, sc3(ops[2])));
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+        }
+        Insn::StPi => {
+            let ea = r_get(b, ops[0] as u32);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            pkt_w(
+                b,
+                ops[0] as u32,
+                ea.wrapping_add(offi(&cx, ops[3], 4, sc3(ops[2]))),
+            );
+        }
+        Insn::StPr => {
+            let ea = r_get(b, ops[0] as u32);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            pkt_w(b, ops[0] as u32, ea.wrapping_add(mu(b, ops[3])));
+        }
+        Insn::StPbr => {
+            let rx = r_get(b, ops[0] as u32);
+            let ea = (rx & 0xffff_0000) | brev16(rx);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            pkt_w(b, ops[0] as u32, rx.wrapping_add(mu(b, ops[3])));
+        }
+        Insn::StPci => {
+            let ea = r_get(b, ops[0] as u32);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            let inc = offi(&cx, ops[4], 4, sc3(ops[2]));
+            pkt_w(b, ops[0] as u32, circ_add(b, ea, inc, ops[3]));
+        }
+        Insn::StPcr => {
+            let ea = r_get(b, ops[0] as u32);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            let inc = mu_i(b, ops[3]) << sc3(ops[2]);
+            pkt_w(b, ops[0] as u32, circ_add(b, ea, inc, ops[3]));
+        }
+        Insn::StGp => {
+            let ea = match cx.ext {
+                Some(e) => packet::apply_ext(e, ops[2] as u32 & 0x3f),
+                None => get32(b, c_ref(u64::from(cnum::GP)).expect("gp"))
+                    .wrapping_add((ops[2] as u32) << sc3(ops[1])),
+            };
+            do_st(b, ea, ops[1], st_val(b, ops[0] as u32, ops[1]))?;
+        }
+        Insn::StAs => {
+            let ea = offu(&cx, ops[3], 0);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            pkt_w(b, ops[0] as u32, ea);
+        }
+        Insn::StSa => {
+            let ea = offu(&cx, ops[4], 0).wrapping_add(r_get(b, ops[0] as u32) << ops[3]);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+        }
+        Insn::StRro => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(r_get(b, ops[1] as u32) << ops[4]);
+            do_st(b, ea, ops[3], st_val(b, ops[2] as u32, ops[3]))?;
+        }
+        Insn::StPq => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[3], sc3(ops[2])));
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+        }
+        Insn::StPqPi => {
+            let ea = r_get(b, ops[0] as u32);
+            do_st(b, ea, ops[2], st_val(b, ops[1] as u32, ops[2]))?;
+            pkt_w(
+                b,
+                ops[0] as u32,
+                ea.wrapping_add(offi(&cx, ops[3], 4, sc3(ops[2]))),
+            );
+        }
+        Insn::StPqRo => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(r_get(b, ops[1] as u32) << ops[4]);
+            do_st(b, ea, ops[3], st_val(b, ops[2] as u32, ops[3]))?;
+        }
+        Insn::StPqAbs => {
+            let ea = offu(&cx, ops[2], 0);
+            do_st(b, ea, ops[1], st_val(b, ops[0] as u32, ops[1]))?;
+        }
+        // ---- HX6: ストア即値形・memop ----
+        // stiu6 のオフセットは符号なし（#u6:scale）。
+        Insn::StI => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[2], sc2(ops[1])));
+            let v = ximm(cx.ext, ops[3], 0, 8);
+            do_st2(b, ea, ops[1], u64::from(v))?;
+        }
+        Insn::StIp => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[2], sc2(ops[1])));
+            let v = ximm(cx.ext, ops[3], 0, 6);
+            do_st2(b, ea, ops[1], u64::from(v))?;
+        }
+        Insn::MopI | Insn::MopR => {
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[2], sc2(ops[1])));
+            let old = do_ld2(b, ea, ops[1])?;
+            // 即値形の演算子は {+=, -=, clrbit, setbit}、
+            // レジスタ形は {+=, -=, &=, |=}。
+            let v = if insn == Insn::MopI {
+                // u5 は常に 5 ビット符号なし（extender は
+                // アドレスの stiu6 側にだけ併合する）。
+                let u = ops[4] as u32;
+                match ops[3] {
+                    0 => old.wrapping_add(u),
+                    1 => old.wrapping_sub(u),
+                    2 => old & !(1u32.wrapping_shl(u)),
+                    _ => old | 1u32.wrapping_shl(u),
+                }
+            } else {
+                let u = r_get(b, ops[4] as u32);
+                match ops[3] {
+                    0 => old.wrapping_add(u),
+                    1 => old.wrapping_sub(u),
+                    2 => old & u,
+                    _ => old | u,
+                }
+            };
+            do_st2(b, ea, ops[1], u64::from(v))?;
+        }
+        // ---- HX6: `.new` ストア値 ----
+        Insn::StNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offi(&cx, ops[4], 11, sc2(ops[2])));
+            do_st2(b, ea, ops[2], u64::from(v))?;
+        }
+        Insn::StPiNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            pkt_w(
+                b,
+                ops[0] as u32,
+                ea.wrapping_add(offi(&cx, ops[4], 4, sc2(ops[2]))),
+            );
+        }
+        Insn::StPrNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            pkt_w(b, ops[0] as u32, ea.wrapping_add(mu(b, ops[4])));
+        }
+        Insn::StPbrNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let rx = r_get(b, ops[0] as u32);
+            let ea = (rx & 0xffff_0000) | brev16(rx);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            pkt_w(b, ops[0] as u32, rx.wrapping_add(mu(b, ops[4])));
+        }
+        Insn::StPciNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            let inc = offi(&cx, ops[5], 4, sc2(ops[2]));
+            pkt_w(b, ops[0] as u32, circ_add(b, ea, inc, ops[4]));
+        }
+        Insn::StPcrNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            let inc = mu_i(b, ops[4]) << sc2(ops[2]);
+            pkt_w(b, ops[0] as u32, circ_add(b, ea, inc, ops[4]));
+        }
+        Insn::StGpNt => {
+            let v = nv_src(b, cx.pos, ops[2])?;
+            let ea = match cx.ext {
+                Some(e) => packet::apply_ext(e, ops[3] as u32 & 0x3f),
+                None => get32(b, c_ref(u64::from(cnum::GP)).expect("gp"))
+                    .wrapping_add((ops[3] as u32) << sc2(ops[1])),
+            };
+            do_st2(b, ea, ops[1], u64::from(v))?;
+        }
+        Insn::StPqNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[4], sc2(ops[2])));
+            do_st2(b, ea, ops[2], u64::from(v))?;
+        }
+        Insn::StPqPiNt => {
+            let v = nv_src(b, cx.pos, ops[3])?;
+            let ea = r_get(b, ops[0] as u32);
+            do_st2(b, ea, ops[2], u64::from(v))?;
+            pkt_w(
+                b,
+                ops[0] as u32,
+                ea.wrapping_add(offi(&cx, ops[4], 4, sc2(ops[2]))),
+            );
+        }
+        Insn::StRoNt => {
+            let v = nv_src(b, cx.pos, ops[4])?;
+            let ea = r_get(b, ops[0] as u32).wrapping_add(r_get(b, ops[1] as u32) << ops[5]);
+            do_st2(b, ea, ops[3], u64::from(v))?;
+        }
+        Insn::StPqRoNt => {
+            let v = nv_src(b, cx.pos, ops[4])?;
+            let ea = r_get(b, ops[0] as u32).wrapping_add(r_get(b, ops[1] as u32) << ops[5]);
+            do_st2(b, ea, ops[3], u64::from(v))?;
+        }
+        Insn::StPqAbsNt => {
+            let v = nv_src(b, cx.pos, ops[2])?;
+            let ea = offu(&cx, ops[3], 0);
+            do_st2(b, ea, ops[1], u64::from(v))?;
         }
         Insn::JumpPcrel => {
             let off = jump_off(ops[0], 2, 24);
