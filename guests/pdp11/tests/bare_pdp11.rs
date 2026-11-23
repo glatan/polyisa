@@ -1276,3 +1276,258 @@ fn cc_ops_apply_mask() {
     step_m(&mut env, "pdp11_34").unwrap();
     assert_eq!(sem::psw_get(&env.backend), 0o177760);
 }
+
+// ---- PD7: サブルーチン命令（sob・jsr・rts・mark）----
+
+#[test]
+fn decode_subroutine_insns() {
+    assert_eq!(dec(0o004000), Some(Insn::Jsr)); // jsr r0, …
+    assert_eq!(dec(0o004777), Some(Insn::Jsr)); // jsr r7, …
+    assert_eq!(dec(0o006400), Some(Insn::Mark)); // mark 0
+    assert_eq!(dec(0o006477), Some(Insn::Mark)); // mark 63
+    assert_eq!(dec(0o077000), Some(Insn::Sob)); // sob r0, -0
+    assert_eq!(dec(0o000200), Some(Insn::Rts)); // rts r0
+    assert_eq!(dec(0o000207), Some(Insn::Rts)); // rts pc
+}
+
+/// sob は reg−1 が非零なら PC−2×off6（語単位の後方向き）へ。
+/// 条件コードは不変。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn sob_counts_down_backward() {
+    // sob r2, off4 — 分岐の可否と語単位の後方変位。
+    for (r2, new_r2, pc) in [
+        (0o5u16, 0o4u16, 0o772u16), // 5→4、next(0o1002)−2×4
+        (0o1, 0, 0o1002),           // 1→0 で素通し
+        (0, 0o177777, 0o772),       // 0→−1（非零）で分岐
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &[0o077204]);
+        sem::r_set(&mut env.backend, 2, r2);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 2), env.pc as u16),
+            (new_r2, pc),
+            "sob r2={r2:o}"
+        );
+    }
+    // off6=0 は減算だけで同じ次の語へ進む。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o077200]);
+    sem::r_set(&mut env.backend, 2, 0o5);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 2), 0o4);
+    assert_eq!(env.pc, 0o1002);
+    // CC は不変（立てたまま残る）。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o077204]);
+    sem::r_set(&mut env.backend, 2, 0o1);
+    sem::psw_put(&mut env.backend, 0o17);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(nzvc(&env), 0o17);
+    // sob ループ: 3 回まわしてから落ちる（off6=2 は nop の位置）。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000240, 0o077202]);
+    sem::r_set(&mut env.backend, 2, 0o3);
+    for i in 0..3 {
+        step_m(&mut env, "pdp11_34").unwrap(); // nop（ループ先）
+        step_m(&mut env, "pdp11_34").unwrap(); // sob
+        assert_eq!(sem::r_get(&env.backend, 2), 2 - i);
+    }
+    assert_eq!(env.pc, 0o1004); // 3 回目で落ちる
+}
+
+/// jsr は tmp=宛先アドレス→link を -(SP) へ→link=次の命令→PC=tmp。
+/// 宛先は指定子評価（@#a の絶対語等）で、CC は不変。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn jsr_pushes_link_and_loads_return() {
+    let words = asm_r(Insn::Jsr, 5, &[Spec::Abs(0o3000)]);
+    assert_eq!(words, [0o004537, 0o3000]); // jsr r5, @#a
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    sem::r_set(&mut env.backend, 5, 0o7777);
+    sem::psw_put(&mut env.backend, 0o17); // CC は不変
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o1004); // link=次の命令
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, SP0 - 2);
+    assert_eq!(get16(&env, sp), 0o7777); // 旧 link 値が積まれた
+    assert_eq!(nzvc(&env), 0o17);
+}
+
+/// link レジスタが dst 評価のオート増減で変わるとき、積まれるのは
+/// 変更後の値（jsr r5,@(r5)+ の規則 — 指定子の書き戻しが push の
+/// 読み出しに先立つ）。EA 自体は増分前の値。
+// Ref: SPEC-PDP11-ARCH83（第5章 jsr の記述）.
+#[test]
+fn jsr_link_autoinc_pushes_modified_value() {
+    let words = asm_r(Insn::Jsr, 5, &[Spec::AutoIncDef(5)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o3000); // r5 の指し先 → サブルーチン
+    sem::r_set(&mut env.backend, 5, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000); // 増分前の指し先語がジャンプ先
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o2002); // 増分後の r5 が積まれた
+    assert_eq!(sem::r_get(&env.backend, 5), 0o1002); // link=次の命令
+}
+
+/// rts は PC=link→link=(SP)+。link に SP・PC を選んだときも規定の
+/// 逐語順に従う（rts pc は積まれた戻りアドレスが PC に入る）。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn rts_pops_link_after_jump() {
+    // rts r0 — 跳び先は r0 の旧値、r0 にはスタックの語が入る。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000200]);
+    put16(&mut env, SP0, 0o5555);
+    sem::r_set(&mut env.backend, 0, 0o3000);
+    sem::psw_put(&mut env.backend, 0o17); // CC は不変
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(sem::r_get(&env.backend, 0), 0o5555);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0 + 2);
+    assert_eq!(nzvc(&env), 0o17);
+    // rts pc — link=PC は積まれた語がそのまま PC になる。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000207]);
+    put16(&mut env, SP0, 0o3000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0 + 2);
+    // rts sp — PC←旧 SP、(SP) の語が SP に入る（更新の逐語順）。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000206]);
+    put16(&mut env, SP0, 0o4444);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, u64::from(SP0));
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o4444);
+}
+
+/// jsr/rts の往復 — link レジスタを変えた組と PC link 規約。
+// Ref: SPEC-PDP11-ARCH83（第5章・付録 F）.
+#[test]
+fn jsr_rts_roundtrip_and_link_regs() {
+    // jsr r5, @#0o3000 の後に rts r5 — link の往復。
+    let mut env = env_at(
+        "pdp11_34",
+        0o1000,
+        &asm_r(Insn::Jsr, 5, &[Spec::Abs(0o3000)]),
+    );
+    put16(&mut env, 0o3000, 0o000205); // rts r5
+    sem::r_set(&mut env.backend, 5, 0o7777);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1004); // jsr の次へ戻る
+    assert_eq!(sem::r_get(&env.backend, 5), 0o7777); // link 復元
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+    // jsr pc, @#a — link=PC は戻りアドレスを積むだけで、rts pc が
+    // それを PC へ戻す（汎用レジスタを link に取らない規約）。
+    let mut env = env_at(
+        "pdp11_34",
+        0o1000,
+        &asm_r(Insn::Jsr, 7, &[Spec::Abs(0o3000)]),
+    );
+    put16(&mut env, 0o3000, 0o000207); // rts pc
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(get16(&env, SP0 - 2), 0o1004); // 戻りアドレス
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1004);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+}
+
+/// 同じ link レジスタでの 2 段呼出 — link は順に積まれ逆順に
+/// 復元される（jsr の自動ネスト規則）。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn jsr_rts_nests_with_same_link() {
+    // 0o1000: jsr r5, @#0o3000 (戻り 0o1004)
+    // 0o3000: jsr r5, @#0o3400 (戻り 0o3004)
+    // 0o3004: rts r5
+    // 0o3400: rts r5
+    let w2 = asm_r(Insn::Jsr, 5, &[Spec::Abs(0o3400)]);
+    let mut env = env_at(
+        "pdp11_34",
+        0o1000,
+        &asm_r(Insn::Jsr, 5, &[Spec::Abs(0o3000)]),
+    );
+    put16(&mut env, 0o3000, w2[0]);
+    put16(&mut env, 0o3002, w2[1]);
+    put16(&mut env, 0o3004, 0o000205); // rts r5
+    put16(&mut env, 0o3400, 0o000205); // rts r5
+    sem::r_set(&mut env.backend, 5, 0o7777);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o1004);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3400);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o3004); // link 上書き
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1004); // top = 外側の戻り link
+    assert_eq!(get16(&env, sp + 2), 0o7777); // その下 = 旧 r5
+    step_m(&mut env, "pdp11_34").unwrap(); // 内側の rts
+    assert_eq!(env.pc, 0o3004);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o1004);
+    step_m(&mut env, "pdp11_34").unwrap(); // 外側の rts
+    assert_eq!(env.pc, 0o1004);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o7777);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+}
+
+/// mark は SP=PC+2×nn→PC=r5→r5=(SP)+ の手順除去形（rti 類似）。
+/// 標準規約では mark 語そのものがスタック上に置かれ、PC+2n が
+/// スタック内の引数ブロックを飛び越える基準になる —— ここでは
+/// 同じ語列をコード領域に置いて逐語の規則を見る（mem は単一空間）。
+// Ref: SPEC-PDP11-ARCH83（第5章・第9章）.
+#[test]
+fn mark_discards_frame_and_restores_r5() {
+    // 0o1000: mark 2 / 0o1002: 引数語 / 0o1004: 引数語 /
+    // 0o1006: 復元される r5 —— SP は PC+2×2 で 0o1006 を指す。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o006402, 0o1111, 0o2222, 0o7777]);
+    sem::r_set(&mut env.backend, 5, 0o3000); // 呼出側の続き
+    sem::psw_put(&mut env.backend, 0o17); // CC は不変
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000); // PC ← r5
+    assert_eq!(sem::r_get(&env.backend, 5), 0o7777); // r5 ← (SP)+
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o1010);
+    assert_eq!(nzvc(&env), 0o17);
+    // mark 0 — 引数なし。SP は次の語を指し、そこから pop する。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o006400, 0o5555]);
+    sem::r_set(&mut env.backend, 5, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2000);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o5555);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o1004);
+}
+
+/// jmp/jsr の残りの指定子形 — 即値語の位置が EA、間接形は指し先。
+/// jsr のモード 0 宛先も jmp と同じ jmp_reg_trap のベクタに落ちる。
+// Ref: SPEC-PDP11-ARCH83（第4・5章・付録 B 項目 5）.
+#[test]
+fn jmp_jsr_specifier_forms() {
+    // jmp #x — 即値語（命令ストリームの次の語）のアドレスが EA。
+    let words = asm(Insn::Jmp, &[Spec::Imm(0o1234)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1002); // 即値語の位置へ跳ぶ
+    // jmp @(r2)+ — 指し先語がジャンプ先、r2 は +2。
+    let words = asm(Insn::Jmp, &[Spec::AutoIncDef(2)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o3000);
+    sem::r_set(&mut env.backend, 2, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(sem::r_get(&env.backend, 2), 0o2002);
+    // jmp x(r3) — インデックス指定子。
+    let words = asm(Insn::Jmp, &[Spec::Index { r: 3, x: 0o40 }]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    sem::r_set(&mut env.backend, 3, 0o3000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3040);
+    // jsr r0, r1 — モード 0 の A アクセスは jmp_reg_trap のベクタ。
+    let words = asm_r(Insn::Jsr, 0, &[Spec::Reg(1)]);
+    for (model, vec) in [("pdp11_34", 0o004u16), ("pdp11_23", 0o010u16)] {
+        let mut env = env_at(model, 0o1000, &words);
+        put16(&mut env, vec, 0o3200);
+        step_m(&mut env, model).unwrap();
+        assert_eq!(env.pc, 0o3200, "{model}");
+        let sp = sem::r_get(&env.backend, reg::SP as u8);
+        assert_eq!(get16(&env, sp), 0o1000); // fault — 命令先頭
+    }
+}

@@ -1,6 +1,7 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! PDP-11 の命令意味論（PD5 の整数群 + PD6 の論理・シフト・CC 操作）。
+//! PDP-11 の命令意味論（PD5 の整数群 + PD6 の論理・シフト・CC 操作
+//! + PD7 のサブルーチン命令）。
 //!
 //! 指定子評価の実効版（`eval_op` — `specifier::eval` が返す EA と
 //! オート増減の書き戻しに、間接形の指し先語の読み出しと byte/word
@@ -14,9 +15,12 @@
 //! 「dst が最大負」のみで C 入力を問わない、com は C=1、inc/dec は
 //! C 不変、シフト・回転は C=シフトアウト桁で V=N xor C、sxt は N/C
 //! 不変、swab は結果の下位バイトで N/Z を見て V/C は消える等）。
-//! 分岐・jmp・トラップ命令は PD4 の形のまま、jsr/rts/sob/mark・
+//! 分岐・jmp・トラップ命令は PD4 の形のまま、サブルーチン命令は
+//! jsr（一時=宛先アドレス→link を -(SP) へ→link=次の命令→PC=一時）・
+//! rts（PC=link→link=(SP)+）・sob（レジスタ減算・非零なら PC−2×off6）・
+//! mark（SP=PC+2×nn→PC=r5→r5=(SP)+。rti 類似の手順除去）を持つ。
 //! 特権・システム命令（rti/rtt・spl・mtps/mfps・mfpt・csm・
-//! tstset/wrtlck）は PD7/PD8 が担う。
+//! tstset/wrtlck）は PD8 が担う。
 //!
 //! ワードアクセスの奇数アドレスは `odd_addr_trap` パラメータに従う:
 //! 立つモデルでは vector 004（バスエラー）に落ち、立たないモデル
@@ -40,8 +44,8 @@ use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
-    CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, ops_fcm, ops_frd, psw,
-    reg,
+    CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, ops_fcm, ops_fn6,
+    ops_fr, ops_frd, ops_frn, psw, reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -700,6 +704,59 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpEx
         Insn::Jmp => {
             let d = eval_op(b, f, pc0, 0)?;
             r_set(b, reg::PC as u8, loc_addr(&d));
+        }
+        // SOB: reg ← reg − 1。結果が非零なら PC − 2×off6 へ（変位は
+        // 語単位の正数で後方向きのみ。基準は次の語 —— 実行中の r7）。
+        Insn::Sob => {
+            let o = ops_frn(u128::from(f.word));
+            let n = o.reg as u8;
+            let v = r_get(b, n).wrapping_sub(1);
+            r_set(b, n, v);
+            if v != 0 {
+                let pc = r_get(b, reg::PC as u8);
+                r_set(b, reg::PC as u8, pc.wrapping_sub(2 * o.off6 as u16));
+            }
+        }
+        // JSR: tmp ← dst（A アクセス — モード 0 は jmp_reg_trap に
+        // fault）、-(SP) ← link、link ← PC（次の命令のアドレス）、
+        // PC ← tmp。link が dst 評価のオート増減で変わるときは
+        // 変更後の値を積む（jsr r5,@(r5)+ の規則 — 指定子評価の
+        // 書き戻しが push の読み出しに先立つ）。link=PC は戻り
+        // アドレスを積んで tmp へ跳ぶだけで、rts pc と対になる。
+        Insn::Jsr => {
+            let n = ops_frd(u128::from(f.word)).reg as u8;
+            let d = eval_op(b, f, pc0, 0)?;
+            let t = loc_addr(&d);
+            let sp = r_get(b, reg::SP as u8).wrapping_sub(2);
+            r_set(b, reg::SP as u8, sp);
+            store_w(b, sp, r_get(b, n))?;
+            r_set(b, n, r_get(b, reg::PC as u8));
+            r_set(b, reg::PC as u8, t);
+        }
+        // RTS: PC ← reg、reg ← (SP)+。reg は SP 更新の前に読む
+        // （reg=SP でも旧値が PC になる規則）。reg=PC（rts pc）は
+        // 積まれた戻りアドレスがそのまま PC に入る。
+        Insn::Rts => {
+            let n = ops_fr(u128::from(f.word)).rreg as u8;
+            let link = r_get(b, n);
+            let sp = r_get(b, reg::SP as u8);
+            let v = load_w(b, sp)?;
+            r_set(b, reg::SP as u8, sp.wrapping_add(2));
+            r_set(b, reg::PC as u8, link);
+            r_set(b, n, v);
+        }
+        // MARK: SP ← PC + 2×nn（PC は mark の次の語 — 標準規約では
+        // mark 語がスタック上に置かれるので、ここがスタック内の
+        // 引数ブロックの先頭になる）、PC ← r5、r5 ← (SP)+
+        // （新しい SP からの pop。rti 類似の手順除去形）。
+        Insn::Mark => {
+            let nn = ops_fn6(u128::from(f.word)).off6 as u16;
+            let sp = r_get(b, reg::PC as u8).wrapping_add(2 * nn);
+            r_set(b, reg::SP as u8, sp);
+            r_set(b, reg::PC as u8, r_get(b, 5));
+            let v = load_w(b, sp)?;
+            r_set(b, reg::SP as u8, sp.wrapping_add(2));
+            r_set(b, 5, v);
         }
         Insn::Bpt => return Err(trap(tv::BPT)),
         Insn::Iot => return Err(trap(tv::IOT)),
