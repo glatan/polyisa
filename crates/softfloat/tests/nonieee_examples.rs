@@ -6,7 +6,7 @@
 //! 精度について、マニュアル記載の既知ビットパターンと、演算の
 //! 自明な往復を検査する。値はすべて整数演算で決定的に得られる。
 
-use polyisa_softfloat::decfp::{VaxDF, VaxFF, VaxGF};
+use polyisa_softfloat::decfp::{FP_IOV, VaxDF, VaxFF, VaxGF, VaxHF};
 use polyisa_softfloat::ibmhex::{Hf32, Hf64, Hf128};
 use polyisa_softfloat::m68kext::M68kExt;
 use polyisa_softfloat::{FP_DZ, FP_NV, FP_OF, FP_UF, Rm};
@@ -141,6 +141,87 @@ fn vax_widen() {
     let d1 = VaxDF::from_bits(0x4080_0000_0000_0000);
     let (g, _) = d1.widen::<11, 52>();
     assert!(g.eq(VaxGF::from_bits(0x4010_0000_0000_0000)));
+}
+
+#[test]
+fn vax_h_format() {
+    // H 1.0 = 0x4001<<112（指数 16384+1）。加算・乗算は 128 ビット
+    // 係数を越えるので 256 ビットの中間積を使う。
+    let one = VaxHF::from_bits(0x4001u128 << 112);
+    let (r, f) = one.add(one, Rm::Rmm);
+    assert_eq!((r.bits(), f), (0x4002u128 << 112, 0));
+    // 1.5 * 1.5 = 2.25（H 1.5 = 指数 16385、仮数ビット 111）。
+    let h15 = VaxHF::from_bits((0x4001u128 << 112) | (1 << 111));
+    let (r, f) = h15.mul(h15, Rm::Rmm);
+    assert_eq!((r.bits(), f), ((0x4002u128 << 112) | (1 << 109), 0));
+    // 2.25 / 1.5 = 1.5。
+    let (r, f) = r.div(h15, Rm::Rmm);
+    assert_eq!((r.bits(), f), (h15.bits(), 0));
+}
+
+#[test]
+fn vax_int_convert() {
+    // from_i32: 5 → 5.0F、-3 → -3.0F。
+    assert_eq!(VaxFF::from_i32(5, Rm::Rmm).bits(), 0x41A0_0000);
+    assert_eq!(VaxFF::from_i32(-3, Rm::Rmm).bits(), 0xC140_0000);
+    assert_eq!(VaxFF::from_i32(0, Rm::Rmm).bits(), 0);
+    // 2^31-1 は F の 24 ビット係数に収まらない → Rmm で丸める。
+    let v = VaxFF::from_i32(i32::MAX, Rm::Rmm);
+    assert_eq!(v.bits(), 0x5000_0000); // 2^31
+    // to_i32: 2.5 → 切捨 2 / 丸め 3、-2.5 → 切捨 -2 / 丸め -3。
+    let f25 = VaxFF::from_bits(0x4120_0000);
+    assert_eq!(f25.to_i32(false), (2, 0));
+    assert_eq!(f25.to_i32(true), (3, 0));
+    let fm25 = VaxFF::from_bits(0xC120_0000);
+    assert_eq!(fm25.to_i32(false), (-2, 0));
+    assert_eq!(fm25.to_i32(true), (-3, 0));
+    // 2^40 は i32 に収まらない → FP_IOV と下位 32 ビット。
+    assert_eq!(VaxFF::from_bits(0x5480_0000).to_i32(false), (0, FP_IOV));
+    // 予約オペランドは FP_NV。
+    assert_eq!(VaxFF::from_bits(0x8000_0000).to_i32(false), (0, FP_NV));
+}
+
+#[test]
+fn vax_rmm_rounding() {
+    // VAX 丸め（0.5 ulp を足して切り捨て = Rmm。ガードだけ見て
+    // sticky は見ない）: 1.0 + 2^-24 → ちょうど半 ulp → 切り上げ。
+    let (r, f) = VaxFF::from_bits(0x4080_0000).add(VaxFF::from_bits(0x3480_0000), Rm::Rmm);
+    assert_eq!((r.bits(), f), (0x4080_0001, 0));
+    // 同じ和を Rtz なら下側に収まる。
+    let (r, _) = VaxFF::from_bits(0x4080_0000).add(VaxFF::from_bits(0x3480_0000), Rm::Rtz);
+    assert_eq!(r.bits(), 0x4080_0000);
+    // cvtdf 相当（縮小。widen_rm に Rmm）: D 1.0 → F 1.0。
+    let (r, f) = VaxDF::from_bits(0x4080_0000_0000_0000).widen_rm::<8, 23>(Rm::Rmm);
+    assert_eq!((r.bits() as u64, f), (0x4080_0000, 0));
+    // G の範囲外値 → F は FP_OF。G の最小正規数 → FP_UF。
+    let (_, f) = VaxGF::from_bits(0x7ff0_0000_0000_0000).widen_rm::<8, 23>(Rm::Rmm);
+    assert_eq!(f & FP_OF, FP_OF);
+    let (_, f) = VaxGF::from_bits(0x0010_0000_0000_0000).widen_rm::<8, 23>(Rm::Rmm);
+    assert_eq!(f & FP_UF, FP_UF);
+}
+
+#[test]
+fn vax_emod() {
+    // 1.5 * 1.5 = 2.25 → int=2、fract=0.25。
+    let h15 = VaxFF::from_bits(0x40C0_0000);
+    let (iv, fract, fl) = h15.emod(0, h15);
+    assert_eq!((iv, fract.bits() as u64, fl), (2, 0x3F80_0000, 0));
+    // 拡張係数 mulrx=0x80: mulr = 1.0 + 2^-24 → int=1、fract=2^-24。
+    let (iv, fract, fl) = VaxFF::from_bits(0x4080_0000).emod(0x80, VaxFF::from_bits(0x4080_0000));
+    assert_eq!((iv, fract.bits() as u64, fl), (1, 0x3480_0000, 0));
+    // 1.0 * 2^40 → 整数あふれ（FP_IOV）、fract は零。
+    let (iv, fract, fl) = VaxFF::from_bits(0x4080_0000).emod(0, VaxFF::from_bits(0x5480_0000));
+    assert_eq!((iv, fract.bits() as u64, fl), (0, 0, FP_IOV));
+}
+
+#[test]
+fn vax_poly_iter() {
+    // Horner 反復: 1.0*2.0 + 0.5 = 2.5 → 2.5*2.0 + 0.25 = 5.25。
+    let (r, f) = VaxFF::from_bits(0x4080_0000)
+        .poly_iter(VaxFF::from_bits(0x4100_0000), VaxFF::from_bits(0x4000_0000));
+    assert_eq!((r.bits() as u64, f), (0x4120_0000, 0));
+    let (r, f) = r.poly_iter(VaxFF::from_bits(0x4100_0000), VaxFF::from_bits(0x3F80_0000));
+    assert_eq!((r.bits() as u64, f), (0x41A8_0000, 0));
 }
 
 // ---- Motorola 68881 拡張 ----

@@ -45,7 +45,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| VX9 | 浮動小数点（F・D・G・H。poly 系を含む）・cvt 系。D 形式のワード並び（middle-endian）はオペランド指定子側で扱う | VX4 | - |
 | VX10 | パック十進（movp/cmpp/addp/subp/mulp/divp/cvt 系） | VX9 | - |
 | VX11 | モデル差と MicroVAX 省略命令の OS 補完経路 | VX5-10 | - |
 | VX12 | `bare_vax` テスト群（DEC 形式とパック十進を含む）+ マイクロコード時間の専用タイミングモデル | VX11 | S23-1 |

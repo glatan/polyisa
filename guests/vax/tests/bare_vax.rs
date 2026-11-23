@@ -3571,3 +3571,532 @@ fn call_frame_faults() {
     assert_eq!(sys.0, sem::scb::RESERVED_OPERAND);
     assert_eq!(env.pc, pc_ret);
 }
+
+// ---- VX9: 浮動小数点 ----
+
+/// F 形式の値（語順写像済み —— レジスタ・メモリに置く形）。
+/// 建築の語順は「指数・符号の語が最下位アドレス」なので、
+/// F 1.0 = 0x00004080。
+fn fv(v: u128) -> u32 {
+    sem::fp_order(Width::F, v) as u32
+}
+
+/// D/G 形式の下位 32 ビット（語順写像済み）。
+fn dv(w: Width, v: u128) -> u32 {
+    sem::fp_order(w, v) as u32
+}
+
+const F1: u32 = 0x0000_4080; // 1.0
+const F2: u32 = 0x0000_4100; // 2.0
+const FH: u32 = 0x0000_4000; // 0.5
+const FM1: u32 = 0x0000_c080; // -1.0
+const FMAX: u32 = 0xffff_7fff; // 最大の有限値（指数 255・仮数全 1）
+const FMIN: u32 = 0x0000_0080; // 最小の正規数（指数 1・仮数 0）
+
+#[test]
+fn vx9_fp_decode() {
+    assert_eq!(dec1(0x40), Some(Insn::Addf2));
+    assert_eq!(dec1(0x4f), Some(Insn::Acbf));
+    assert_eq!(dec1(0x54), Some(Insn::Emodf));
+    assert_eq!(dec1(0x55), Some(Insn::Polyf));
+    assert_eq!(dec1(0x56), Some(Insn::Cvtfd));
+    assert_eq!(dec1(0x60), Some(Insn::Addd2));
+    assert_eq!(dec1(0x75), Some(Insn::Polyd));
+    assert_eq!(dec1(0x76), Some(Insn::Cvtdf));
+    assert_eq!(dec2(0xfd, 0x32), Some(Insn::Cvtdh));
+    assert_eq!(dec2(0xfd, 0x33), Some(Insn::Cvtgf));
+    assert_eq!(dec2(0xfd, 0x55), Some(Insn::Polyg));
+    assert_eq!(dec2(0xfd, 0x56), Some(Insn::Cvtgh));
+    assert_eq!(dec2(0xfd, 0x60), Some(Insn::Addh2));
+    assert_eq!(dec2(0xfd, 0x75), Some(Insn::Polyh));
+    assert_eq!(dec2(0xfd, 0x7c), Some(Insn::Clro));
+    assert_eq!(dec2(0xfd, 0x98), Some(Insn::Cvtfh));
+    assert_eq!(dec2(0xfd, 0x99), Some(Insn::Cvtfg));
+    assert_eq!(dec2(0xfd, 0xf6), Some(Insn::Cvthf));
+    assert_eq!(dec2(0xfd, 0xf7), Some(Insn::Cvthd));
+    // hfp を削ると H 命令は解けない（F/D/G は残る）。
+    let no_hfp = DEFAULT_FEATS & !FEAT_HFP;
+    assert_eq!(decode_model_ex(0x60fd, 16, false, no_hfp), None);
+    assert_eq!(
+        decode_model_ex(0x40fd, 16, false, no_hfp),
+        Some(Insn::Addg2)
+    );
+}
+
+#[test]
+fn fp_f_word_order() {
+    // F 1.0 のメモリ上の並びは 80 40 00 00（指数語が先頭）。
+    let mut env = run_env(1);
+    put(&mut env, DATA, &[0x80, 0x40, 0x00, 0x00]);
+    // movf (r0), r1 —— メモリからレジスタへ（語順は保たれる）。
+    put(&mut env, BASE, &[0x50, 0x60, 0x51]);
+    sem::r_set(&mut env.backend, 0, DATA as u32);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), F1);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // tstf (r0) —— 正の値は N=0/Z=0。
+    put(&mut env, BASE + 0x10, &[0x53, 0x60]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn fp_f_arith() {
+    // addf3 r0, r1, r2 —— 1.0 + 1.0 = 2.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x41, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), F2);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // subf3 r0, r1, r2 —— 1.0 - 1.0 = 0 → Z=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x43, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // mulf3 r0, r1, r2 —— 1.5 * 2.0 = 3.0（canon 0x41400000）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x45, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, fv(0x40c0_0000));
+    sem::r_set(&mut env.backend, 1, F2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), fv(0x4140_0000));
+
+    // divf3 r0, r1, r2 —— 1.0 / 2.0 = 0.5。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x47, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, F2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), FH);
+
+    // addf2 r0, r1 —— 2 項形は第 2 オペランドに畳む。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x40, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), F2);
+}
+
+#[test]
+fn fp_literal_and_mov_mneg() {
+    // addf3 S#8, S#8, r0 —— 浮動リテラル 8 は 1.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x41, 0x08, 0x08, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), F2);
+
+    // movf は dirty zero（指数 0・符号 0・仮数 != 0）を真の零に畳む。
+    // C は保存される。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x50, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, 0x0001_0000); // canon 0x00000001
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), 0);
+    assert_eq!(cc(&env), (false, true, false, true));
+
+    // mnegf r0, r1 —— 1.0 → -1.0（N=1）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x52, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), FM1);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cmpf: 1.0 < 2.0 → N=1。等値は Z=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x51, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, F2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, false, false));
+    sem::r_set(&mut env.backend, 0, F2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn fp_d_g_h_arith() {
+    // addd3 r0'r1, r2'r3, r4'r5 —— 1.0 + 1.0 = 2.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x61, 0x50, 0x52, 0x54]);
+    sem::r_set(&mut env.backend, 0, 0x4080);
+    sem::r_set(&mut env.backend, 1, 0);
+    sem::r_set(&mut env.backend, 2, 0x4080);
+    sem::r_set(&mut env.backend, 3, 0);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 4), 0x4100);
+    assert_eq!(r(&env, 5), 0);
+
+    // addg3 —— G 1.0 + G 1.0 = G 2.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x41, 0x50, 0x52, 0x54]);
+    sem::r_set(&mut env.backend, 0, 0x4010);
+    sem::r_set(&mut env.backend, 2, 0x4010);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 4), 0x4020);
+    assert_eq!(r(&env, 5), 0);
+
+    // addh3 —— H 1.0 + H 1.0 = H 2.0（r8'r9'r10'r11）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x61, 0x50, 0x54, 0x58]);
+    sem::r_set(&mut env.backend, 0, 0x4001);
+    sem::r_set(&mut env.backend, 4, 0x4001);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 8), 0x4002);
+    assert_eq!(r(&env, 9), 0);
+    assert_eq!(r(&env, 10), 0);
+    assert_eq!(r(&env, 11), 0);
+
+    // clro (r0) —— 16 バイトを消す。
+    let mut env = run_env(1);
+    put(&mut env, DATA, &[0xaa; 16]);
+    put(&mut env, BASE, &[0xfd, 0x7c, 0x60]);
+    sem::r_set(&mut env.backend, 0, DATA as u32);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    for i in 0..4 {
+        assert_eq!(mem32(&env, DATA + i * 4), 0);
+    }
+}
+
+#[test]
+fn fp_cvt_int() {
+    // cvtlf #5, r0 —— 5.0 = 0x41a00000（canon）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x4e, 0x05, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), fv(0x41a0_0000));
+
+    // cvtfl: 2.5 → 2（切捨）。cvtrfl: 2.5 → 3（丸め）。
+    // -2.5 → cvtrfl → -3（絶対値側の丸め）。
+    for (opc, src, want) in [
+        (0x4a, fv(0x4120_0000), 2u32),
+        (0x4b, fv(0x4120_0000), 3),
+        (0x4b, fv(0xc120_0000), -3i32 as u32),
+        (0x4a, fv(0xc120_0000), -2i32 as u32),
+    ] {
+        let mut env = run_env(1);
+        put(&mut env, BASE, &[opc, 0x50, 0x51]);
+        sem::r_set(&mut env.backend, 0, src);
+        env.pc = BASE;
+        step(&mut env).unwrap();
+        assert_eq!(r(&env, 1) as i32, want as i32, "opc {opc:#x}");
+    }
+
+    // cvtfb: 200.0 → byte あふれ → 下位 8 ビットと V=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x48, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, fv(0x4448_0000)); // 200.0
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1) & 0xff, 200i32 as u8 as u32);
+    assert!(cc(&env).2); // V=1
+}
+
+#[test]
+fn fp_cvt_formats() {
+    // cvtfd r0, r2'r3 —— F 1.0 → D 1.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x56, 0x50, 0x52]);
+    sem::r_set(&mut env.backend, 0, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0x4080);
+    assert_eq!(r(&env, 3), 0);
+
+    // cvtdf —— D 1.0 → F 1.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x76, 0x50, 0x52]);
+    sem::r_set(&mut env.backend, 0, 0x4080);
+    sem::r_set(&mut env.backend, 1, 0);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), F1);
+
+    // cvtfg —— F 1.0 → G 1.0。cvtgf —— G 1.0 → F 1.0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x99, 0x50, 0x52]);
+    sem::r_set(&mut env.backend, 0, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0x4010);
+    assert_eq!(r(&env, 3), 0);
+
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x33, 0x50, 0x52]);
+    sem::r_set(&mut env.backend, 0, 0x4010);
+    sem::r_set(&mut env.backend, 1, 0);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), F1);
+
+    // cvtfh —— F 1.0 → H 1.0（r4-r7）。cvthf で戻す。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x98, 0x50, 0x54]);
+    sem::r_set(&mut env.backend, 0, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 4), 0x4001);
+    for i in 5..8 {
+        assert_eq!(r(&env, i), 0);
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0xf6, 0x50, 0x54]);
+    sem::r_set(&mut env.backend, 0, 0x4001);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 4), F1);
+}
+
+#[test]
+fn fp_acb() {
+    // acbf r0(=limit 3.0), r1(=add 1.0), r2(=index), -6 ——
+    // index が 1→2→3→4 と進み、index<=limit の間は命令先頭へ戻る。
+    // 変位は .bw（word）。命令長 6 バイトなので戻り変位は -6。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x4f, 0x50, 0x51, 0x52, 0xfa, 0xff, 0x01]);
+    sem::r_set(&mut env.backend, 0, fv(0x4140_0000)); // limit = 3.0
+    sem::r_set(&mut env.backend, 1, F1); // add = 1.0
+    sem::r_set(&mut env.backend, 2, F1); // index = 1.0
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), F2); // index = 2.0
+    assert_eq!(env.pc, BASE); // 2.0 <= 3.0 → 分岐で先頭へ
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), fv(0x4140_0000)); // 3.0
+    assert_eq!(env.pc, BASE); // 3.0 <= 3.0 → まだ分岐
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), fv(0x4180_0000)); // 4.0
+    assert_eq!(env.pc, BASE + 6); // 4.0 > 3.0 → 抜ける
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn fp_exceptions() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+
+    // divf2 r1(=0), r0 —— 浮動ゼロ除算 fault（型 9）。dst 手つかず、
+    // 復帰先は命令先頭（浮動リテラルは 0 を表せないのでレジスタで
+    // 真の零を作る）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x46, 0x51, 0x50]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, 0);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::FLT_DIV_ZERO_F));
+    assert_eq!(env.pc, BASE);
+    assert_eq!(r(&env, 0), F1);
+
+    // addf3 max + max → 浮動オーバーフロー fault（型 8）。dst 手つかず。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x41, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, FMAX);
+    sem::r_set(&mut env.backend, 1, FMAX);
+    sem::r_set(&mut env.backend, 2, 0xdead_beef);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::FLT_OVERFLOW_F));
+    assert_eq!(env.pc, BASE);
+    assert_eq!(r(&env, 2), 0xdead_beef);
+
+    // divf3 min, 2.0 → アンダーフロー。FU=0 なら真の零で続行。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x47, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, FMIN);
+    sem::r_set(&mut env.backend, 1, F2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // FU=1 ならアンダーフロー fault（型 A）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x47, 0x50, 0x51, 0x52]);
+    sem::r_set(&mut env.backend, 0, FMIN);
+    sem::r_set(&mut env.backend, 1, F2);
+    sem::r_set(&mut env.backend, 2, 0xdead_beef);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::FU));
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::FLT_UNDERFLOW_F));
+    assert_eq!(env.pc, BASE);
+    assert_eq!(r(&env, 2), 0xdead_beef);
+
+    // 予約オペランド（指数 0・符号 1）は予約オペランド fault。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x53, 0x50]); // tstf r0
+    sem::r_set(&mut env.backend, 0, 0x0000_8000);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::RESERVED_OPERAND);
+    assert_eq!(env.pc, BASE);
+}
+
+#[test]
+fn fp_emod() {
+    // emodf r0(mulr), r1(mulrx), r2(muld), r3(int), r4(fract) ——
+    // 1.5 * 1.5 = 2.25 → int=2, fract=0.25。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x54, 0x50, 0x51, 0x52, 0x53, 0x54]);
+    sem::r_set(&mut env.backend, 0, fv(0x40c0_0000)); // 1.5
+    sem::r_set(&mut env.backend, 1, 0);
+    sem::r_set(&mut env.backend, 2, fv(0x40c0_0000)); // 1.5
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 2);
+    assert_eq!(r(&env, 4), fv(0x3f80_0000)); // 0.25
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // 拡張係数 mulrx=0x80: mulr = 1.0 + 2^-24 → * 1.0 →
+    // int=1, fract = 2^-24（canon 0x34000000）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x54, 0x50, 0x51, 0x52, 0x53, 0x54]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, 0x80);
+    sem::r_set(&mut env.backend, 2, F1);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 1);
+    assert_eq!(r(&env, 4), fv(0x3480_0000)); // 2^-24
+
+    // 整数あふれ: 1.0 * 2^40 → int に収まらない → V=1、低 32 ビット。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x54, 0x50, 0x51, 0x52, 0x53, 0x54]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, 0);
+    sem::r_set(&mut env.backend, 2, fv(0x5480_0000)); // 2^40
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 0); // 2^40 の下位 32 ビット
+    assert_eq!(r(&env, 4), 0);
+    assert!(cc(&env).2); // V=1
+
+    // emodg —— mulr=r0'r1, mulrx=r1, muld=r2'r3, int=r3, fract=r4'r5。
+    // 1.5*1.5 = 2.25 → int=2（r3 は muld の上位として読んでから
+    // int の書き先になる —— ソースは書き込み前に評価済み）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x54, 0x50, 0x51, 0x52, 0x53, 0x54]);
+    let g15 = dv(Width::G, 0x4018_0000_0000_0000); // G 1.5
+    sem::r_set(&mut env.backend, 0, g15);
+    sem::r_set(&mut env.backend, 1, 0);
+    sem::r_set(&mut env.backend, 2, g15);
+    sem::r_set(&mut env.backend, 3, 0);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 2); // int.wl
+    assert_eq!(r(&env, 4), dv(Width::G, 0x3ff0_0000_0000_0000)); // G 0.25
+    assert_eq!(r(&env, 5), 0);
+}
+
+#[test]
+fn fp_poly() {
+    // polyf r0(arg), r1(degree), (r5)(tbladdr) ——
+    // arg=2.0, degree=2, table=[1.0, 0.5, 0.25]（高次係数が先頭）
+    // → 1.0*x^2 + 0.5*x + 0.25 = 5.25。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x55, 0x50, 0x51, 0x65]);
+    for (i, c) in [F1, FH, fv(0x3f80_0000)].iter().enumerate() {
+        put(&mut env, DATA + (i as u64) * 4, &c.to_le_bytes());
+    }
+    sem::r_set(&mut env.backend, 0, F2);
+    sem::r_set(&mut env.backend, 1, 2);
+    sem::r_set(&mut env.backend, 5, DATA as u32);
+    env.pc = BASE;
+    // 「初期化 + 反復 1 回」が最初のステップ、以後 1 反復 =
+    // 1 ステップ。途中は FPD=1 で PC は命令先頭へ戻る。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE);
+    assert!(sem::psl_get(&env.backend) & (1 << psl::FPD) != 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4); // 完了 → 次の命令
+    assert!(sem::psl_get(&env.backend) & (1 << psl::FPD) == 0);
+    assert_eq!(r(&env, 0), fv(0x41a8_0000)); // 5.25
+    assert_eq!(r(&env, 1), 0);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (DATA + 12) as u32); // 表の終端
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn fp_poly_degree_and_h() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    // 次数 > 31 は予約オペランド fault。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x55, 0x50, 0x51, 0x65]);
+    sem::r_set(&mut env.backend, 0, F1);
+    sem::r_set(&mut env.backend, 1, 32);
+    sem::r_set(&mut env.backend, 5, DATA as u32);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::RESERVED_OPERAND);
+    assert_eq!(env.pc, BASE);
+
+    // polyh —— arg は反復中スタックへ退避し、完了で取り除く。
+    // arg=2.0, degree=2, table=[1.0, 0.5, 0.25] → 5.25。
+    // H の arg は r0'r1'r2'r3 に跨るので degree は r6 に置く。
+    let mut env = run_env_stack();
+    put(&mut env, BASE, &[0xfd, 0x75, 0x50, 0x56, 0x65]);
+    // 表の H 値は指数語が最下位アドレス: H 1.0 = 0x4001、
+    // H 0.5 = 0x4000、H 0.25 = 0x3fff（残り 12 バイトは初期値 0）。
+    put(&mut env, DATA, &0x4001u32.to_le_bytes());
+    put(&mut env, DATA + 16, &0x4000u32.to_le_bytes());
+    put(&mut env, DATA + 32, &0x3fffu32.to_le_bytes());
+    sem::r_set(&mut env.backend, 0, 0x4002); // H 2.0
+    sem::r_set(&mut env.backend, 6, 2);
+    sem::r_set(&mut env.backend, 5, DATA as u32);
+    let sp0 = r(&env, reg::SP as u8);
+    env.pc = BASE;
+    step(&mut env).unwrap(); // 初期化 + arg 退避 + 反復 1 回
+    assert_eq!(r(&env, reg::SP as u8), sp0 - 16);
+    step(&mut env).unwrap(); // 反復 2 回目で完了
+    assert_eq!(r(&env, reg::SP as u8), sp0);
+    // 5.25 = 0.65625*2^3 → 指数語 0x4003、仮数の先頭語 0x5000。
+    assert_eq!(r(&env, 0), 0x5000_4003);
+    assert_eq!(r(&env, 1), 0);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), 0);
+}

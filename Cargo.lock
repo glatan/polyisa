@@ -325,6 +325,7 @@ dependencies = [
  "polyisa-isagen",
  "polyisa-mem",
  "polyisa-sem",
+ "polyisa-softfloat",
 ]
 
 [[package]]

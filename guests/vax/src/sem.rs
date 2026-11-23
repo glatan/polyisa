@@ -26,6 +26,8 @@
 use polyisa_engine::interp::{InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64, W128};
+use polyisa_softfloat::decfp::{FP_IOV, VaxF};
+use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 
 use crate::specifier::{self, Fetched, Legality, OpTy, Opnd, Spec, Width};
 use crate::{CpuState, Insn, PART_INSN_NONE, PartialInsn, psl, reg};
@@ -79,6 +81,14 @@ pub mod scb {
         pub const DEC_OVERFLOW: u32 = 6;
         /// 添字の範囲違反。
         pub const SUBSCRIPT: u32 = 7;
+        /// 浮動オーバーフロー fault。直接実行する浮動命令は
+        /// （trap 型 3 の代わりに）この型で届く — trap 型は
+        /// 補完 macrocode など命令が完結してから届ける経路の型。
+        pub const FLT_OVERFLOW_F: u32 = 8;
+        /// 浮動ゼロ除算 fault。
+        pub const FLT_DIV_ZERO_F: u32 = 9;
+        /// 浮動アンダーフロー fault。
+        pub const FLT_UNDERFLOW_F: u32 = 10;
     }
     /// 算術 trap の配送コード: `SCB ベクタ | 型パラメータ<<16`。
     /// 型は実機ではベクタとは別にスタックへ積まれるパラメータ —
@@ -462,7 +472,7 @@ fn eval_spec(
     let sz = w.bytes();
     Ok(match s {
         Spec::Lit(v) => Loc::Val {
-            v: u128::from(*v),
+            v: fp_lit(w, *v),
             addr: start,
         },
         Spec::Indexed { rx, base } => {
@@ -550,6 +560,25 @@ pub fn fp_order(w: Width, v: u128) -> u128 {
         out |= ((v >> (16 * i)) & 0xffff) << (16 * (n - 1 - i));
     }
     out
+}
+
+/// 短リテラルの値。浮動型の指定子に付く 6 ビットリテラルは
+/// 3 ビットの指数部と 3 ビットの仮数部からなる値（符号は常に 0。
+/// 指数は形式のバイアス加算、仮数は係数の上位 3 ビット）。
+/// 返すのは読み出し側の `fp_order` が正準形へ戻せる形に語順を
+/// 掛けた値。整数型は零拡張。
+// Ref: SPEC-VAX-ARM（リテラルモードの節）.
+fn fp_lit(w: Width, v: u8) -> u128 {
+    let e3 = u128::from(v >> 3);
+    let f3 = u128::from(v & 7);
+    let canon = match w {
+        Width::F => ((128 + e3) << 23) | (f3 << 20),
+        Width::D => ((128 + e3) << 55) | (f3 << 52),
+        Width::G => ((1024 + e3) << 52) | (f3 << 49),
+        Width::H => ((16384 + e3) << 112) | (f3 << 109),
+        _ => return u128::from(v),
+    };
+    fp_order(w, canon)
 }
 
 /// VAX の fault（予約オペランド・予約モード・特権命令等 — 復帰先は
@@ -1463,6 +1492,499 @@ fn ret(b: &mut InterpBackend) -> Result<(), InterpExit> {
     Ok(())
 }
 
+// ---- 浮動小数点（VX9）----
+//
+// 演算核は decfp（`VaxF<E,M>`。オペランドの読み書きでは `fp_order`
+// が正準形と建築の語順を写す）。丸めは常に VAX 規則（0.5 ulp を
+// 足して切り捨て = `Rm::Rmm`）。浮動例外は fault（型 8/9/A）—
+// dst は手つかず、条件コードは建築上不定（現状維持の決定的選択）。
+// アンダーフローは PSL<FU>=0 なら真の零を dst へ書いて続行、=1 なら
+// fault。予約オペランドは各ソースの読み出し時に予約オペランド
+// fault。整数側のあふれ（cvt の整数 dst・emod の整数部）は整数
+// オーバーフローの規則（V=1、IV 有効なら整数オーバーフロー trap）。
+// Ref: SPEC-VAX-ARM（浮動小数点命令の節、算術例外の章）.
+
+/// 浮動オペランドの読み出し（語順写像つき decfp 値）。予約
+/// オペランドは読み出し時に fault — dst・条件コードは書かない。
+fn fp_get<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    loc: &Loc,
+    w: Width,
+) -> Result<VaxF<E, M>, InterpExit> {
+    let v = VaxF::<E, M>::from_bits(fp_order(w, read(b, loc, w)?));
+    if v.is_reserved() {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    Ok(v)
+}
+
+/// 演算結果の浮動例外判定。書き戻すべき値を返す（FU 解除時の下桁は
+/// 真の零）。上桁・ゼロ除算・FU 時の下桁は fault（dst は手つかず）。
+fn fp_result<const E: u32, const M: u32>(
+    b: &InterpBackend,
+    v: VaxF<E, M>,
+    flags: u8,
+) -> Result<VaxF<E, M>, InterpExit> {
+    if flags & FP_OF != 0 {
+        return Err(fault(scb::arith(scb::at::FLT_OVERFLOW_F), None));
+    }
+    if flags & FP_DZ != 0 {
+        return Err(fault(scb::arith(scb::at::FLT_DIV_ZERO_F), None));
+    }
+    if flags & FP_UF != 0 && psl_flag(b, psl::FU) {
+        return Err(fault(scb::arith(scb::at::FLT_UNDERFLOW_F), None));
+    }
+    Ok(v)
+}
+
+/// 浮動結果 `v` を幅 `w` のオペランドへ書く（語順写像）。
+fn fp_put<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    loc: &Loc,
+    w: Width,
+    v: VaxF<E, M>,
+) -> Result<(), InterpExit> {
+    write(b, loc, w, fp_order(w, v.bits()))
+}
+
+/// 浮動結果の条件コード N/Z（V=0。C は呼び出し側が渡す —
+/// 演算・変換・tst/cmp は 0、mov は保存、acb は保存）。
+fn fp_cc<const E: u32, const M: u32>(b: &mut InterpBackend, v: VaxF<E, M>, c: bool) {
+    cc_nzvc(b, v.is_neg(), v.is_zero(), false, c);
+}
+
+/// 2 項（`op2.mx OP= op1.rx`）と 3 項（`sum.wx = op1 OP op2`）の
+/// 浮動四則。2 項は第 2 オペランドが累算（sub/div の被演算子側）。
+fn fp_arith<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let w = tys[0].width;
+    let s = eval(b, f, pos, 0)?;
+    let op1 = fp_get::<E, M>(b, &s, w)?;
+    let s = eval(b, f, pos, 1)?;
+    let op2 = fp_get::<E, M>(b, &s, w)?;
+    let (lhs, rhs, d) = if tys.len() == 2 {
+        (op2, op1, s)
+    } else {
+        let d = eval(b, f, pos, 2)?;
+        (op1, op2, d)
+    };
+    let (r, fl) = match f.insn {
+        Insn::Addf2
+        | Insn::Addf3
+        | Insn::Addd2
+        | Insn::Addd3
+        | Insn::Addg2
+        | Insn::Addg3
+        | Insn::Addh2
+        | Insn::Addh3 => lhs.add(rhs, Rm::Rmm),
+        Insn::Subf2
+        | Insn::Subf3
+        | Insn::Subd2
+        | Insn::Subd3
+        | Insn::Subg2
+        | Insn::Subg3
+        | Insn::Subh2
+        | Insn::Subh3 => lhs.sub(rhs, Rm::Rmm),
+        Insn::Mulf2
+        | Insn::Mulf3
+        | Insn::Muld2
+        | Insn::Muld3
+        | Insn::Mulg2
+        | Insn::Mulg3
+        | Insn::Mulh2
+        | Insn::Mulh3 => lhs.mul(rhs, Rm::Rmm),
+        _ => lhs.div(rhs, Rm::Rmm),
+    };
+    let r = fp_result(b, r, fl)?;
+    fp_put(b, &d, w, r)?;
+    fp_cc(b, r, false);
+    Ok(())
+}
+
+/// movx: dst = src。dirty zero は真の零に畳む。C は保存。
+fn fp_mov<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let v = fp_get::<E, M>(b, &s, tys[0].width)?.clean_zero();
+    let d = eval(b, f, pos, 1)?;
+    fp_put(b, &d, tys[1].width, v)?;
+    fp_cc(b, v, psl_flag(b, psl::C));
+    Ok(())
+}
+
+/// mnegx: dst = -src。ゼロは真の零（予約オペランドは作らない）。
+fn fp_mneg<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let v = fp_get::<E, M>(b, &s, tys[0].width)?.neg();
+    let d = eval(b, f, pos, 1)?;
+    fp_put(b, &d, tys[1].width, v)?;
+    fp_cc(b, v, false);
+    Ok(())
+}
+
+/// cmpx: src1 と src2 を比べる（N=src1<src2・Z=等値・V=0・C=0）。
+fn fp_cmp<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let w = tys[0].width;
+    let s = eval(b, f, pos, 0)?;
+    let a = fp_get::<E, M>(b, &s, w)?;
+    let s = eval(b, f, pos, 1)?;
+    let v = fp_get::<E, M>(b, &s, w)?;
+    let c = a.cmp(v).unwrap_or(0);
+    cc_nzvc(b, c < 0, c == 0, false, false);
+    Ok(())
+}
+
+/// tstx: オペランドを零と比べる（N=負・Z=零・V=0・C=0）。
+fn fp_tst<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let w = specifier::insn_ops(f.insn)[0].width;
+    let s = eval(b, f, pos, 0)?;
+    let v = fp_get::<E, M>(b, &s, w)?;
+    fp_cc(b, v, false);
+    Ok(())
+}
+
+/// 形式間変換。縮小は VAX 丸め（Rmm）。上桁・FU 時の下桁は fault。
+fn fp_cvt_ff<const E1: u32, const M1: u32, const E2: u32, const M2: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let v = fp_get::<E1, M1>(b, &s, tys[0].width)?;
+    let (r, fl) = v.widen_rm::<E2, M2>(Rm::Rmm);
+    let r = fp_result(b, r, fl)?;
+    let d = eval(b, f, pos, 1)?;
+    fp_put(b, &d, tys[1].width, r)?;
+    fp_cc(b, r, false);
+    Ok(())
+}
+
+/// 浮動→整数（`round` は cvtr*l の丸め版）。整数あふれは下位
+/// ビットを書いて V=1（IV 有効なら整数オーバーフロー trap）。
+fn fp_cvt_fi<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    round: bool,
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let v = fp_get::<E, M>(b, &s, tys[0].width)?;
+    let (iv, fl) = v.to_i32(round);
+    let dw = tys[1].width;
+    let d = eval(b, f, pos, 1)?;
+    let bits = u128::from(iv as u32) & mask_w(dw);
+    write(b, &d, dw, bits)?;
+    // あふれ判定は出力幅（byte/word は 32 ビットより狭い —
+    // to_i32 の FP_IOV は 32 ビット基準）。書き出した値を
+    // 符号拡張して戻るかどうかで見る。
+    let iov = (fl & FP_IOV != 0) || sext_w(bits, dw) as i32 != iv;
+    cc_arith(b, bits, iov, false, dw);
+    iv_trap(b)
+}
+
+/// 整数→浮動。byte/word は常に正確、long は仮数に収まらなければ
+/// VAX 丸め（D/G/H の係数は i32 を全て保持するので常に正確）。
+fn fp_cvt_if<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let iv = sext_w(read(b, &s, tys[0].width)?, tys[0].width) as i32;
+    let r = VaxF::<E, M>::from_i32(iv, Rm::Rmm);
+    let d = eval(b, f, pos, 1)?;
+    fp_put(b, &d, tys[1].width, r)?;
+    fp_cc(b, r, false);
+    Ok(())
+}
+
+/// acbx: limit.rx, add.rx, index.mx, displ.bw。index += add して、
+/// add が非負なら index<=limit、負なら index>=limit で分岐。
+/// 浮動あふれは fault（index は手つかず）、FU 解除の下桁は index=0。
+fn fp_acb<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let w = specifier::insn_ops(f.insn)[0].width;
+    let s = eval(b, f, pos, 0)?;
+    let lim = fp_get::<E, M>(b, &s, w)?;
+    let s = eval(b, f, pos, 1)?;
+    let add = fp_get::<E, M>(b, &s, w)?;
+    let d = eval(b, f, pos, 2)?;
+    let idx = fp_get::<E, M>(b, &d, w)?;
+    let (r, fl) = idx.add(add, Rm::Rmm);
+    let r = fp_result(b, r, fl)?;
+    fp_put(b, &d, w, r)?;
+    let c = r.cmp(lim).unwrap_or(0);
+    let take = if add.is_neg() { c >= 0 } else { c <= 0 };
+    fp_cc(b, r, psl_flag(b, psl::C));
+    if take {
+        branch(b, br_displ(f, 3));
+    }
+    Ok(())
+}
+
+/// emodx: mulr.rx, mulrx.rb/rw, muld.rx, int.wl, fract.wx。
+/// 拡張した乗数と被乗数の積を整数部（.wl 出力）と小数部（.wx
+/// 出力）へ分ける。整数あふれは下位ビットを書いて V=1（IV trap）。
+/// FU 解除時の下桁は整数部・小数部ともに真の零へ。
+fn fp_emod<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    let tys = specifier::insn_ops(f.insn);
+    let s = eval(b, f, pos, 0)?;
+    let mulr = fp_get::<E, M>(b, &s, tys[0].width)?;
+    let s = eval(b, f, pos, 1)?;
+    let rx = read(b, &s, tys[1].width)? as u32;
+    let s = eval(b, f, pos, 2)?;
+    let muld = fp_get::<E, M>(b, &s, tys[2].width)?;
+    // EMODF/D は mulrx.rb 全 8 ビット。EMODG/H は mulrx.rw の上位
+    // 11/15 ビット（下位 5/1 ビットは無視）。
+    let extv = if E == 8 { rx & 0xff } else { rx >> (16 - E) };
+    let (iv, fract, fl) = mulr.emod(extv, muld);
+    let di = eval(b, f, pos, 3)?;
+    let df = eval(b, f, pos, 4)?;
+    if fl & FP_UF != 0 {
+        if psl_flag(b, psl::FU) {
+            return Err(fault(scb::arith(scb::at::FLT_UNDERFLOW_F), None));
+        }
+        write(b, &di, Width::L, 0)?;
+        write(b, &df, tys[4].width, 0)?;
+        cc_nzvc(b, false, true, false, false);
+        return Ok(());
+    }
+    let iov = fl & FP_IOV != 0;
+    write(b, &di, Width::L, u128::from(iv as u32))?;
+    fp_put(b, &df, tys[4].width, fract)?;
+    cc_nzvc(b, fract.is_neg(), fract.is_zero(), iov, false);
+    iv_trap(b)
+}
+
+/// 係数表の 1 要素を語順写像つきで読み、予約オペランドを弾く。
+fn poly_coeff<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    w: Width,
+    a: u32,
+) -> Result<VaxF<E, M>, InterpExit> {
+    let v = VaxF::<E, M>::from_bits(fp_order(w, load(b, a, w.bytes())?));
+    if v.is_reserved() {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    Ok(v)
+}
+
+/// 建築の退避レジスタへの状態書き出し（POLYF: r0=tmp3・r1=arg・
+/// r2<7:0>=tmp1・r3=tmp2。POLYD/G: r1'r0=tmp3・r2<7:0>=tmp1・
+/// r3=tmp2・r5'r4=arg。POLYH: r3'r2'r1'r0=tmp3・r4<7:0>=tmp1・
+/// r5=tmp2・arg はスタック）。tmp1 は残り反復回数、tmp2 は次の
+/// 係数アドレス。中断・例外・完了前の共通形。
+fn poly_save<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    w: Width,
+    acc: VaxF<E, M>,
+    arg: VaxF<E, M>,
+    tmp1: u32,
+    tmp2: u32,
+) {
+    match w {
+        Width::F => {
+            reg_write(b, 0, w, fp_order(w, acc.bits()));
+            reg_write(b, 1, w, fp_order(w, arg.bits()));
+            r_set(b, 2, tmp1);
+            r_set(b, 3, tmp2);
+        }
+        Width::D | Width::G => {
+            reg_write(b, 0, w, fp_order(w, acc.bits()));
+            r_set(b, 2, tmp1);
+            r_set(b, 3, tmp2);
+            reg_write(b, 4, w, fp_order(w, arg.bits()));
+        }
+        _ => {
+            reg_write(b, 0, w, fp_order(w, acc.bits()));
+            r_set(b, 4, tmp1);
+            r_set(b, 5, tmp2);
+        }
+    }
+}
+
+/// 退避レジスタからの状態読み出し（`poly_save` の逆）。
+/// POLYH の arg はスタック上（FPD の間は残っている）。
+fn poly_load<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    w: Width,
+) -> Result<(VaxF<E, M>, VaxF<E, M>, u32, u32), InterpExit> {
+    Ok(match w {
+        Width::F => (
+            VaxF::from_bits(fp_order(w, reg_read(b, 0, w))),
+            VaxF::from_bits(fp_order(w, reg_read(b, 1, w))),
+            r_get(b, 2) & 0xff,
+            r_get(b, 3),
+        ),
+        Width::D | Width::G => (
+            VaxF::from_bits(fp_order(w, reg_read(b, 0, w))),
+            VaxF::from_bits(fp_order(w, reg_read(b, 4, w))),
+            r_get(b, 2) & 0xff,
+            r_get(b, 3),
+        ),
+        _ => {
+            let arg = VaxF::from_bits(fp_order(w, load(b, r_get(b, reg::SP as u8), 16)?));
+            (
+                VaxF::from_bits(fp_order(w, reg_read(b, 0, w))),
+                arg,
+                r_get(b, 4) & 0xff,
+                r_get(b, 5),
+            )
+        }
+    })
+}
+
+/// 完了時のレジスタ最終値（POLYH は arg の退避分をスタックから
+/// 取り除く）。残りは建築の規定値（tmp1 位置 0・tmp2 位置は表の
+/// 終端、arg 側は 0）。
+fn poly_finish<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    w: Width,
+    acc: VaxF<E, M>,
+    tmp2: u32,
+) {
+    let a = fp_order(w, acc.bits());
+    match w {
+        Width::F => {
+            reg_write(b, 0, w, a);
+            r_set(b, 1, 0);
+            r_set(b, 2, 0);
+            r_set(b, 3, tmp2);
+        }
+        Width::D | Width::G => {
+            reg_write(b, 0, w, a);
+            r_set(b, 2, 0);
+            r_set(b, 3, tmp2);
+            r_set(b, 4, 0);
+            r_set(b, 5, 0);
+        }
+        _ => {
+            let sp = r_get(b, reg::SP as u8).wrapping_add(16);
+            r_set(b, reg::SP as u8, sp);
+            reg_write(b, 0, w, a);
+            r_set(b, 4, 0);
+            r_set(b, 5, tmp2);
+        }
+    }
+}
+
+/// 反復途中の例外 — レジスタはすでに建築の退避形なので、
+/// FPD と部分実行標識を立てて fault を返す（命令は継続可能）。
+fn poly_fault(b: &mut InterpBackend, opc: u16, pc0: u32, e: InterpExit) -> InterpExit {
+    partial_save(b, opc, [0; 4], pc0);
+    e
+}
+
+/// polyx: arg.rx, degree.rw, tbladdr.ab。「反復 1 回 = 1 ステップ」。
+/// 係数表は最高次の係数が先頭（次数が下がる方向へアドレスが進む）
+/// で、Horner 反復 `tmp3 = arg*tmp3 + (tmp2)` を回す。中間精度は
+/// decfp の `poly_iter` が規定どおり扱う。中断・例外時のレジスタは
+/// 建築の退避形そのものを使うので、どの位置の例外でも継続可能。
+// Ref: SPEC-VAX-ARM（poly 命令の節）.
+fn poly<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+    opc: u16,
+) -> Result<(), InterpExit> {
+    let w = specifier::insn_ops(f.insn)[0].width;
+    let size = w.bytes();
+    if partial_resume(b, opc).is_none() {
+        // 新しい開始（他命令由来の FPD は掃く）。
+        partial_done(b);
+        let s = eval(b, f, pos, 0)?;
+        let arg = fp_get::<E, M>(b, &s, w)?;
+        let deg = eval_r(b, f, pos, 1, Width::W)? as u32;
+        if deg > 31 {
+            return Err(fault(scb::RESERVED_OPERAND, None));
+        }
+        let t = eval_a(b, f, pos, 2)?;
+        // C[0]（最高次係数）を読んで累算の初期値にする。
+        let acc = poly_coeff::<E, M>(b, w, t)?;
+        // POLYH は arg をスタックへ退避する（完成時に除去）。
+        if w == Width::H {
+            let sp = r_get(b, reg::SP as u8).wrapping_sub(16);
+            r_set(b, reg::SP as u8, sp);
+            store(b, sp, 16, fp_order(w, arg.bits()))?;
+        }
+        poly_save::<E, M>(b, w, acc, arg, deg, t.wrapping_add(size));
+    }
+    let (acc, arg, mut tmp1, mut tmp2) = poly_load::<E, M>(b, w)?;
+    if tmp1 == 0 {
+        // 次数 0、または最終反復の完了。
+        poly_finish::<E, M>(b, w, acc, tmp2);
+        fp_cc(b, acc, false);
+        partial_done(b);
+        return Ok(());
+    }
+    let c = poly_coeff::<E, M>(b, w, tmp2).map_err(|e| poly_fault(b, opc, pc0, e))?;
+    let (r, fl) = acc.poly_iter(arg, c);
+    let r = if fl & FP_OF != 0 {
+        return Err(poly_fault(
+            b,
+            opc,
+            pc0,
+            fault(scb::arith(scb::at::FLT_OVERFLOW_F), None),
+        ));
+    } else if fl & FP_UF != 0 {
+        if psl_flag(b, psl::FU) {
+            return Err(poly_fault(
+                b,
+                opc,
+                pc0,
+                fault(scb::arith(scb::at::FLT_UNDERFLOW_F), None),
+            ));
+        }
+        VaxF::zero()
+    } else {
+        r
+    };
+    tmp1 -= 1;
+    tmp2 = tmp2.wrapping_add(size);
+    poly_save::<E, M>(b, w, r, arg, tmp1, tmp2);
+    if tmp1 == 0 {
+        poly_finish::<E, M>(b, w, r, tmp2);
+        fp_cc(b, r, false);
+        partial_done(b);
+    } else {
+        partial_save(b, opc, [0; 4], pc0);
+    }
+    Ok(())
+}
+
 /// 命令 1 個の意味論。`pos[i]` はオペランド i の指定子バイト列の
 /// 先頭・終端の絶対アドレス（PC 相対の基底と即値の位置に使う）。
 /// `pc0` は命令の先頭アドレス。実行時の r15 は命令の終端
@@ -1497,6 +2019,10 @@ pub fn exec(
         | Insn::Matchc
         | Insn::Movtc
         | Insn::Movtuc
+        | Insn::Polyf
+        | Insn::Polyd
+        | Insn::Polyg
+        | Insn::Polyh
         | Insn::Crc => {}
         _ => partial_done(b),
     }
@@ -2267,6 +2793,94 @@ pub fn exec(
         // calls/callg/ret: 手続呼出フレームの構築と解除。
         Insn::Calls | Insn::Callg => call(b, f, pos)?,
         Insn::Ret => ret(b)?,
+        // ---- 浮動小数点（VX9）----
+        Insn::Addf2
+        | Insn::Addf3
+        | Insn::Subf2
+        | Insn::Subf3
+        | Insn::Mulf2
+        | Insn::Mulf3
+        | Insn::Divf2
+        | Insn::Divf3 => fp_arith::<8, 23>(b, f, pos)?,
+        Insn::Addd2
+        | Insn::Addd3
+        | Insn::Subd2
+        | Insn::Subd3
+        | Insn::Muld2
+        | Insn::Muld3
+        | Insn::Divd2
+        | Insn::Divd3 => fp_arith::<8, 55>(b, f, pos)?,
+        Insn::Addg2
+        | Insn::Addg3
+        | Insn::Subg2
+        | Insn::Subg3
+        | Insn::Mulg2
+        | Insn::Mulg3
+        | Insn::Divg2
+        | Insn::Divg3 => fp_arith::<11, 52>(b, f, pos)?,
+        Insn::Addh2
+        | Insn::Addh3
+        | Insn::Subh2
+        | Insn::Subh3
+        | Insn::Mulh2
+        | Insn::Mulh3
+        | Insn::Divh2
+        | Insn::Divh3 => fp_arith::<15, 112>(b, f, pos)?,
+        Insn::Movf => fp_mov::<8, 23>(b, f, pos)?,
+        Insn::Movd => fp_mov::<8, 55>(b, f, pos)?,
+        Insn::Movg => fp_mov::<11, 52>(b, f, pos)?,
+        Insn::Movh => fp_mov::<15, 112>(b, f, pos)?,
+        Insn::Mnegf => fp_mneg::<8, 23>(b, f, pos)?,
+        Insn::Mnegd => fp_mneg::<8, 55>(b, f, pos)?,
+        Insn::Mnegg => fp_mneg::<11, 52>(b, f, pos)?,
+        Insn::Mnegh => fp_mneg::<15, 112>(b, f, pos)?,
+        Insn::Cmpf => fp_cmp::<8, 23>(b, f, pos)?,
+        Insn::Cmpd => fp_cmp::<8, 55>(b, f, pos)?,
+        Insn::Cmpg => fp_cmp::<11, 52>(b, f, pos)?,
+        Insn::Cmph => fp_cmp::<15, 112>(b, f, pos)?,
+        Insn::Tstf => fp_tst::<8, 23>(b, f, pos)?,
+        Insn::Tstd => fp_tst::<8, 55>(b, f, pos)?,
+        Insn::Tstg => fp_tst::<11, 52>(b, f, pos)?,
+        Insn::Tsth => fp_tst::<15, 112>(b, f, pos)?,
+        Insn::Cvtfb | Insn::Cvtfw | Insn::Cvtfl => fp_cvt_fi::<8, 23>(b, f, pos, false)?,
+        Insn::Cvtrfl => fp_cvt_fi::<8, 23>(b, f, pos, true)?,
+        Insn::Cvtdb | Insn::Cvtdw | Insn::Cvtdl => fp_cvt_fi::<8, 55>(b, f, pos, false)?,
+        Insn::Cvtrdl => fp_cvt_fi::<8, 55>(b, f, pos, true)?,
+        Insn::Cvtgb | Insn::Cvtgw | Insn::Cvtgl => fp_cvt_fi::<11, 52>(b, f, pos, false)?,
+        Insn::Cvtrgl => fp_cvt_fi::<11, 52>(b, f, pos, true)?,
+        Insn::Cvthb | Insn::Cvthw | Insn::Cvthl => fp_cvt_fi::<15, 112>(b, f, pos, false)?,
+        Insn::Cvtrhl => fp_cvt_fi::<15, 112>(b, f, pos, true)?,
+        Insn::Cvtbf | Insn::Cvtwf | Insn::Cvtlf => fp_cvt_if::<8, 23>(b, f, pos)?,
+        Insn::Cvtbd | Insn::Cvtwd | Insn::Cvtld => fp_cvt_if::<8, 55>(b, f, pos)?,
+        Insn::Cvtbg | Insn::Cvtwg | Insn::Cvtlg => fp_cvt_if::<11, 52>(b, f, pos)?,
+        Insn::Cvtbh | Insn::Cvtwh | Insn::Cvtlh => fp_cvt_if::<15, 112>(b, f, pos)?,
+        Insn::Cvtfd => fp_cvt_ff::<8, 23, 8, 55>(b, f, pos)?,
+        Insn::Cvtdf => fp_cvt_ff::<8, 55, 8, 23>(b, f, pos)?,
+        Insn::Cvtfg => fp_cvt_ff::<8, 23, 11, 52>(b, f, pos)?,
+        Insn::Cvtgf => fp_cvt_ff::<11, 52, 8, 23>(b, f, pos)?,
+        Insn::Cvtfh => fp_cvt_ff::<8, 23, 15, 112>(b, f, pos)?,
+        Insn::Cvtdh => fp_cvt_ff::<8, 55, 15, 112>(b, f, pos)?,
+        Insn::Cvtgh => fp_cvt_ff::<11, 52, 15, 112>(b, f, pos)?,
+        Insn::Cvthf => fp_cvt_ff::<15, 112, 8, 23>(b, f, pos)?,
+        Insn::Cvthd => fp_cvt_ff::<15, 112, 8, 55>(b, f, pos)?,
+        Insn::Cvthg => fp_cvt_ff::<15, 112, 11, 52>(b, f, pos)?,
+        Insn::Acbf => fp_acb::<8, 23>(b, f, pos)?,
+        Insn::Acbd => fp_acb::<8, 55>(b, f, pos)?,
+        Insn::Acbg => fp_acb::<11, 52>(b, f, pos)?,
+        Insn::Acbh => fp_acb::<15, 112>(b, f, pos)?,
+        Insn::Emodf => fp_emod::<8, 23>(b, f, pos)?,
+        Insn::Emodd => fp_emod::<8, 55>(b, f, pos)?,
+        Insn::Emodg => fp_emod::<11, 52>(b, f, pos)?,
+        Insn::Emodh => fp_emod::<15, 112>(b, f, pos)?,
+        Insn::Polyf => poly::<8, 23>(b, f, pos, pc0, 0x55)?,
+        Insn::Polyd => poly::<8, 55>(b, f, pos, pc0, 0x75)?,
+        Insn::Polyg => poly::<11, 52>(b, f, pos, pc0, 0x55fd)?,
+        Insn::Polyh => poly::<15, 112>(b, f, pos, pc0, 0x75fd)?,
+        Insn::Clro => {
+            let d = eval(b, f, pos, 0)?;
+            write(b, &d, Width::O, 0)?;
+            cc_nzv(b, false, true, false);
+        }
         _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
     }
     Ok(())

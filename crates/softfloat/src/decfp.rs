@@ -13,12 +13,18 @@
 //! `FP_UF` を返す。VAX の規則では、オーバーフローはエラーで結果は
 //! 不定、アンダーフローは真の零になる。この実装は決定性のため、
 //! オーバーフロー時は符号つきの最大有限値を返す。
-//! 丸めは呼び出し側の `Rm` に従う（VAX の演算は 0.5 ulp を足して
-//! 切り捨てる規則で、`Rm::Rmm` に近い）。
+//! 丸めは呼び出し側の `Rm` に従う。VAX の演算の丸めは「0.5 ulp を
+//! 足して切り捨てる」規則 —— ガード桁が立っていれば絶対値を丸め
+//! 上げる `Rm::Rmm` と一致する（sticky は効かない）。
 // Ref: VAX Architecture Reference Manual の F/D/G/H 形式（事実のみ）。
 
 use crate::{FP_DZ, FP_NV, FP_OF, FP_UF, Rm};
 use core::cmp::Ordering;
+
+/// 整数オーバーフロー（整数変換・EMOD の整数部が結果の 32 ビット幅に
+/// 収まらない。dst には真の結果の下位ビットが置かれる）。
+/// `FP_*` の RISC-V 五ビットの外側にある DEC 系だけの拡張ビット。
+pub const FP_IOV: u8 = 0x20;
 
 /// DEC の浮動小数点。指数 E ビット（バイアス 2^(E-1)）、仮数 M ビット
 /// （隠れビット込みで M+1 ビットの有效数字）。
@@ -38,6 +44,47 @@ pub type VaxHF = VaxF<15, 112>;
 
 fn bitlen(v: u128) -> i64 {
     128 - v.leading_zeros() as i64
+}
+
+/// u128 同士の積の (上位, 下位)。H 形式の係数乗算（226 ビット）や
+/// EMOD の拡張係数（241 ビット）が u128 に収まらないため。
+fn mulhilo(a: u128, b: u128) -> (u128, u128) {
+    const LOM: u128 = 0xffff_ffff_ffff_ffff;
+    let (a0, a1) = (a & LOM, a >> 64);
+    let (b0, b1) = (b & LOM, b >> 64);
+    let t = a0 * b0;
+    let s1 = a0 * b1 + (t >> 64);
+    let s2 = a1 * b0 + (s1 & LOM);
+    let lo = (t & LOM) | (s2 << 64);
+    let hi = a1 * b1 + (s1 >> 64) + (s2 >> 64);
+    (hi, lo)
+}
+
+/// 256 ビット値 (hi:lo) のビット長。
+fn bitlen256(hi: u128, lo: u128) -> i64 {
+    if hi == 0 {
+        bitlen(lo)
+    } else {
+        128 + bitlen(hi)
+    }
+}
+
+/// 256 ビット値 (hi:lo) から下位 `s` ビットを落として u128 に畳む。
+/// 落ちた桁は sticky に畳む（結果が u128 に収まることは呼び出し側の
+/// 責務 — 使いどころは常に最上位側の切り出し）。
+fn shr256(hi: u128, lo: u128, s: u32) -> (u128, bool) {
+    if s == 0 {
+        return (lo, false);
+    }
+    if s >= 128 {
+        let rest = s - 128;
+        let sticky =
+            lo != 0 || (rest < 128 && (hi & ((1u128 << rest.min(127)) - 1)) != 0) || rest >= 128;
+        let q = if rest >= 128 { 0 } else { hi >> rest };
+        return (q, sticky);
+    }
+    let sticky = (lo & ((1u128 << s) - 1)) != 0;
+    ((hi << (128 - s)) | (lo >> s), sticky)
 }
 
 #[allow(clippy::should_implement_trait)]
@@ -168,16 +215,13 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
         }
         let (_, m1, e1) = self.unpack();
         let (_, m2, e2) = other.unpack();
-        // 積は最大 2M+2 ビット。M+2 ビット＋sticky に畳む。
-        let mut p = m1 * m2;
-        let mut e = e1 + e2;
-        let mut sticky = false;
-        while bitlen(p) > i64::from(M) + 2 {
-            sticky |= (p & 1) != 0;
-            p >>= 1;
-            e += 1;
-        }
-        round_pack::<E, M>(neg, p, e, sticky, rm)
+        // 積は最大 2M+2 ビット（H は 226 ビットで u128 に収まらない
+        // ので 256 ビットに受ける）。M+2 ビット＋sticky に畳む。
+        let (ph, pl) = mulhilo(m1, m2);
+        let want = i64::from(M) + 2;
+        let drop = (bitlen256(ph, pl) - want).max(0) as u32;
+        let (q, sticky) = shr256(ph, pl, drop);
+        round_pack::<E, M>(neg, q, e1 + e2 + i64::from(drop), sticky, rm)
     }
 
     /// 除算。
@@ -264,10 +308,12 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
         self.cmp(other) == Some(0)
     }
 
-    /// 別の形式に変換する。仮数が狭まるとき（D→G など）は RNE で
-    /// 丸める。予約オペランドはそのまま写して FP_NV を返す。
+    /// 別の形式に変換する。仮数が狭まるとき（D→G など）の丸めは
+    /// `rm` に従う（VAX の cvt 命令は `Rm::Rmm`、既存の DEC 系経路は
+    /// `widen` が RNE を使う）。予約オペランドはそのまま写して
+    /// FP_NV を返す。
     #[must_use]
-    pub fn widen<const E2: u32, const M2: u32>(self) -> (VaxF<E2, M2>, u8) {
+    pub fn widen_rm<const E2: u32, const M2: u32>(self, rm: Rm) -> (VaxF<E2, M2>, u8) {
         if self.is_reserved() {
             return (
                 VaxF::<E2, M2> {
@@ -280,7 +326,7 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
             return (VaxF::<E2, M2>::zero(), 0);
         }
         let (neg, mut sig, mut eb) = self.unpack();
-        // 係数を M2+1 ビットに揃える。落ちる桁は RNE で丸める。
+        // 係数を M2+1 ビットに揃える。落ちる桁は rm で丸める。
         if M2 >= M {
             let d = M2 - M;
             sig <<= d;
@@ -292,7 +338,14 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
             eb += i64::from(d);
             let guard = (dropped >> (d - 1)) & 1;
             let sticky = (dropped & ((1u128 << (d - 1)) - 1)) != 0;
-            if guard != 0 && (sticky || (sig & 1) == 1) {
+            let up = match rm {
+                Rm::Rtz => false,
+                Rm::Rup => !neg && (guard != 0 || sticky),
+                Rm::Rdn => neg && (guard != 0 || sticky),
+                Rm::Rmm => guard != 0,
+                Rm::Rne => guard != 0 && (sticky || (sig & 1) == 1),
+            };
+            if up {
                 sig += 1;
                 if bitlen(sig) > i64::from(M2) + 1 {
                     sig >>= 1;
@@ -301,6 +354,281 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
             }
         }
         VaxF::<E2, M2>::pack(neg, sig, eb)
+    }
+
+    /// 別の形式に変換する。仮数が狭まるときは RNE で丸める
+    /// （VAX の cvt は `widen_rm` に `Rm::Rmm` を渡す）。
+    #[must_use]
+    pub fn widen<const E2: u32, const M2: u32>(self) -> (VaxF<E2, M2>, u8) {
+        self.widen_rm(Rm::Rne)
+    }
+
+    /// 負の有限値か（条件コード N。指数 0 は真の零・dirty zero で
+    /// 負ではない。結果に予約オペランドは生成されないので、
+    /// 読み出し側が予約オペランドを弾いた後に使う前提）。
+    #[must_use]
+    pub fn is_neg(self) -> bool {
+        let (neg, exp, _) = self.decode();
+        neg && exp != 0
+    }
+
+    /// 符号を反転する（mneg）。指数 0（真の零・dirty zero）は真の
+    /// 零を返す — 予約オペランドは結果に生成されない。
+    #[must_use]
+    pub fn neg(self) -> Self {
+        if self.decode().1 == 0 {
+            Self::zero()
+        } else {
+            Self::from_bits(self.bits ^ (1u128 << (E + M)))
+        }
+    }
+
+    /// dirty zero（指数 0・符号 0・仮数非 0）を真の零へ畳む。
+    /// その他の値はそのまま。予約オペランドは呼び出し側が先に弾く。
+    #[must_use]
+    pub fn clean_zero(self) -> Self {
+        if self.is_zero() { Self::zero() } else { self }
+    }
+
+    /// 整数（i32）からの変換。丸めは `rm`（VAX の cvt は Rmm）。
+    /// オーバーフロー・アンダーフローは起きない。
+    #[must_use]
+    pub fn from_i32(v: i32, rm: Rm) -> Self {
+        if v == 0 {
+            return Self::zero();
+        }
+        let neg = v < 0;
+        let mag = u128::from(v.unsigned_abs());
+        // M+2 ビット（係数＋ガード）へ畳んで round_pack へ。
+        let want = i64::from(M) + 2;
+        let bl = bitlen(mag);
+        let (q, e, sticky) = if bl > want {
+            let s = (bl - want) as u32;
+            (mag >> s, i64::from(s), (mag & ((1u128 << s) - 1)) != 0)
+        } else {
+            let s = (want - bl) as u32;
+            (mag << s, -i64::from(s), false)
+        };
+        round_pack::<E, M>(neg, q, e, sticky, rm).0
+    }
+
+    /// 整数（i32）への変換。`round` なら VAX の丸め（0.5 ulp を足して
+    /// 切り捨て — 絶対値で最も近い方へ）で、なければ 0 方向へ
+    /// 切り詰める（符号・絶対値表現の DEC 形式は丸めも符号・絶対値）。
+    /// 返すのは (結果の下位 32 ビットの二の補数, フラグ)。フラグは
+    /// FP_NV（予約オペランド）と FP_IOV（32 ビットに収まらない —
+    /// その場合も下位ビットは真の値のまま）を持ち得る。
+    #[must_use]
+    pub fn to_i32(self, round: bool) -> (i32, u8) {
+        if self.is_reserved() {
+            return (0, FP_NV);
+        }
+        if self.is_zero() {
+            return (0, 0);
+        }
+        let (neg, sig, e) = self.unpack();
+        // 絶対値の整数部（下位 32 ビットと「収まるか」の判定だけ
+        // 要るので大きい側は飽和する）。
+        let (low, iov) = if e >= 0 {
+            let mbits = bitlen(sig) + e;
+            let low = if e >= 32 {
+                0
+            } else {
+                (sig as u32) << (e as u32)
+            };
+            (
+                low,
+                mbits > 32 || (mbits == 32 && !(neg && low == 0x8000_0000)),
+            )
+        } else {
+            let r = (-e) as u32;
+            let mut mag = if r >= 128 { 0 } else { sig >> r };
+            if round && (1..=128).contains(&r) && (sig >> (r - 1)) & 1 == 1 {
+                mag += 1;
+            }
+            let lim = if neg {
+                0x8000_0000u128
+            } else {
+                0x7fff_ffffu128
+            };
+            (mag as u32, mag > lim)
+        };
+        let v = if neg { low.wrapping_neg() } else { low } as i32;
+        (v, if iov { FP_IOV } else { 0 })
+    }
+
+    /// EMOD。`mulrx` は係数拡張の桁（self 側の係数の下に連結する
+    /// ext ビット — EMODF/D は mulrx.rb の 8 ビット、EMODG/H は
+    /// mulrx.rw の上位 11/15 ビットを呼び出し側が右詰めで渡す）。
+    /// 拡張係数と muld の積を、正規化前の仮数フィールド幅
+    /// （形式の全幅 32/64/128 ビット）へ切り詰めてから整数部と
+    /// 小数部へ分ける。小数部は VAX 丸めの形式値。
+    /// 返すのは (整数部の下位 32 ビットの二の補数, 小数部, フラグ)。
+    /// フラグは FP_NV・FP_UF（小数部の下桁）・FP_IOV。
+    // Ref: VAX Architecture Reference Manual の emod 命令の節.
+    #[must_use]
+    pub fn emod(self, mulrx: u32, muld: Self) -> (i32, Self, u8) {
+        if self.is_reserved() || muld.is_reserved() {
+            return (0, Self::zero(), FP_NV);
+        }
+        if self.is_zero() || muld.is_zero() {
+            return (0, Self::zero(), 0);
+        }
+        let neg = self.decode().0 ^ muld.decode().0;
+        let (_, m1, e1) = self.unpack();
+        let (_, m2, e2) = muld.unpack();
+        // 拡張桁は EMODF/D が 8（指数 8 の下位に連結）、EMODG が
+        // 11、EMODH が 15 — どれも E に一致する。
+        let ext = E;
+        let sig = (m1 << ext) | u128::from(mulrx & ((1u32 << ext) - 1));
+        let (ph, pl) = mulhilo(sig, m2);
+        // 正規化前の積を形式の全幅（1+E+M）ビットの仮数フィールドへ
+        // 切り詰める（常にフィールド幅を超えるので必ず右へ寄せる）。
+        let w2 = i64::from(Self::WIDTH);
+        let drop = (bitlen256(ph, pl) - w2).max(0) as u32;
+        let (q, _) = shr256(ph, pl, drop);
+        let e = e1 - i64::from(ext) + e2 + i64::from(drop);
+        // 値 = q * 2^e。q は最大 w2 ビット（先頭が立たないこともある —
+        // 正規化前の積のフィールドという建前）。
+        let mut flags = 0u8;
+        let (low, iov, fsig, fe) = if e >= 0 {
+            // 全部整数部。
+            let mbits = bitlen(q) + e;
+            let low = if e >= 32 { 0 } else { (q as u32) << (e as u32) };
+            (
+                low,
+                mbits > 32 || (mbits == 32 && !(neg && low == 0x8000_0000)),
+                0u128,
+                0i64,
+            )
+        } else {
+            let r = (-e) as u32;
+            if r >= Self::WIDTH {
+                // 全部小数部。
+                (0, false, q, e)
+            } else {
+                let imag = q >> r;
+                let mbits = bitlen(imag);
+                let low = imag as u32;
+                (
+                    low,
+                    mbits > 32 || (mbits == 32 && !(neg && low == 0x8000_0000)),
+                    q & ((1u128 << r) - 1),
+                    e,
+                )
+            }
+        };
+        if iov {
+            flags |= FP_IOV;
+        }
+        // 小数部を正規化・丸め（VAX 規則）。
+        let (fract, ff) = if fsig == 0 {
+            (Self::zero(), 0)
+        } else {
+            let want = i64::from(M) + 2;
+            let bl = bitlen(fsig);
+            let (mut q2, mut e2) = (fsig, fe);
+            let mut sticky = false;
+            if bl > want {
+                let s = (bl - want) as u32;
+                sticky = (fsig & ((1u128 << s) - 1)) != 0;
+                q2 = fsig >> s;
+                e2 += i64::from(s);
+            } else if bl < want {
+                q2 = fsig << (want - bl) as u32;
+                e2 -= want - bl;
+            }
+            round_pack::<E, M>(neg, q2, e2, sticky, Rm::Rmm)
+        };
+        (
+            if neg { low.wrapping_neg() } else { low } as i32,
+            fract,
+            flags | ff,
+        )
+    }
+
+    /// POLY の 1 反復: `arg * self + coeff` を正本の中間精度で
+    /// 計算する。作業仮数は上位が立つ幅いっぱいのフィールドで、
+    /// 積と和のそれぞれについて上位 `E + M` ビット（作業フィールド
+    /// の先頭の「分数部」の先頭側）を残して下位を切り捨てる —
+    /// 切り詰めのあと正規化・丸め（VAX 規則）して形式値に畳む。
+    /// フラグは FP_NV・FP_OF・FP_UF。
+    // Ref: VAX Architecture Reference Manual の poly 命令の節.
+    #[must_use]
+    pub fn poly_iter(self, arg: Self, coeff: Self) -> (Self, u8) {
+        if self.is_reserved() || arg.is_reserved() || coeff.is_reserved() {
+            return (Self::zero(), FP_NV);
+        }
+        // 作業仮数フィールド（FW ビット、正規化入力は最上位が立つ）。
+        // 残すのはフィールド上位 W = E+M ビット。
+        const FW: i64 = 128;
+        let w = i64::from(E + M);
+        let mask: u128 = (1u128 << (FW - w)) - 1;
+        // （符号, 作業仮数, bit0 の重み）へほどく。
+        let unpack_fw = |v: Self| -> (bool, u128, i64) {
+            let (neg, sig, e) = v.unpack();
+            let sh = FW - bitlen(sig);
+            (neg, sig << sh as u32, e - sh)
+        };
+        // 積: 非正規化のまま作業フィールドの上位を残す。
+        let (s_p, f_p, e_p) = if self.is_zero() || arg.is_zero() {
+            (false, 0u128, 0i64)
+        } else {
+            let (na, fa, ea) = unpack_fw(self);
+            let (nb, fb, eb) = unpack_fw(arg);
+            // 256 ビット積の上位 FW ビットが作業仮数。
+            let (ph, _pl) = mulhilo(fa, fb);
+            (na ^ nb, ph & !mask, ea + eb + FW)
+        };
+        let (s_c, f_c, e_c) = if coeff.is_zero() {
+            (false, 0u128, 0i64)
+        } else {
+            unpack_fw(coeff)
+        };
+        if f_p == 0 && f_c == 0 {
+            return (Self::zero(), 0);
+        }
+        // 和: 指数の大きい側へ揃えて符号・絶対値で畳む。作業
+        // フィールドの下へはみ出た桁は借りの規則だけ見る
+        // （add_sub と同じ）。
+        let (x, mut y, sx, sy, ex) = if e_p >= e_c {
+            (f_p, f_c, s_p, s_c, e_p)
+        } else {
+            (f_c, f_p, s_c, s_p, e_c)
+        };
+        let diff = (e_p - e_c).unsigned_abs();
+        let mut dropped_nz = false;
+        if diff >= FW as u64 {
+            dropped_nz = y != 0;
+            y = 0;
+        } else if diff > 0 {
+            let r = diff as u32;
+            dropped_nz = (y & ((1u128 << r) - 1)) != 0;
+            y >>= r;
+        }
+        let (mut q, neg, carry) = if sx == sy {
+            let s = x.wrapping_add(y);
+            (s, sx, s < x)
+        } else if x > y || (x == y && !dropped_nz) {
+            (x - y, sx, false)
+        } else {
+            (y - x, sy, false)
+        };
+        if dropped_nz && sx != sy && neg != sy {
+            q = q.wrapping_sub(1);
+        }
+        let mut e = ex;
+        if carry {
+            // 和がフィールドをはみ出す — 1 桁ずらして MSB を戻す。
+            q = (q >> 1) | (1u128 << (FW - 1));
+            e += 1;
+        }
+        // 非正規化の和をフィールド上位 W ビットへ切り詰める。
+        q &= !mask;
+        if q == 0 {
+            return (Self::zero(), 0);
+        }
+        round_pack::<E, M>(neg, q, e, false, Rm::Rmm)
     }
 }
 
@@ -378,17 +706,26 @@ fn add_sub<const E: u32, const M: u32>(
     }
     let (_, m1, e1) = a.unpack();
     let (_, m2, e2) = b.unpack();
-    let (x, mut y, sx, sy, ex) = if e1 >= e2 {
+    let (mut x, mut y, sx, sy, mut ex) = if e1 >= e2 {
         (m1, m2, s1, s2, e1)
     } else {
         (m2, m1, s2, s1, e2)
     };
+    // ガード桁方式の揃え: 指数の小さい側を diff-1 ビットずらして
+    // 最上位の「ガード候補」を係数の bit0 に残し、大きい側は
+    // 1 ビット上げてスケールを ex-1 に合わせる。ずらして落ちた
+    // 下位 diff-1 ビットが sticky — 0.5 ulp 規則（Rmm）は正規化
+    // 後のガード位置だけを見るので、ここで 1 桁残さないと加算で
+    // 半 ulp が常に捨てられてしまう。
     let diff = (e1 - e2).unsigned_abs().min(127);
     let mut dropped: u128 = 0;
-    let r = diff.min(127) as u32;
-    if r > 0 {
-        dropped = y & ((1u128 << r.min(127)) - 1);
-        y >>= r.min(127);
+    let mut r = 0u32; // sticky へ送った桁数
+    if diff > 0 {
+        r = (diff - 1).min(126) as u32;
+        dropped = y & ((1u128 << r) - 1);
+        y >>= r;
+        x <<= 1;
+        ex -= 1;
     }
     let dropped_nz = dropped != 0;
     let (mut q, neg) = if sx == sy {
@@ -417,5 +754,25 @@ fn add_sub<const E: u32, const M: u32>(
         };
         return round_pack::<E, M>(neg, q2, ex - i64::from(r), false, rm);
     }
-    round_pack::<E, M>(neg, q, ex, dropped_nz, rm)
+    // q の LSB の下に続く残余（tail は r 桁）。減算で借りを
+    // 起こした側（x'-y' が係数上 0 より大きく残った側）は
+    // 補数 2^r - dropped になる。加算・被減数側は dropped そのまま。
+    let tail = if sx != sy && neg == sx && dropped_nz {
+        (1u128 << r) - dropped
+    } else {
+        dropped
+    };
+    // 正規化が左に寄せるぶんだけ tail の上位桁を係数へ取り込む
+    // （残りが sticky）。ガード位置が常に真の桁から来るように
+    // するため — 全部を sticky に畳むと Rmm の半 ulp 判定が
+    // キャンセレーションで誤る。
+    let want = i64::from(M) + 2;
+    if bitlen(q) < want && r > 0 {
+        let take = ((want - bitlen(q)) as u32).min(r);
+        q = (q << take) | (tail >> (r - take));
+        ex -= i64::from(take);
+        r -= take;
+    }
+    let sticky = (tail & ((1u128 << r) - 1)) != 0;
+    round_pack::<E, M>(neg, q, ex, sticky, rm)
 }

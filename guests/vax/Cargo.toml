@@ -10,6 +10,7 @@ polyisa-guest = { path = "../../crates/guest" }
 polyisa-sem = { path = "../../crates/sem" }
 polyisa-mem = { path = "../../crates/mem" }
 polyisa-engine = { path = "../../crates/engine" }
+polyisa-softfloat = { path = "../../crates/softfloat" }
 
 [build-dependencies]
 polyisa-isadl = { path = "../../crates/isadl" }
