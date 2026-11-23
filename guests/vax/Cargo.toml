@@ -11,6 +11,7 @@ polyisa-sem = { path = "../../crates/sem" }
 polyisa-mem = { path = "../../crates/mem" }
 polyisa-engine = { path = "../../crates/engine" }
 polyisa-softfloat = { path = "../../crates/softfloat" }
+polyisa-decimal = { path = "../../crates/decimal" }
 
 [build-dependencies]
 polyisa-isadl = { path = "../../crates/isadl" }

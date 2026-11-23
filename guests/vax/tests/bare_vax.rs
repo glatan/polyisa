@@ -34,8 +34,9 @@ fn decode_one_byte_opcodes() {
     assert_eq!(dec1(0x05), Some(Insn::Rsb));
     assert_eq!(dec1(0x06), Some(Insn::Ldpctx));
     assert_eq!(dec1(0x07), Some(Insn::Svpctx));
+    assert_eq!(dec1(0x08), Some(Insn::Cvtps));
     // 未宣言の語と、接頭だけの語は命令にならない。
-    assert_eq!(dec1(0x08), None);
+    assert_eq!(dec1(0x0a), None);
     assert_eq!(dec1(0xfd), None);
     assert_eq!(dec1(0xfe), None);
     assert_eq!(dec1(0xff), None);
@@ -563,7 +564,6 @@ fn declared_operand_insns_decode() {
     let no_hfp = DEFAULT_FEATS & !FEAT_HFP;
     assert_eq!(decode_model_ex(0x7dfd, 16, false, no_hfp), None);
     // まだ宣言していない語は解けない。
-    assert_eq!(dec1(0x08), None);
     assert_eq!(dec2(0xfd, 0x00), None);
     // insn_ops の match は Insn 全バリアントを網羅する
     // （コンパイル時の保証）。INSNS メタ表にも代表名がある。
@@ -847,8 +847,8 @@ fn reserved_mode_and_insn_faults() {
     let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
     assert_eq!(sys.0, [sem::scb::RESERVED_MODE]);
     assert!(matches!(r, Err(Outcome::Unimplemented { .. })));
-    // 0x08 は予約オペコード → 予約命令 fault 0x10。
-    put(&mut env, BASE + 0x10, &[0x08]);
+    // 0x0a（index）は予約オペコード → 予約命令 fault 0x10。
+    put(&mut env, BASE + 0x10, &[0x0a]);
     env.pc = BASE + 0x10;
     let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
     assert_eq!(sys.0.last(), Some(&sem::scb::PRIV_INSN));
@@ -4099,4 +4099,622 @@ fn fp_poly_degree_and_h() {
     assert_eq!(r(&env, 1), 0);
     assert_eq!(r(&env, 2), 0);
     assert_eq!(r(&env, 3), 0);
+}
+
+// ---- VX10: 十進文字列 ----
+
+/// 十進の .rw オペランド（#n 即値語）。
+fn rw(n: u16, out: &mut Vec<u8>) {
+    out.push(0x8f);
+    out.extend_from_slice(&n.to_le_bytes());
+}
+
+/// 十進の .ab オペランド（@#addr）。
+fn ab(addr: u64, out: &mut Vec<u8>) {
+    abs(addr, out);
+}
+
+/// パック十進のテスト用バイト列（右詰め・優先符号 C/D）。
+fn pk(digits: &[u8], neg: bool) -> Vec<u8> {
+    let len = digits.len();
+    let n = len / 2 + 1;
+    let mut out = vec![0u8; n];
+    for k in 0..len {
+        let p = 2 * n - 2 - k;
+        let d = digits[len - 1 - k];
+        if p.is_multiple_of(2) {
+            out[p / 2] |= d << 4;
+        } else {
+            out[p / 2] |= d;
+        }
+    }
+    out[n - 1] = (out[n - 1] & 0xf0) | if neg { 0xd } else { 0xc };
+    out
+}
+
+/// メモリの len 桁パック十進を文字列化して比較しやすくする。
+fn mem_pack(env: &BareEnv, a: u64, len: usize) -> (Vec<u8>, bool) {
+    let n = len / 2 + 1;
+    let mut b = vec![0u8; n];
+    env.backend
+        .mem
+        .read(VirtAddr(a), &mut b, Access::DATA_LE)
+        .unwrap();
+    let mut digits = Vec::new();
+    for k in 0..len {
+        let p = 2 * n - 2 - k;
+        digits.push(if p.is_multiple_of(2) {
+            b[p / 2] >> 4
+        } else {
+            b[p / 2] & 0xf
+        });
+    }
+    digits.reverse();
+    (digits, b[n - 1] & 0xf == 0xd || b[n - 1] & 0xf == 0xb)
+}
+
+fn mem_bytes(env: &BareEnv, a: u64, n: usize) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    env.backend
+        .mem
+        .read(VirtAddr(a), &mut b, Access::DATA_LE)
+        .unwrap();
+    b
+}
+
+/// trap/fault コードを集めるハンドラ（処置済みとして続行）。
+struct Rec(Vec<u32>);
+impl TrapHandler for Rec {
+    fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+        self.0.push(code);
+        TrapOutcome::Handled
+    }
+}
+
+const DEC: u64 = DATA;
+
+#[test]
+fn dec_insns_decode() {
+    assert_eq!(dec1(0x08), Some(Insn::Cvtps));
+    assert_eq!(dec1(0x09), Some(Insn::Cvtsp));
+    assert_eq!(dec1(0x20), Some(Insn::Addp4));
+    assert_eq!(dec1(0x21), Some(Insn::Addp6));
+    assert_eq!(dec1(0x22), Some(Insn::Subp4));
+    assert_eq!(dec1(0x23), Some(Insn::Subp6));
+    assert_eq!(dec1(0x24), Some(Insn::Cvtpt));
+    assert_eq!(dec1(0x25), Some(Insn::Mulp));
+    assert_eq!(dec1(0x26), Some(Insn::Cvttp));
+    assert_eq!(dec1(0x27), Some(Insn::Divp));
+    assert_eq!(dec1(0x34), Some(Insn::Movp));
+    assert_eq!(dec1(0x35), Some(Insn::Cmpp3));
+    assert_eq!(dec1(0x36), Some(Insn::Cvtpl));
+    assert_eq!(dec1(0x37), Some(Insn::Cmpp4));
+    assert_eq!(dec1(0x38), Some(Insn::Editpc));
+    assert_eq!(dec1(0xf8), Some(Insn::Ashp));
+    assert_eq!(dec1(0xf9), Some(Insn::Cvtlp));
+    // decimal 機能が無いモデルでは解けない。
+    let no_dec = DEFAULT_FEATS & !FEAT_DECIMAL & !FEAT_EDITPC;
+    assert_eq!(decode_model_ex(0x34, 8, false, no_dec), None);
+    assert_eq!(decode_model_ex(0x38, 8, false, no_dec), None);
+    assert_eq!(decode_model_ex(0xf8, 8, false, no_dec), None);
+}
+
+#[test]
+fn dec_movp_basic_and_minus_zero() {
+    // movp #5, @#src, @#dst —— "12345"+ を写す。
+    let mut env = run_env(1);
+    let mut prog = vec![0x34];
+    rw(5, &mut prog);
+    ab(DEC, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3, 4, 5], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_bytes(&env, DEC + 0x40, 3), pk(&[1, 2, 3, 4, 5], false));
+    assert_eq!(cc(&env), (false, false, false, false));
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), DEC as u32);
+    assert_eq!(r(&env, 3), (DEC + 0x40) as u32);
+
+    // -0 のソースは結果 +0（符号ニブルを優先の正に直す）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0, 0, 0, 0, 0], true));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let (d, neg) = mem_pack(&env, DEC + 0x40, 5);
+    assert!(d.iter().all(|&x| x == 0));
+    assert!(!neg);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn dec_cmpp_and_zero_len() {
+    // cmpp3 #3, @#s1, @#s2 —— "123" vs "124" → N=1。
+    let mut env = run_env(1);
+    let mut prog = vec![0x35];
+    rw(3, &mut prog);
+    ab(DEC, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3], false));
+    put(&mut env, DEC + 0x20, &pk(&[1, 2, 4], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cmpp4 で桁数違いの等値: "0123" vs "123" → Z=1。
+    let mut env = run_env(1);
+    let mut prog = vec![0x37];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0, 1, 2, 3], false));
+    put(&mut env, DEC + 0x20, &pk(&[1, 2, 3], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // 長さ 0 の文字列は値 0。movp #0 は符号つき 1 バイトを写す。
+    let mut env = run_env(1);
+    let mut prog = vec![0x34];
+    rw(0, &mut prog);
+    ab(DEC, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[], false));
+    put(&mut env, DEC + 0x20, &[0xff]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_bytes(&env, DEC + 0x20, 1), vec![0x0c]);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn dec_add_sub_overflow() {
+    // addp4 #2,@#a, #3,@#b —— "23" + "100" → "123"。
+    let mut env = run_env(1);
+    let mut prog = vec![0x20];
+    rw(2, &mut prog);
+    ab(DEC, &mut prog);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[2, 3], false));
+    put(&mut env, DEC + 0x20, &pk(&[1, 0, 0], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 3), (vec![1, 2, 3], false));
+    assert_eq!(cc(&env), (false, false, false, false));
+    assert_eq!(r(&env, 1), DEC as u32);
+    assert_eq!(r(&env, 3), (DEC + 0x20) as u32);
+
+    // addp6: "999" + "005" = "1004" → 3 桁に収まらず "004"、V=1。
+    let mut env = run_env(1);
+    let mut prog = vec![0x21];
+    rw(3, &mut prog);
+    ab(DEC, &mut prog);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    rw(3, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[9, 9, 9], false));
+    put(&mut env, DEC + 0x20, &pk(&[0, 0, 5], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x40, 3), (vec![0, 0, 4], false));
+    assert_eq!(cc(&env), (false, false, true, false));
+
+    // subp6: "0100" - "0001" = "0099"。
+    let mut env = run_env(1);
+    let mut prog = vec![0x23];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0, 0, 0, 1], false));
+    put(&mut env, DEC + 0x20, &pk(&[0, 1, 0, 0], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x40, 4), (vec![0, 0, 9, 9], false));
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // subp4: "0005" - "0010" = "-0005" → N=1。
+    let mut env = run_env(1);
+    let mut prog = vec![0x22];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0, 0, 1, 0], false));
+    put(&mut env, DEC + 0x20, &pk(&[0, 0, 0, 5], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 4), (vec![0, 0, 0, 5], true));
+    assert_eq!(cc(&env), (true, false, false, false));
+}
+
+#[test]
+fn dec_mulp_divp() {
+    // mulp: "12" * "34" = "0408"。
+    let mut env = run_env_stack();
+    let mut prog = vec![0x25];
+    rw(2, &mut prog);
+    ab(DEC, &mut prog);
+    rw(2, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2], false));
+    put(&mut env, DEC + 0x20, &pk(&[3, 4], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x40, 4), (vec![0, 4, 0, 8], false));
+    assert_eq!(cc(&env), (false, false, false, false));
+    assert_eq!(r(&env, 5), (DEC + 0x40) as u32);
+
+    // divp: "100" / "7" = "14"（商のみ。負×正 → 負）。
+    let mut env = run_env_stack();
+    let mut prog = vec![0x27];
+    rw(1, &mut prog);
+    ab(DEC, &mut prog);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    rw(2, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[7], false));
+    put(&mut env, DEC + 0x20, &pk(&[1, 0, 0], true));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x40, 2), (vec![1, 4], true));
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // divp by 0 → 算術 trap（div-zero 型）。
+    let mut env = run_env_stack();
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0], false));
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, [sem::scb::arith(sem::scb::at::FLT_DIV_ZERO)]);
+}
+
+#[test]
+fn dec_cvtpl_cvtlp_round_trip() {
+    // cvtpl #5,@#src,r0 —— -12345 → r0。
+    let mut env = run_env(1);
+    let mut prog = vec![0x36];
+    rw(5, &mut prog);
+    ab(DEC, &mut prog);
+    prog.push(0x50); // r0
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3, 4, 5], true));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) as i32, -12345);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // 範囲外 → 下位 32 ビット + V=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &prog);
+    let big = pk(&[9, 9, 9, 9, 9], false); // 99999 は収まるので 30 桁にする
+    put(&mut env, DEC, &big);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) as i32, 99999);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // cvtpl で 11 桁 → V=1。
+    let mut env = run_env(1);
+    let mut prog = vec![0x36];
+    rw(11, &mut prog);
+    ab(DEC, &mut prog);
+    prog.push(0x50);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[9; 11], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 99_999_999_999u64 as u32);
+    // 99999999999 mod 2^32 = 0x4876_e7ff（符号ビットは立たない）。
+    assert_eq!(cc(&env), (false, false, true, false));
+
+    // cvtlp r0 → packed。往復する。
+    let mut env = run_env(1);
+    let mut prog = vec![0xf9, 0x50];
+    rw(5, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    sem::r_set(&mut env.backend, 0, -12345i32 as u32);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_bytes(&env, DEC + 0x20, 3), pk(&[1, 2, 3, 4, 5], true));
+    assert_eq!(cc(&env), (true, false, false, false));
+    assert_eq!(r(&env, 3), (DEC + 0x20) as u32);
+
+    // cvtlp で十進オーバーフロー: 12345 → len3 "345" + V。
+    let mut env = run_env(1);
+    let mut prog = vec![0xf9, 0x50];
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    sem::r_set(&mut env.backend, 0, 12345);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 3), (vec![3, 4, 5], false));
+    assert_eq!(cc(&env), (false, false, true, false));
+}
+
+#[test]
+fn dec_cvtps_cvtsp() {
+    // cvtps: "-0123" → "-" + "123"。len4 → dst 5 バイト。
+    let mut env = run_env(1);
+    let mut prog = vec![0x08];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[0, 1, 2, 3], true));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_bytes(&env, DEC + 0x20, 5), b"-0123");
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cvtsp: 往復 "+00042" → packed len5 = 0 0 0 4 2。
+    let mut env = run_env(1);
+    let mut prog = vec![0x09];
+    rw(5, &mut prog);
+    ab(DEC, &mut prog);
+    rw(5, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, b"+00042");
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 5), (vec![0, 0, 0, 4, 2], false));
+    assert_eq!(cc(&env), (false, false, false, false));
+    assert_eq!(r(&env, 1), DEC as u32);
+
+    // 不正バイト → 予約オペランド fault（PC は命令先頭）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, b"+0004X");
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+    assert_eq!(env.pc, BASE);
+
+    // 不正な符号バイトも同様。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, b"X00042");
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+}
+
+#[test]
+fn dec_cvtpt_cvttp() {
+    const TBL: u64 = DEC + 0x200;
+    // 変換表（双方向）: ASCII '0'+d ↔ 0xdC（正）、'@'+d ↔ 0xdD（負）。
+    // その他は不正ニブル（検査のため 0xff 埋め）。
+    let mut tbl = [0xffu8; 256];
+    for d in 0..10u8 {
+        tbl[b'0'.wrapping_add(d) as usize] = d << 4 | 0x0c;
+        tbl[b'@'.wrapping_add(d) as usize] = d << 4 | 0x0d;
+        tbl[(d << 4 | 0x0c) as usize] = b'0' + d;
+        tbl[(d << 4 | 0x0d) as usize] = b'@' + d;
+    }
+
+    // cvttp: "004C"（'C'='@'+3 = -3）→ packed "0043"-。
+    let mut env = run_env(1);
+    let mut prog = vec![0x26];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    ab(TBL, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, b"004C");
+    put(&mut env, TBL, &tbl);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 4), (vec![0, 0, 4, 3], true));
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cvtpt で往復: packed "0043"- → "004" + tbl[0x3D]='C'。
+    let mut env = run_env(1);
+    let mut prog = vec![0x24];
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    ab(TBL, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x40, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC + 0x20, &pk(&[0, 0, 4, 3], true));
+    put(&mut env, TBL, &tbl);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_bytes(&env, DEC + 0x40, 4), b"004C");
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // 表から不正な符号ニブルが返ると abort。
+    let mut env = run_env(1);
+    let mut prog = vec![0x26];
+    rw(4, &mut prog);
+    ab(DEC, &mut prog);
+    ab(TBL, &mut prog);
+    rw(4, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, b"004!"); // '!' → tbl = 0xff → 不正
+    put(&mut env, TBL, &tbl);
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+}
+
+#[test]
+fn dec_ashp() {
+    // ashp cnt=+2, src "123" → dst "12300"（len5）。
+    let mut env = run_env(1);
+    let mut prog = vec![0xf8, 0x8f, 0x02];
+    rw(3, &mut prog);
+    ab(DEC, &mut prog);
+    prog.extend_from_slice(&[0x8f, 0x00]); // round=0
+    rw(5, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 5), (vec![1, 2, 3, 0, 0], false));
+
+    // ashp cnt=-1, round=5: "123" → 最下位桁捨て → "12"、
+    // 捨てた最上位は 3 → 3+5<10 で丸めなし → "012"。
+    let mut env = run_env(1);
+    let mut prog = vec![0xf8, 0x8f, 0xffu8];
+    rw(3, &mut prog);
+    ab(DEC, &mut prog);
+    prog.extend_from_slice(&[0x8f, 0x05]);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 3), (vec![0, 1, 2], false));
+
+    // round=9: 3+9>=10 → 桁上げ "013"。
+    let mut env = run_env(1);
+    let mut prog = vec![0xf8, 0x8f, 0xffu8];
+    rw(3, &mut prog);
+    ab(DEC, &mut prog);
+    prog.extend_from_slice(&[0x8f, 0x09]);
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem_pack(&env, DEC + 0x20, 3), (vec![0, 1, 3], false));
+}
+
+#[test]
+fn dec_len_reserved() {
+    // 桁数 > 31 は予約オペランド abort（fault → PC は命令先頭）。
+    let mut env = run_env(1);
+    let mut prog = vec![0x34];
+    rw(32, &mut prog);
+    ab(DEC, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &[0x0c]);
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+    assert_eq!(env.pc, BASE);
+}
+
+#[test]
+fn dec_editpc_basic() {
+    // パターン: EO$FLOAT 3 → 負数 "−12345" の先頭に '-' を立てて
+    // "−123" まで有意化 → EO$INSERT ',' → EO$MOVE 2 → EO$END。
+    // dst = "-123,45"。パターン演算子 1 個 = 1 ステップで FPD。
+    let mut env = run_env(1);
+    let src = DEC;
+    let pat = DEC + 0x20;
+    let dst = DEC + 0x40;
+    let mut prog = vec![0x38];
+    rw(5, &mut prog);
+    ab(src, &mut prog);
+    ab(pat, &mut prog);
+    ab(dst, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, src, &pk(&[1, 2, 3, 4, 5], true));
+    put(&mut env, pat, &[0xa3, 0x44, b',', 0x92, 0x00]);
+    env.pc = BASE;
+
+    step(&mut env).unwrap(); // float3（r3 = pat+1）
+    assert_eq!(env.pc, BASE);
+    assert!(sem::psl_get(&env.backend) & (1 << psl::FPD) != 0);
+    assert_eq!(r(&env, 3), (pat + 1) as u32);
+    assert_eq!(mem_bytes(&env, dst, 4), b"-123");
+
+    step(&mut env).unwrap(); // insert ','
+    assert_eq!(env.pc, BASE);
+    step(&mut env).unwrap(); // move2
+    step(&mut env).unwrap(); // EO$END → 完了
+    assert_eq!(env.pc, BASE + prog.len() as u64);
+    assert!(sem::psl_get(&env.backend) & (1 << psl::FPD) == 0);
+    assert_eq!(mem_bytes(&env, dst, 7), b"-123,45");
+    // 完了時の制御ブロック: r0=元の桁数・r1=src 先頭・
+    // r2/r4=0・r3=EO$END の位置・r5=dst 終端。
+    assert_eq!(r(&env, 0), 5);
+    assert_eq!(r(&env, 1), src as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (pat + 4) as u32);
+    assert_eq!(r(&env, 4), 0);
+    assert_eq!(r(&env, 5), (dst + 7) as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+}
+
+#[test]
+fn dec_editpc_blank_zero() {
+    // 値 0 の入力を EO$BLANK_ZERO で fill に置き換える:
+    // fill='*', move3 で "***"（零なので全部 fill）→ blank_zero(3)
+    // で直前 3 バイトを fill に。dst="***"、Z=1・N=0。
+    let mut env = run_env(1);
+    let src = DEC;
+    let pat = DEC + 0x20;
+    let dst = DEC + 0x40;
+    let mut prog = vec![0x38];
+    rw(3, &mut prog);
+    ab(src, &mut prog);
+    ab(pat, &mut prog);
+    ab(dst, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, src, &pk(&[0, 0, 0], false));
+    put(&mut env, pat, &[0x40, b'*', 0x93, 0x45, 0x03, 0x00]);
+    env.pc = BASE;
+    // 4 演算子（fill, move3, blank_zero, end）= 4 ステップ。
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, BASE);
+    }
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + prog.len() as u64);
+    assert_eq!(mem_bytes(&env, dst, 3), b"***");
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn dec_overlap_copy() {
+    // 部分重複の movp（dst = src+1）: 結果は UNPREDICTABLE でも
+    // クラッシュしない（決定的: 単純な前向きコピー）。
+    let mut env = run_env(1);
+    let mut prog = vec![0x34];
+    rw(5, &mut prog);
+    ab(DEC, &mut prog);
+    ab(DEC + 1, &mut prog);
+    put(&mut env, BASE, &prog);
+    put(&mut env, DEC, &pk(&[1, 2, 3, 4, 5], false));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // 前向き 1 バイトコピーなので先頭バイトが伝播する（決定的）。
+    assert_eq!(mem_bytes(&env, DEC, 4), [0x12, 0x12, 0x12, 0x12]);
 }

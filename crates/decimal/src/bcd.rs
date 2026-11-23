@@ -40,6 +40,14 @@ impl BcdEnv {
         }
     }
 
+    /// VAX パック十進の符号規約。受理する正符号は 0xA/0xC/0xE/0xF、
+    /// 負符号は 0xB/0xD、優先符号は 0xC/0xD —— s390 と同じ集合。
+    /// Ref: SPEC-VAX-ARM（十進文字列の符号表）.
+    #[must_use]
+    pub const fn vax() -> Self {
+        Self::s390()
+    }
+
     /// 符号なし形式。全ニブルが数字で、結果の符号ニブルは 0xF。
     #[must_use]
     pub const fn unsigned() -> Self {

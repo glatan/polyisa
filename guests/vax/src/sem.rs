@@ -163,7 +163,7 @@ pub fn psl_flag(b: &InterpBackend, bit: u32) -> bool {
 }
 
 /// PSL の 1 ビットを書く。
-fn psl_flag_set(b: &mut InterpBackend, bit: u32, v: bool) {
+pub(crate) fn psl_flag_set(b: &mut InterpBackend, bit: u32, v: bool) {
     let p = psl_get(b);
     psl_put(b, if v { p | 1 << bit } else { p & !(1 << bit) });
 }
@@ -181,7 +181,7 @@ pub fn fpd(b: &InterpBackend) -> bool {
 }
 
 /// 条件コード N/Z/V を書く（C は保存。mov・mcom・mova 系の規則）。
-fn cc_nzv(b: &mut InterpBackend, n: bool, z: bool, v: bool) {
+pub(crate) fn cc_nzv(b: &mut InterpBackend, n: bool, z: bool, v: bool) {
     psl_flag_set(b, psl::N, n);
     psl_flag_set(b, psl::Z, z);
     psl_flag_set(b, psl::V, v);
@@ -195,7 +195,7 @@ fn cc_mov(b: &mut InterpBackend, v: u128, w: Width) {
 }
 
 /// N/Z/V/C をまとめて書く（演算系。VAX は全演算で C も更新する）。
-fn cc_nzvc(b: &mut InterpBackend, n: bool, z: bool, v: bool, c: bool) {
+pub(crate) fn cc_nzvc(b: &mut InterpBackend, n: bool, z: bool, v: bool, c: bool) {
     cc_nzv(b, n, z, v);
     psl_flag_set(b, psl::C, c);
 }
@@ -222,7 +222,7 @@ fn cc_arith(b: &mut InterpBackend, r: u128, v: bool, c: bool, w: Width) {
 /// 更新のあとに呼ぶ: V=1 で PSL<IV>=1 なら trap（復帰先は次の
 /// 命令 —— run 側で env.pc が命令終端に進む）。
 // Ref: SPEC-VAX-ARM（整数オーバーフローと IV の章）.
-fn iv_trap(b: &InterpBackend) -> Result<(), InterpExit> {
+pub(crate) fn iv_trap(b: &InterpBackend) -> Result<(), InterpExit> {
     if psl_flag(b, psl::V) && psl_flag(b, psl::IV) {
         return Err(trap(scb::arith(scb::at::INT_OVERFLOW)));
     }
@@ -387,7 +387,7 @@ fn reg_write(b: &mut InterpBackend, r: u8, w: Width, v: u128) {
 }
 
 /// メモリから `n` バイトを読む（1/2/4/8/16）。
-fn load(b: &mut InterpBackend, addr: u32, n: u32) -> Result<u128, InterpExit> {
+pub(crate) fn load(b: &mut InterpBackend, addr: u32, n: u32) -> Result<u128, InterpExit> {
     let a = u64::from(addr);
     Ok(match n {
         1 => u128::from(b.load::<W8>(a, DRD)?),
@@ -399,7 +399,7 @@ fn load(b: &mut InterpBackend, addr: u32, n: u32) -> Result<u128, InterpExit> {
 }
 
 /// メモリへ `n` バイトを書く（1/2/4/8/16）。
-fn store(b: &mut InterpBackend, addr: u32, n: u32, v: u128) -> Result<(), InterpExit> {
+pub(crate) fn store(b: &mut InterpBackend, addr: u32, n: u32, v: u128) -> Result<(), InterpExit> {
     let a = u64::from(addr);
     match n {
         1 => b.store::<W8>(a, v as u8, DWR),
@@ -713,7 +713,7 @@ fn branch(b: &mut InterpBackend, displ: i32) {
 }
 
 /// オペランド `i` の評価（`insn_ops` の型と `pos` の位置を引く）。
-fn eval(
+pub(crate) fn eval(
     b: &mut InterpBackend,
     f: &Fetched,
     pos: &[(u32, u32)],
@@ -725,7 +725,7 @@ fn eval(
 
 /// オペランド `i` の評価+読み出し（`eval` と `read` はともに
 /// `&mut` を取るので、入れ子呼び出しを避ける畳込み）。
-fn eval_r(
+pub(crate) fn eval_r(
     b: &mut InterpBackend,
     f: &Fetched,
     pos: &[(u32, u32)],
@@ -737,7 +737,7 @@ fn eval_r(
 }
 
 /// オペランド `i` の評価+アドレス化（`.a` 系の値）。
-fn eval_a(
+pub(crate) fn eval_a(
     b: &mut InterpBackend,
     f: &Fetched,
     pos: &[(u32, u32)],
@@ -1912,6 +1912,7 @@ fn poly_fault(b: &mut InterpBackend, opc: u16, pc0: u32, e: InterpExit) -> Inter
 /// で、Horner 反復 `tmp3 = arg*tmp3 + (tmp2)` を回す。中間精度は
 /// decfp の `poly_iter` が規定どおり扱う。中断・例外時のレジスタは
 /// 建築の退避形そのものを使うので、どの位置の例外でも継続可能。
+// Gap: GAP-0077 — 反復内の中断可能点の粒度はモデルの区切り。
 // Ref: SPEC-VAX-ARM（poly 命令の節）.
 fn poly<const E: u32, const M: u32>(
     b: &mut InterpBackend,
@@ -2023,7 +2024,8 @@ pub fn exec(
         | Insn::Polyd
         | Insn::Polyg
         | Insn::Polyh
-        | Insn::Crc => {}
+        | Insn::Crc
+        | Insn::Editpc => {}
         _ => partial_done(b),
     }
     match f.insn {
@@ -2876,6 +2878,24 @@ pub fn exec(
         Insn::Polyd => poly::<8, 55>(b, f, pos, pc0, 0x75)?,
         Insn::Polyg => poly::<11, 52>(b, f, pos, pc0, 0x55fd)?,
         Insn::Polyh => poly::<15, 112>(b, f, pos, pc0, 0x75fd)?,
+        // ---- 十進文字列（VX10）----
+        Insn::Movp
+        | Insn::Cmpp3
+        | Insn::Cmpp4
+        | Insn::Addp4
+        | Insn::Addp6
+        | Insn::Subp4
+        | Insn::Subp6
+        | Insn::Mulp
+        | Insn::Divp
+        | Insn::Cvtpl
+        | Insn::Cvtlp
+        | Insn::Cvtps
+        | Insn::Cvtsp
+        | Insn::Cvtpt
+        | Insn::Cvttp
+        | Insn::Ashp
+        | Insn::Editpc => crate::decimal::exec(b, f, pos, pc0)?,
         Insn::Clro => {
             let d = eval(b, f, pos, 0)?;
             write(b, &d, Width::O, 0)?;

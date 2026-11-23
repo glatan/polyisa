@@ -31,6 +31,9 @@ pub mod run;
 /// 命令意味論（指定子評価・途中状態・命令本体）。
 pub mod sem;
 
+/// 十進文字列命令（パック十進演算・数値文字列変換・editpc）。
+pub mod decimal;
+
 /// VAX の ISA ファミリ名。
 pub struct Vax;
 
