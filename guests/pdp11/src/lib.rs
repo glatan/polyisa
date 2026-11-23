@@ -30,6 +30,9 @@ pub mod specifier;
 /// CIS（076nnn 空間）の記述子評価と文字列・十進命令の意味論。
 pub mod cis;
 
+/// メモリ管理（PAR/PDR 再配置・I/D 空間・MMR0-3・I/O ページ写像）。
+pub mod mmu;
+
 /// 実行ループ（ワードフェッチ・トラップ境界の解決）。
 pub mod run;
 
@@ -158,6 +161,12 @@ pub struct CpuState {
     pub pdr: [u16; 48],
     /// MMU 状態レジスタ MMR0-MMR3（先行モデルは MMR0-2 のみ）。
     pub mmr: [u16; 4],
+    /// スタック制限レジスタ（stack_limit モデルのみ意味を持つ）。
+    pub stklim: u16,
+    /// 命令完了時に配送するトラップ（ベクタ。0=なし）。MMU の
+    /// trap 条件（ACF 1/4/5）とカーネルスタックのイエローゾーンが
+    /// 立て、step が命令の完結時に拾う。
+    pub pendtrap: u16,
     /// 中断可能命令の途中状態（CIS。`PartialInsn`）。
     pub partial: PartialInsn,
 }
@@ -180,6 +189,8 @@ impl Default for CpuState {
             par: [0; 48],
             pdr: [0; 48],
             mmr: [0; 4],
+            stklim: 0,
+            pendtrap: 0,
             partial: PartialInsn::default(),
         }
     }
@@ -212,7 +223,10 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, par), 94);
         assert_eq!(core::mem::offset_of!(CpuState, pdr), 190);
         assert_eq!(core::mem::offset_of!(CpuState, mmr), 286);
-        assert_eq!(core::mem::offset_of!(CpuState, partial), 296);
+        assert_eq!(core::mem::offset_of!(CpuState, stklim), 294);
+        assert_eq!(core::mem::offset_of!(CpuState, pendtrap), 296);
+        // `PartialInsn` の 4 バイト整列で 298 から 300 へ詰まる。
+        assert_eq!(core::mem::offset_of!(CpuState, partial), 300);
     }
 
     #[test]

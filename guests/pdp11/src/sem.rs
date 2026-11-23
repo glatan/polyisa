@@ -50,15 +50,15 @@
 //! Ref: SPEC-PDP11-ARCH83.
 
 use polyisa_engine::interp::{InterpBackend, InterpExit};
-use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16, W64};
 use polyisa_softfloat::decfp::{FP_IOV, VaxDF, VaxF, VaxFF};
 use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
-    CpuState, FEAT_DUAL_REGSET, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
-    OddAddrTrapParam, cis, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
+    CpuState, FEAT_ID_SPLIT, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
+    OddAddrTrapParam, cis, mmu, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw,
+    reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -80,37 +80,17 @@ pub mod tv {
     /// 浮動例外（244。FP11 の浮動割込みと FIS のエラートラップが
     /// 同じ番号で経路は別 —— ARCH83 付録 A・付録 C）。
     pub const FPP: u16 = 0o244;
+    /// メモリ管理 abort/trap（250。PAR/PDR の参照不可・長さ違反・
+    /// read-only と、mm_trap モデルの trap 条件が届く）。
+    pub const MMU: u16 = 0o250;
 }
 
-/// データの読み出し・書き込みのアクセス属性。整列の規則は
-/// PDP-11 自身の奇数アドレスエラーが担う（`waddr`）ので、mem 層
-/// には整列を要求しない。
-const DRD: Access = Access {
-    endian: Endian::Le,
-    align: Align::Unaligned,
-    kind: AccessKind::DataRead,
-};
-const DWR: Access = Access {
-    endian: Endian::Le,
-    align: Align::Unaligned,
-    kind: AccessKind::DataWrite,
-};
-
-/// 命令語フェッチのアクセス属性。`AccessKind::Fetch` が I 空間、
-/// `AccessKind::Data*` が D 空間を指す空間選択の口 —— PD4 は
-/// 単一空間で、分離 I/D は PD12 が `mem` 側に拡張して実現する。
-pub const FETCH: Access = Access {
-    endian: Endian::Le,
-    align: Align::Unaligned,
-    kind: AccessKind::Fetch,
-};
-
-fn get16(b: &InterpBackend, r: StateRef<W16>) -> u16 {
+pub(crate) fn get16(b: &InterpBackend, r: StateRef<W16>) -> u16 {
     let off = r.offset();
     u16::from_le_bytes(b.state[off..off + 2].try_into().expect("w16"))
 }
 
-fn set16(b: &mut InterpBackend, r: StateRef<W16>, v: u16) {
+pub(crate) fn set16(b: &mut InterpBackend, r: StateRef<W16>, v: u16) {
     let off = r.offset();
     b.state[off..off + 2].copy_from_slice(&v.to_le_bytes());
 }
@@ -178,7 +158,7 @@ fn usp_ref() -> StateRef<W16> {
 
 /// モード値 <15:14> が選ぶ SP 退避先。値 2（予約）はカーネル枠に
 /// 畳む決定的な選択。
-fn mode_sp_ref(mode: u16) -> StateRef<W16> {
+pub(crate) fn mode_sp_ref(mode: u16) -> StateRef<W16> {
     if mode == psw::SUPERVISOR {
         ssp_ref()
     } else if mode == psw::USER {
@@ -189,7 +169,7 @@ fn mode_sp_ref(mode: u16) -> StateRef<W16> {
 }
 
 /// 第 2 レジスタセット r_i′ の状態面（dual_regset モデル）。
-fn ralt_ref(i: u8) -> StateRef<W16> {
+pub(crate) fn ralt_ref(i: u8) -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, ralt) + usize::from(i) * 2)
 }
 
@@ -231,7 +211,7 @@ pub fn trap(vec: u16) -> InterpExit {
 /// 決定的な表現 —— LSI-11 系のワードサイクルは常に語境界で
 /// 行われる。付録 B 項目 15/21）。
 // Ref: SPEC-PDP11-ARCH83（付録 B）, SPEC-PDP11-LSI11.
-fn waddr(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
+pub(crate) fn waddr(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
     if a & 1 == 0 {
         Ok(a)
     } else if b.param::<OddAddrTrapParam>() {
@@ -241,32 +221,64 @@ fn waddr(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
     }
 }
 
-/// バイト読み出し。
+/// バイト読み出し（現モードのデータ空間 —— `mmu` が MMU 変換と
+/// I/O ページ写像を担う）。
 pub fn load_b(b: &mut InterpBackend, a: u16) -> Result<u8, InterpExit> {
-    b.load::<polyisa_sem::W8>(u64::from(a), DRD)
+    let mode = mmu::cur_mode(b);
+    mmu::rd_b(b, a, mode, mmu::Space::D)
 }
 
 /// ワード読み出し（奇数アドレスは `waddr` の規則）。
 pub fn load_w(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
     let a = waddr(b, a)?;
-    b.load::<W16>(u64::from(a), DRD)
+    let mode = mmu::cur_mode(b);
+    mmu::rd_w(b, a, mode, mmu::Space::D)
+}
+
+/// 現モード・空間を選ぶワード読み出し。MFPI/MFPD の前モード参照と
+/// 間接指定子の指し先語（I 空間）が使う。
+pub fn load_w_as(
+    b: &mut InterpBackend,
+    a: u16,
+    mode: u16,
+    sp: mmu::Space,
+) -> Result<u16, InterpExit> {
+    let a = waddr(b, a)?;
+    mmu::rd_w(b, a, mode, sp)
 }
 
 /// バイト書き込み。
 pub fn store_b(b: &mut InterpBackend, a: u16, v: u8) -> Result<(), InterpExit> {
-    b.store::<polyisa_sem::W8>(u64::from(a), v, DWR)
+    let mode = mmu::cur_mode(b);
+    mmu::wr_b(b, a, mode, mmu::Space::D, v)
 }
 
 /// ワード書き込み（奇数アドレスは `waddr` の規則）。
 pub fn store_w(b: &mut InterpBackend, a: u16, v: u16) -> Result<(), InterpExit> {
     let a = waddr(b, a)?;
-    b.store::<W16>(u64::from(a), v, DWR)
+    let mode = mmu::cur_mode(b);
+    mmu::wr_w(b, a, mode, mmu::Space::D, v)
 }
 
-/// 命令語のフェッチ（I 空間。ワード整列は `waddr` の規則）。
+/// 現モード・空間を選ぶワード書き込み。トラップ配送のスタック
+/// プッシュと MTPI/MTPD の前モード参照が使う。
+pub fn store_w_as(
+    b: &mut InterpBackend,
+    a: u16,
+    mode: u16,
+    sp: mmu::Space,
+    v: u16,
+) -> Result<(), InterpExit> {
+    let a = waddr(b, a)?;
+    mmu::wr_w(b, a, mode, sp, v)
+}
+
+/// 命令語のフェッチ（現モードの I 空間。ワード整列は `waddr` の
+/// 規則）。
 pub fn fetch_w(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
     let a = waddr(b, a)?;
-    b.load::<W16>(u64::from(a), FETCH)
+    let mode = mmu::cur_mode(b);
+    mmu::fetch(b, a, mode)
 }
 
 // ---- 条件コード ----
@@ -375,15 +387,18 @@ fn eval_op_w(
     let regs: [u16; 8] = core::array::from_fn(|j| r_get(b, j as u8));
     let (ea_v, wb) = specifier::eval(spec, w, ea, &regs);
     if let Some((n, v)) = wb {
-        r_set(b, n, v);
+        mmu::reg_wb(b, n, v, regs[usize::from(n)]);
     }
     Ok(match (ea_v, spec) {
         (Ea::Reg(n), _) => Loc::Reg(n),
         (Ea::Imm(v), _) => Loc::Imm { v, addr: ea },
-        // 間接形の EA は指し先語のアドレス — その語（ワード）を読んで
-        // オペランドアドレスにする。
+        // 間接形の EA は指し先語のアドレス — その語（ワード）は
+        // 現モードの I 空間から読んでオペランドアドレスにする
+        // （ARCH83 第9章の deferred アクセス規則 —— simh の
+        // GeteaW は isenable で読む）。
         (Ea::Addr(a), Spec::AutoIncDef(_) | Spec::AutoDecDef(_) | Spec::IndexDef { .. }) => {
-            Loc::Mem(load_w(b, a)?)
+            let mode = mmu::cur_mode(b);
+            Loc::Mem(load_w_as(b, a, mode, mmu::Space::I)?)
         }
         (Ea::Addr(a), _) => Loc::Mem(a),
     })
@@ -1492,29 +1507,51 @@ pub fn fp_imm_extra(b: &InterpBackend, f: &Fetched) -> u16 {
 /// トラップの配送。古い PSW と PC を（この順に）ベクタの新 PSW が
 /// 指すモードのスタックに積み、新しい PC/PSW を読む実機の形。
 /// `stacked` は積む PC（trap は次の命令、fault は命令先頭 ——
-/// 呼び出し側の規則）。現在の SP は現モードの退避先へ保存してから
-/// 新モードの退避先を読む —— モード機構の最小形で、MMU の全面化は
-/// PD12 が担う。モード値 2（予約）はカーネル枠に畳む決定的な選択。
+/// 呼び出し側の規則）。ベクタの読み出しはカーネルデータ空間、
+/// プッシュは新モードのデータ空間（`mmu` 経由 —— ARCH83 第9章の
+/// メモリ管理制御下の割込み条件）。現在の SP は現モードの退避先へ
+/// 保存してから新モードの退避先を読み、新 PSW の prev モードには
+/// 旧モードを挿入する。モード値 2（予約）はカーネル枠に畳む
+/// 決定的な選択。
 // Ref: SPEC-PDP11-ARCH83（第8章 トラップと割込み・第9章 メモリ管理
 // 制御下の割込み条件）.
 pub fn deliver(b: &mut InterpBackend, vec: u16, stacked: u16) -> Result<(), InterpExit> {
     let old_psw = psw_get(b);
-    let new_pc = load_w(b, vec)?;
-    let new_psw = load_w(b, vec.wrapping_add(2))?;
+    // ベクタの 2 語はカーネルデータ空間から読む（MMR3<2> が立って
+    // いれば D、無ければ I —— ARCH83 第9章・simh の calc_ds(K)）。
+    let new_pc = mmu::rd_w(b, vec, psw::KERNEL, mmu::Space::D)?;
+    let new_psw = mmu::rd_w(b, vec.wrapping_add(2), psw::KERNEL, mmu::Space::D)?;
     let old_mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
     let new_mode = new_psw >> psw::CUR_MOD & psw::MOD_MASK;
     set16(b, mode_sp_ref(old_mode), r_get(b, reg::SP as u8));
     r_set(b, reg::SP as u8, get16(b, mode_sp_ref(new_mode)));
-    // -(SP) ← PSW、-(SP) ← PC —— RTI が PC→PSW の順に戻す形。
+    // -(SP) ← PSW、-(SP) ← PC —— 新モードのデータ空間に積む
+    // （RTI が PC→PSW の順に戻す形）。
     let mut sp = r_get(b, reg::SP as u8);
     sp = sp.wrapping_sub(2);
     r_set(b, reg::SP as u8, sp);
-    store_w(b, sp, old_psw)?;
+    store_w_as(b, sp, new_mode, mmu::Space::D, old_psw)?;
     sp = sp.wrapping_sub(2);
     r_set(b, reg::SP as u8, sp);
-    store_w(b, sp, stacked)?;
+    store_w_as(b, sp, new_mode, mmu::Space::D, stacked)?;
     r_set(b, reg::PC as u8, new_pc);
-    psw_put(b, new_psw);
+    // prev モードには旧モードを入れる（ベクタの PSW<13:12> は
+    // 捨てる —— ARCH83 第8章・simh の PM 挿入規則）。
+    let merged = (new_psw & !(psw::MOD_MASK << psw::PRV_MOD)) | old_mode << psw::PRV_MOD;
+    psw_put(b, merged);
+    if b.param::<crate::DualRegsetParam>() && (old_psw ^ merged) >> psw::RS & 1 != 0 {
+        mmu::rs_swap(b);
+    }
+    // トラップ経路の MMU 簿記: 命令トラップ群（ILL/BPT/IOT/EMT/
+    // TRAP）以外は MMR2 ← ベクタ・MMR1 ← 0（simh の
+    // trap_load_mmr2 規則）。
+    mmu::ops::trap_load(b, vec);
+    // カーネルスタックのイエローゾーン —— プッシュで限界を割った
+    // ら vector 004 を引き継ぐ（赤ゾーン化してもう一度踏んだら
+    // 配送自体が失敗して終端する）。
+    if vec != tv::BUS && new_mode == psw::KERNEL && mmu::stk_below(b) {
+        return deliver(b, tv::BUS, stacked);
+    }
     Ok(())
 }
 
@@ -1884,6 +1921,8 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             let sp = r_get(b, reg::SP as u8).wrapping_sub(2);
             r_set(b, reg::SP as u8, sp);
             store_w(b, sp, r_get(b, n))?;
+            mmu::ops::mmr1_raw(b, 0o366);
+            mmu::ops::stk_chk(b);
             r_set(b, n, r_get(b, reg::PC as u8));
             r_set(b, reg::PC as u8, t);
         }
@@ -1896,6 +1935,7 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             let sp = r_get(b, reg::SP as u8);
             let v = load_w(b, sp)?;
             r_set(b, reg::SP as u8, sp.wrapping_add(2));
+            mmu::ops::mmr1_raw(b, 0o26);
             r_set(b, reg::PC as u8, link);
             r_set(b, n, v);
         }
@@ -1923,11 +1963,13 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         Insn::Rti | Insn::Rtt => {
             let old_psw = psw_get(b);
             let sp0 = r_get(b, reg::SP as u8);
+            // pop は現モードのデータ空間（RTI は SP+4 を旧モード枠に
+            // 退避してから切替える）。
             let new_pc = load_w(b, sp0)?;
             let new_psw = load_w(b, sp0.wrapping_add(2))?;
+            mmu::ops::mmr1_raw(b, 0o26);
+            mmu::ops::mmr1_raw(b, 0o26);
             let cur_mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
-            // 退避するのは pop 後の SP。
-            set16(b, mode_sp_ref(cur_mode), sp0.wrapping_add(4));
             let merged = if cur_mode == psw::KERNEL {
                 new_psw
             } else {
@@ -1936,18 +1978,8 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
                     | (old_psw & psw::PRI_MASK)
                     | ((old_psw | new_psw) & (0o17_0000 | 1 << psw::RS))
             };
-            psw_put(b, merged);
-            // 第 2 レジスタセット: RS が変われば r0-r5 と ralt を交換する
-            // （dual_regset モデルのみ）。
-            if feats & FEAT_DUAL_REGSET != 0 && (old_psw ^ merged) >> psw::RS & 1 != 0 {
-                for i in 0..6u8 {
-                    let t = r_get(b, i);
-                    r_set(b, i, get16(b, ralt_ref(i)));
-                    set16(b, ralt_ref(i), t);
-                }
-            }
-            let new_mode = merged >> psw::CUR_MOD & psw::MOD_MASK;
-            r_set(b, reg::SP as u8, get16(b, mode_sp_ref(new_mode)));
+            r_set(b, reg::SP as u8, sp0.wrapping_add(4));
+            mmu::psw_apply(b, merged);
             r_set(b, reg::PC as u8, new_pc);
         }
         // SPL: PSW<7:5> ← n3。カーネルモードでのみ効き、他のモードでは
@@ -1973,6 +2005,89 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
                     p & !0xf | v & 0xf
                 },
             );
+        }
+        // MFPI/MFPD: 前モード（PSW<13:12>）の空間から dst を読んで
+        // 現スタックに -(SP) で積む。MFPI は前モード I 空間、MFPD は
+        // 前モード D 空間 —— ただし前・現ともに user のとき MFPI は
+        // user D 空間を読む（user から I 空間は見えない —
+        // ARCH83 第9章 Table の注記。MTPI も同じ規則で D を書く）。
+        // モード 0 の r6 は前モードの SP 退避先を指す。CC: N・Z
+        // （値による）・V=0・C 不変。
+        Insn::Mfpi | Insn::Mfpd => {
+            // MFPD/MTPD は分離 I/D を持つモデルのみ（spec の注記 —
+            // デコードは mmu 群として受けてからここで弾く）。
+            if f.insn == Insn::Mfpd && feats & FEAT_ID_SPLIT == 0 {
+                return Err(fault(tv::ILL));
+            }
+            let d = eval_op(b, f, pc0, 0)?;
+            let (cm, pm) = (mmu::cur_mode(b), mmu::prev_mode(b));
+            let d_space = f.insn == Insn::Mfpd || (cm == pm && pm == psw::USER);
+            let v = match d {
+                Loc::Reg(n) => {
+                    if n == reg::SP as u8 && cm != pm {
+                        get16(b, mode_sp_ref(pm))
+                    } else {
+                        r_get(b, n)
+                    }
+                }
+                Loc::Mem(a) => load_w_as(
+                    b,
+                    a,
+                    pm,
+                    if d_space {
+                        mmu::Space::D
+                    } else {
+                        mmu::Space::I
+                    },
+                )?,
+                Loc::Imm { v, .. } => v,
+            };
+            let sp = r_get(b, reg::SP as u8).wrapping_sub(2);
+            r_set(b, reg::SP as u8, sp);
+            store_w(b, sp, v)?;
+            mmu::ops::mmr1_raw(b, 0o366);
+            mmu::ops::stk_chk(b);
+            psw_flag_set(b, psw::N, v & 0o100000 != 0);
+            psw_flag_set(b, psw::Z, v == 0);
+            psw_flag_set(b, psw::V, false);
+        }
+        // MTPI/MTPD: (SP)+ で積まれた値を前モードの空間の dst へ
+        // 書く。空間規則は MFPx と同じ（MFPI 対の user-user 特例を
+        // MTPI も持つ —— ARCH83 第9章）。
+        Insn::Mtpi | Insn::Mtpd => {
+            if f.insn == Insn::Mtpd && feats & FEAT_ID_SPLIT == 0 {
+                return Err(fault(tv::ILL));
+            }
+            let d = eval_op(b, f, pc0, 0)?;
+            let (cm, pm) = (mmu::cur_mode(b), mmu::prev_mode(b));
+            let d_space = f.insn == Insn::Mtpd || (cm == pm && pm == psw::USER);
+            let sp0 = r_get(b, reg::SP as u8);
+            let v = load_w(b, sp0)?;
+            r_set(b, reg::SP as u8, sp0.wrapping_add(2));
+            mmu::ops::mmr1_raw(b, 0o26);
+            match d {
+                Loc::Reg(n) => {
+                    if n == reg::SP as u8 && cm != pm {
+                        set16(b, mode_sp_ref(pm), v);
+                    } else {
+                        r_set(b, n, v);
+                    }
+                }
+                Loc::Mem(a) | Loc::Imm { addr: a, .. } => store_w_as(
+                    b,
+                    a,
+                    pm,
+                    if d_space {
+                        mmu::Space::D
+                    } else {
+                        mmu::Space::I
+                    },
+                    v,
+                )?,
+            }
+            psw_flag_set(b, psw::N, v & 0o100000 != 0);
+            psw_flag_set(b, psw::Z, v == 0);
+            psw_flag_set(b, psw::V, false);
         }
         // MFPS: dst.byte ← PS<7:0>。N=PS bit7・Z=PS<7:0>=0・V=0・C 不変
         // （モード 0 宛ては bit7 の符号拡張 —— `write` の byte→レジスタ
@@ -2023,6 +2138,7 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
                 r_set(b, reg::SP as u8, sp);
                 store_w(b, sp, v)?;
             }
+            mmu::ops::stk_chk(b);
             let target = load_w(b, 0o10)?;
             r_set(b, reg::PC as u8, target);
         }
@@ -2133,6 +2249,9 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         | Insn::Divpi
         | Insn::Ashpi
         | Insn::Cvtlpi => return cis::exec(b, f, pc0),
+        // 全 Insn に腕がある —— デコード表を将来拡げたときの予備
+        // として残す（網羅なのでコンパイラは到達不能と警告する）。
+        #[allow(unreachable_patterns)]
         _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
     }
     Ok(())

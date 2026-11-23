@@ -124,6 +124,51 @@ pub fn build_model() -> polyisa_isadl::Model {
          直後（次の命令の実行前）、next は次の命令の実行後（ARCH83 \
          付録 B 項目 11 のモデル差）",
     );
+    // PD12（メモリ管理）が使うパラメータ。
+    m.param(
+        "mmu_pa",
+        ParamKind::Enum(vec![
+            "off".to_string(),
+            "p18".to_string(),
+            "p22".to_string(),
+            "sel22".to_string(),
+        ]),
+        "off",
+        "MMU の物理アドレス幅。off=MMU なし、p18=18 ビット固定、\
+         p22=22 ビット固定（11/70）、sel22=MMR3<4> が 22/18 ビットを選ぶ\
+         （11/24・11/44・J-11。MMR3 自体もこの 2 系だけが持つ）",
+    );
+    m.param(
+        "mm_trap",
+        ParamKind::Bool,
+        "false",
+        "メモリ管理トラップ（ACF 1/4/5 の trap 条件と MMR0<9><12>）を \
+         実装するか。11/45・11/70 だけが持ち、他モデルでは ACF の \
+         予約値が nonresident abort に畳まれる",
+    );
+    m.param(
+        "gpr_mapped",
+        ParamKind::Bool,
+        "false",
+        "汎用レジスタが I/O ページの 177700-177717 に写像されるか \
+         （セット 0＋セット 1＋モード別 SP。UNIBUS 系モデル）",
+    );
+    m.param(
+        "stack_limit",
+        ParamKind::Bool,
+        "false",
+        "スタック制限レジスタ（177774）とカーネルスタックの \
+         イエローゾーン検査を持つか（11/45・11/60・11/70 系）",
+    );
+    m.param(
+        "dual_regset",
+        ParamKind::Bool,
+        "false",
+        "第 2 汎用レジスタセットを持つか。同名の機能旗は命令 \
+         デコードを担い、こちらは PSW<11>（RS）の効果 —— \
+         RTI・PSW の I/O ページ書き込み・トラップ配送での \
+         セット切替 —— を実行時の意味論が読む側",
+    );
 
     // CPU モデル。版の範囲は 11/03（KD11-F＝LSI-11 チップ）から
     // J-11 まで。オプション搭載（11/03 の KEV11、F-11 系の
@@ -174,31 +219,56 @@ pub fn build_model() -> polyisa_isadl::Model {
             "pdp11_04",
             "",
             &[][..],
-            &[("odd_addr_trap", "false"), ("jmp_reg_trap", "vec004")][..],
+            &[
+                ("odd_addr_trap", "false"),
+                ("jmp_reg_trap", "vec004"),
+                ("gpr_mapped", "true"),
+            ][..],
         ),
         (
             "pdp11_34",
             "",
             &[][..],
-            &[("jmp_reg_trap", "vec004")][..],
+            &[
+                ("jmp_reg_trap", "vec004"),
+                ("mmu_pa", "p18"),
+                ("gpr_mapped", "true"),
+            ][..],
         ),
         (
             "pdp11_44",
             "",
             &["eis", "mmu", "id_split", "spl", "mfpt"][..],
-            &[("jmp_reg_trap", "vec004"), ("mfpt_code", "1")][..],
+            &[
+                ("jmp_reg_trap", "vec004"),
+                ("mfpt_code", "1"),
+                ("mmu_pa", "sel22"),
+                ("gpr_mapped", "true"),
+            ][..],
         ),
         (
             "pdp11_60",
             "",
             &["eis", "mmu"][..],
-            &[("jmp_reg_trap", "vec004")][..],
+            &[
+                ("jmp_reg_trap", "vec004"),
+                ("mmu_pa", "p18"),
+                ("gpr_mapped", "true"),
+                ("stack_limit", "true"),
+            ][..],
         ),
         (
             "pdp11_70",
             "",
             &["eis", "mmu", "id_split", "sm", "dual_regset", "spl"][..],
-            &[("jmp_reg_trap", "vec004")][..],
+            &[
+                ("jmp_reg_trap", "vec004"),
+                ("mmu_pa", "p22"),
+                ("gpr_mapped", "true"),
+                ("stack_limit", "true"),
+                ("mm_trap", "true"),
+                ("dual_regset", "true"),
+            ][..],
         ),
         (
             "pdp11_23",
@@ -209,15 +279,25 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("psw_mapped", "false"),
                 ("jmp_reg_trap", "vec010"),
                 ("mfpt_code", "3"),
+                ("mmu_pa", "p18"),
             ][..],
         ),
         (
             "pdp11_24",
             "pdp11_23",
             &["tstset_wrtlck"][..],
-            &[][..],
+            &[("mmu_pa", "sel22")][..],
         ),
-        ("pdp11_73", "", j11, &[("mfpt_code", "5")][..]),
+        (
+            "pdp11_73",
+            "",
+            j11,
+            &[
+                ("mfpt_code", "5"),
+                ("mmu_pa", "sel22"),
+                ("dual_regset", "true"),
+            ][..],
+        ),
         ("pdp11_83", "pdp11_73", &[][..], &[][..]),
         ("pdp11_93", "pdp11_83", &[][..], &[][..]),
         (

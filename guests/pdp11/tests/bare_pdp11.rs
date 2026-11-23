@@ -1598,7 +1598,9 @@ fn rti_and_trap_switch_per_mode_stacks() {
     assert_eq!(st_get(&mut env, KSP), SP0 + 4); // pop 後のカーネル SP
     step_m(&mut env, "pdp11_70").unwrap(); // ユーザーモードの emt
     assert_eq!(env.pc, 0o2400);
-    assert_eq!(sem::psw_get(&env.backend), 0);
+    // 新 PSW の prev モードは旧モード（user=3）が挿入される —
+    // ARCH83 第8章（ベクタの <13:12> は使われない）。
+    assert_eq!(sem::psw_get(&env.backend), 0o30000);
     let sp = sem::r_get(&env.backend, reg::SP as u8);
     assert_eq!(sp, SP0); // カーネルスタック（SP0+4）に 2 語
     assert_eq!(get16(&env, sp), 0o2002);
@@ -3987,4 +3989,530 @@ fn cvtnli_inline_long() {
     assert_eq!(env.pc, 0o1006);
     assert_eq!(get16(&env, 0o6000), 12345);
     assert_eq!(get16(&env, 0o6002), 0);
+}
+
+// ---- PD12: メモリ管理・I/D 分離 ----
+
+use polyisa_guest_pdp11::mmu::{self, Space};
+
+/// pdp11_70（22 ビット・分離 I/D・デュアルレジスタ・スタック制限）
+/// の物理メモリ環境。`mem` の写像は物理アドレスに対して行う —
+/// 再配置の効いた仮想アドレスはゲスト側の MMU 変換を通る。
+fn env_mmu70() -> BareEnv {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    for pa in [0u64, 0o40000, 0o50000, 0o400000, 0o1000000] {
+        env.backend.mem.map(VirtAddr(pa), 1, Perms(0b111)).unwrap();
+    }
+    install_params(&mut env.backend, &model_params("pdp11_70"));
+    env.backend.addr_mask = 0xFFFF;
+    env.pc = 0o1000;
+    sem::r_set(&mut env.backend, reg::SP as u8, SP0);
+    env
+}
+
+/// 物理アドレスへの語書き込み。
+fn pput16(env: &mut BareEnv, pa: u32, v: u16) {
+    env.backend
+        .mem
+        .write(VirtAddr(u64::from(pa)), &v.to_le_bytes())
+        .unwrap();
+}
+
+/// 物理アドレスの語読み出し。
+fn pget16(env: &BareEnv, pa: u32) -> u16 {
+    let mut b = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(u64::from(pa)),
+            &mut b,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    u16::from_le_bytes(b)
+}
+
+/// 語列を物理アドレスへ置く。
+fn pload(env: &mut BareEnv, pa: u32, words: &[u16]) {
+    for (i, w) in words.iter().enumerate() {
+        pput16(env, pa + 2 * i as u32, *w);
+    }
+}
+
+/// カーネルの全 8 ページを恒等写像にする。page7 は物理 I/O
+/// ページの先頭に写す（`io_paf` はブロック単位 —— 22 ビットなら
+/// 0o177600、18 ビットなら 0o7600）。I/O ページの MMIO が再配置下
+/// でも届く実 OS の形。
+fn kernel_identity(env: &mut BareEnv, io_paf: u16) {
+    for p in 0..8u16 {
+        let paf = if p == 7 { io_paf } else { p * 0o200 };
+        for sp in [Space::I, Space::D] {
+            mmu::apr_put(&mut env.backend, mmu::apr_idx(0, sp, p), paf, 0o177406);
+        }
+    }
+}
+
+/// 恒等写像は素通し —— MMIO で MMR0<0> を立てても命令・データとも
+/// そのまま動く（実機で relocation 投入直後に恒等写像を組む
+/// ブリングアップの形）。
+// Ref: SPEC-PDP11-ARCH83（第9章）。
+#[test]
+fn mmu_identity_relocation_is_transparent() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    pput16(&mut env, 0, 0o007777);
+    // mov #0o777, r0
+    // mov #1, @#177572        ; MMIO で MMR0<0> を立てて再配置 ON
+    // mov @#0, r1             ; VA0 のデータ（D 空間・恒等）→ PA0
+    // add #2, r1
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o012700, 0o000777, 0o012737, 0o000001, 0o177572, 0o013701, 0o000000, 0o062701,
+            0o000002,
+        ],
+    );
+    for _ in 0..4 {
+        step_m(&mut env, "pdp11_70").unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 0), 0o777);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o10001);
+    assert_eq!(mmu::mmr_val(&env.backend, 0) & 1, 1);
+}
+
+/// PAR の再配置 —— カーネル D ページ 0 を別の物理ページへ写すと、
+/// 同じ仮想アドレスのデータアクセスがそこへ着く。
+#[test]
+fn mmu_par_relocates_data_page() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // KD page0 → PA 0o1000000（KI は恒等のまま）。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::D, 0),
+        0o10000,
+        0o177406,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    pput16(&mut env, 0o1000000, 0o135246);
+    // mov #1, @#177572; mov @#0, r0; mov r0, @#2
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o012737, 0o000001, 0o177572, 0o013700, 0o000000, 0o010037, 0o000002,
+        ],
+    );
+    for _ in 0..3 {
+        step_m(&mut env, "pdp11_70").unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 0), 0o135246);
+    assert_eq!(pget16(&env, 0o1000002), 0o135246); // D 空間側に届いた
+    assert_eq!(pget16(&env, 2), 0); // PA2（I 空間側が見る位置）は無関係
+}
+
+/// 分離 I/D —— 同じ仮想アドレスが、フェッチ（I 空間）とデータ
+/// アクセス（D 空間）で別の物理ページに写る。S24-1 の判定項目
+/// 「分離 I&D のアドレス空間を含む」の検証そのもの。
+// Ref: SPEC-PDP11-ARCH83（第9章 —— 16 の APR と分離 I/D）。
+#[test]
+fn mmu_split_id_maps_same_va_to_different_pa() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // ページ 1 のカーネル I → PA 0o400000、D → PA 0o1000000。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::I, 1),
+        0o04000,
+        0o177406,
+    );
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::D, 1),
+        0o10000,
+        0o177406,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    // I 空間が見る VA 0o20000 の先: mov #0o1234, r0; rts pc
+    pload(&mut env, 0o400000, &[0o012700, 0o001234, 0o000207]);
+    // D 空間が見る同一 VA の先頭語（I 側の命令語とは別物）。
+    pput16(&mut env, 0o1000000, 0o065432);
+    // mov #1, @#177572
+    // jsr pc, @#0o20000      ; フェッチは I 空間 → PA 0o400000
+    // mov @#0o20000, r1      ; 同じ VA のデータは D 空間 → PA 0o1000000
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o012737, 0o000001, 0o177572, 0o004737, 0o020000, 0o013701, 0o020000,
+        ],
+    );
+    for _ in 0..5 {
+        step_m(&mut env, "pdp11_70").unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1234); // I 空間のコードが走った
+    assert_eq!(sem::r_get(&env.backend, 1), 0o065432); // 同じ VA で D は別写像
+    assert_eq!(pget16(&env, 0o400000), 0o012700); // 参照した命令語そのもの
+}
+
+/// モード別ページ集合 —— ユーザーはユーザー専用の APR で見る。
+/// RTI でユーザーモードへ入り、ユーザー D 空間のデータを読んで
+/// トラップでカーネルに戻るまでを通す（ベクタ読み出しとスタック
+/// プッシュのカーネル D 空間・prev モード挿入も兼ねて検査）。
+#[test]
+fn mmu_user_mode_uses_own_apr_set() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::I, 0),
+        0o04000,
+        0o177406,
+    );
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::D, 0),
+        0o10000,
+        0o177406,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS | mmu::mmr3::UDS);
+    mmu::mmr_put(&mut env.backend, 0, 1);
+    st_put(&mut env, USP, 0o7000); // ユーザー SP（VA。UD0 経由で PA 0o1007000）
+    // ユーザーコード（VA 0o2000 = PA 0o402000）: mov @#4, r1; emt 0
+    pload(&mut env, 0o402000, &[0o013701, 0o000004, 0o104000]);
+    pput16(&mut env, 0o1000004, 0o111111);
+    // カーネル: -(sp) に PSW=0o140000 と PC=0o2000 を積んで rti。
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012746, 0o140000, 0o012746, 0o002000, 0o000002],
+    );
+    // emt ベクタ → カーネルハンドラ: mov r1, @#0o50000; halt
+    pput16(&mut env, 0o030, 0o2400);
+    pput16(&mut env, 0o032, 0);
+    pload(&mut env, 0o2400, &[0o010137, 0o050000, 0o000000]);
+    for _ in 0..4 {
+        step_m(&mut env, "pdp11_70").unwrap(); // push ×2, rti, mov@#4
+    }
+    // mov @#4 後 —— r1 にユーザー D 空間の値。
+    assert_eq!(sem::r_get(&env.backend, 1), 0o111111);
+    assert_eq!(sem::psw_get(&env.backend) >> 14 & 3, psw::USER);
+    step_m(&mut env, "pdp11_70").unwrap(); // emt → カーネルハンドラへ
+    assert_eq!(env.pc, 0o2400);
+    // 新 PSW の prev<13:12> は旧モード（user=3）が挿入される。
+    assert_eq!(sem::psw_get(&env.backend), 0o30000);
+    step_m(&mut env, "pdp11_70").unwrap(); // mov r1,@#0o50000
+    assert_eq!(pget16(&env, 0o50000), 0o111111); // カーネル D（恒等）へ書けた
+    assert!(step_m(&mut env, "pdp11_70").is_err()); // halt で終端
+}
+
+/// nonresident abort —— ACF=0 のページへの参照は vector 250 の
+/// fault（MMR0 に状態を残し、積む PC は命令先頭）。
+#[test]
+fn mmu_nonresident_access_aborts_through_250() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // KD page1 を nonresident（ACF=0）に。
+    mmu::apr_put(&mut env.backend, mmu::apr_idx(0, Space::D, 1), 0, 0o177400);
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    pput16(&mut env, 0o250, 0o3000); // vec250 ハンドラ
+    pput16(&mut env, 0o252, 0);
+    pload(&mut env, 0o3000, &[0o000000]); // halt
+    // mov #1, @#177572; mov @#0o20000, r0（abort は 0o1006 の命令）
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012737, 0o000001, 0o177572, 0o013700, 0o020000],
+    );
+    step_m(&mut env, "pdp11_70").unwrap(); // MMR0 enable
+    step_m(&mut env, "pdp11_70").unwrap(); // abort → vec250
+    assert_eq!(env.pc, 0o3000);
+    // MMR0: NR<15>・ページ情報 <6:1> = ds<4>|page1<3:1> = 0o22。
+    let m0 = mmu::mmr_val(&env.backend, 0);
+    assert_eq!(m0 & mmu::mmr0::FREEZE, mmu::mmr0::NR);
+    assert_eq!(m0 & mmu::mmr0::PAGE, 0o22);
+    // MMR2 は配送時にベクタ値で上書きされる（simh の
+    // trap_load_mmr2 規則 —— abort 時の命令 PC は MMR0 凍結前に
+    // 記録済みで、配送で 0250 に変わる）。
+    assert_eq!(mmu::mmr_val(&env.backend, 2), 0o250);
+    // fault の規則 —— 積まれた PC は中断した命令の先頭。
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(pget16(&env, u32::from(sp)), 0o1006);
+    assert!(step_m(&mut env, "pdp11_70").is_err()); // ハンドラの halt
+}
+
+/// read-only abort —— ACF=2 への書き込みは MMR0<13> を立てて
+/// vector 250 へ fault。
+#[test]
+fn mmu_readonly_write_aborts() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::D, 1),
+        0o04000,
+        0o177402,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    pput16(&mut env, 0o250, 0o3000);
+    pput16(&mut env, 0o252, 0);
+    pload(&mut env, 0o3000, &[0o000000]);
+    // mov #1, @#177572; mov r0, @#0o20000 —— RO ページへの書き込み。
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012737, 0o000001, 0o177572, 0o010037, 0o020000],
+    );
+    step_m(&mut env, "pdp11_70").unwrap();
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let m0 = mmu::mmr_val(&env.backend, 0);
+    assert_eq!(m0 & mmu::mmr0::FREEZE, mmu::mmr0::RO);
+    assert_eq!(pget16(&env, 0o400000), 0); // RO ページは書かれていない
+}
+
+/// page-length abort —— PDR の PLF を越えるブロックへの参照は
+/// MMR0<14> を立てて vector 250 へ fault。
+#[test]
+fn mmu_page_length_aborts() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // KD page1: PLF=0o4（先頭 5 ブロックまで可）・ACF=6。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::D, 1),
+        0o04000,
+        0o002006,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    pput16(&mut env, 0o250, 0o3000);
+    pput16(&mut env, 0o252, 0);
+    pload(&mut env, 0o3000, &[0o000000]);
+    // mov #1, @#177572; mov @#0o21000, r0 —— bn=0o20 > PLF=4。
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012737, 0o000001, 0o177572, 0o013700, 0o021000],
+    );
+    step_m(&mut env, "pdp11_70").unwrap();
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let m0 = mmu::mmr_val(&env.backend, 0);
+    assert_eq!(m0 & mmu::mmr0::FREEZE, mmu::mmr0::PL);
+    // ページ情報は page1・D 空間（0o22）。
+    assert_eq!(m0 & mmu::mmr0::PAGE, 0o22);
+}
+
+/// I/O ページの MMIO —— PAR/PDR・MMR0-3 は I/O ページの
+/// レジスタとして読み書きできる（再配置の ON/OFF 両方の経路）。
+#[test]
+fn mmu_registers_via_iop() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // mov #0o4000, @#172342    ; KI PAR1（off 12340 は PAR 群）
+    // mov @#172342, r0          → 0o4000
+    // mov #4, @#172516          ; MMR3 = KDS（off 12516）
+    // mov @#172516, r1          → 4
+    // mov #1, @#177572          ; MMR0 enable
+    // mov @#177572, r2          → 1（再配置下でも PAR7→IOP で届く）
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o012737, 0o004000, 0o172342, 0o013700, 0o172342, 0o012737, 0o000004, 0o172516,
+            0o013701, 0o172516, 0o012737, 0o000001, 0o177572, 0o013702, 0o177572,
+        ],
+    );
+    for _ in 0..6 {
+        step_m(&mut env, "pdp11_70").unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 0), 0o4000);
+    assert_eq!(sem::r_get(&env.backend, 1), 4);
+    assert_eq!(sem::r_get(&env.backend, 2), 1);
+    // PAR1 の中身が状態面に反映されている。
+    assert_eq!(
+        mmu::mmr_val(&env.backend, 3) & mmu::mmr3::KDS,
+        mmu::mmr3::KDS
+    );
+}
+
+/// `mmu` 機能旗の門 —— mmu のないモデルでは 0065xx（MFPI）は
+/// vector 010 の違法命令。id_split のない mmu モデル（11/60
+/// 相当）では 1065xx（MFPD）も違法。
+#[test]
+fn mfp_instructions_respect_feature_gates() {
+    // mmu 旗なし（pdp11_34 既定）: mfpi → vector 010。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o006501]); // mfpi @r1
+    put16(&mut env, 0o010, 0o2400);
+    put16(&mut env, 0o012, 0);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    // id_split なしの mmu モデル（pdp11_60）: mfpd → vector 010。
+    let mut env = env_at("pdp11_60", 0o1000, &[0o106501]); // mfpd @r1
+    put16(&mut env, 0o010, 0o2400);
+    put16(&mut env, 0o012, 0);
+    step_m(&mut env, "pdp11_60").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    // mfpi 自体は pdp11_60 で動く（レジスタ形は前モードの r を読み
+    // -(SP) に積む）。
+    let mut env = env_at("pdp11_60", 0o1000, &[0o006501]);
+    sem::r_set(&mut env.backend, 1, 0o555);
+    step_m(&mut env, "pdp11_60").unwrap();
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, SP0 - 2);
+    assert_eq!(get16(&env, sp), 0o555);
+}
+
+/// 18 ビットモデル —— pdp11_34+mmu（KT11-D 搭載）は 18 ビット
+/// 物理空間で、I/O ページは 76xxxx。MMR3 を持たないので D 空間
+/// 参照は I 空間の APR に畳まれる。
+#[test]
+fn mmu_18bit_model_maps_iop_at_76xxxx() {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    for pa in [0u64, 0o40000, 0o600000] {
+        env.backend.mem.map(VirtAddr(pa), 1, Perms(0b111)).unwrap();
+    }
+    install_params(&mut env.backend, &model_params("pdp11_34"));
+    env.backend.addr_mask = 0xFFFF;
+    env.pc = 0o1000;
+    sem::r_set(&mut env.backend, reg::SP as u8, SP0);
+    let feats = model_feats("pdp11_34") | FEAT_MMU;
+    kernel_identity(&mut env, 0o7600);
+    // KI page1 → PA 0o600000（18 ビット空間の上位）。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::I, 1),
+        0o06000,
+        0o177406,
+    );
+    pput16(&mut env, 0o600000, 0o123456);
+    // mov #1, @#177572; mov @#0o20000, r0; mov @#177572, r1
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o012737, 0o000001, 0o177572, 0o013700, 0o020000, 0o013701, 0o177572,
+        ],
+    );
+    for _ in 0..3 {
+        run::step(&mut env, &mut NoSys, feats).unwrap();
+    }
+    // MMR3 がないので D 空間参照は I 空間の APR（=PA 0o600000）に。
+    assert_eq!(sem::r_get(&env.backend, 0), 0o123456);
+    // 再配置下の MMIO は PAR7→76xxxx 写像で届く（r1 = MMR0 = 1）。
+    assert_eq!(sem::r_get(&env.backend, 1), 1);
+}
+
+/// メモリ管理トラップ条件（mm_trap モデルのみ —— 11/70）——
+/// ACF=4（R/W・trap-on-access）への参照はアクセスを通して、
+/// 命令の完結時に vector 250 の trap として届く。MMR0<12><7> が
+/// 立ち、積む PC は次の命令（fault の命令先頭とは違う規則）。
+#[test]
+fn mmu_trap_condition_is_a_trap_not_an_abort() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // KD page1: ACF=4（R/W・trap-on-access）→ PA 0o400000。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::D, 1),
+        0o04000,
+        0o177404,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS);
+    // MMR0 = TENB<9> | ENABLE —— trap 条件を配送に繋げる。
+    mmu::mmr_put(&mut env.backend, 0, mmu::mmr0::TENB | mmu::mmr0::ENABLE);
+    pput16(&mut env, 0o400000, 0o123456);
+    pput16(&mut env, 0o250, 0o3000);
+    pput16(&mut env, 0o252, 0);
+    // mov @#0o20000, r0 —— trap 条件。アクセスは通り、命令の完了時に
+    // vector 250 が届く。
+    pload(&mut env, 0o1000, &[0o013700, 0o020000]);
+    step_m(&mut env, "pdp11_70").unwrap();
+    // アクセスは完結している（r0 にデータ）。trap が配送されて
+    // ハンドラの PC に来ている。
+    assert_eq!(sem::r_get(&env.backend, 0), 0o123456);
+    assert_eq!(env.pc, 0o3000);
+    let m0 = mmu::mmr_val(&env.backend, 0);
+    assert_ne!(m0 & mmu::mmr0::TRAP, 0); // <12> trap 発生
+    assert_ne!(m0 & mmu::mmr0::IC, 0); // <7> 命令完了
+    assert_eq!(m0 & mmu::mmr0::FREEZE, 0); // abort ではないので凍結なし
+    // PDR<7>（A）が立つ —— KD page1 は添字 9。
+    const PDR9: usize = core::mem::offset_of!(CpuState, pdr) + 9 * 2;
+    assert_ne!(st_get(&mut env, PDR9) & 0o200, 0);
+    // trap の規則 —— 積まれた PC は次の命令。
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(pget16(&env, u32::from(sp)), 0o1004);
+}
+
+/// スタック制限 —— カーネルスタックが stklim+0o400（イエロー
+/// ゾーン）を割ると命令の完結時に vector 004 が届く。
+#[test]
+fn mmu_stack_limit_yellow_zone() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    pput16(&mut env, 0o004, 0o2600);
+    pput16(&mut env, 0o006, 0);
+    // mov #0o40700, @#177774 —— stklim（I/O ページ）を設定。
+    // mov r0, -(sp) —— SP が 0o40776 に落ち、限界 0o41300 を割る。
+    pload(&mut env, 0o1000, &[0o012737, 0o040700, 0o177774, 0o010046]);
+    step_m(&mut env, "pdp11_70").unwrap(); // stklim 設定
+    step_m(&mut env, "pdp11_70").unwrap(); // push → イエローゾーン
+    assert_eq!(env.pc, 0o2600);
+    // push は完結し（trap の規則）、配送のフレーム 2 語も積まれて
+    // いる（SP0 - 2 - 4）。
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0 - 6);
+}
+
+/// sel22 —— MMR3<4> で 22 ビットと 18 ビットを切り替える
+/// （11/24・11/44・J-11）。M22E=0 の物理アドレスは 18 ビットに
+/// 畳まれ、22 ビットを指す PAR はマスクで 18 ビット側の I/O
+/// ページ（76xxxx）に落ちる。立てれば 18 ビットを越える物理
+/// ページに届く。
+#[test]
+fn mmu_sel22_switches_pa_width() {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    for pa in [0u64, 0o40000, 0o2000000] {
+        env.backend.mem.map(VirtAddr(pa), 1, Perms(0b111)).unwrap();
+    }
+    install_params(&mut env.backend, &model_params("pdp11_73"));
+    env.backend.addr_mask = 0xFFFF;
+    env.pc = 0o1000;
+    sem::r_set(&mut env.backend, reg::SP as u8, SP0);
+    kernel_identity(&mut env, 0o177600); // PAR7 → IOP（0o1776xxxx）
+    mmu::mmr_put(&mut env.backend, 3, 0); // M22E=0 → 18 ビット
+    mmu::mmr_put(&mut env.backend, 0, 1);
+    // KI page1 → PA 0o2000000（18 ビットを越える物理ページ）。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(0, Space::I, 1),
+        0o20000,
+        0o177406,
+    );
+    pput16(&mut env, 0, 0o000777); // PA0 の語（マスクで巻き戻る先）
+    pput16(&mut env, 0o2000000, 0o165432); // 22 ビット側の語
+    // mov @#177572, r2      ; IOP —— 22 ビットの PA が 18 ビットに
+    //                        畳まれても MMR0（17777572 & 0777777 =
+    //                        777572 = IOP 内の正しい位置）に届く
+    // mov @#0o20000, r0     ; PA 0o2000000 → 18 ビットに畳まれ PA0
+    // mov #0o20, @#172516   ; MMR3<4>=1 → 22 ビット
+    // mov @#0o20000, r1     ; 今度は PA 0o2000000 に届く
+    pload(
+        &mut env,
+        0o1000,
+        &[
+            0o013702, 0o177572, 0o013700, 0o020000, 0o012737, 0o000020, 0o172516, 0o013701,
+            0o020000,
+        ],
+    );
+    for _ in 0..4 {
+        step_m(&mut env, "pdp11_73").unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 2), 1); // MMR0<0>
+    assert_eq!(sem::r_get(&env.backend, 0), 0o777); // 18 ビットで PA0 に畳まれた
+    assert_eq!(sem::r_get(&env.backend, 1), 0o165432); // 22 ビットで届いた
 }

@@ -35,7 +35,7 @@ use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_sem::{Backend, ExceptionKind, GuestException};
 
 use crate::{
-    FEAT_FP11, Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, psw, reg, sem, specifier,
+    FEAT_FP11, Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, mmu, psw, reg, sem, specifier,
 };
 
 /// 例外をトラップ配送に写す。`vec` はベクタ（バイトアドレス）、
@@ -96,6 +96,9 @@ fn dispatch_err(
 // Ref: SPEC-PDP11-ARCH83（第4・5章）.
 pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Result<(), Outcome> {
     let pc = env.pc as u16;
+    // 命令先頭の MMU 簿記: MMR2 ← 命令の仮想 PC・MMR1 ← 0・
+    // MMR0<7>（IC）← 0。凍結中（MMR0<15:13> が立つ）は触らない。
+    mmu::step_begin(&mut env.backend, pc);
     // 命令語フェッチ。奇数アドレス・未写像はバスエラー経路に乗る
     // （奇数アドレスの可否は `odd_addr_trap` パラメータ）。
     let w0 = match sem::fetch_w(&mut env.backend, pc) {
@@ -172,6 +175,13 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             // 制御転送（jmp・分岐・mov …,pc も）は r7 の書き込みと
             // して表れる。
             env.pc = u64::from(sem::r_get(&env.backend, reg::PC as u8));
+            // メモリ管理トラップ（ACF 1/4/5 の trap 条件）と
+            // スタックイエローゾーンは命令の完結時に届く —— T ビット
+            // トラップより先に配送する（simh の trap_req 順）。
+            if let Some(vec) = mmu::take_pendtrap(&mut env.backend) {
+                mmu::set_ic(&mut env.backend);
+                return deliver(env, sys, vec, env.pc as u16);
+            }
             // T ビットトレーストラップ: traced な命令の完了、または
             // RTI が T を立てた直後の発火点（`rti_ttrap` = imm の
             // モデル）。next のモデルと RTT はこの境界では発火せず、
