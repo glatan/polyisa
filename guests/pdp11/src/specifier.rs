@@ -250,6 +250,7 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Rol
         | Insn::Asr
         | Insn::Asl
+        | Insn::Xor
         | Insn::Tstset
         | Insn::Wrtlck => &[MW],
         Insn::Clr | Insn::Mtpi | Insn::Sxt | Insn::Mtpd => &[WW],
@@ -265,8 +266,7 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Rorb
         | Insn::Rolb
         | Insn::Asrb
-        | Insn::Aslb
-        | Insn::Xor => &[MB],
+        | Insn::Aslb => &[MB],
         Insn::Clrb | Insn::Mfps => &[WB],
         Insn::Tstb | Insn::Mtps => &[RB],
         Insn::Jsr => &[AW],
@@ -305,15 +305,7 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Rtt
         | Insn::Mfpt
         | Insn::Nop
-        | Insn::Clc
-        | Insn::Clv
-        | Insn::Clz
-        | Insn::Cln
         | Insn::Ccc
-        | Insn::Sec
-        | Insn::Sev
-        | Insn::Sez
-        | Insn::Sen
         | Insn::Scc => &[],
     }
 }

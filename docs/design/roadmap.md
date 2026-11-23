@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PD6 | 論理・シフト・rot/sxt/xor・adc/sbc/swab・scc/ccc | PD4 | - |
 | PD7 | 分岐・sob・jsr/rts/jmp・mark | PD4 | - |
 | PD8 | トラップ・特権・システム命令: emt/trap/bpt/iot・rti/rtt・wait/reset/halt・spl・mtps/mfps・mfpt・csm・tstset/wrtlck とトラップ配送 | PD4 | - |
 | PD9 | EIS（mul/div/ash/ashc）と FIS（0750xR・KEV11） | PD5 | - |

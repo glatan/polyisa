@@ -1,17 +1,22 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! PDP-11 の命令意味論（PD5 で整数群を網羅）。
+//! PDP-11 の命令意味論（PD5 の整数群 + PD6 の論理・シフト・CC 操作）。
 //!
 //! 指定子評価の実効版（`eval_op` — `specifier::eval` が返す EA と
 //! オート増減の書き戻しに、間接形の指し先語の読み出しと byte/word
 //! の読み書きを足す）と、整数命令群を実装する。二重オペランドは
 //! mov/movb・cmp/cmpb・add・sub・bit/bitb・bic/bicb・bis/bisb、
 //! 単一オペランドは clr/clrb・com/comb・inc/incb・dec/decb・
-//! neg/negb・adc/adcb・sbc/sbcb・tst/tstb。条件コードの規則は
-//! 命令ごとに ARCH83 第5章から写す（sbc の V は「dst が最大負」の
-//! みで C 入力を問わない、com は C=1、inc/dec は C 不変等）。
-//! 分岐・jmp・トラップ命令は PD4 の形のまま、論理・シフト・CC
-//! 操作（xor・swab・ror/rol・asr/asl・sxt・scc/ccc）は PD6 が担う。
+//! neg/negb・adc/adcb・sbc/sbcb・tst/tstb・ror/rorb・rol/rolb・
+//! asr/asrb・asl/aslb・swab・sxt、レジスタ形は xor、条件コード操作は
+//! ccc/scc（マスク <3:0> が NZVC に対応し複数桁を同時に消す/立てる）。
+//! 条件コードの規則は命令ごとに ARCH83 第5章から写す（sbc の V は
+//! 「dst が最大負」のみで C 入力を問わない、com は C=1、inc/dec は
+//! C 不変、シフト・回転は C=シフトアウト桁で V=N xor C、sxt は N/C
+//! 不変、swab は結果の下位バイトで N/Z を見て V/C は消える等）。
+//! 分岐・jmp・トラップ命令は PD4 の形のまま、jsr/rts/sob/mark・
+//! 特権・システム命令（rti/rtt・spl・mtps/mfps・mfpt・csm・
+//! tstset/wrtlck）は PD7/PD8 が担う。
 //!
 //! ワードアクセスの奇数アドレスは `odd_addr_trap` パラメータに従う:
 //! 立つモデルでは vector 004（バスエラー）に落ち、立たないモデル
@@ -34,7 +39,10 @@ use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
-use crate::{CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, psw, reg};
+use crate::{
+    CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, ops_fcm, ops_frd, psw,
+    reg,
+};
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
 /// バスエラーのような fault 由来の双方が同じ配送経路を通る。
@@ -439,6 +447,22 @@ fn alu2(insn: Insn, s: u16, d: u16, w: Width) -> (u16, bool, Option<bool>) {
     }
 }
 
+/// 1 桁のシフト・回転。（結果, シフトアウトした桁 = 新しい C）を返す。
+/// asr は右へ 1 桁シフトして符号桁を複写、asl は左へ 1 桁シフトして
+/// 0 を挿入、ror/rol は C を桁列の一部に含む 17/9 桁の回転。
+// Ref: SPEC-PDP11-ARCH83（第5章 各命令の条件コード）.
+fn shift1(insn: Insn, v: u16, w: Width, c: bool) -> (u16, bool) {
+    let (sgn, m) = sign_mask(w);
+    let v = v & m;
+    match insn {
+        Insn::Asr | Insn::Asrb => (v >> 1 | v & sgn, v & 1 != 0),
+        Insn::Asl | Insn::Aslb => (v << 1 & m, v & sgn != 0),
+        Insn::Ror | Insn::Rorb => (v >> 1 | if c { sgn } else { 0 }, v & 1 != 0),
+        Insn::Rol | Insn::Rolb => (v << 1 & m | u16::from(c), v & sgn != 0),
+        _ => unreachable!("shift1 の対象外"),
+    }
+}
+
 // ---- トラップ配送 ----
 
 /// トラップの配送。古い PSW と PC を（この順に）カーネルスタックに
@@ -587,6 +611,68 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpEx
             if let Some(cf) = c_f {
                 psw_flag_set(b, psw::C, cf);
             }
+        }
+        // シフト・回転: C = シフトアウトした桁、V = N xor C（新しい
+        // 両ビット）。byte 形は下位バイトで演算し符号拡張で書き戻す。
+        Insn::Asr
+        | Insn::Asrb
+        | Insn::Asl
+        | Insn::Aslb
+        | Insn::Ror
+        | Insn::Rorb
+        | Insn::Rol
+        | Insn::Rolb => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let d = eval_op(b, f, pc0, 0)?;
+            let v = read(b, &d, w)?;
+            let (r, cout) = shift1(f.insn, v, w, psw_flag(b, psw::C));
+            write(b, &d, w, r)?;
+            cc_nz(b, r, w);
+            psw_flag_set(b, psw::C, cout);
+            psw_flag_set(b, psw::V, psw_flag(b, psw::N) != cout);
+        }
+        // バイト交換（語専用）。N=結果の下位バイトの最上位桁、
+        // Z=下位バイトが 0、V・C は消える。
+        Insn::Swab => {
+            let d = eval_op(b, f, pc0, 0)?;
+            let v = read(b, &d, Width::W)?;
+            let r = v.rotate_left(8);
+            write(b, &d, Width::W, r)?;
+            psw_flag_set(b, psw::N, r & 0x80 != 0);
+            psw_flag_set(b, psw::Z, r & 0xff == 0);
+            psw_flag_set(b, psw::V, false);
+            psw_flag_set(b, psw::C, false);
+        }
+        // 符号拡張: N が立っていれば −1、消えていれば 0 を書く。
+        // N・C は変えない。Z=N が消えている（結果が 0）と立ち、V=0。
+        Insn::Sxt => {
+            let d = eval_op(b, f, pc0, 0)?;
+            let n = psw_flag(b, psw::N);
+            write(b, &d, Width::W, if n { 0o177777 } else { 0 })?;
+            psw_flag_set(b, psw::Z, !n);
+            psw_flag_set(b, psw::V, false);
+        }
+        // 排他的論理和（レジスタ形）: dst ← reg ^ dst。V=0・C 不変。
+        Insn::Xor => {
+            let tys = specifier::insn_ops(f.insn);
+            let n = ops_frd(u128::from(f.word)).reg as u8;
+            let d = eval_op(b, f, pc0, 0)?;
+            let dv = read(b, &d, tys[0].width)?;
+            let r = r_get(b, n) ^ dv;
+            write(b, &d, tys[0].width, r)?;
+            cc_mov(b, r, tys[0].width);
+        }
+        // 条件コード操作: マスク <3:0> の各桁が NZVC に対応する。
+        // ccc 族（000240+m）は選択桁を消し、scc 族（000260+m）は立てる
+        // —— clc/sec などの個別名は m=1,2,4,8 の特例で、複数桁を一度に
+        // 触れる。マスク 0（nop・scc+0）は何もしない。
+        Insn::Ccc => {
+            let m = ops_fcm(u128::from(f.word)).ccm as u16;
+            psw_put(b, psw_get(b) & !m);
+        }
+        Insn::Scc => {
+            let m = ops_fcm(u128::from(f.word)).ccm as u16;
+            psw_put(b, psw_get(b) | m);
         }
         // 分岐: off8 は符号付き 8 ビットで語単位（×2）。基準は命令の
         // 次の語 —— 実行中の r7 はそこを指す。

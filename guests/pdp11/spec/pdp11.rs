@@ -241,6 +241,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   off8(7-0)             … 分岐変位・EMT/TRAP のコード
     //   off6(5-0)             … SOB 変位・MARK の個数
     //   n3(2-0)               … SPL の優先度
+    //   ccm(3-0)              … 条件コード操作のマスク（NZVC の選択）
     // Ref: SPEC-PDP11-ARCH83（第5章 命令語構成）.
     for (name, hi, lo) in [
         ("smode", 11u32, 9u32),
@@ -253,6 +254,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("off8", 7, 0),
         ("off6", 5, 0),
         ("n3", 2, 0),
+        ("ccm", 3, 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -283,6 +285,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(fmt("FN6", &["off6"]));
     // 3 ビット優先度（SPL）。
     m.formats.push(fmt("FN3", &["n3"]));
+    // 条件コード操作（op + マスク4）。
+    m.formats.push(fmt("FCM", &["ccm"]));
     // オペランドなし（全桁固定の命令）。
     m.formats.push(fmt("F0", &[]));
 
@@ -387,17 +391,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("reset", "F0", "0000 0000 0000 0101", "system", ""),
         ("rtt", "F0", "0000 0000 0000 0110", "system", ""),
         ("mfpt", "F0", "0000 0000 0000 0111", "system", "mfpt"),
-        ("nop", "F0", "0000 0000 1010 0000", "misc", ""),
-        ("clc", "F0", "0000 0000 1010 0001", "misc", ""),
-        ("clv", "F0", "0000 0000 1010 0010", "misc", ""),
-        ("clz", "F0", "0000 0000 1010 0100", "misc", ""),
-        ("cln", "F0", "0000 0000 1010 1000", "misc", ""),
-        ("ccc", "F0", "0000 0000 1010 1111", "misc", ""),
-        ("sec", "F0", "0000 0000 1011 0001", "misc", ""),
-        ("sev", "F0", "0000 0000 1011 0010", "misc", ""),
-        ("sez", "F0", "0000 0000 1011 0100", "misc", ""),
-        ("sen", "F0", "0000 0000 1011 1000", "misc", ""),
-        ("scc", "F0", "0000 0000 1011 1111", "misc", ""),
     ];
     for &(name, format, pattern, timing, feat) in insns {
         m.insns.push(Insn {
@@ -412,6 +405,38 @@ pub fn build_model() -> polyisa_isadl::Model {
             wheres: vec![],
             syntax: name.to_string(),
             timing: timing.to_string(),
+        });
+    }
+
+    // 条件コード操作。「000240 + マスク」族は選択桁を消し（ccc）、
+    // 「000260 + マスク」族は立てる（scc）—— マスク <3:0> の各桁が
+    // NZVC に対応し、複数桁を一度に触れる（clc/clv/… や sec/sev/…
+    // の個別名は ccm=1,2,4,8 の特例、全消し/全立ては ccm=15）。
+    // nop は ccc 族のマスク 0 の正準名 —— 範囲の重なりは ccm の
+    // wheres で切り分ける（nop が ccm==0、ccc が ccm!=0）。
+    // Ref: SPEC-PDP11-ARCH83（第5章 条件コード操作）.
+    let eq0 = WhereClause {
+        field: "ccm".to_string(),
+        op: WhereOp::Eq,
+        rhs: WhereRhs::Lit(0),
+    };
+    let ne0 = WhereClause {
+        op: WhereOp::Ne,
+        ..eq0.clone()
+    };
+    for (name, format, pattern, wheres) in [
+        ("nop", "F0", "0000 0000 1010 0000", vec![eq0]),
+        ("ccc", "FCM", "0000 0000 1010 ....", vec![ne0]),
+        ("scc", "FCM", "0000 0000 1011 ....", vec![]),
+    ] {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: format.to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::True,
+            wheres,
+            syntax: name.to_string(),
+            timing: "misc".to_string(),
         });
     }
 

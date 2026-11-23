@@ -77,8 +77,9 @@ fn decode_gated_by_features() {
 #[test]
 fn insn_count() {
     // 二重 12 + 単一語 20 + 単一バイト 16 + JSR/RTS/SOB 3 + EIS/XOR 5
-    // + FIS 4 + 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 19。
-    assert_eq!(INSNS.len(), 98);
+    // + FIS 4 + 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
+    // （条件コード操作は nop + ccc/scc のマスク形として数える）。
+    assert_eq!(INSNS.len(), 90);
 }
 
 #[test]
@@ -357,7 +358,7 @@ fn insn_ops_signature() {
     assert_eq!(insn_ops(Insn::Add), [RW, MW]);
     assert_eq!(insn_ops(Insn::Jmp), [AW]);
     assert_eq!(insn_ops(Insn::Tstb), [RB]);
-    assert_eq!(insn_ops(Insn::Xor), [MB]);
+    assert_eq!(insn_ops(Insn::Xor), [MW]);
     // 指定子を持たない命令。
     for i in [
         Insn::Br,
@@ -1042,4 +1043,236 @@ fn multi_precision_add_sub_chain() {
     step_m(&mut env4, "pdp11_34").unwrap();
     assert_eq!(sem::r_get(&env4.backend, 1), 0o177777);
     assert_eq!(nzvc(&env4), 0o11); // N+C
+}
+
+// ---- PD6: 論理・シフト・CC 操作 ----
+
+/// FRD 形（reg<8:6> + 指定子）の組立て。`asm` は指定子だけを載せる
+/// ので、語の reg フィールドはここで立てる（xor・jsr・EIS 形）。
+fn asm_r(insn: Insn, n: u8, specs: &[Spec]) -> Vec<u16> {
+    let mut v = asm(insn, specs);
+    v[0] |= (u16::from(n) & 7) << 6;
+    v
+}
+
+#[test]
+fn decode_cc_ops_mask() {
+    // 条件コード操作はマスク形: ccc=000240+m（選択桁を消す）・
+    // scc=000260+m（立てる）。mask=0 の消しは nop の正準名を持つ。
+    assert_eq!(dec(0o000240), Some(Insn::Nop));
+    for m in 1..=0o17u16 {
+        assert_eq!(dec(0o000240 | m), Some(Insn::Ccc), "ccc+{m:o}");
+        assert_eq!(dec(0o000260 | m), Some(Insn::Scc), "scc+{m:o}");
+    }
+    // マスク 0 の立て側（000260）も合法で、実行しても何もしない。
+    assert_eq!(dec(0o000260), Some(Insn::Scc));
+    // 000220-000227 は予約（spl も 00023x のみ）。
+    assert_eq!(dec(0o000220), None);
+    assert_eq!(dec_m(0o000227, "pdp11_70"), None);
+    // 個別名はマスクの特例なので逆アセンブルは族名に畳まれる。
+    assert_eq!(disasm_word(0o000241, 16).as_deref(), Some("ccc"));
+}
+
+/// シフト・回転の (insn, 旧 r0, CC0) → (r0, CC) 一括検査。
+/// C=シフトアウトした桁、V=N xor C（新しい両ビット）。byte 形は
+/// 下位バイトで演算し符号拡張で書き戻す。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn shift_rotate_cc_table() {
+    let r0 = &[Spec::Reg(0)][..];
+    for (insn, old, cc0, new, cc) in [
+        // asr: 右へ 1 桁シフトして符号桁を複写。C=旧最下位桁。
+        (Insn::Asr, 0o000005u16, 0, 0o000002, 0o3), // +5→+2、V=N xor C
+        (Insn::Asr, 0o100000, 0o1, 0o140000, 0o12), // M.N.I./2、N+V
+        (Insn::Asr, 0o177777, 0, 0o177777, 0o11),   // −1→−1、N+C
+        (Insn::Asr, 0o000001, 0, 0, 0o7),           // +1→0、Z+V+C
+        (Insn::Asr, 0o000004, 0o17, 0o000002, 0),   // 旧 CC は置き換わる
+        // asrb: 0201(−127)→0300(−64) を符号拡張。
+        (Insn::Asrb, 0o000201, 0, 0o177700, 0o11), // N+C
+        (Insn::Asrb, 0o000101, 0, 0o000040, 0o3),  // 0101→040、V+C
+        (Insn::Asrb, 0o000200, 0, 0o177700, 0o12), // −128→−64、N+V
+        // asl: 左へ 1 桁シフトして 0 挿入。C=旧符号桁。
+        (Insn::Asl, 0o040000, 0, 0o100000, 0o12), // N+V（溢れ）
+        (Insn::Asl, 0o100000, 0, 0, 0o7),         // →0、Z+V+C
+        (Insn::Asl, 0o177777, 0, 0o177776, 0o11), // N+C
+        (Insn::Asl, 0o077777, 0o1, 0o177776, 0o12), // 旧 C は置き換わる
+        // aslb: 0177→0376（符号拡張 −2）。
+        (Insn::Aslb, 0o000177, 0, 0o177776, 0o12), // N+V
+        (Insn::Aslb, 0o000200, 0, 0, 0o7),         // →0、Z+V+C
+        // ror: C を最上位に入れる右回転。C=旧最下位桁。
+        (Insn::Ror, 0o000002, 0o1, 0o100001, 0o12), // C が入る、N+V
+        (Insn::Ror, 0o000001, 0, 0, 0o7),           // →0、Z+V+C
+        (Insn::Ror, 0o100000, 0, 0o040000, 0),      // 符号桁→040000
+        (Insn::Ror, 0o100001, 0o1, 0o140000, 0o11), // N+C
+        // rorb: 0201、C=0 → 0100。C=1、V=N xor C=1。
+        (Insn::Rorb, 0o000201, 0, 0o000100, 0o3), // V+C
+        // rol: C を最下位に入れる左回転。C=旧符号桁。
+        (Insn::Rol, 0o100000, 0o1, 0o000001, 0o3),  // V+C
+        (Insn::Rol, 0o000001, 0o1, 0o000003, 0),    // C が入る
+        (Insn::Rol, 0o000000, 0o1, 0o000001, 0),    // 0→1、C 消える
+        (Insn::Rol, 0o177777, 0o1, 0o177777, 0o11), // 全 1→全 1、N+C
+        // rolb: 0100、C=1 → 0201（符号拡張 −127）。
+        (Insn::Rolb, 0o000100, 0o1, 0o177601, 0o12), // N+V
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &asm(insn, r0));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, old);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 0), nzvc(&env)),
+            (new, cc),
+            "{insn:?} dst={old:o} cc0={cc0:o}"
+        );
+    }
+}
+
+#[test]
+fn shift_memory_operand() {
+    // asl @#a — メモリの読み・シフト・書き戻し。
+    let words = asm(Insn::Asl, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o040000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o100000);
+    assert_eq!(nzvc(&env), 0o12); // N+V
+
+    // rorb @#a — バイトの読み・回転・書き戻し（語の下位バイト）。
+    let words = asm(Insn::Rorb, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o000201);
+    sem::psw_put(&mut env.backend, 0o1); // C=1
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000) & 0xff, 0o300);
+    assert_eq!(nzvc(&env), 0o11); // N+C
+}
+
+/// swab は語専用 — 上下バイトを交換し、結果の下位バイトで N/Z、
+/// V・C は消える。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn swab_cc() {
+    for (old, cc0, new, cc) in [
+        (0o100377u16, 0, 0o177600u16, 0o10), // 結果の下位 0200 → N
+        (0o000377, 0o17, 0o177400, 0o4),     // 結果の下位 0 → Z、V/C 消える
+        (0o052400, 0o1, 0o000125, 0),        // 正の下位バイト、C 消える
+        (0o177777, 0, 0o177777, 0o10),       // 0xff↔0xff → N
+        (0o000200, 0o3, 0o100000, 0o4),      // 結果の下位 0 → Z
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &asm(Insn::Swab, &[Spec::Reg(0)]));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, old);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 0), nzvc(&env)),
+            (new, cc),
+            "swab {old:o} cc0={cc0:o}"
+        );
+    }
+    // swab @#a — メモリの語も交換する。
+    let words = asm(Insn::Swab, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o100377);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o177600);
+    assert_eq!(nzvc(&env), 0o10); // N
+}
+
+/// sxt は N を dst 語全体へ拡張する。N・C は不変、Z=N が消えて
+/// いるときに立つ、V=0。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn sxt_extends_n() {
+    for (cc0, new, cc) in [
+        (0o10u16, 0o177777u16, 0o10u16), // N → −1、N が残る
+        (0o11, 0o177777, 0o11),          // N+C → C も残る
+        (0, 0, 0o4),                     // N=0 → 0、Z
+        (0o5, 0, 0o5),                   // Z+C → Z・C とも残る
+        (0o16, 0o177777, 0o10),          // N+Z+V → Z・V は消える
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &asm(Insn::Sxt, &[Spec::Reg(0)]));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, 0o123456);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 0), nzvc(&env)),
+            (new, cc),
+            "sxt cc0={cc0:o}"
+        );
+    }
+    // sxt @#a — メモリへも −1 を書く。
+    let words = asm(Insn::Sxt, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o10);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o177777);
+    assert_eq!(nzvc(&env), 0o10); // N 不変
+}
+
+/// xor はレジスタ形 — dst ← reg ^ dst。V=0・C 不変。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn xor_cc_and_operands() {
+    for (s, d0, cc0, d1, cc) in [
+        (0o125252u16, 0o052525u16, 0o1u16, 0o177777u16, 0o11u16), // N+C 保存
+        (0o125252, 0o125252, 0o10, 0, 0o4),                       // Z、N 消える
+        (0o000000, 0o077777, 0o17, 0o077777, 0o1),                // C のみ残る
+        (0o177777, 0o000000, 0, 0o177777, 0o10),                  // N
+    ] {
+        // xor r0, r1 — 語の reg フィールド <8:6> = 0。
+        let mut env = env_at("pdp11_34", 0o1000, &asm_r(Insn::Xor, 0, &[Spec::Reg(1)]));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, s);
+        sem::r_set(&mut env.backend, 1, d0);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 1), nzvc(&env)),
+            (d1, cc),
+            "xor {s:o}^{d0:o} cc0={cc0:o}"
+        );
+        // ソースレジスタは変わらない。
+        assert_eq!(sem::r_get(&env.backend, 0), s);
+    }
+    // xor r2, @#a — 宛先メモリの書き戻し。
+    let words = asm_r(Insn::Xor, 2, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o052525);
+    sem::psw_put(&mut env.backend, 0o1); // C=1
+    sem::r_set(&mut env.backend, 2, 0o125252);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o177777);
+    assert_eq!(nzvc(&env), 0o11); // N+C 保存
+}
+
+/// 条件コード操作: ccc=000240+m（消し）・scc=000260+m（立て）。
+/// 個別名（clc/sec/…）と複合マスク・マスク 0 のどれも正規の形。
+// Ref: SPEC-PDP11-ARCH83（第5章 条件コード操作）.
+#[test]
+fn cc_ops_apply_mask() {
+    for (word, cc0, cc) in [
+        (0o000241u16, 0o17u16, 0o16u16), // clc: C を消す
+        (0o000242, 0o17, 0o15),          // clv
+        (0o000244, 0o17, 0o13),          // clz
+        (0o000250, 0o17, 0o07),          // cln
+        (0o000257, 0o17, 0),             // ccc: 全消し
+        (0o000243, 0o17, 0o14),          // 複合: V+C を消す
+        (0o000261, 0o16, 0o17),          // sec: C を立てる
+        (0o000262, 0o15, 0o17),          // sev
+        (0o000264, 0o13, 0o17),          // sez
+        (0o000270, 0o07, 0o17),          // sen
+        (0o000277, 0, 0o17),             // scc: 全立て
+        (0o000263, 0o10, 0o13),          // 複合: V+C を立てる
+        (0o000260, 0o05, 0o05),          // scc+0: 何もしない
+        (0o000240, 0o13, 0o13),          // nop: 何もしない
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &[word]);
+        sem::psw_put(&mut env.backend, cc0);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(nzvc(&env), cc, "{word:o} cc0={cc0:o}");
+        assert_eq!(env.pc, 0o1002);
+    }
+    // CC 以外の PSW 桁（T・優先度・モード）は触らない。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000257]); // ccc
+    sem::psw_put(&mut env.backend, 0o177777);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::psw_get(&env.backend), 0o177760);
 }
