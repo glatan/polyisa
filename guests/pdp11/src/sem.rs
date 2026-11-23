@@ -1,7 +1,8 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! PDP-11 の命令意味論（PD5 の整数群 + PD6 の論理・シフト・CC 操作
-//! + PD7 のサブルーチン命令）。
+//! + PD7 のサブルーチン命令 + PD8 の特権・システム命令 + PD9 の
+//! EIS/FIS）。
 //!
 //! 指定子評価の実効版（`eval_op` — `specifier::eval` が返す EA と
 //! オート増減の書き戻しに、間接形の指し先語の読み出しと byte/word
@@ -24,6 +25,13 @@
 //! のモデル値）・csm（MMR3<3> 条件のスーパーバイザ呼出）・
 //! tstset/wrtlck（バスロックの単一スレッド近似）・reset（裸モデル
 //! では NOP）を持つ。
+//! EIS は mul（R,Rv1 の 32 ビット積・奇数 R は低位積のみ）・div
+//! （商 R・剰余 Rv1・0 除算と商溢れの CC）・ash（符号付き 6 ビット
+//! カウントの算術シフト）・ashc（R:R|1 の 32 ビット対シフト ——
+//! 奇数 R の右シフトは回転）を持つ。FIS は 0750xR の fadd/fsub/
+//! fmul/fdiv —— 汎用レジスタが指すフレームの A±B を A 位置へ
+//! 格納して R+4、例外は vector 244 へ fault と CC の再解釈を
+//! 行う（KEV11。FMUL/FDIV は R6 への作業語 push/pop つき）。
 //!
 //! ワードアクセスの奇数アドレスは `odd_addr_trap` パラメータに従う:
 //! 立つモデルでは vector 004（バスエラー）に落ち、立たないモデル
@@ -44,11 +52,13 @@
 use polyisa_engine::interp::{InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
+use polyisa_softfloat::decfp::VaxFF;
+use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
     CpuState, FEAT_DUAL_REGSET, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
-    OddAddrTrapParam, ops_fcm, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
+    OddAddrTrapParam, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -67,6 +77,9 @@ pub mod tv {
     pub const EMT: u16 = 0o030;
     /// TRAP（034）。
     pub const TRAP: u16 = 0o034;
+    /// 浮動例外（244。FP11 の浮動割込みと FIS のエラートラップが
+    /// 同じ番号で経路は別 —— ARCH83 付録 A・付録 C）。
+    pub const FPP: u16 = 0o244;
 }
 
 /// データの読み出し・書き込みのアクセス属性。整列の規則は
@@ -496,6 +509,109 @@ fn shift1(insn: Insn, v: u16, w: Width, c: bool) -> (u16, bool) {
     }
 }
 
+// ---- EIS（PD9）----
+
+/// ASH/ASHC のシフトカウント（src<5:0> を符号付き 6 ビットと
+/// して読む、-32..+31。負=右・正=左）。
+// Ref: SPEC-PDP11-ARCH83（第5章 ASH）.
+fn shift_cnt(sv: u16) -> i32 {
+    let c = i32::from(sv & 0x3f);
+    if c & 0x20 != 0 { c - 0x40 } else { c }
+}
+
+/// `bits` 幅の算術シフトを 1 桁ずつ行う。`cnt` は符号付きで
+/// 負=右（符号複写）・正=左（0 挿入）。（結果, 最後にシフト
+/// アウトした桁, シフト中に符号桁が初期値と違ったことがあるか）。
+// Ref: SPEC-PDP11-ARCH83（第5章 ASH/ASHC）.
+fn ashift(v: u64, bits: u32, cnt: i32) -> (u64, bool, bool) {
+    let mask = (1u64 << bits) - 1;
+    let sign = 1u64 << (bits - 1);
+    let mut v = v & mask;
+    let sign0 = v & sign != 0;
+    let mut cout = false;
+    let mut schg = false;
+    if cnt >= 0 {
+        for _ in 0..cnt {
+            cout = v & sign != 0;
+            v = v << 1 & mask;
+            schg |= (v & sign != 0) != sign0;
+        }
+    } else {
+        for _ in 0..-cnt {
+            cout = v & 1 != 0;
+            v = v >> 1 | v & sign;
+        }
+    }
+    (v, cout, schg)
+}
+
+// ---- FIS（PD9）----
+
+/// FIS のオペランドフレームから F 形式 1 個を読む。メモリ配置は
+/// 「+0 の語が符号・指数・仮数上位」（ARCH83 第3章 —— 浮動の
+/// 「3412」語順）なので、2 語を 上位:下位 に並べると decfp の
+/// 正準形（`bits()` の形）になる。
+fn fis_f_get(b: &mut InterpBackend, a: u16) -> Result<VaxFF, InterpExit> {
+    let hi = load_w(b, a)?;
+    let lo = load_w(b, a.wrapping_add(2))?;
+    Ok(VaxFF::from_bits(u128::from(hi) << 16 | u128::from(lo)))
+}
+
+/// FIS 命令本体。`n` はオペランドフレームを指すレジスタ:
+/// (R)/(R+2) が B 引数、(R+4)/(R+6) が A 引数。結果は A 位置へ
+/// 書き、成功なら R ← R+4（結果の上位語を指す）。
+/// 例外（オーバーフロー・アンダーフロー・ゼロ除算）は条件コードを
+/// 再解釈して vector 244 に fault —— 積む PC は命令先頭で、
+/// R とオペランドは不変のまま再実行できる。例外時 CC:
+/// overflow → V=1・Z=0、underflow → V=1・N=1・Z=0、
+/// 0 除算 → V=1・N=1・C=1・Z=0。成功時は N=結果<0・Z=結果=0・
+/// V=0・C=0。
+// Ref: SPEC-PDP11-ARCH83（付録 C）.
+// Gap: GAP-0082（指数 0 を零へ畳む選択・decfp VaxF の借用）
+fn fis_exec(b: &mut InterpBackend, n: u8, insn: Insn) -> Result<(), InterpExit> {
+    let r = r_get(b, n);
+    let a = fis_f_get(b, r.wrapping_add(4))?;
+    let bb = fis_f_get(b, r)?;
+    // 指数部 0 のオペランドは符号・仮数を問わず 0（KE11-F の規則
+    // —— decfp の予約オペランド（指数 0・符号 1）は FIS では零と
+    // して読む決定的な選択。dirty zero は decfp が零として扱う）。
+    let a = if a.is_reserved() { VaxFF::zero() } else { a };
+    let bb = if bb.is_reserved() { VaxFF::zero() } else { bb };
+    // FIS の丸めは「常に絶対値を増やす方向」（KE11-F —— ガード桁
+    // が立っていれば仮数を丸め上げる `Rm::Rmm` と一致）。
+    let (v, fl) = match insn {
+        Insn::Fadd => a.add(bb, Rm::Rmm),
+        Insn::Fsub => a.sub(bb, Rm::Rmm),
+        Insn::Fmul => a.mul(bb, Rm::Rmm),
+        Insn::Fdiv => a.div(bb, Rm::Rmm),
+        _ => unreachable!("fis_exec の対象外"),
+    };
+    if fl & (FP_OF | FP_UF | FP_DZ) != 0 {
+        // 例外 CC の再解釈。N=UF か 0 除算、C=0 除算のみ。
+        let (nf, cf) = if fl & FP_DZ != 0 {
+            (true, true)
+        } else if fl & FP_UF != 0 {
+            (true, false)
+        } else {
+            (false, false)
+        };
+        psw_flag_set(b, psw::V, true);
+        psw_flag_set(b, psw::N, nf);
+        psw_flag_set(b, psw::C, cf);
+        psw_flag_set(b, psw::Z, false);
+        return Err(fault(tv::FPP));
+    }
+    let bits = v.bits() as u32;
+    store_w(b, r.wrapping_add(4), (bits >> 16) as u16)?;
+    store_w(b, r.wrapping_add(6), bits as u16)?;
+    r_set(b, n, r.wrapping_add(4));
+    psw_flag_set(b, psw::N, v.is_neg());
+    psw_flag_set(b, psw::Z, v.is_zero());
+    psw_flag_set(b, psw::V, false);
+    psw_flag_set(b, psw::C, false);
+    Ok(())
+}
+
 // ---- トラップ配送 ----
 
 /// トラップの配送。古い PSW と PC を（この順に）ベクタの新 PSW が
@@ -689,6 +805,117 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             let r = r_get(b, n) ^ dv;
             write(b, &d, tys[0].width, r)?;
             cc_mov(b, r, tys[0].width);
+        }
+        // ---- EIS（PD9）----
+        // レジスタ対は R（上位）と Rv1 = R OR 1（下位）—— 奇数 R
+        // では両者が同じレジスタになる（mul は「低位積のみ格納」に
+        // 一致。div は偶数 R が建前で、奇数 R の Rv1=R 読みは文字
+        // どおりの規則に沿う決定的な選択）。FRD 形の宛先スロット
+        // にはソース指定子が入る（読み出し側）。
+        // Ref: SPEC-PDP11-ARCH83（第5章 EIS）.
+        Insn::Mul => {
+            let n = ops_frd(u128::from(f.word)).reg as u8;
+            let s = eval_op(b, f, pc0, 0)?;
+            let sv = i32::from(read(b, &s, Width::W)? as i16);
+            let prod = i32::from(r_get(b, n) as i16) * sv;
+            // R ← 積の上位、Rv1 ← 下位（奇数 R では同じレジスタへ
+            // 上位→下位の順に書くので下位が残る）。
+            r_set(b, n, (prod >> 16) as u16);
+            r_set(b, n | 1, prod as u16);
+            // CC は R が奇数でも 32 ビット積全体で立つ。
+            psw_flag_set(b, psw::N, prod < 0);
+            psw_flag_set(b, psw::Z, prod == 0);
+            psw_flag_set(b, psw::V, false);
+            // C = 積が符号付き 16 ビットに収まらない。
+            psw_flag_set(b, psw::C, !(-0x8000..0x8000).contains(&prod));
+        }
+        // Gap: GAP-0082（奇数 R・例外経路の不定域は決定的選択）
+        Insn::Div => {
+            let n = ops_frd(u128::from(f.word)).reg as u8;
+            let s = eval_op(b, f, pc0, 0)?;
+            let sv = i32::from(read(b, &s, Width::W)? as i16);
+            let dvd = (u32::from(r_get(b, n)) << 16 | u32::from(r_get(b, n | 1))) as i32;
+            if sv == 0 {
+                // 0 除算: V=1・C=1。レジスタと N・Z は変えない。
+                psw_flag_set(b, psw::V, true);
+                psw_flag_set(b, psw::C, true);
+            } else if let Some(q) = dvd
+                .checked_div(sv)
+                .filter(|q| (-0x8000..0x8000).contains(q))
+            {
+                // 商は 0 方向への切詰、剰余は被除数と同符号
+                // （Rust の /・% と同じ向き）。i32::MIN / -1 は
+                // Rust では panic する組 —— checked_div が None
+                // を返しオーバーフロー経路に畳まれる。
+                let rem = dvd % sv;
+                // R ← 商、Rv1 ← 剰余（奇数 R では剰余が残る）。
+                r_set(b, n, q as u16);
+                r_set(b, n | 1, rem as u16);
+                psw_flag_set(b, psw::N, q < 0);
+                psw_flag_set(b, psw::Z, q == 0);
+                psw_flag_set(b, psw::V, false);
+                psw_flag_set(b, psw::C, false);
+            } else {
+                // 商が 16 ビット 2 の補数に収まらない → V=1・C=0
+                // で命令は中断される。R,Rv1 と N・Z は不定 —
+                // 変えない決定的な選択。
+                psw_flag_set(b, psw::V, true);
+                psw_flag_set(b, psw::C, false);
+            }
+        }
+        Insn::Ash | Insn::Ashc => {
+            let n = ops_frd(u128::from(f.word)).reg as u8;
+            let s = eval_op(b, f, pc0, 0)?;
+            let sv = read(b, &s, Width::W)?;
+            let cnt = shift_cnt(sv);
+            if f.insn == Insn::Ash {
+                let (v, cout, schg) = ashift(u64::from(r_get(b, n)), 16, cnt);
+                r_set(b, n, v as u16);
+                cc_nz(b, v as u16, Width::W);
+                // C=最後に出た桁、V=シフト中に符号が変わったか。
+                // どちらも NN=0 では消える。
+                psw_flag_set(b, psw::C, cnt != 0 && cout);
+                psw_flag_set(b, psw::V, cnt != 0 && schg);
+            } else {
+                // 32 ビット対 R:R|1 をシフト。奇数 R では被演算が
+                // R:R —— 右シフトは 16 ビットの回転になる規則と
+                // 一致する（KE11-E/BLUEFISH の奇数 R 記述どおり）。
+                let pair = u64::from(r_get(b, n)) << 16 | u64::from(r_get(b, n | 1));
+                let (v, cout, schg) = ashift(pair, 32, cnt);
+                // R ← 結果 <31:16>、次に Rv1 ← <15:0>（奇数 R では
+                // 下位の書き込みが残る）。
+                r_set(b, n, (v >> 16) as u16);
+                r_set(b, n | 1, v as u16);
+                // CC は常に 32 ビット結果で立つ。
+                psw_flag_set(b, psw::N, v & 0x8000_0000 != 0);
+                psw_flag_set(b, psw::Z, v == 0);
+                psw_flag_set(b, psw::V, cnt != 0 && schg);
+                psw_flag_set(b, psw::C, cnt != 0 && cout);
+            }
+        }
+        // ---- FIS（PD9）----
+        // 0750xR。汎用レジスタがフレームを指す（詳しくは fis_exec）。
+        // FMUL/FDIV は実機（LSI-11 系 KEV11）で R6 スタックへ
+        // 1 語 push/pop する —— SP は書き込み可能メモリを指す必要
+        // がある（付録 C 注記・付録 B 項目 22）。中断の規則
+        // （BR 要求で命令をやり直す）は裸実行では割込みが起きない。
+        // Gap: GAP-0082（中断規則は push/pop のみ再現）
+        Insn::Fadd | Insn::Fsub | Insn::Fmul | Insn::Fdiv => {
+            let n = ops_ff(u128::from(f.word)).freg as u8;
+            let scratch = matches!(f.insn, Insn::Fmul | Insn::Fdiv);
+            if scratch {
+                // -(SP) に作業語。書き込みを先に済ませてから SP を
+                // 進める —— バスエラーなら SP は元のまま fault。
+                let sp = r_get(b, reg::SP as u8).wrapping_sub(2);
+                store_w(b, sp, 0)?;
+                r_set(b, reg::SP as u8, sp);
+            }
+            let r = fis_exec(b, n, f.insn);
+            if scratch {
+                let sp = r_get(b, reg::SP as u8).wrapping_add(2);
+                r_set(b, reg::SP as u8, sp);
+            }
+            r?;
         }
         // 条件コード操作: マスク <3:0> の各桁が NZVC に対応する。
         // ccc 族（000240+m）は選択桁を消し、scc 族（000260+m）は立てる

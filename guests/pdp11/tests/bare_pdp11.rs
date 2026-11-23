@@ -1848,3 +1848,442 @@ fn halt_in_user_mode_traps_to_vector4() {
     let mut env = env_at("pdp11_70", 0o1000, &[0o000000]);
     assert!(step_m(&mut env, "pdp11_70").is_err());
 }
+
+// ---- PD9: EIS（mul/div/ash/ashc）と FIS（0750xR）----
+
+/// FIS 命令語（0750xR — freg<2:0> のみを載せる）。
+fn asm_f(insn: Insn, n: u8) -> u16 {
+    encode(insn, &[]).expect("encodable") as u16 | u16::from(n & 7)
+}
+
+/// F 形式の 32 ビット値をフレームに書く（上位語が低アドレス —
+/// PDP-11 の語順規則）。
+fn putf(env: &mut BareEnv, a: u16, bits: u32) {
+    put16(env, a, (bits >> 16) as u16);
+    put16(env, a.wrapping_add(2), bits as u16);
+}
+
+/// F 形式を読む。
+fn getf(env: &BareEnv, a: u16) -> u32 {
+    u32::from(get16(env, a)) << 16 | u32::from(get16(env, a.wrapping_add(2)))
+}
+
+/// 機能旗を足した集合での 1 ステップ（eis/fis を持たない既定モデル
+/// に旗だけ乗せる）。
+fn step_f(env: &mut BareEnv, feats: u128) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, feats)
+}
+
+/// mul は偶数 R で R,R+1 に 32 ビット積、奇数 R では下位積のみ。
+/// CC は常に 32 ビット積で立つ（C=積が 16 ビットに収まらない）。
+// Ref: SPEC-PDP11-ARCH83（第5章 MUL）.
+#[test]
+fn mul_register_pair_and_cc() {
+    let feats = model_feats("pdp11_03") | FEAT_EIS;
+    for (n, dst, src, r_lo, r_hi, cc) in [
+        // 偶数 R: r2:r3 ← 0o1234 × 0o1000（= 0x53800）。16 ビットに
+        // 収まらないので C=1、V=0。
+        (2u8, 0o1234u16, 0o1000u16, 0o5u16, 0o34000u16, 0o1u16),
+        // 収まる積: 2×2=4 → CC 全消し。
+        (2, 0o2, 0o2, 0, 0o4, 0),
+        // 負の積: -1 × 3 = -3 = 0xFFFF_FFFD → N=1。16 ビットに
+        // 収まるので C=0。
+        (0, 0o177777u16, 0o3, 0o177777u16, 0o177775u16, 0o10u16),
+        // 奇数 R: -32768 × 2 = -65536。下位語だけが R に残り、
+        // CC は 32 ビット積で立つ（N=1・C=1）。
+        (3, 0o100000u16, 0o2, 0, 0, 0o11u16),
+        // 積が 0: -32768 × 0 → Z=1・C=0。
+        (2, 0o100000u16, 0, 0, 0, 0o4u16),
+        // -1 × -1 = 1 → 正・収まる。
+        (0, 0o177777u16, 0o177777u16, 0, 0o1, 0),
+    ] {
+        let words = asm_r(Insn::Mul, n, &[Spec::Imm(src)]);
+        let mut env = env_at("pdp11_03", 0o1000, &words);
+        sem::psw_put(&mut env.backend, 0o17); // 旧 CC は置き換わる
+        sem::r_set(&mut env.backend, n, dst);
+        step_f(&mut env, feats).unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, n), sem::r_get(&env.backend, n | 1)),
+            (r_lo, r_hi),
+            "mul r{n} dst={dst:o} src={src:o}"
+        );
+        assert_eq!(nzvc(&env), cc, "mul r{n} dst={dst:o} src={src:o}");
+    }
+    // メモリソース: mul (r1)+, r2 — src は指定子評価される。
+    let words = asm_r(Insn::Mul, 2, &[Spec::AutoInc(1)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o400);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    sem::r_set(&mut env.backend, 2, 0o3);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 2), 0);
+    assert_eq!(sem::r_get(&env.backend, 3), 0o1400); // 3×0o400
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2002);
+}
+
+/// div は偶数 R で R,R+1 の 32 ビット被除数を src で割り、商を R・
+/// 剰余を R+1 に入れる。剰余は被除数と同符号（0 方向切詰）。
+/// 0 除算は V=1・C=1、商が 16 ビットに収まらなければ V=1・C=0
+/// でレジスタは不変。
+// Ref: SPEC-PDP11-ARCH83（第5章 DIV）.
+#[test]
+fn div_quotient_remainder_and_errors() {
+    let feats = model_feats("pdp11_03") | FEAT_EIS;
+    for (dvd_hi, dvd_lo, src, q, rem, cc) in [
+        // 64 / 8 = 8 余り 0。
+        (0u16, 0o100u16, 0o10u16, 0o10u16, 0u16, 0u16),
+        // -7 / 2 = -3 余り -1（0 方向切詰・剰余は被除数と同符号）。
+        (0o177777, 0o177771, 0o2, 0o177775, 0o177777, 0o10),
+        // -8192 / -4 = 2048 余り 0。
+        (0o177777, 0o160000, 0o177774, 0o4000, 0, 0),
+        // 0 / 5 = 0 余り 0 → Z。
+        (0, 0, 0o5, 0, 0, 0o4),
+    ] {
+        let words = asm_r(Insn::Div, 0, &[Spec::Imm(src)]);
+        let mut env = env_at("pdp11_03", 0o1000, &words);
+        sem::r_set(&mut env.backend, 0, dvd_hi);
+        sem::r_set(&mut env.backend, 1, dvd_lo);
+        step_f(&mut env, feats).unwrap();
+        assert_eq!(
+            (
+                sem::r_get(&env.backend, 0),
+                sem::r_get(&env.backend, 1),
+                nzvc(&env)
+            ),
+            (q, rem, cc),
+            "div {dvd_hi:o}:{dvd_lo:o} / {src:o}"
+        );
+    }
+    // 0 除算: V=1・C=1、レジスタ不変。
+    let words = asm_r(Insn::Div, 0, &[Spec::Reg(2)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o1234);
+    sem::r_set(&mut env.backend, 1, 0o5670);
+    sem::r_set(&mut env.backend, 2, 0);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1234);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o5670);
+    assert_eq!(nzvc(&env), 0o3); // V+C
+    // 商溢れ: 0x8000_0000 / -1 → V=1・C=0、レジスタ不変。
+    let words = asm_r(Insn::Div, 0, &[Spec::Imm(0o177777)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o100000);
+    sem::r_set(&mut env.backend, 1, 0);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o100000);
+    assert_eq!(nzvc(&env), 0o2); // V のみ
+    // 商が 16 ビットを 1 だけ超える: 32768 / 1 → V=1。
+    let words = asm_r(Insn::Div, 0, &[Spec::Imm(0o1)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0);
+    sem::r_set(&mut env.backend, 1, 0o100000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(nzvc(&env), 0o2);
+}
+
+/// ash は src<5:0> を符号付き 6 ビットのカウントで算術シフト
+/// （負=右・正=左）。C=最後に出た桁、V=シフト中に符号が変わった、
+/// どちらも NN=0 では消える。
+// Ref: SPEC-PDP11-ARCH83（第5章 ASH）.
+#[test]
+fn ash_signed_count_and_cc() {
+    let feats = model_feats("pdp11_03") | FEAT_EIS;
+    for (old, cnt, new, cc) in [
+        // 左 4: 0o12345 → 0o47120。シフト中に符号が 1 になった
+        // ことがある → V=1、最後に出た桁=1 → C=1。
+        (0o12345u16, 0o4u16, 0o47120u16, 0o3u16),
+        // 左 1: 0o040000 → 0o100000。符号が 0→1 → V=1、C=0。
+        (0o040000, 0o1, 0o100000, 0o12),
+        // 右 3（カウント 0o75 = -3）: 0o100000 → 0o170000。
+        // 符号複写なので V=0・C=0、N=1。
+        (0o100000, 0o75, 0o170000, 0o10),
+        // 右 1（0o77 = -1）: 0o5 → 0o2。C=出た bit0=1、N=0、V=0。
+        (0o5, 0o77, 0o2, 0o1),
+        // カウント 0: 値不変、CC は結果から（N=1、V=0・C=0）。
+        (0o100000, 0, 0o100000, 0o10),
+        // 左 31: 0o77777 → 0。全桁が出て C=0、V=1、Z=1。
+        (0o77777, 0o37, 0, 0o6),
+        // 右 32（0o40 = -32）: 0o100000 → 0o177777。最後に出たのは
+        // 符号桁 → C=1、V=0、N=1。
+        (0o100000, 0o40, 0o177777, 0o11),
+        // 上位ビットはカウントに関係ない（src<5:0> のみ —— 上位桁を
+        // 立てても 0o04 = +4 と同じ結果）。
+        (0o12345, 0o177704, 0o47120, 0o3),
+    ] {
+        let words = asm_r(Insn::Ash, 0, &[Spec::Imm(cnt)]);
+        let mut env = env_at("pdp11_03", 0o1000, &words);
+        sem::psw_put(&mut env.backend, 0o17); // 旧 CC は置き換わる
+        sem::r_set(&mut env.backend, 0, old);
+        step_f(&mut env, feats).unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 0), nzvc(&env)),
+            (new, cc),
+            "ash r0={old:o} cnt={cnt:o}"
+        );
+    }
+}
+
+/// ashc は R:R|1 の 32 ビット対をシフト。奇数 R では被演算が
+/// R:R（同じレジスタの複製）で、右シフトは 16 ビットの回転になる。
+/// CC は常に 32 ビット結果で立つ。
+// Ref: SPEC-PDP11-ARCH83（第5章 ASHC）.
+#[test]
+fn ashc_32bit_pair_and_odd_rotate() {
+    let feats = model_feats("pdp11_03") | FEAT_EIS;
+    // 偶数対: r0:r1 = 0x0001_0000 を左 4 → 0x0010_0000。
+    let words = asm_r(Insn::Ashc, 0, &[Spec::Imm(0o4)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o1);
+    sem::r_set(&mut env.backend, 1, 0);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o20);
+    assert_eq!(sem::r_get(&env.backend, 1), 0);
+    assert_eq!(nzvc(&env), 0);
+    // 右 4: r0:r1 = 0x8000_0000 → 0xF800_0000 → N=1。C=bit3=0。
+    let words = asm_r(Insn::Ashc, 0, &[Spec::Imm(0o74)]); // -4
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o100000);
+    sem::r_set(&mut env.backend, 1, 0);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o174000);
+    assert_eq!(sem::r_get(&env.backend, 1), 0);
+    assert_eq!(nzvc(&env), 0o10);
+    // V: 0x4000_0000 の左 1 → 符号が 0→1 に変わる → V=1。
+    let words = asm_r(Insn::Ashc, 0, &[Spec::Imm(0o1)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o040000);
+    sem::r_set(&mut env.backend, 1, 0);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o100000);
+    assert_eq!(nzvc(&env), 0o12); // N+V
+    // 奇数 R の右シフトは回転: r3 = 0o100001、右 1 → 0o140000
+    // （ROR と同値）。C=出た bit0=1。
+    let words = asm_r(Insn::Ashc, 3, &[Spec::Imm(0o77)]); // -1
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 3, 0o100001);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 0o140000);
+    assert_eq!(nzvc(&env), 0o11); // N+C
+    // 奇数 R の左シフトは 16 ビット左シフト相当: r3=1、左 4 → 0o20。
+    let words = asm_r(Insn::Ashc, 3, &[Spec::Imm(0o4)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::r_set(&mut env.backend, 3, 0o1);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 0o20);
+    // Z は 32 ビット結果: 対が全部 0 → Z=1。
+    let words = asm_r(Insn::Ashc, 0, &[Spec::Imm(0o10)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(nzvc(&env), 0o4);
+}
+
+/// EIS は `eis` 旗がないと予約命令（vector 010、fault —— 積む
+/// PC は命令先頭）。旗があればデコード・実行できる。
+// Ref: SPEC-PDP11-ARCH83（第5章・付録 C）.
+#[test]
+fn eis_fis_gated_by_flags() {
+    // pdp11_03 は EIS を持たない → 070RSS は vector 010。
+    let words = asm_r(Insn::Mul, 0, &[Spec::Reg(0)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1000); // fault — 命令先頭
+    // pdp11_70 は EIS 標準 —— 同じ語が mul として動く。
+    let mut env = env_at("pdp11_70", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o3);
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o11); // 3×3
+    // FIS も旗なしでは vector 010。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    // pdp11_73 は FP11 標準で FIS は排他（decode も付録 C どおり）。
+    assert_eq!(dec_m(0o075001, "pdp11_73"), None);
+}
+
+/// FIS: 汎用レジスタがフレームを指し、(R)/(R+2)=B・(R+4)/(R+6)=A。
+/// 結果は A 位置へ、成功なら R ← R+4。CC は N=結果<0・Z=結果=0・
+/// V=0・C=0。
+// Ref: SPEC-PDP11-ARCH83（付録 C）.
+#[test]
+fn fis_arith_frame_and_cc() {
+    let feats = model_feats("pdp11_03") | FEAT_FIS;
+    // 1.0 / 2.0 / 3.0 / 6.0 / 0.5 / 2^-24 の F 形式ビット列
+    // （符号・指数 excess 200・仮数）。
+    const F1_0: u32 = 0x4080_0000;
+    const F2_0: u32 = 0x4100_0000;
+    const F3_0: u32 = 0x4140_0000;
+    const F6_0: u32 = 0x41C0_0000;
+    const F_2M24: u32 = 0x3480_0000; // 2^-24
+    // fadd r1: B=1.0・A=2.0 → 3.0。r1 ← +4。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    putf(&mut env, 0o2000, F1_0);
+    putf(&mut env, 0o2004, F2_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F3_0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2004); // R+4 → 結果上位
+    assert_eq!(nzvc(&env), 0);
+    // fsub r1: 3.0 - 1.0 → 2.0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fsub, 1)]);
+    putf(&mut env, 0o2000, F1_0);
+    putf(&mut env, 0o2004, F3_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F2_0);
+    // fmul r1: 2.0 × 3.0 → 6.0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
+    putf(&mut env, 0o2000, F2_0);
+    putf(&mut env, 0o2004, F3_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F6_0);
+    // fdiv r1: 6.0 / 3.0 → 2.0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fdiv, 1)]);
+    putf(&mut env, 0o2000, F3_0);
+    putf(&mut env, 0o2004, F6_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F2_0);
+    // 丸め: 1.0 + 2^-24。真の結果は 1 ulp の半分 —— FIS は絶対値
+    // を増やす方向へ丸める（KE11-F）ので 1.0+ulp。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    putf(&mut env, 0o2000, F_2M24);
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), 0x4080_0001);
+    // 負の結果: 1.0 - 3.0 = -2.0 → N=1。結果は -2.0 = 0xC100_0000。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fsub, 1)]);
+    putf(&mut env, 0o2000, F3_0);
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), 0xC100_0000);
+    assert_eq!(nzvc(&env), 0o10); // N
+    // 零の結果: 1.0 - 1.0 = 0 → Z=1（クリーンな 0 が格納される）。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fsub, 1)]);
+    putf(&mut env, 0o2000, F1_0);
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), 0);
+    assert_eq!(nzvc(&env), 0o4); // Z
+    // 指数 0 のオペランドは符号を問わず 0（KE11-F）: -0 + 1.0 = 1.0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    putf(&mut env, 0o2000, 0x8000_0000); // -0（指数 0・符号 1）
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F1_0);
+}
+
+/// FIS の例外: 0 除算・オーバーフロー・アンダーフローは CC を
+/// 再解釈して vector 244 へ fault（積む PC は命令先頭、PSW は
+/// エラー CC を含む）。R とオペランドは不変。
+// Ref: SPEC-PDP11-ARCH83（付録 C）.
+#[test]
+fn fis_errors_trap_244_with_reinterpreted_cc() {
+    let feats = model_feats("pdp11_03") | FEAT_FIS;
+    const F1_0: u32 = 0x4080_0000;
+    const F2_0: u32 = 0x4100_0000;
+    const F_MAX: u32 = 0x7FFF_FFFF; // 最大正規化（exp 377・仮数全 1）
+    const F_MIN: u32 = 0x0080_0000; // 最小正規化（exp 1・仮数 0）
+    const F_HALF: u32 = 0x4000_0000; // 0.5
+    // 0 除算: V=1・N=1・C=1・Z=0。B=0 で fdiv。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fdiv, 1)]);
+    putf(&mut env, 0o2000, 0); // B = 0
+    putf(&mut env, 0o2004, F1_0); // A = 1.0
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1000); // fault — 命令先頭
+    // 積まれた PSW はエラー CC（V=1・N=1・C=1・Z=0）。配送後の現行
+    // PSW はベクタの新 PSW（0o246 = 0）なので、エラー CC は積まれた
+    // 側だけに残る形になる。
+    assert_eq!(get16(&env, sp + 2) & 0xf, 0o13);
+    // R とオペランドは不変。
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2000);
+    assert_eq!(getf(&env, 0o2004), F1_0);
+    // オーバーフロー: max × 2.0 → V=1・N=0・C=0・Z=0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
+    putf(&mut env, 0o2000, F2_0);
+    putf(&mut env, 0o2004, F_MAX);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp + 2) & 0xf, 0o2); // V のみ
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2000);
+    assert_eq!(getf(&env, 0o2004), F_MAX); // A 不変
+    // アンダーフロー: min × 0.5 → V=1・N=1・C=0・Z=0。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
+    putf(&mut env, 0o2000, F_HALF);
+    putf(&mut env, 0o2004, F_MIN);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp + 2) & 0xf, 0o12); // V+N
+    // fsub のアンダーフロー: min - 0 は引く数が 0 で結果は
+    // min —— 例外なしの確認にもなる。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    putf(&mut env, 0o2000, 0);
+    putf(&mut env, 0o2004, F_MIN);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), F_MIN);
+    assert_eq!(nzvc(&env), 0);
+}
+
+/// FMUL/FDIV は R6 スタックへ作業語を 1 語 push/pop する
+/// （付録 C 注記・付録 B 項目 22）—— SP が書き込めなければ
+/// バスエラーで命令が中断する。FADD/FSUB は SP を触らない。
+// Ref: SPEC-PDP11-ARCH83（付録 C・付録 B 項目 22）.
+#[test]
+fn fis_mul_div_implicit_sp_scratch() {
+    let feats = model_feats("pdp11_03") | FEAT_FIS;
+    const F1_0: u32 = 0x4080_0000;
+    const F2_0: u32 = 0x4100_0000;
+    // 正常系: fmul が終わると SP は元に戻る（push+pop）。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
+    putf(&mut env, 0o2000, F2_0);
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+    assert_eq!(getf(&env, 0o2004), F2_0); // 2.0 × 1.0
+    // SP-2 が未写像 → fmul の push がバスエラー（vector 004）。配送
+    // の push は新 PSW（ユーザーモード）のスタック —— usp を
+    // 写像済みにしておく。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
+    putf(&mut env, 0o2000, F2_0);
+    putf(&mut env, 0o2004, F1_0);
+    put16(&mut env, 0o004, 0o3000);
+    put16(&mut env, 0o006, 0o140000); // ユーザーモードの PSW
+    st_put(&mut env, USP, SP0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o20002); // SP-2 が未写像
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(env.pc, 0o3000);
+    assert_eq!(getf(&env, 0o2004), F1_0); // A は演算前のまま
+    // 同条件の fadd は SP を触らないので普通に実行できる。
+    let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
+    putf(&mut env, 0o2000, F2_0);
+    putf(&mut env, 0o2004, F1_0);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o20002);
+    step_f(&mut env, feats).unwrap();
+    assert_eq!(getf(&env, 0o2004), 0x4140_0000); // 3.0
+}
