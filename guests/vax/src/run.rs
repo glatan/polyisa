@@ -17,8 +17,11 @@
 //! 次の命令なので `env.pc` を命令終端に進めてから配送する。
 //!
 //! 解読不能（予約命令）とモデルの機能集合にない命令（サブセット
-//! 命令の補完要求）は OS パーソナリティの `handle_unimpl` に渡す
-//! （`emul_dispatch` の既定は hook。SCB への実機配送は VX11）。
+//! 命令の補完要求）は `emul_dispatch` が振り分ける: hook（既定）
+//! なら OS パーソナリティの `handle_unimpl` を先に試し、受けない
+//! 場合と scb のときはクラス別の実機 fault に写す —— 省略された
+//! 浮動小数点群は予約命令 fault、文字列・十進・CRC・EDITPC 群は
+//! 補完例外（SCB 0xC8/0xCC、PSL<FPD> で開始/継続）。
 //! 未実装の命令意味論は `Outcome::Unimplemented`（m68k 先例）。
 //!
 //! 中断可能命令（VX7 以降が本体を実装する）は「反復 1 回 =
@@ -31,10 +34,13 @@ use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_mem::{Access, AccessKind, AddressSpace, Align, Endian, VirtAddr};
-use polyisa_sem::ExceptionKind;
+use polyisa_sem::{Backend as _, ExceptionKind};
 
 use crate::specifier::{self, OpTy};
-use crate::{DEFAULT_FEATS, decode_model_ex, reg, sem};
+use crate::{
+    DEFAULT_FEATS, EMUL_DISPATCH_SCB, EmulDispatchParam, FEAT_BITS, FEAT_HFP, decode_model_ex, reg,
+    sem,
+};
 
 /// フェッチのアクセス属性。整列は要求しない（命令はバイト整列）。
 const FETCH: Access = Access {
@@ -112,19 +118,52 @@ fn fault(
     trap_result(pc, word, t)
 }
 
-/// 解読不能・機能集合にない・未実装の命令。OS パーソナリティの
-/// 補完経路（`handle_unimpl`、emul_dispatch=hook）を先に試し、
-/// 受けなければ予約命令 fault に写す。
+/// 命令を遮っている機能旗を探す。モデルの集合では解けずフル
+/// 集合では解ける命令を呼ぶ。`when` は単一の旗なので、それを
+/// 抜いた集合で解けなくなる旗が一意に見つかる（旗を持たない
+/// 命令は None）。
+fn gate(word: u32) -> Option<u128> {
+    let len = if word & 0xff >= 0xfd { 16 } else { 8 };
+    FEAT_BITS
+        .iter()
+        .map(|&(_, bit)| bit)
+        .find(|&bit| decode_model_ex(u128::from(word), len, false, DEFAULT_FEATS & !bit).is_none())
+}
+
+/// 解読不能・機能集合にない・未実装の命令。emul_dispatch=hook
+/// （既定）なら OS パーソナリティの補完経路（`handle_unimpl`）を
+/// 先に試す。受けなければクラス別の実機 fault に写す —— 省略
+/// された浮動小数点群（hfp）は予約命令 fault、文字列・十進・
+/// CRC・EDITPC 群は補完例外。補完例外のベクタは PSL<FPD> で
+/// 開始（0xC8）/継続（0xCC）を振り分ける正本規則。復帰先は
+/// いずれも命令先頭（OS 側の補完が命令を再評価して終端へ進める
+/// 契約）。実機が配送前に行う指定子評価と例外フレームのスタック
+/// 積みはこの裸モデルの範囲外。
+// Gap: GAP-0079
+// Ref: SPEC-VAX-ARM（サブセット化の章）, SPEC-VAX-MICROVAX §3.9.
 fn unimpl_insn(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,
     pc: u32,
     word: u32,
 ) -> Result<(), Outcome> {
-    if sys.handle_unimpl(env, u64::from(pc), u64::from(word)) == TrapOutcome::Handled {
+    if env.backend.param::<EmulDispatchParam>() != EMUL_DISPATCH_SCB
+        && sys.handle_unimpl(env, u64::from(pc), u64::from(word)) == TrapOutcome::Handled
+    {
         return Ok(());
     }
-    fault(env, sys, pc, sem::scb::PRIV_INSN, u128::from(word))
+    let code = match gate(word) {
+        Some(FEAT_HFP) => sem::scb::PRIV_INSN,
+        Some(_) => {
+            if sem::fpd(&env.backend) {
+                sem::scb::EMUL_CONT
+            } else {
+                sem::scb::EMUL_START
+            }
+        }
+        None => sem::scb::PRIV_INSN,
+    };
+    fault(env, sys, pc, code, u128::from(word))
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論。`env.pc` は命令の先頭

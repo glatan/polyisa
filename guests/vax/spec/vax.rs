@@ -33,18 +33,25 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // 機能旗。命令群の実装差（直接実行か補完経路か）を表す。
     // フル VAX はすべて持ち、MicroVAX 系は実装しない群を
-    // remove_features で削る。削られた命令は補完要求（サブセット
-    // 例外）として扱い、配送経路は `emul_dispatch` パラメータ。
+    // remove_features で削る。削られた命令は補完要求として扱い、
+    // 配送経路は `emul_dispatch` パラメータ。削ったときに起きる
+    // 例外は正本のサブセット規則で群ごとに決まる: 文字列・十進系
+    // （decimal/string_ext/string_cmp/crc/editpc）は補完例外
+    // （SCB 0xC8/0xCC）、浮動小数点群（hfp）は予約命令 fault。
     // - `decimal`: パック十進・数値文字列命令（movp/cmpp/addp/
     //   subp/mulp/divp/cvt*/ashp 系）。
-    // - `hfp`: H 形式浮動小数点と octaword 命令。
+    // - `hfp`: H 形式浮動小数点と octaword 命令（movo/clro/
+    //   movah/pushah を含む）。
     // - `string_ext`: 拡張文字列命令（matchc/movtc/movtuc）。
     // - `string_cmp`: 文字列の比較・走査系（cmpc3/cmpc5/locc/
     //   scanc/skpc/spanc の 6 個）。SOC 系はマイクロコードで実装
     //   するが、KA630（MicroVAX II）では補完対象だった世代差の節点。
     // - `crc`: crc。
     // - `editpc`: editpc。
-    // - `compat`: PDP-11 互換モード命令。
+    // - `compat`: PDP-11 互換モード。compat 命令は別 ISA でこの
+    //   モデルには命令として現れない —— 旗は識別用で、compat を
+    //   省略した実装で REI が CM 遷移を試みたときの予約オペランド
+    //   fault は REI の意味論の仕事（未実装）。
     // Ref: SPEC-VAX-ARM（サブセット化の章）, SPEC-VAX-MICROVAX §3.7.
     for name in [
         "decimal",
@@ -80,14 +87,25 @@ pub fn build_model() -> polyisa_isadl::Model {
          KA660 では無効で、十進補完の macrocode がこの桁を使う",
     );
 
-    // CPU モデル。11/780 はフル VAX（全機能）の基底。MicroVAX 系は
-    // 実装しない群を削る。NVAX 以降の世代差（compat の有無等）の
-    // 確定は VX11 で正本照合のうえ行う。
+    // CPU モデル。11/780 はフル VAX（全機能）の基底 —— 実機の
+    // 11/780 では G/H 形式がオプション扱いだが、ここでは全
+    // オプションを搭載した形を取る。MicroVAX 系は実装しない群を
+    // 削る（「マイクロコード支援」群は macrocode 補完が前提の
+    // 加速なので、機能旗では補完対象として削る。加速の効果は
+    // タイミング側の課題 —— VX12）。
     // - microvax2（KA630・MicroVAX II）: decimal/hfp/string_ext/
-    //   string_cmp/crc/editpc/compat を補完対象とする。
+    //   string_cmp/crc/editpc/compat を補完対象とする（ARM 付録 B
+    //   の「省略可能な文字列命令なし・H なし・互換モードなし」に、
+    //   string_cmp の 6 個が microcode assisted で macrocode 補完
+    //   だった KA660 TM §3.7 の脚註を合わせた）。
     // - ka660（SOC）: KA630 との差は string_cmp の 6 個を実装
     //   する点。dv_hw はハードが扱わない。
-    // Ref: SPEC-VAX-ARM, SPEC-VAX-MICROVAX §3.7.
+    // - nvax: compat 以外の全命令を実装する形。登録正本に NVAX
+    //   の実装群の記述はない —— ARM 付録 B の後期 VAX（8200/
+    //   8300/8500「全命令・互換モードなし」）と同型として宣言した
+    //   近似（GAP 記録）。ka650（CVAX）系の実装群差も台帳に
+    //   正本がなく、宣言は ka660 形で代用する。
+    // Ref: SPEC-VAX-ARM（付録 B）, SPEC-VAX-MICROVAX §3.7.
     let subset: &[&str] = &[
         "decimal",
         "hfp",

@@ -30,6 +30,7 @@
 
 use polyisa_decimal::PackedDec;
 use polyisa_engine::interp::{InterpBackend, InterpExit};
+use polyisa_sem::Backend as _;
 
 use crate::sem::{
     cc_nzvc, eval, eval_a, eval_r, fault, iv_trap, load, partial_done, partial_resume,
@@ -123,10 +124,12 @@ fn cc_dec(b: &mut InterpBackend, v: &PackedDec, overflow: bool) {
 }
 
 /// 十進オーバーフローの trap: V=1 かつ PSL<DV>=1 のとき算術 trap
-/// 型 6（DECOVF）。KA660 等 dv_hw=false のモデル差は VX11 で扱う
-/// —— ここでは PSL の桁どおりに振る舞う。
-fn dv_trap(b: &InterpBackend) -> Result<(), InterpExit> {
-    if psl_flag(b, psl::V) && psl_flag(b, psl::DV) {
+/// 型 6（DECOVF）。dv_hw=false のモデル（KA660）ではハードが DV
+/// 桁を扱わない —— 十進補完の macrocode が使う桁なので trap
+/// しない。
+// Ref: SPEC-VAX-MICROVAX §3.9（PSL<DV> の項）.
+fn dv_trap(b: &mut InterpBackend) -> Result<(), InterpExit> {
+    if b.param::<crate::DvHwParam>() && psl_flag(b, psl::V) && psl_flag(b, psl::DV) {
         return Err(trap(scb::arith(scb::at::DEC_OVERFLOW)));
     }
     Ok(())

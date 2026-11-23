@@ -4718,3 +4718,259 @@ fn dec_overlap_copy() {
     // 前向き 1 バイトコピーなので先頭バイトが伝播する（決定的）。
     assert_eq!(mem_bytes(&env, DEC, 4), [0x12, 0x12, 0x12, 0x12]);
 }
+
+// ---- VX11: モデル差と補完経路 ----
+
+/// trap コードと `handle_unimpl` の呼出を記録するハンドラ。
+#[derive(Default)]
+struct Emul {
+    trap: Option<u32>,
+    trap_pc: u64,
+    unimpl: Option<(u64, u64)>,
+}
+
+impl TrapHandler for Emul {
+    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+        self.trap = Some(code);
+        self.trap_pc = env.pc;
+        TrapOutcome::Handled
+    }
+    fn handle_unimpl(&mut self, _env: &mut BareEnv, pc: u64, word: u64) -> TrapOutcome {
+        self.unimpl = Some((pc, word));
+        TrapOutcome::Unimplemented
+    }
+}
+
+#[test]
+fn vx11_model_insn_matrix() {
+    // モデル×命令の受理行列（Ref: SPEC-VAX-ARM 付録 B,
+    // SPEC-VAX-MICROVAX §3.7）。
+    let f = |n: &str| model_feats(n);
+    let dec = |w: u128, l: u32, m: u128| decode_model_ex(w, l, false, m).is_some();
+    // 文字列比較 6 個（cmpc3=0x29）: 780・ka660・nvax では直接
+    // 実行、microvax2 では補完対象。
+    for n in ["vax11_780", "ka660", "nvax"] {
+        assert!(dec(0x29, 8, f(n)), "{n}: cmpc3");
+    }
+    assert!(!dec(0x29, 8, f("microvax2")), "microvax2: cmpc3");
+    // 十進（movp=0x34）・crc(0x0b)・editpc(0x38)・movtc(0x2e) は
+    // フル集合のモデルのみ。
+    for w in [0x34u128, 0x0b, 0x38, 0x2e] {
+        for n in ["vax11_780", "nvax"] {
+            assert!(dec(w, 8, f(n)), "{n}: {w:#x}");
+        }
+        for n in ["microvax2", "ka660"] {
+            assert!(!dec(w, 8, f(n)), "{n}: {w:#x}");
+        }
+    }
+    // octaword（movo=0xfd 0x7d）もフル集合のみ。
+    for n in ["vax11_780", "nvax"] {
+        assert!(dec(0x7dfd, 16, f(n)), "{n}: movo");
+    }
+    for n in ["microvax2", "ka660"] {
+        assert!(!dec(0x7dfd, 16, f(n)), "{n}: movo");
+    }
+    // kernel の movc3/movc5 は全モデルで直接実行。
+    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+        assert!(dec(0x28, 8, f(n)), "{n}: movc3");
+        assert!(dec(0x2c, 8, f(n)), "{n}: movc5");
+    }
+    // 予約語（0x0a 未宣言）はどのモデルでも解けない。
+    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+        assert!(!dec(0x0a, 8, f(n)), "{n}: 0x0a");
+    }
+}
+
+#[test]
+fn vx11_model_exec_matrix() {
+    // ka660 で cmpc3 は直接実行される（string_cmp を実装）。
+    // cmpc3 #1,@#a,@#b —— 等しい 1 バイト同士で Z=1。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0x29, 0x8f, 1, 0, 0x9f, 0, 0x08, 0x01, 0, 0x9f, 1, 0x08, 0x01, 0,
+        ],
+    );
+    put(&mut env, DATA, &[0x42]);
+    put(&mut env, DATA + 1, &[0x42]);
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(env.pc, BASE + 14);
+    assert_eq!(cc(&env), (false, true, false, false));
+    assert_eq!(sys.unimpl, None);
+    assert_eq!(sys.trap, None);
+
+    // nvax で addp4 は直接実行される（decimal あり）。
+    // addp4 #1,@#a, #1,@#b —— "1"+"2"="3"。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0x20, 0x8f, 1, 0, 0x9f, 0, 0x08, 0x01, 0, 0x8f, 1, 0, 0x9f, 1, 0x08, 0x01, 0,
+        ],
+    );
+    put(&mut env, DATA, &pk(&[1], false));
+    put(&mut env, DATA + 1, &pk(&[2], false));
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("nvax")).unwrap();
+    assert_eq!(mem_pack(&env, DATA + 1, 1), (vec![3], false));
+    assert_eq!(sys.unimpl, None);
+}
+
+#[test]
+fn vx11_hook_emulates_subset_insn() {
+    // hook（既定）では handle_unimpl が補完の役目を負う。
+    // Handled ならハンドラが復帰 PC を設定した契約。
+    struct EmuOk;
+    impl TrapHandler for EmuOk {
+        fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+            TrapOutcome::Unimplemented
+        }
+        fn handle_unimpl(&mut self, env: &mut BareEnv, pc: u64, _word: u64) -> TrapOutcome {
+            env.pc = pc + 5; // movp #1,@#a,@#b の命令長ぶん進める
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x34, 0x8f, 1, 0, 0x50]); // movp #1,@#a,@#b（指定子は未完でもよい）
+    env.pc = BASE;
+    let mut sys = EmuOk;
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(env.pc, BASE + 5);
+
+    // hook を辞退した命令はクラス別の実機 fault に写る ——
+    // 十進命令なら補完例外 0xC8（FPD=0）、予約語なら 0x10。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x34]);
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(sys.unimpl, Some((BASE, 0x34)));
+    assert_eq!(sys.trap, Some(sem::scb::EMUL_START));
+    assert_eq!(sys.trap_pc, BASE);
+
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x0a]); // どの集合にもない語は予約命令 fault
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(sys.unimpl, None);
+    assert_eq!(sys.trap, Some(sem::scb::PRIV_INSN));
+}
+
+#[test]
+fn vx11_scb_dispatch() {
+    // scb では handle_unimpl を呼ばず実機どおりのベクタへ配送。
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_SCB,
+            dv_hw: false,
+        },
+    );
+    put(&mut env, BASE, &[0x34]); // movp（decimal、ka660 では省略）
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(sys.unimpl, None);
+    assert_eq!(sys.trap, Some(sem::scb::EMUL_START));
+    assert_eq!(sys.trap_pc, BASE); // fault の復帰先は命令先頭
+
+    // FPD=1 の再入は継続ベクタ 0xCC（補完が中断された形）。
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_SCB,
+            dv_hw: false,
+        },
+    );
+    put(&mut env, BASE, &[0x38]); // editpc
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::FPD));
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(sys.trap, Some(sem::scb::EMUL_CONT));
+
+    // 省略された浮動群（movo=hfp）は予約命令 fault 0x10 ——
+    // 補完例外の対象は文字列・十進系だけという正本規則。
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_SCB,
+            dv_hw: false,
+        },
+    );
+    put(&mut env, BASE, &[0xfd, 0x7d]); // movo
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
+    assert_eq!(sys.trap, Some(sem::scb::PRIV_INSN));
+    assert_eq!(sys.unimpl, None);
+
+    // microvax2 では string_cmp も補完対象 —— cmpc3 が 0xC8 に乗る。
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_SCB,
+            dv_hw: true,
+        },
+    );
+    put(&mut env, BASE, &[0x29]); // cmpc3
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, model_feats("microvax2")).unwrap();
+    assert_eq!(sys.trap, Some(sem::scb::EMUL_START));
+}
+
+#[test]
+fn vx11_dv_hw_param() {
+    // cvtlp r0,#3,@#dst —— 12345 は 3 桁に収まらず V=1（十進
+    // オーバーフロー）。PSL<DV>=1 のとき dv_hw=true なら算術 trap
+    // 型 6、dv_hw=false（KA660）ならハードは桁を扱わず trap しない。
+    let mut prog = vec![0xf9, 0x50];
+    rw(3, &mut prog);
+    ab(DEC + 0x20, &mut prog);
+
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_HOOK,
+            dv_hw: true,
+        },
+    );
+    put(&mut env, BASE, &prog);
+    sem::r_set(&mut env.backend, 0, 12345);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::DV));
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.trap, Some(sem::scb::arith(sem::scb::at::DEC_OVERFLOW)));
+    assert_eq!(sys.trap_pc, BASE + prog.len() as u64); // trap は命令終端へ
+
+    let mut env = run_env(1);
+    install_params(
+        &mut env.backend,
+        &Params {
+            emul_dispatch: EMUL_DISPATCH_HOOK,
+            dv_hw: false,
+        },
+    );
+    put(&mut env, BASE, &prog);
+    sem::r_set(&mut env.backend, 0, 12345);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::DV));
+    env.pc = BASE;
+    let mut sys = Emul::default();
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.trap, None);
+    assert_eq!(cc(&env), (false, false, true, false));
+}
