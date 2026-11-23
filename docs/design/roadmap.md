@@ -44,8 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX5 | 整数算術・論理・シフト・combine/mux 系 | HX4 | - |
-| HX6 | load/store・memop・`.new` 書き込み | HX4 | - |
 | HX7 | 分岐・jump/call/jumpr・述語付き実行・allocframe/deallocframe/dealloc_return・endloop・trap0 | HX4 | - |
 | HX8 | ハードウェアループ（loop0/loop1、LC/SA） | HX4 | - |
 | HX9 | HVX | HX4 | - |
