@@ -332,6 +332,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         // af11: allocframe のフレームサイズ（bits[10:0]、
         // zfill 3 でバイトオフセット）。
         ("af11", vec![(10, 0)], 3),
+        // ---- HX8: ハードウェアループ ----
+        // lr7: loopN のループ開始即値（bits{12:8}+{4:3} の
+        // 7 ビット符号付きワードオフセット。zfill 2 でバイト
+        // 距離、宣言パケットの先頭相対。extender 併合でも
+        // 32 ビット PC 相対オフセットのまま）。
+        ("lr7", vec![(12, 8), (4, 3)], 2),
+        // lc10: loopN の反復回数 U10（bits{20:16}+{7:5}+{1:0}）。
+        ("lc10", vec![(20, 16), (7, 5), (1, 0)], 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -1061,6 +1069,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         &["s5", "af11"],
         vec![gpr("x", "s5", Access::ReadWrite), val("u", "af11")],
     ));
+    // ---- HX8: ハードウェアループ宣言 ----
+    // loopN(start,#u10)（start は宣言パケット先頭相対の
+    // PC 相対オフセット。## 併合でも PC 相対のまま）。
+    m.formats.push(fmt(
+        "FLOOPI",
+        &["lr7", "lc10"],
+        vec![val("target", "lr7"), val("imm", "lc10")],
+    ));
+    // loopN(start,Rs)。
+    m.formats.push(fmt(
+        "FLOOPR",
+        &["lr7", "s5"],
+        vec![val("target", "lr7"), gpr("s", "s5", Access::Read)],
+    ));
     // Rd = Cs。
     m.formats.push(fmt(
         "FRDC",
@@ -1711,6 +1733,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Pd = cmp.eq/gt(Rs,Rt)。Ref: ALU32 compare.
         ("cmpeq_rr", "FCMP", "11110010000.............000000..", "p{d}=cmp.eq({s},{t})", "alu"),
         ("cmpgt_rr", "FCMP", "11110010010.............000000..", "p{d}=cmp.gt({s},{t})", "alu"),
+        // ---- HX8: ハードウェアループ（CR クラスで slot 3）。
+        // loopN(start,#u10) / loopN(start,Rs)。start は宣言
+        // パケットの先頭相対（## 併合でも PC 相対）、count は
+        // LCn に入る。loop0 が内側、loop1 が外側のループ。
+        // Ref: hardware loops / instruction class CR.
+        ("loop0i", "FLOOPI", "01101001000.......0..........0..", "loop0(#{target},#{imm})", "branch"),
+        ("loop1i", "FLOOPI", "01101001001.......0..........0..", "loop1(#{target},#{imm})", "branch"),
+        ("loop0r", "FLOOPR", "01100000000.......0.....000..000", "loop0(#{target},{s})", "branch"),
+        ("loop1r", "FLOOPR", "01100000001.......0.....000..000", "loop1(#{target},{s})", "branch"),
     ] {
         m.insns.push(ins(name, format, pattern, base(), syntax, timing));
     }

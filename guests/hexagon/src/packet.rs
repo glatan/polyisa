@@ -547,6 +547,16 @@ pub enum ComposeError {
     /// `.new` 消費命令（述語の .new を読む条件形）に対応する
     /// 生成側命令が同じパケット内にない。
     NewProducer,
+    /// ループ終端（endloop 標識）のパケットにプログラム
+    /// フロー命令がある。
+    LoopEndFlow,
+    /// ループ終端パケットに対応する SA/LC を書く命令がある
+    /// （endloop0 で SA0/LC0、endloop1 で SA1/LC1。loopN 宣言と
+    /// `c{0-3}=Rs` 転送を符号パターンで検査する）。
+    LoopEndWrite,
+    /// loopN 宣言を含むパケットに投機的間接ジャンプ・
+    /// new-value compare jump・dealloc_return がある。
+    LoopSetupFlow,
 }
 
 /// プログラムフロー命令の dual-jump 適格（dual-jump 表の分類）。
@@ -564,9 +574,62 @@ enum Flow {
     Both,
 }
 
+/// loopN 宣言命令の判定。CR クラスで bits[27:22]=000000 が
+/// レジスタカウント形、100100 が即値形。bit21 が loop1 を
+/// 選ぶ。戻り値はそのループが書く SA/LC の面（bit0 = SA0/LC0、
+/// bit1 = SA1/LC1。endloop 制限の比較にそのまま使う）。
+fn loop_insn(w: u32) -> Option<u8> {
+    if iclass(w) == 6 && matches!((w >> 22) & 0x3f, 0 | 0b100100) {
+        Some(1 << ((w >> 21) & 1))
+    } else {
+        None
+    }
+}
+
+/// その語が SA/LC を書くかを返す（bit0 = SA0/LC0、bit1 =
+/// SA1/LC1 への書き込み）。loopN 宣言と `c{0-3}=Rs` 転送
+/// （wrcr、c5 = 0-3 がループレジスタ）が対象。
+/// Ref: SPEC-HEXAGON-PRM (V79) loop restrictions.
+fn loop_reg_write(w: u32) -> u8 {
+    let mut m = 0u8;
+    if let Some(n) = loop_insn(w) {
+        m |= n;
+    }
+    // `Cd=Rs`（bits[31:21]=01100010001）の宛先 d5（bits[4:0]）
+    // が c0-3（SA0/LC0/SA1/LC1）。
+    if iclass(w) == 6 && (w >> 21) & 0x7ff == 0b011_0001_0001 && w & 0x1c == 0 {
+        m |= 1 << ((w >> 1) & 1);
+    }
+    m
+}
+
+/// loopN 宣言を含むパケットに置けない命令（投機的間接
+/// ジャンプ・new-value compare jump・dealloc_return）。
+/// `group` が `Some` のとき `word` は 13 ビット subinsn 語。
+/// Ref: SPEC-HEXAGON-PRM (V79) loop restrictions.
+fn loop_setup_bad(len: u32, group: Option<Group>, word: u128) -> bool {
+    if len == 13 {
+        // L2 の dealloc_return（1111101x）と投機的 jumpr
+        // （1111111x で述語選択 dprd3 が p0.new/!p0.new の 6/7）。
+        return group == Some(Group::L2)
+            && (word >> 6 == 0b1111101 || (word >> 6 == 0b1111111 && word & 7 >= 6));
+    }
+    let w = word as u32;
+    match iclass(w) {
+        // new-value compare jump（ICLASS 2 の [27:26]=00）。
+        2 => (w >> 26) & 3 == 0,
+        // 投機的間接ジャンプ（`if ([!]Pu.new) jumpr`。
+        // 述語付 jumpr 形 [27:22]=001101 で bit11 が .new）。
+        5 => (w >> 22) & 0x3f == 0b001101 && w >> 11 & 1 != 0,
+        // 32 ビット dealloc_return 系（[27:24]=0110）。
+        9 => (w >> 24) & 0xf == 6,
+        _ => false,
+    }
+}
+
 /// 命令のフロー種別。`group` が `Some` のとき `word` は
 /// 13 ビット subinsn 語。
-/// Gap: GAP-0069（ICLASS 6 のフロー形・NVJ・endloop 制限は
+/// Gap: GAP-0069（ICLASS 6 のフロー形・NVJ の一部は
 /// 未分離）。
 fn flow_of(len: u32, group: Option<Group>, word: u128, class: Class) -> Flow {
     if len == 13 {
@@ -807,6 +870,32 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
         (Some(_), None, _) => {}
         (None, _, _) => {}
         _ => return Err(ComposeError::BadJumpCombo),
+    }
+    // 2g. ハードウェアループの規則（PRM loop restrictions）。
+    //     - ループ終端（endloop 標識）のパケットにはプログラム
+    //       フロー命令を置けない。
+    //     - ループ終端パケットには対応する SA/LC を書く命令を
+    //       置けない（endloop0 → SA0/LC0、endloop1 → SA1/LC1。
+    //       反対側のループレジスタは書ける）。
+    //     - loopN 宣言を含むパケットには投機的間接ジャンプ・
+    //       new-value compare jump・dealloc_return を置けない。
+    for c in &cands {
+        if pkt.endloop != 0 && flow_of(c.len, c.group, c.word, c.class) != Flow::None {
+            return Err(ComposeError::LoopEndFlow);
+        }
+        if c.len == 32 && loop_reg_write(c.word as u32) & pkt.endloop != 0 {
+            return Err(ComposeError::LoopEndWrite);
+        }
+    }
+    if cands
+        .iter()
+        .any(|c| c.len == 32 && loop_insn(c.word as u32).is_some())
+    {
+        for c in &cands {
+            if loop_setup_bad(c.len, c.group, c.word) {
+                return Err(ComposeError::LoopSetupFlow);
+            }
+        }
     }
 
     // 3. 貪欲に上位スロットから割当て（低アドレス側の命令ほど

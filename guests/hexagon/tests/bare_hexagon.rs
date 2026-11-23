@@ -982,7 +982,7 @@ fn trap0_exits_to_os() {
 #[test]
 fn endloop_marker_recorded() {
     // Parse 10 のループ終端標識が CpuState.endloop に転記される
-    // （LC/SA の処理自体は HX8）。
+    // （LC/SA の処理は commit が行う。LC=0 のままでは分岐しない）。
     let mut env = run_env();
     put(&mut env, BASE, &[with_pp(NOP, 2), with_pp(NOP, 3)]);
     env.pc = BASE;
@@ -3067,4 +3067,325 @@ fn hx7_traps_and_hints() {
     sem::r_set(&mut env.backend, 4, 0x4321);
     step(&mut env).unwrap();
     assert_eq!(env.pc, 0x4321, "p0.new 偽で分岐");
+}
+
+// ---- HX8: ハードウェアループ ----
+// Ref: SPEC-HEXAGON-PRM (V79) Section 8.
+
+#[test]
+fn hx8_loop_words() {
+    // llvm-mc 実符号との突き合わせ。
+    // loop0(#0,#10) / loop1(#8,#100) / loop0(#16,r5) / loop1(#12,r31)
+    for (w, insn, ops) in [
+        (0x6900_c042u32, Insn::Loop0i, &[0u64, 10] as &[u64]),
+        (0x6923_c030, Insn::Loop1i, &[8, 100]),
+        (0x6005_c100, Insn::Loop0r, &[16, 5]),
+        (0x603f_c018, Insn::Loop1r, &[12, 31]),
+    ] {
+        assert_eq!(decode(u128::from(w), 32), Some(insn), "decode {w:#010x}");
+        assert_eq!(extract_ops(insn, u128::from(w)), ops, "ops {w:#010x}");
+        assert_eq!(decode(u128::from(w), 13), None, "duplex {w:#010x}");
+    }
+    // エンコード往復。
+    for (insn, ops) in [
+        (Insn::Loop0i, &[8u64, 3] as &[u64]),
+        (Insn::Loop1i, &[16, 100]),
+        (Insn::Loop0r, &[8, 5]),
+        (Insn::Loop1r, &[8, 31]),
+    ] {
+        let w = encode(insn, ops).unwrap() as u32;
+        assert_eq!(decode(u128::from(w), 32), Some(insn));
+        assert_eq!(extract_ops(insn, u128::from(w)), ops);
+    }
+    // 符号表示。
+    assert_eq!(
+        disasm_word_ex(0x6900_c042, 32, true, 0).as_deref(),
+        Some("loop0(#0,#10)")
+    );
+    assert_eq!(
+        disasm_word_ex(0x603f_c018, 32, true, 0).as_deref(),
+        Some("loop1(#12,r31)")
+    );
+}
+
+#[test]
+fn hx8_loop0_imm() {
+    // loop0(#8,#3): 宣言パケットから +8 バイト先のパケットを
+    // 3 回回る。LC0 は endloop でだけ変わる。
+    let mut env = run_env();
+    let l = with_pp(encode(Insn::Loop0i, &[8, 3]).unwrap() as u32, 3);
+    let body0 = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 2);
+    let body1 = with_pp(encode(Insn::AddRi, &[2, 2, 1]).unwrap() as u32, 3);
+    let after = with_pp(encode(Insn::EqS16, &[3, 99]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[l, with_pp(NOP, 3), body0, body1, after]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(
+        sem::c_get(&env.backend, cnum::SA0.into()).unwrap(),
+        BASE as u32 + 8
+    );
+    assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), 3);
+    assert_eq!(env.pc, BASE + 4);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8, "ループ先頭パケットへ進む");
+    for (n, lc) in [(1, 2), (2, 1)] {
+        step(&mut env).unwrap();
+        assert_eq!(sem::r_get(&env.backend, 1), n);
+        assert_eq!(sem::r_get(&env.backend, 2), n);
+        assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), lc);
+        assert_eq!(env.pc, BASE + 8, "LC0>1 で SA0 復帰");
+    }
+    // LC0=1 の終端では減算せず通り抜ける。
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 3);
+    assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), 1);
+    assert_eq!(env.pc, BASE + 16);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 99);
+    assert_eq!(env.pc, BASE + 20);
+}
+
+#[test]
+fn hx8_loop1_reg() {
+    // loop1(#4,r5): レジスタカウント。外側ループ用の組。
+    let mut env = run_env();
+    let l = with_pp(encode(Insn::Loop1r, &[4, 5]).unwrap() as u32, 3);
+    let body0 = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 2);
+    let body1 = with_pp(encode(Insn::AddRi, &[2, 2, 1]).unwrap() as u32, 2);
+    let body2 = with_pp(encode(Insn::AddRi, &[3, 3, 1]).unwrap() as u32, 3);
+    let after = with_pp(encode(Insn::EqS16, &[4, 7]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[l, body0, body1, body2, after]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 5, 2);
+    step(&mut env).unwrap();
+    assert_eq!(
+        sem::c_get(&env.backend, cnum::SA1.into()).unwrap(),
+        BASE as u32 + 4
+    );
+    assert_eq!(sem::c_get(&env.backend, cnum::LC1.into()).unwrap(), 2);
+    // 1 周目: LC1 2→1 で SA1 復帰。2 周目: LC1=1 で抜ける。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4, "LC1>1 で SA1 復帰");
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 16, "LC1=1 でループ脱出");
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 2);
+    assert_eq!(sem::r_get(&env.backend, 2), 2);
+    assert_eq!(sem::r_get(&env.backend, 3), 2);
+    assert_eq!(sem::r_get(&env.backend, 4), 7);
+}
+
+#[test]
+fn hx8_nested_loops() {
+    // PRM 例の形: 外側 loop1 の体内で内側 loop0 を毎周宣言する。
+    //   +0  loop1(#8,#2)
+    //   +4  nop
+    //   +8  loop0(#8,#3)          <- SA1 が指す外側先頭
+    //   +12 nop
+    //   +16 r1+=1 :endloop0       <- SA0 が指す内側先頭
+    //   +20 r2+=1
+    //   +24 r3+=1
+    //   +28 r4+=1 :endloop1
+    //   +32 r5+=1
+    //   +36 r6=#9
+    let mut env = run_env();
+    let l1 = with_pp(encode(Insn::Loop1i, &[8, 2]).unwrap() as u32, 3);
+    let l0 = with_pp(encode(Insn::Loop0i, &[8, 3]).unwrap() as u32, 3);
+    let last = with_pp(encode(Insn::EqS16, &[6, 9]).unwrap() as u32, 3);
+    put(
+        &mut env,
+        BASE,
+        &[
+            l1,
+            with_pp(NOP, 3),
+            l0,
+            with_pp(NOP, 3),
+            with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 2),
+            with_pp(encode(Insn::AddRi, &[2, 2, 1]).unwrap() as u32, 3),
+            with_pp(encode(Insn::AddRi, &[3, 3, 1]).unwrap() as u32, 1),
+            with_pp(encode(Insn::AddRi, &[4, 4, 1]).unwrap() as u32, 2),
+            with_pp(encode(Insn::AddRi, &[5, 5, 1]).unwrap() as u32, 3),
+            last,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap(); // loop1
+    step(&mut env).unwrap(); // nop
+    step(&mut env).unwrap(); // loop0
+    assert_eq!(
+        sem::c_get(&env.backend, cnum::SA0.into()).unwrap(),
+        BASE as u32 + 16
+    );
+    step(&mut env).unwrap(); // nop -> +16
+    // 内側 3 周。
+    for n in 1..=3 {
+        step(&mut env).unwrap();
+        assert_eq!(sem::r_get(&env.backend, 1), n);
+        assert_eq!(env.pc, if n < 3 { BASE + 16 } else { BASE + 24 });
+    }
+    // 外側 1 周目の終端: LC1 2→1 で SA1（loop0 宣言）へ。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+    assert_eq!(sem::r_get(&env.backend, 3), 1);
+    step(&mut env).unwrap(); // loop0 再宣言で LC0 が 3 に戻る
+    assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), 3);
+    step(&mut env).unwrap(); // nop
+    // 内側 3 周（2 周目）。
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(sem::r_get(&env.backend, 1), 6);
+    assert_eq!(env.pc, BASE + 24);
+    // 外側 2 周目の終端: LC1=1 で脱出。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 36);
+    assert_eq!(sem::c_get(&env.backend, cnum::LC1.into()).unwrap(), 1);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 2);
+    assert_eq!(sem::r_get(&env.backend, 4), 2);
+    assert_eq!(sem::r_get(&env.backend, 5), 2);
+    assert_eq!(sem::r_get(&env.backend, 6), 9);
+}
+
+#[test]
+fn hx8_dual_endloop() {
+    // 1 パケットに :endloop0:endloop1 が両方付く形。
+    // 内側 loop0 が先に裁かれる。
+    let mut env = run_env();
+    let l1 = with_pp(encode(Insn::Loop1i, &[8, 2]).unwrap() as u32, 3);
+    let l0 = with_pp(encode(Insn::Loop0i, &[4, 2]).unwrap() as u32, 3);
+    let b0 = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 2);
+    let b1 = with_pp(encode(Insn::AddRi, &[2, 2, 1]).unwrap() as u32, 2);
+    let b2 = with_pp(encode(Insn::AddRi, &[3, 3, 1]).unwrap() as u32, 3);
+    let last = with_pp(encode(Insn::EqS16, &[4, 5]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[l1, l0, b0, b1, b2, last]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    step(&mut env).unwrap();
+    // 終端パケット実行: LC0 2→1 で SA0 復帰（LC1 はまだ不変）。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+    assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), 1);
+    assert_eq!(sem::c_get(&env.backend, cnum::LC1.into()).unwrap(), 2);
+    // 2 回目: LC0=1 で内側判定を通り、LC1 2→1 で SA1 復帰。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8, "SA1 は内側先頭と同じアドレス");
+    assert_eq!(sem::c_get(&env.backend, cnum::LC1.into()).unwrap(), 1);
+    // 3 回目: 両方 LC=1 で脱出。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 20);
+    assert_eq!(sem::r_get(&env.backend, 1), 3);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 4), 5);
+}
+
+#[test]
+fn hx8_loop_zero_and_one() {
+    // LC=0/1 の宣言でも本体は必ず 1 回実行され、終端で
+    // 減算せずに抜ける（LC は端境でもそのまま残る）。
+    for count in [0u64, 1] {
+        let mut env = run_env();
+        let l = with_pp(encode(Insn::Loop0i, &[4, count]).unwrap() as u32, 3);
+        let b0 = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 2);
+        let b1 = with_pp(encode(Insn::EqS16, &[2, 1]).unwrap() as u32, 3);
+        let last = with_pp(encode(Insn::EqS16, &[3, 2]).unwrap() as u32, 3);
+        put(&mut env, BASE, &[l, b0, b1, last]);
+        env.pc = BASE;
+        step(&mut env).unwrap();
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, BASE + 12, "LC={count} は 1 回で脱出");
+        assert_eq!(sem::r_get(&env.backend, 1), 1);
+        assert_eq!(
+            sem::c_get(&env.backend, cnum::LC0.into()).unwrap(),
+            count as u32
+        );
+        step(&mut env).unwrap();
+        assert_eq!(sem::r_get(&env.backend, 3), 2);
+    }
+}
+
+#[test]
+fn hx8_loop_extender() {
+    // `loop0(##0x12345678,#10)`（llvm-mc 実符号）: extender
+    // 併合でもオフセットは PC 相対のまま（jump と同じ規則で、
+    // SA = パケット先頭 + 併合値）。
+    let mut env = run_env();
+    put(
+        &mut env,
+        BASE,
+        &[with_pp(0x0123_5159, 1), with_pp(0x6900_ce03, 3)],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(
+        sem::c_get(&env.backend, cnum::SA0.into()).unwrap(),
+        BASE as u32 + 0x1234_5678
+    );
+    assert_eq!(sem::c_get(&env.backend, cnum::LC0.into()).unwrap(), 3);
+    assert_eq!(env.pc, BASE + 8);
+}
+
+#[test]
+fn hx8_loop_packet_rules() {
+    // ループ終端パケットのプログラムフロー命令は拒否。
+    let (pkt, _) = packet::split(&[with_pp(NOP, 2), with_pp(JUMP, 3)]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::LoopEndFlow);
+    // duplex の jumpr R31 もフロー命令。
+    let dup = packet::pack_duplex(0x1fc0, 0x1010, Group::L2, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[with_pp(NOP, 2), dup]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::LoopEndFlow);
+    // endloop0 パケットで SA0/LC0 を書く loop0 宣言は拒否。
+    let l0 = with_pp(encode(Insn::Loop0i, &[8, 3]).unwrap() as u32, 2);
+    let (pkt, _) = packet::split(&[l0, with_pp(NOP, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopEndWrite
+    );
+    // endloop0 で c1=Rs（LC0 への転送）も拒否。
+    let wc = with_pp(encode(Insn::Wrcr, &[1, 5]).unwrap() as u32, 2);
+    let (pkt, _) = packet::split(&[wc, with_pp(NOP, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopEndWrite
+    );
+    // 反対側の組（endloop0 で loop1 / c3=Rs）は許容。
+    let l1 = with_pp(encode(Insn::Loop1i, &[8, 3]).unwrap() as u32, 2);
+    let (pkt, _) = packet::split(&[l1, with_pp(NOP, 3)]).unwrap();
+    assert!(packet::expand(&pkt).is_ok(), "endloop0 で SA1/LC1 は書ける");
+    let wc3 = with_pp(encode(Insn::Wrcr, &[3, 5]).unwrap() as u32, 2);
+    let (pkt, _) = packet::split(&[wc3, with_pp(NOP, 3)]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+    // loop 宣言パケットの投機的間接ジャンプは拒否。
+    let l = with_pp(encode(Insn::Loop0i, &[8, 3]).unwrap() as u32, 1);
+    let j = with_pp(encode(Insn::JumprPqn, &[31, 0, 0]).unwrap() as u32, 3);
+    let (pkt, _) = packet::split(&[l, j]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopSetupFlow
+    );
+    // new-value compare jump も拒否。
+    let nv = with_pp(encode(Insn::NvjEqr, &[2, 5, 0, 4]).unwrap() as u32, 3);
+    let (pkt, _) = packet::split(&[l, nv]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopSetupFlow
+    );
+    // dealloc_return（32 ビット形）も拒否。
+    let d = with_pp(encode(Insn::Deallocret, &[30, 30]).unwrap() as u32, 3);
+    let (pkt, _) = packet::split(&[l, d]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopSetupFlow
+    );
+    // duplex の dealloc_return も拒否。
+    let dup = packet::pack_duplex(0x1f40, 0x1010, Group::L2, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[l, dup]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::LoopSetupFlow
+    );
+    // loop 宣言と普通の命令の同居は許容。
+    let i = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 3);
+    let (pkt, _) = packet::split(&[l, i]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
 }

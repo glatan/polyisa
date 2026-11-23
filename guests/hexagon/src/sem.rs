@@ -246,8 +246,8 @@ fn nv_src(b: &InterpBackend, pos: u32, nt: u64) -> Result<u32, InterpExit> {
 }
 
 /// 現在のパケットがハードウェアループの終端かを保持する面
-/// （bit0 = endloop0、bit1 = endloop1）。commit での LC 減算と
-/// SA 復帰は HX8 が足す。
+/// （bit0 = endloop0、bit1 = endloop1）。commit が LC 減算と
+/// SA 復帰を行う。
 #[must_use]
 pub fn endloop_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, endloop))
@@ -265,8 +265,14 @@ pub fn pkt_clear(b: &mut InterpBackend) {
 
 /// パケットの終わりで書き込みをまとめて反映する。pkt_*_ok の
 /// ビットが立つ器だけ確定値へコピーし、未確定域をクリアする。
-/// ループ終端の LC/SA 処理は HX8 が足す。
-pub fn commit(b: &mut InterpBackend) -> Result<(), InterpExit> {
+/// パケットがハードウェアループ終端（endloopN 標識）なら、
+/// 対応する LC を検査して `if (LCn > 1) { LCn--; PC = SAn }`
+/// を行い、戻り先アドレスを返す（なければ None）。LC<=1 の
+/// 終端では減算せず次のパケットへ進む（ループ本体は回数
+/// にかかわらず最低 1 回実行される）。両マーカのとき内側の
+/// loop0 を先に検査する（loop0 が内側、loop1 が外側）。
+/// Ref: SPEC-HEXAGON-PRM (V79) hardware loops.
+pub fn commit(b: &mut InterpBackend) -> Result<Option<u32>, InterpExit> {
     let ok = get32(b, pkt_r_ok_ref());
     for i in 0..32 {
         if ok >> i & 1 != 0 {
@@ -289,7 +295,25 @@ pub fn commit(b: &mut InterpBackend) -> Result<(), InterpExit> {
     for i in 0..4 {
         set32(b, pkt_prod_ref(i), 0);
     }
-    Ok(())
+    // ハードウェアループ終端の処理。endloop0 標識では LC0 を、
+    // endloop1 標識では LC1 を検査する。内側 loop0 を先に評価
+    // し、残りがあれば減算して SA への戻り先を返す。
+    let el = get32(b, endloop_ref());
+    if el & 1 != 0 {
+        let lc = c_get(b, u64::from(cnum::LC0))?;
+        if lc > 1 {
+            c_set(b, u64::from(cnum::LC0), lc - 1)?;
+            return Ok(Some(c_get(b, u64::from(cnum::SA0))?));
+        }
+    }
+    if el & 2 != 0 {
+        let lc = c_get(b, u64::from(cnum::LC1))?;
+        if lc > 1 {
+            c_set(b, u64::from(cnum::LC1), lc - 1)?;
+            return Ok(Some(c_get(b, u64::from(cnum::SA1))?));
+        }
+    }
+    Ok(None)
 }
 
 /// dot-if 修飾の述語条件。呼び出し側（フェッチ層）が命令語の
@@ -1326,6 +1350,28 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, ops[1] as u32, r_get(b, ops[0] as u32));
             let off = jump_off(ops[2], 2, 11);
             jump(b, cx.pc.wrapping_add(off));
+        }
+        // ---- HX8: ハードウェアループ宣言 ----
+        // loopN(start,count): SAn = 宣言パケット先頭 +
+        // PC 相対オフセット（extender 併合時も 32 ビット
+        // PC 相対のまま。jump と同じ規則）、LCn = U10 即値
+        // または Rs。loop0 が内側、loop1 が外側。反復の進行
+        // （LC 減算・SA 復帰）は終端パケットの commit が担う。
+        // Ref: SPEC-HEXAGON-PRM (V79) hw loops.
+        Insn::Loop0i | Insn::Loop1i | Insn::Loop0r | Insn::Loop1r => {
+            let sa = cx.pc.wrapping_add(ximm(cx.ext, ops[0], 2, 9));
+            let lc = if matches!(insn, Insn::Loop0i | Insn::Loop1i) {
+                ops[1] as u32
+            } else {
+                r_get(b, ops[1] as u32)
+            };
+            let (s, l) = if matches!(insn, Insn::Loop0i | Insn::Loop0r) {
+                (cnum::SA0, cnum::LC0)
+            } else {
+                (cnum::SA1, cnum::LC1)
+            };
+            c_set(b, u64::from(s), sa)?;
+            c_set(b, u64::from(l), lc)?;
         }
         // frame の構築・解除・復帰。`masked` は冒頭で裁く。
         Insn::Allocframe => {

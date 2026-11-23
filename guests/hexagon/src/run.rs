@@ -170,8 +170,8 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
     };
     let next = pc.wrapping_add(4 * used as u32);
     // CpuState.pc は常に実行中パケットの先頭（PC 相対・リンク値の
-    // 基底）。split のループ終端標識も状態に転記する（LC/SA の
-    // 処理自体は HX8）。
+    // 基底）。split のループ終端標識も状態に転記する（commit が
+    // LC 減算と SA 復帰を行う）。
     env.backend.set(sem::pc_ref(), pc);
     env.backend.set(sem::endloop_ref(), u32::from(pkt.endloop));
     // パケット内の制御転送は先に記録された側が勝つ。
@@ -209,9 +209,9 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
                 // パケットの生産値を確定してから OS パーソナリティへ。
                 // 戻り先は次のパケット（分岐が記録されていればその
-                // 着地点）。
-                let _ = sem::commit(&mut env.backend);
-                let dest = target.unwrap_or(next);
+                // 着地点。ループ終端なら SA 復帰もありうる）。
+                let loop_dest = sem::commit(&mut env.backend).ok().flatten();
+                let dest = target.or(loop_dest).unwrap_or(next);
                 env.pc = u64::from(dest);
                 env.backend.set(sem::pc_ref(), dest);
                 let t = sys.handle_trap(env, e.code as u32);
@@ -225,13 +225,19 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             }
         }
     }
-    if sem::commit(&mut env.backend).is_err() {
-        return Err(Outcome::Unimplemented {
-            pc: u64::from(pc),
-            word: u128::from(words[0]),
-        });
-    }
-    env.pc = u64::from(target.unwrap_or(next));
-    env.backend.set(sem::pc_ref(), target.unwrap_or(next));
+    let loop_dest = match sem::commit(&mut env.backend) {
+        Ok(t) => t,
+        Err(_) => {
+            return Err(Outcome::Unimplemented {
+                pc: u64::from(pc),
+                word: u128::from(words[0]),
+            });
+        }
+    };
+    // 明示の制御転送があればそちらが勝つ（正規のループ終端
+    // パケットにはフロー命令は置けないので両立しない）。
+    let dest = target.or(loop_dest).unwrap_or(next);
+    env.pc = u64::from(dest);
+    env.backend.set(sem::pc_ref(), dest);
     Ok(())
 }

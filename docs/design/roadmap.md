@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX8 | ハードウェアループ（loop0/loop1、LC/SA） | HX4 | - |
 | HX9 | HVX | HX4 | - |
 | HX10 | タイミングモデル: 複数ハードウェアスレッドの交互実行を表す専用モデル | HX4 | - |
 | HX11 | Linux ABI: hexagon の syscall 表（trap0）・ELF・`heavy_program_hexagon` | HX5-9 | S22-1 |
