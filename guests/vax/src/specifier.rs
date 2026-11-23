@@ -610,8 +610,15 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         Insn::Cmpc5 => &[RB, RW, AB, RW, AB],
         Insn::Locc | Insn::Skpc => &[RB, RW, AB],
         Insn::Scanc | Insn::Spanc => &[RW, AB, AB, RB],
+        Insn::Matchc => &[RW, AB, RW, AB],
+        Insn::Movtc | Insn::Movtuc => &[RW, AB, RB, AB, RW, AB],
+        Insn::Crc => &[AB, RL, RW, AB],
         Insn::Insque => &[AB, AB],
         Insn::Remque => &[AB, WL],
+        Insn::Insqhi | Insn::Insqti => &[AB, AQ],
+        Insn::Remqhi | Insn::Remqti => &[AQ, WL],
+        Insn::Pushr | Insn::Popr => &[RW],
+        Insn::Chmk | Insn::Chme | Insn::Chms | Insn::Chmu => &[RW],
         Insn::Halt
         | Insn::Nop
         | Insn::Rei

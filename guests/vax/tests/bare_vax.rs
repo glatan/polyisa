@@ -2440,3 +2440,775 @@ fn aob_sob_loop_branches() {
     step(&mut env).unwrap();
     assert_eq!(env.pc, BASE + 3 - 6);
 }
+
+// ---- VX7: キュー・文字列・マスク積み降ろし・CHM ----
+
+/// スタックが使える環境（0x7fff_0000 の 1 ページを張る）。
+fn run_env_stack() -> BareEnv {
+    let mut env = run_env(1);
+    env.backend
+        .mem
+        .map(
+            VirtAddr(0x7fff_0000 - PAGE_SIZE),
+            1,
+            Perms(Perms::RW.0 | Perms::X.0),
+        )
+        .unwrap();
+    env
+}
+
+/// @#addr の絶対アドレス指定子のバイト列。
+fn abs(addr: u64, out: &mut Vec<u8>) {
+    out.push(0x9f);
+    out.extend_from_slice(&(addr as u32).to_le_bytes());
+}
+
+/// データ領域の先頭（8 バイト整列済み）。
+const DATA: u64 = BASE + 0x800;
+
+#[test]
+fn new_vx7_insns_decode() {
+    assert_eq!(dec1(0x0b), Some(Insn::Crc));
+    assert_eq!(dec1(0x5c), Some(Insn::Insqhi));
+    assert_eq!(dec1(0x5d), Some(Insn::Insqti));
+    assert_eq!(dec1(0x5e), Some(Insn::Remqhi));
+    assert_eq!(dec1(0x5f), Some(Insn::Remqti));
+    assert_eq!(dec1(0x39), Some(Insn::Matchc));
+    assert_eq!(dec1(0x2e), Some(Insn::Movtc));
+    assert_eq!(dec1(0x2f), Some(Insn::Movtuc));
+    assert_eq!(dec1(0xba), Some(Insn::Popr));
+    assert_eq!(dec1(0xbb), Some(Insn::Pushr));
+    assert_eq!(dec1(0xbc), Some(Insn::Chmk));
+    assert_eq!(dec1(0xbd), Some(Insn::Chme));
+    assert_eq!(dec1(0xbe), Some(Insn::Chms));
+    assert_eq!(dec1(0xbf), Some(Insn::Chmu));
+    assert_eq!(insn_ops(Insn::Insqhi), &[AB, AQ]);
+    assert_eq!(insn_ops(Insn::Remqti), &[AQ, WL]);
+    assert_eq!(insn_ops(Insn::Matchc), &[RW, AB, RW, AB]);
+    assert_eq!(insn_ops(Insn::Movtc), &[RW, AB, RB, AB, RW, AB]);
+    assert_eq!(insn_ops(Insn::Crc), &[AB, RL, RW, AB]);
+    assert_eq!(insn_ops(Insn::Pushr), &[RW]);
+    assert_eq!(insn_ops(Insn::Chmk), &[RW]);
+    // 拡張文字列命令は string_ext で削れる。
+    let no_str = DEFAULT_FEATS & !FEAT_STRING_EXT;
+    assert_eq!(decode_model_ex(0x2e, 8, false, no_str), None);
+    assert_eq!(decode_model_ex(0x39, 8, false, no_str), None);
+    let no_crc = DEFAULT_FEATS & !FEAT_CRC;
+    assert_eq!(decode_model_ex(0x0b, 8, false, no_crc), None);
+    // movc3/movc5・キュー・CHM はカーネル集合なので削れない。
+    assert!(decode_model_ex(0x28, 8, false, no_str).is_some());
+    assert!(decode_model_ex(0x5c, 8, false, no_str).is_some());
+    assert!(decode_model_ex(0xbc, 8, false, no_str).is_some());
+}
+
+#[test]
+fn insque_remque_absolute() {
+    // 絶対リンクキュー: 空ヘッダ H{H,H} へ A を挿入 → 1 項目の輪。
+    let mut env = run_env(1);
+    let (h, a, b) = (DATA, DATA + 0x10, DATA + 0x20);
+    put(&mut env, h, &(h as u32).to_le_bytes());
+    put(&mut env, h + 4, &(h as u32).to_le_bytes());
+    // insque @#A, @#H
+    let mut insn = vec![0x0e];
+    abs(a, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem32(&env, h), a as u32);
+    assert_eq!(mem32(&env, h + 4), a as u32);
+    assert_eq!(mem32(&env, a), h as u32);
+    assert_eq!(mem32(&env, a + 4), h as u32);
+    // Z=1（先頭項目）・N=V=C=0（succ==pred）。
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // insque @#B, @#A —— A の後ろへ。succ=H <u pred=A で C=1・N=1。
+    let mut insn = vec![0x0e];
+    abs(b, &mut insn);
+    abs(a, &mut insn);
+    put(&mut env, BASE + 0x10, &insn);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(mem32(&env, a), b as u32);
+    assert_eq!(mem32(&env, b), h as u32);
+    assert_eq!(mem32(&env, b + 4), a as u32);
+    assert_eq!(mem32(&env, h + 4), b as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // remque @#B, r2 —— B を外す。輪は H<->A に戻る。
+    let mut insn = vec![0x0f];
+    abs(b, &mut insn);
+    insn.push(0x52);
+    put(&mut env, BASE + 0x20, &insn);
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), b as u32);
+    assert_eq!(mem32(&env, a), h as u32);
+    assert_eq!(mem32(&env, h + 4), a as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // 空ヘッダの remque —— V=1（外せる項目なし）・Z=1。
+    put(&mut env, h, &(h as u32).to_le_bytes());
+    put(&mut env, h + 4, &(h as u32).to_le_bytes());
+    let mut insn = vec![0x0f];
+    abs(h, &mut insn);
+    insn.push(0x52);
+    put(&mut env, BASE + 0x30, &insn);
+    env.pc = BASE + 0x30;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), h as u32);
+    assert_eq!(cc(&env), (false, true, true, false));
+}
+
+#[test]
+fn interlocked_queue_self_relative() {
+    // 自己相対キュー: 空ヘッダ {0,0}。insqhi で先頭へ、insqti で
+    // 末尾へ、remqhi/remqti で順に外す。
+    let mut env = run_env(1);
+    let (h, e, f) = (DATA, DATA + 0x10, DATA + 0x20);
+    put(&mut env, h, &0u32.to_le_bytes());
+    put(&mut env, h + 4, &0u32.to_le_bytes());
+
+    // insqhi @#E, @#H —— 空への挿入 → Z=1。
+    let mut insn = vec![0x5c];
+    abs(e, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(mem32(&env, h), (e - h) as u32);
+    assert_eq!(mem32(&env, h + 4), (e - h) as u32);
+    assert_eq!(mem32(&env, e), (h.wrapping_sub(e)) as u32);
+    assert_eq!(mem32(&env, e + 4), (h.wrapping_sub(e)) as u32);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // insqti @#F, @#H —— 末尾へ → Z=0。
+    let mut insn = vec![0x5d];
+    abs(f, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE + 0x10, &insn);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(mem32(&env, h), (e - h) as u32);
+    assert_eq!(mem32(&env, h + 4), (f - h) as u32);
+    assert_eq!(mem32(&env, e), (f - e) as u32);
+    assert_eq!(mem32(&env, f), (h.wrapping_sub(f)) as u32);
+    assert_eq!(mem32(&env, f + 4), (e.wrapping_sub(f)) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // remqhi @#H, r2 —— E を外す → V=0・Z=0。
+    let mut insn = vec![0x5e];
+    abs(h, &mut insn);
+    insn.push(0x52);
+    put(&mut env, BASE + 0x20, &insn);
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), e as u32);
+    assert_eq!(mem32(&env, h), (f - h) as u32);
+    assert_eq!(mem32(&env, h + 4), (f - h) as u32);
+    assert_eq!(mem32(&env, f), (h.wrapping_sub(f)) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // remqti @#H, r2 —— 最後の 1 項目 F を外す → Z=1（空になった）。
+    let mut insn = vec![0x5f];
+    abs(h, &mut insn);
+    insn.push(0x52);
+    put(&mut env, BASE + 0x30, &insn);
+    env.pc = BASE + 0x30;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), f as u32);
+    assert_eq!(mem32(&env, h), 0);
+    assert_eq!(mem32(&env, h + 4), 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // 空キューの remqhi → V=1・Z=1、addr にはヘッダの位置。
+    let mut insn = vec![0x5e];
+    abs(h, &mut insn);
+    insn.push(0x52);
+    put(&mut env, BASE + 0x40, &insn);
+    env.pc = BASE + 0x40;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), h as u32);
+    assert_eq!(cc(&env), (false, true, true, false));
+}
+
+#[test]
+fn queue_reserved_operands() {
+    struct Rec(Vec<u32>);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0.push(code);
+            TrapOutcome::Unimplemented
+        }
+    }
+    let h = DATA;
+    // 副インターロックが立っている → V=1・C=1 の失敗終了。
+    let mut env = run_env(1);
+    put(&mut env, h, &1u32.to_le_bytes());
+    put(&mut env, h + 4, &0u32.to_le_bytes());
+    let mut insn = vec![0x5c];
+    abs(DATA + 0x10, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, false, true, true));
+    assert_eq!(mem32(&env, h), 1); // キューは不変。
+
+    // ヘッダ語 <2:1> が残っている → 予約オペランド fault。
+    let mut env = run_env(1);
+    let mut sys = Rec(Vec::new());
+    put(&mut env, h, &4u32.to_le_bytes());
+    put(&mut env, h + 4, &0u32.to_le_bytes());
+    let mut insn = vec![0x5c];
+    abs(DATA + 0x10, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+    assert!(matches!(r, Err(Outcome::Unimplemented { .. })));
+
+    // entry の非 8 バイト整列 → 予約オペランド fault。
+    let mut env = run_env(1);
+    let mut sys = Rec(Vec::new());
+    put(&mut env, h, &0u32.to_le_bytes());
+    put(&mut env, h + 4, &0u32.to_le_bytes());
+    let mut insn = vec![0x5c];
+    abs(DATA + 0x14, &mut insn);
+    abs(h, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap_err();
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+}
+
+#[test]
+fn movc3_forward_and_regs() {
+    // movc3 #4, @#src, @#dst —— dst<src なら前向き 1 バイトずつ、
+    // FPD を見る。
+    let mut env = run_env(1);
+    let (s, d) = (DATA + 0x100, DATA);
+    put(&mut env, s, &[0x11, 0x22, 0x33, 0x44]);
+    let mut insn = vec![0x28, 0x04];
+    abs(s, &mut insn);
+    abs(d, &mut insn);
+    let ilen = insn.len() as u64;
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+
+    // 1 ステップ = 1 バイト。中断状態は建築レジスタに見える。
+    step(&mut env).unwrap();
+    assert!(sem::fpd(&env.backend));
+    assert_eq!(env.pc, BASE);
+    assert_eq!(r(&env, 0), 3);
+    assert_eq!(r(&env, 1), (s + 1) as u32);
+    assert_eq!(r(&env, 3), (d + 1) as u32);
+    step(&mut env).unwrap();
+    step(&mut env).unwrap();
+    step(&mut env).unwrap();
+    assert!(!sem::fpd(&env.backend));
+    assert_eq!(env.pc, BASE + ilen);
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (s + 4) as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (d + 4) as u32);
+    let mut out = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(d), &mut out, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(out, [0x11, 0x22, 0x33, 0x44]);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn movc3_backward_overlap() {
+    // dst が src 内部（src<dst<src+len）→ 末尾から複写して元の
+    // バイト列が保存される。src=DATA, dst=DATA+2, len=4。
+    let mut env = run_env(1);
+    let s = DATA;
+    let d = DATA + 2;
+    put(&mut env, s, &[0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    let mut insn = vec![0x28, 0x04];
+    abs(s, &mut insn);
+    abs(d, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..4 {
+        step(&mut env).unwrap();
+    }
+    let mut out = [0u8; 6];
+    env.backend
+        .mem
+        .read(VirtAddr(s), &mut out, Access::DATA_LE)
+        .unwrap();
+    // 前向きなら壊れる並びが後ろ向きで守られる。
+    assert_eq!(out, [0x10, 0x20, 0x10, 0x20, 0x30, 0x40]);
+    assert_eq!(r(&env, 1), (s + 4) as u32);
+    assert_eq!(r(&env, 3), (d + 4) as u32);
+}
+
+#[test]
+fn movc5_fill_and_cc() {
+    // movc5 #2, @#src, #0x2e, #5, @#dst —— 埋め草で伸ばす。
+    let mut env = run_env(1);
+    let (s, d) = (DATA, DATA + 0x100);
+    put(&mut env, s, &[0xaa, 0xbb]);
+    let mut insn = vec![0x2c, 0x02];
+    abs(s, &mut insn);
+    insn.push(0x2e); // fill='.'
+    insn.push(0x05);
+    abs(d, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..5 {
+        step(&mut env).unwrap();
+    }
+    let mut out = [0u8; 5];
+    env.backend
+        .mem
+        .read(VirtAddr(d), &mut out, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(out, [0xaa, 0xbb, 0x2e, 0x2e, 0x2e]);
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (s + 2) as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (d + 5) as u32);
+    // srclen(2) < dstlen(5) → N=1・C=1。
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // src が長い場合: 余分は移らず r0 に残り数が返る。
+    let mut env = run_env(1);
+    put(&mut env, s, &[1, 2, 3, 4, 5, 6]);
+    let mut insn = vec![0x2c, 0x06];
+    abs(s, &mut insn);
+    insn.push(0x00);
+    insn.push(0x04);
+    abs(d, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..4 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 2);
+    assert_eq!(r(&env, 1), (s + 4) as u32);
+    assert_eq!(r(&env, 3), (d + 4) as u32);
+    // srclen(6) > dstlen(4) → N=0・Z=0・C=0。
+    assert_eq!(cc(&env), (false, false, false, false));
+    let mut out = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(d), &mut out, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(out, [1, 2, 3, 4]);
+}
+
+#[test]
+fn cmpc3_and_cmpc5() {
+    // cmpc3 #3, @#a, @#b —— 等しい → Z=1、r0-r3 は終端位置。
+    let mut env = run_env(1);
+    let (a, b) = (DATA, DATA + 0x40);
+    put(&mut env, a, &[0x61, 0x62, 0x63]);
+    put(&mut env, b, &[0x61, 0x62, 0x63]);
+    let mut insn = vec![0x29, 0x03];
+    abs(a, &mut insn);
+    abs(b, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(cc(&env), (false, true, false, false));
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (a + 3) as u32);
+    assert_eq!(r(&env, 3), (b + 3) as u32);
+
+    // 不一致で止まる: "abc" vs "abd...": 3 バイト目で 'c'<'d'。
+    let mut env = run_env(1);
+    put(&mut env, a, &[0x61, 0x62, 0x63]);
+    put(&mut env, b, &[0x61, 0x62, 0x7a]);
+    let mut insn = vec![0x29, 0x03];
+    abs(a, &mut insn);
+    abs(b, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    // r0=残り（終端バイトを含む）=1、r1/r3=不一致バイトの位置。
+    assert_eq!(r(&env, 0), 1);
+    assert_eq!(r(&env, 1), (a + 2) as u32);
+    assert_eq!(r(&env, 2), 1);
+    assert_eq!(r(&env, 3), (b + 2) as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // cmpc5 #0x20, #2, @#a, #4, @#b —— "ab" vs "ab  ": fill で
+    // 拡張して等しい → Z=1。
+    let mut env = run_env(1);
+    put(&mut env, a, &[0x61, 0x62]);
+    put(&mut env, b, &[0x61, 0x62, 0x20, 0x20]);
+    let mut insn = vec![0x2d, 0x20, 0x02];
+    abs(a, &mut insn);
+    insn.push(0x04);
+    abs(b, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..4 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(cc(&env), (false, true, false, false));
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 2), 0);
+
+    // cmpc5: "ab" vs "abc!" —— fill 0x20 より 'c' が大きいので
+    // 短い側が小さい判定（第 1 項 = fill 側の比較で N=0・C=1? ——
+    // fill(0x20) < 'c'(0x63) → N=0・C=1）。
+    let mut env = run_env(1);
+    put(&mut env, a, &[0x61, 0x62]);
+    put(&mut env, b, &[0x61, 0x62, 0x63, 0x21]);
+    let mut insn = vec![0x2d, 0x20, 0x02];
+    abs(a, &mut insn);
+    insn.push(0x04);
+    abs(b, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    // 3 バイト目: fill(0x20) vs 'c'(0x63) → 第 1 項が小さい。
+    // r2 は終了バイトを含む残り（位置 2 から 4 バイト中 2 個）。
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 2), 2);
+    assert_eq!(r(&env, 3), (b + 2) as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+}
+
+#[test]
+fn locc_skpc_scanc_spanc() {
+    let s = DATA;
+    // locc #'c', #5, @#s —— 3 バイト目で一致: r0=3（含む）・
+    // r1=その位置・Z=0。
+    let mut env = run_env(1);
+    put(&mut env, s, b"abcde");
+    let mut insn = vec![0x3a, 0x8f, 0x63, 0x05];
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 3);
+    assert_eq!(r(&env, 1), (s + 2) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // 見つからない → r0=0・r1=1 つ先・Z=1。
+    let mut env = run_env(1);
+    put(&mut env, s, b"abcde");
+    let mut insn = vec![0x3a, 0x8f, 0x7a, 0x05];
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..5 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (s + 5) as u32);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // skpc #'a', #3, @#s —— "aab": 3 バイト目が 'a' でない。
+    let mut env = run_env(1);
+    put(&mut env, s, b"aabde");
+    let mut insn = vec![0x3b, 0x8f, 0x61, 0x03];
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 1);
+    assert_eq!(r(&env, 1), (s + 2) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // scanc #4, @#s, @#tbl, #0x01 —— 表に立つ文字まで走査。
+    // 表: 'c' と 'e' に 1 を立てる。
+    let mut env = run_env(1);
+    let t = DATA + 0x200;
+    put(&mut env, s, b"acde");
+    put(&mut env, t + 0x63, &[1]);
+    put(&mut env, t + 0x65, &[1]);
+    let mut insn = vec![0x2a, 0x04];
+    abs(s, &mut insn);
+    abs(t, &mut insn);
+    insn.push(0x01);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..2 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 3);
+    assert_eq!(r(&env, 1), (s + 1) as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), t as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // spanc: 表に立つ間は読み進める（空白のスパン）。
+    let mut env = run_env(1);
+    put(&mut env, s, b"  ab");
+    put(&mut env, t + 0x20, &[1]);
+    let mut insn = vec![0x2b, 0x04];
+    abs(s, &mut insn);
+    abs(t, &mut insn);
+    insn.push(0x01);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+    }
+    assert_eq!(r(&env, 0), 2);
+    assert_eq!(r(&env, 1), (s + 2) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn matchc_search() {
+    // matchc #2, @#obj, #7, @#src —— "de" in "abcdefg": 一致で
+    // r0=0・r1=obj 終端・r2=一致末尾以降の残り・r3=一致末尾の 1 つ先。
+    let mut env = run_env(1);
+    let (o, s) = (DATA + 0x100, DATA);
+    put(&mut env, o, b"de");
+    put(&mut env, s, b"abcdefg");
+    let mut insn = vec![0x39, 0x02];
+    abs(o, &mut insn);
+    insn.push(0x07);
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    // 1 反復 = 1 比較 —— 十分な回数まわす。
+    for _ in 0..16 {
+        step(&mut env).unwrap();
+        if !sem::fpd(&env.backend) {
+            break;
+        }
+    }
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (o + 2) as u32);
+    assert_eq!(r(&env, 2), 2);
+    assert_eq!(r(&env, 3), (s + 5) as u32);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // 見つからない → r0=objlen・r1=objaddr・r2=0・r3=src 終端。
+    let mut env = run_env(1);
+    put(&mut env, o, b"zz");
+    let mut insn = vec![0x39, 0x02];
+    abs(o, &mut insn);
+    insn.push(0x07);
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..16 {
+        step(&mut env).unwrap();
+        if !sem::fpd(&env.backend) {
+            break;
+        }
+    }
+    assert_eq!(r(&env, 0), 2);
+    assert_eq!(r(&env, 1), o as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (s + 7) as u32);
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn movtc_movtuc() {
+    // movtc #3, @#src, #0x2e, @#tbl, #5, @#dst —— 表で大文字化して
+    // 残りを '.' で埋める。
+    let mut env = run_env(1);
+    let (s, t, d) = (DATA, DATA + 0x200, DATA + 0x100);
+    put(&mut env, s, b"abc");
+    for i in 0..256u32 {
+        let u = if (0x61..=0x7a).contains(&(i as u8)) {
+            i as u8 - 0x20
+        } else {
+            i as u8
+        };
+        put(&mut env, t + u64::from(i), &[u]);
+    }
+    let mut insn = vec![0x2e, 0x03];
+    abs(s, &mut insn);
+    insn.push(0x2e);
+    abs(t, &mut insn);
+    insn.push(0x05);
+    abs(d, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..5 {
+        step(&mut env).unwrap();
+    }
+    let mut out = [0u8; 5];
+    env.backend
+        .mem
+        .read(VirtAddr(d), &mut out, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(&out, b"ABC..");
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), (s + 3) as u32);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), t as u32);
+    assert_eq!(r(&env, 4), 0);
+    assert_eq!(r(&env, 5), (d + 5) as u32);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // movtuc #5, @#src, #0x00, @#tbl, #5, @#dst —— 表で 0 に写る
+    // バイト（'!' 位置に 0 を置いた表）で止まる。
+    let mut env = run_env(1);
+    put(&mut env, s, b"ab!cd");
+    for i in 0..256u32 {
+        put(&mut env, t + u64::from(i), &[i as u8]);
+    }
+    put(&mut env, t + 0x21, &[0]); // '!' -> 0 = esc
+    let mut insn = vec![0x2f, 0x05];
+    abs(s, &mut insn);
+    insn.push(0x00);
+    abs(t, &mut insn);
+    insn.push(0x05);
+    abs(d, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..5 {
+        step(&mut env).unwrap();
+        if !sem::fpd(&env.backend) {
+            break;
+        }
+    }
+    // '!' で止まる: r0=3（'!' を含む残り）・r1='!'・r5=受けるはず
+    // だった位置。V=1。dst には "ab" だけ。
+    assert_eq!(r(&env, 0), 3);
+    assert_eq!(r(&env, 1), (s + 2) as u32);
+    assert_eq!(r(&env, 4), 3);
+    assert_eq!(r(&env, 5), (d + 2) as u32);
+    assert_eq!(cc(&env), (false, true, true, false));
+    let mut out = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(d), &mut out, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(&out, b"ab");
+}
+
+#[test]
+fn crc_table_poly() {
+    // CRC-32（Ethernet/AUTODIN-II 多項式）の表で "123456789" を
+    // 畳む —— 既知値 0xcbf43926 と一致するはず。
+    let mut env = run_env(1);
+    let (t, s) = (DATA + 0x200, DATA);
+    const POLY: u32 = 0xedb8_8320;
+    for i in 0..16u32 {
+        let mut v = i;
+        for _ in 0..4 {
+            v = v >> 1 ^ if v & 1 != 0 { POLY } else { 0 };
+        }
+        put(&mut env, t + u64::from(i) * 4, &v.to_le_bytes());
+    }
+    put(&mut env, s, b"123456789");
+    // crc @#tbl, #0xffffffff, #9, @#s
+    let mut insn = vec![0x0b];
+    abs(t, &mut insn);
+    insn.push(0x8f);
+    insn.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+    insn.push(0x09);
+    abs(s, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    for _ in 0..9 {
+        step(&mut env).unwrap();
+    }
+    let got = r(&env, 0) ^ 0xffff_ffff;
+    assert_eq!(got, 0xcbf4_3926, "crc {:08x}", got);
+    assert_eq!(r(&env, 1), 0);
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(r(&env, 3), (s + 9) as u32);
+    // r0=0x340bc6d9 —— N=0・Z=0。
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn pushr_popr_roundtrip() {
+    // pushr #mask —— mask の立ったレジスタを r14 から順に積む。
+    let mut env = run_env_stack();
+    let mask: u16 = 0x5003; // r0, r1, r12, r14
+    for (i, v) in [(0u8, 0xa0u32), (1, 0xa1), (12, 0xac)] {
+        sem::r_set(&mut env.backend, i, v);
+    }
+    // mask は SP 自身も含むので、積まれる値は元の SP。
+    let sp = r(&env, 14);
+    let mut insn = vec![0xbb, 0x8f];
+    insn.extend_from_slice(&mask.to_le_bytes());
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // push 順は r14→r12→r1→r0: [sp-4]=r14, [sp-8]=r12, ...
+    assert_eq!(r(&env, 14), sp - 16);
+    assert_eq!(mem32(&env, u64::from(sp - 4)), sp);
+    assert_eq!(mem32(&env, u64::from(sp - 8)), 0xac);
+    assert_eq!(mem32(&env, u64::from(sp - 12)), 0xa1);
+    assert_eq!(mem32(&env, u64::from(sp - 16)), 0xa0);
+
+    // レジスタを壊してから同じ mask で popr —— r0 側から戻る。
+    for i in [0u8, 1, 12] {
+        sem::r_set(&mut env.backend, i, 0);
+    }
+    let mut insn = vec![0xba, 0x8f];
+    insn.extend_from_slice(&mask.to_le_bytes());
+    put(&mut env, BASE + 0x10, &insn);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xa0);
+    assert_eq!(r(&env, 1), 0xa1);
+    assert_eq!(r(&env, 12), 0xac);
+    assert_eq!(r(&env, 14), sp);
+}
+
+#[test]
+fn chmk_dispatch() {
+    // chmk #7 —— code を符号拡張してスタックへ積み、SCB 0x40 の
+    // trap としてパーソナリティへ渡る。
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env_stack();
+    put(&mut env, BASE, &[0xbc, 0x07]);
+    env.pc = BASE;
+    let sp = r(&env, 14);
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::CHMK);
+    // trap なので復帰先は次の命令。
+    assert_eq!(env.pc, BASE + 2);
+    assert_eq!(r(&env, 14), sp - 4);
+    assert_eq!(mem32(&env, u64::from(sp - 4)), 7);
+    // PRV_MOD=user(3)・CUR_MOD=kernel(0)。
+    let p = sem::psl_get(&env.backend);
+    assert_eq!(p >> psl::PRV_MOD & 3, 3);
+    assert_eq!(p >> psl::CUR_MOD & 3, 0);
+
+    // chmu #-2 —— user から user へは現行モードのまま、code は
+    // 符号拡張される。
+    let mut env = run_env_stack();
+    let mut insn = vec![0xbf, 0x8f];
+    insn.extend_from_slice(&0xfffeu16.to_le_bytes());
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    let sp = r(&env, 14);
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::CHMU);
+    assert_eq!(mem32(&env, u64::from(sp - 4)), 0xffff_fffe);
+    let p = sem::psl_get(&env.backend);
+    assert_eq!(p >> psl::CUR_MOD & 3, 3);
+    assert_eq!(p >> psl::PRV_MOD & 3, 3);
+}

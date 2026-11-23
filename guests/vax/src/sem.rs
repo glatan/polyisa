@@ -48,6 +48,12 @@ pub mod scb {
     pub const BPT: u32 = 0x2c;
     /// 算術 trap。
     pub const ARITHMETIC: u32 = 0x34;
+    /// change mode to kernel trap。
+    pub const CHMK: u32 = 0x40;
+    /// change mode to executive trap。
+    pub const CHME: u32 = 0x44;
+    /// change mode to supervisor trap。
+    pub const CHMS: u32 = 0x48;
     /// change mode to user trap。
     pub const CHMU: u32 = 0x4c;
     /// サブセット命令の補完要求: 開始（FPD=0）。
@@ -688,6 +694,655 @@ fn eval(
     eval_op(b, &f.ops[i], ty, pos[i].0, pos[i].1)
 }
 
+/// オペランド `i` の評価+読み出し（`eval` と `read` はともに
+/// `&mut` を取るので、入れ子呼び出しを避ける畳込み）。
+fn eval_r(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    i: usize,
+    w: Width,
+) -> Result<u128, InterpExit> {
+    let l = eval(b, f, pos, i)?;
+    read(b, &l, w)
+}
+
+/// オペランド `i` の評価+アドレス化（`.a` 系の値）。
+fn eval_a(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    i: usize,
+) -> Result<u32, InterpExit> {
+    let l = eval(b, f, pos, i)?;
+    loc_addr(&l)
+}
+
+// ---- キュー（VX7）----
+// 項目は {前方リンク, 後方リンク} のロングワード対。insque/remque は
+// リンクを絶対アドレスとして扱い、インターロック版はヘッダを基準と
+// する自己相対変位として扱う（項目そのものの並びは同じ）。
+// インターロック版の「主インターロック」は単一スレッド近似で常に
+// 取得成功（副インターロック = ヘッダ語の bit 0 だけをメモリ上の
+// ビットとして検査・獲得・解放する）。bit 0 が立っていれば
+// N=0・Z=0・V=1・C=1 の失敗終了、<2:1> が残っていれば
+// 予約オペランド fault。
+// Ref: SPEC-VAX-ARM（キュー命令の節）.
+// Gap: GAP-0076 — 単一スレッド近似の記録。
+
+/// キュー命令の予約オペランド検査（8 バイト整列と項目!=ヘッダ）。
+fn q_check(entry: u32, hdr: u32) -> Result<(), InterpExit> {
+    if entry & 7 != 0 || hdr & 7 != 0 || entry == hdr {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    Ok(())
+}
+
+/// ヘッダの副インターロック語を読み、競合なら `Ok(None)`、予約
+/// オペランドなら fault、獲得可能なら語を返す。
+fn q_hdr(b: &mut InterpBackend, h: u32) -> Result<Option<u32>, InterpExit> {
+    let v = load(b, h, 4)? as u32;
+    if v & 6 != 0 {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    Ok(if v & 1 != 0 { None } else { Some(v) })
+}
+
+/// インターロック獲得失敗の条件コード（N=0・Z=0・V=1・C=1）。
+fn q_fail(b: &mut InterpBackend) {
+    cc_nzvc(b, false, false, true, true);
+}
+
+// ---- 文字列（VX7）----
+// 中断規約: 反復 1 回 = 1 ステップ。建築上の退避先は正本の制御
+// ブロックに沿って r0=残り長・r1=走査アドレスの対で r0-r5 へ
+// 割り当て、命令固有の作業語（fill/esc・方向・元の長さなど
+// レジスタに載らないもの）は partial.work へ。完了時に正本の
+// 最終 r0-r5 と条件コードを書いて partial_done。
+// Ref: SPEC-VAX-ARM（文字列命令の節、中断の節）.
+
+/// バイト比較の条件コード（第 1 項基準: N=符号付き・C=符号なし）。
+fn cc_bcmp(b: &mut InterpBackend, x: u8, y: u8) {
+    cc_nzvc(b, (x as i8) < (y as i8), x == y, false, x < y);
+}
+
+/// 文字列の条件コード（N=0・Z=残り零・V=0・C=0 —— locc 系）。
+fn cc_strz(b: &mut InterpBackend, z: bool) {
+    cc_nzvc(b, false, z, false, false);
+}
+
+/// 開始（部分実行なし）ならオペランドを評価して初期化関数を
+/// 走らせ、作業語を返す。再入なら退避した作業語をそのまま返す。
+fn str_enter(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    opc: u16,
+    init: impl FnOnce(&mut InterpBackend, &Fetched, &[(u32, u32)]) -> Result<[u32; 4], InterpExit>,
+) -> Result<Option<[u32; 4]>, InterpExit> {
+    if let Some(w) = partial_resume(b, opc) {
+        return Ok(Some(w));
+    }
+    init(b, f, pos).map(Some)
+}
+
+/// 反復が未完なら作業語を残して中断、済みなら標識を消す。
+fn str_leave(b: &mut InterpBackend, opc: u16, work: [u32; 4], pc0: u32, done: bool) {
+    if done {
+        partial_done(b);
+    } else {
+        partial_save(b, opc, work, pc0);
+    }
+}
+
+/// movc3: len.rw, src.ab, dst.ab。src>dst（符号なし）なら前向き、
+/// そうでなければ末尾から（重なりを壊さない向き —— 正本の規則）。
+/// 後ろ向きは movc5 と同じくポインタを末尾に立てて戻る。
+/// r0=残り・r1/r3=走査位置、work=[後ろ向き, 元の len]。終了:
+/// r0=r2=r4=r5=0・r1=src+len・r3=dst+len、N=V=C=0・Z=1。
+fn movc3(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    const OPC: u16 = 0x28;
+    let Some(work) = str_enter(b, f, pos, OPC, |b, f, pos| {
+        let len = eval_r(b, f, pos, 0, Width::W)? as u32;
+        let s = eval_a(b, f, pos, 1)?;
+        let d = eval_a(b, f, pos, 2)?;
+        let bwd = s <= d;
+        r_set(b, 0, len);
+        r_set(b, 1, if bwd { s.wrapping_add(len) } else { s });
+        r_set(b, 2, 0);
+        r_set(b, 3, if bwd { d.wrapping_add(len) } else { d });
+        r_set(b, 4, 0);
+        r_set(b, 5, 0);
+        Ok([u32::from(bwd), len, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let (mut r0, mut r1, mut r3) = (r_get(b, 0), r_get(b, 1), r_get(b, 3));
+    let mut done = r0 == 0;
+    if !done {
+        if work[0] == 0 {
+            let v = load(b, r1, 1)?;
+            store(b, r3, 1, v)?;
+            r1 = r1.wrapping_add(1);
+            r3 = r3.wrapping_add(1);
+        } else {
+            r1 = r1.wrapping_sub(1);
+            r3 = r3.wrapping_sub(1);
+            let v = load(b, r1, 1)?;
+            store(b, r3, 1, v)?;
+        }
+        r0 -= 1;
+        done = r0 == 0;
+    }
+    r_set(b, 0, r0);
+    r_set(b, 1, r1);
+    r_set(b, 3, r3);
+    if done {
+        // 後ろ向きはポインタが頭に戻っている —— 正本の最終値
+        // （src/dst + len）へ補正する。
+        if work[0] != 0 {
+            r_set(b, 1, r1.wrapping_add(work[1]));
+            r_set(b, 3, r3.wrapping_add(work[1]));
+        }
+        cc_strz(b, true);
+    }
+    str_leave(b, OPC, work, pc0, done);
+    Ok(())
+}
+
+/// movc5: srclen.rw, src.ab, fill.rb, dstlen.rw, dst.ab。移動後の
+/// 残りは fill で埋める。方向の規則は movc3 と同じ。後ろ向きは
+/// ポインタを末尾に立てて 1 つずつ戻る（正本のアルゴリズム）。
+/// r0=src 残り・r1=src 走査・r2=dst 残り・r3=dst 走査、
+/// work=[後ろ向き, fill, 元の srclen, 元の dstlen]。終了:
+/// r0=未移動 src 数・r1=src+移動数・r2=r4=r5=0・r3=dst+dstlen、
+/// N=srclen<dstlen・Z=等値・V=0・C=符号なし比較。
+fn movc5(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    const OPC: u16 = 0x2c;
+    let Some(work) = str_enter(b, f, pos, OPC, |b, f, pos| {
+        let sl = eval_r(b, f, pos, 0, Width::W)? as u32;
+        let s = eval_a(b, f, pos, 1)?;
+        let fill = eval_r(b, f, pos, 2, Width::B)? as u32;
+        let dl = eval_r(b, f, pos, 3, Width::W)? as u32;
+        let d = eval_a(b, f, pos, 4)?;
+        let bwd = s <= d;
+        r_set(b, 0, sl);
+        r_set(b, 1, if bwd { s.wrapping_add(sl.min(dl)) } else { s });
+        r_set(b, 2, dl);
+        r_set(b, 3, if bwd { d.wrapping_add(dl) } else { d });
+        r_set(b, 4, 0);
+        r_set(b, 5, 0);
+        Ok([u32::from(bwd), fill, sl, dl])
+    })?
+    else {
+        return Ok(());
+    };
+    let fill = u128::from(work[1] as u8);
+    let (mut r0, mut r1, mut r2, mut r3) = (r_get(b, 0), r_get(b, 1), r_get(b, 2), r_get(b, 3));
+    let done = if work[0] == 0 {
+        if r0 != 0 && r2 != 0 {
+            let v = load(b, r1, 1)?;
+            store(b, r3, 1, v)?;
+            r0 -= 1;
+            r1 = r1.wrapping_add(1);
+            r2 -= 1;
+            r3 = r3.wrapping_add(1);
+        } else if r2 != 0 {
+            store(b, r3, 1, fill)?;
+            r2 -= 1;
+            r3 = r3.wrapping_add(1);
+        }
+        r2 == 0
+    } else {
+        if r2 > r0 {
+            r2 -= 1;
+            r3 = r3.wrapping_sub(1);
+            store(b, r3, 1, fill)?;
+        } else if r2 != 0 {
+            r0 -= 1;
+            r1 = r1.wrapping_sub(1);
+            r2 -= 1;
+            r3 = r3.wrapping_sub(1);
+            let v = load(b, r1, 1)?;
+            store(b, r3, 1, v)?;
+        }
+        r2 == 0
+    };
+    r_set(b, 0, r0);
+    r_set(b, 1, r1);
+    r_set(b, 2, r2);
+    r_set(b, 3, r3);
+    if done {
+        // 後ろ向きはポインタが頭に戻っている —— 正本の最終値
+        // （走った端の 1 つ先）へ補正する。
+        if work[0] != 0 {
+            r_set(b, 1, r1.wrapping_add(work[2].min(work[3])));
+            r_set(b, 3, r3.wrapping_add(work[3]));
+        }
+        cc_nzvc(
+            b,
+            work[2] < work[3],
+            work[2] == work[3],
+            false,
+            work[2] < work[3],
+        );
+    }
+    str_leave(b, OPC, work, pc0, done);
+    Ok(())
+}
+
+/// cmpc3/cmpc5: 文字列の比較。残り 0 側は（cmpc5 では）fill で
+/// 拡張して比べる。r0/r2=各残り・r1/r3=各走査、work[0]=fill
+/// （cmpc3 では未使用）。終了: 不一致なら r0/r2 に終端バイトを
+/// 含む残り・r1/r3 にそのアドレス、一致なら全て 0/終端。CC は
+/// 最後に効いたバイト比較（等しければ Z=1 のみ）。
+fn cmpc(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    let c5 = f.insn == Insn::Cmpc5;
+    let opc = if c5 { 0x2d } else { 0x29 };
+    let Some(work) = str_enter(b, f, pos, opc, |b, f, pos| {
+        // cmpc3: len,addr1,addr2 / cmpc5: fill,len1,addr1,len2,addr2。
+        let (fill, i1, a1, i2, a2) = if c5 {
+            (eval_r(b, f, pos, 0, Width::B)? as u32, 1, 2, 3, 4)
+        } else {
+            (0, 0, 1, 0, 2)
+        };
+        let l1 = eval_r(b, f, pos, i1, Width::W)? as u32;
+        let p1 = eval_a(b, f, pos, a1)?;
+        let l2 = if c5 {
+            eval_r(b, f, pos, i2, Width::W)? as u32
+        } else {
+            l1
+        };
+        let p2 = eval_a(b, f, pos, a2)?;
+        r_set(b, 0, l1);
+        r_set(b, 1, p1);
+        r_set(b, 2, l2);
+        r_set(b, 3, p2);
+        Ok([fill, 0, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let fill = work[0] as u8;
+    let (mut r0, mut r1, mut r2, mut r3) = (r_get(b, 0), r_get(b, 1), r_get(b, 2), r_get(b, 3));
+    // 反復 1 回 = 1 バイトの比較。不一致か両者尽きで終了。
+    if r0 != 0 && r2 != 0 {
+        let x = load(b, r1, 1)? as u8;
+        let y = load(b, r3, 1)? as u8;
+        if x != y {
+            cc_bcmp(b, x, y);
+            str_leave(b, opc, work, pc0, true);
+            return Ok(());
+        }
+        r0 -= 1;
+        r1 = r1.wrapping_add(1);
+        r2 -= 1;
+        r3 = r3.wrapping_add(1);
+    } else if r0 != 0 {
+        let x = load(b, r1, 1)? as u8;
+        if x != fill {
+            cc_bcmp(b, x, fill);
+            str_leave(b, opc, work, pc0, true);
+            return Ok(());
+        }
+        r0 -= 1;
+        r1 = r1.wrapping_add(1);
+    } else if r2 != 0 {
+        let y = load(b, r3, 1)? as u8;
+        if y != fill {
+            cc_bcmp(b, fill, y);
+            str_leave(b, opc, work, pc0, true);
+            return Ok(());
+        }
+        r2 -= 1;
+        r3 = r3.wrapping_add(1);
+    }
+    let done = r0 == 0 && r2 == 0;
+    r_set(b, 0, r0);
+    r_set(b, 1, r1);
+    r_set(b, 2, r2);
+    r_set(b, 3, r3);
+    if done {
+        cc_nzvc(b, false, true, false, false);
+    }
+    str_leave(b, opc, work, pc0, done);
+    Ok(())
+}
+
+/// locc/skpc: char.rb, len.rw, addr.ab。locc は一致を探し、skpc は
+/// 不一致を探す。r0=残り（見つけたバイトを含む）・r1=その位置
+/// （なければ 1 つ先）。CC: N=0・Z=r0==0・V=0・C=0。
+fn locc(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    let skip = f.insn == Insn::Skpc;
+    let opc = if skip { 0x3b } else { 0x3a };
+    let Some(work) = str_enter(b, f, pos, opc, |b, f, pos| {
+        let ch = eval_r(b, f, pos, 0, Width::B)? as u32;
+        let len = eval_r(b, f, pos, 1, Width::W)? as u32;
+        let a = eval_a(b, f, pos, 2)?;
+        r_set(b, 0, len);
+        r_set(b, 1, a);
+        Ok([ch, 0, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let ch = work[0] as u8;
+    let (mut r0, mut r1) = (r_get(b, 0), r_get(b, 1));
+    let mut done = r0 == 0;
+    if !done {
+        let x = load(b, r1, 1)? as u8;
+        done = (x == ch) != skip;
+        if !done {
+            r0 -= 1;
+            r1 = r1.wrapping_add(1);
+            r_set(b, 0, r0);
+            r_set(b, 1, r1);
+            done = r0 == 0;
+        }
+    }
+    if done {
+        cc_strz(b, r0 == 0);
+    }
+    str_leave(b, opc, work, pc0, done);
+    Ok(())
+}
+
+/// scanc/spanc: len.rw, addr.ab, tbl.ab, mask.rb。各バイトで
+/// 表を引き、scanc は (tbl[b] & mask) != 0 で、spanc は == 0 で
+/// 止まる。r0=残り（条件バイトを含む）・r1=その位置・r2=0・
+/// r3=tbl。CC: N=0・Z=r0==0・V=0・C=0。
+fn scanc(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    let span = f.insn == Insn::Spanc;
+    let opc = if span { 0x2b } else { 0x2a };
+    let Some(work) = str_enter(b, f, pos, opc, |b, f, pos| {
+        let len = eval_r(b, f, pos, 0, Width::W)? as u32;
+        let a = eval_a(b, f, pos, 1)?;
+        let t = eval_a(b, f, pos, 2)?;
+        let m = eval_r(b, f, pos, 3, Width::B)? as u32;
+        r_set(b, 0, len);
+        r_set(b, 1, a);
+        r_set(b, 2, 0);
+        r_set(b, 3, t);
+        Ok([m, 0, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let m = work[0] as u8;
+    let (mut r0, mut r1, r3) = (r_get(b, 0), r_get(b, 1), r_get(b, 3));
+    let mut done = r0 == 0;
+    if !done {
+        let x = load(b, r1, 1)? as u8;
+        let t = load(b, r3.wrapping_add(u32::from(x)), 1)? as u8;
+        done = (t & m != 0) != span;
+        if !done {
+            r0 -= 1;
+            r1 = r1.wrapping_add(1);
+            r_set(b, 0, r0);
+            r_set(b, 1, r1);
+            done = r0 == 0;
+        }
+    }
+    if done {
+        cc_strz(b, r0 == 0);
+    }
+    str_leave(b, opc, work, pc0, done);
+    Ok(())
+}
+
+/// matchc: objlen.rw, objaddr.ab, srclen.rw, srcaddr.ab。source 内
+/// に object と一致する部分列を探す。r0=object 残り・r1=object
+/// 走査・r2=source 残り・r3=source 走査、work[0]=元の objlen。
+/// 不一致のたび object を頭に戻して起点を 1 つ進める（正本の
+/// アルゴリズム）。終了: 一致なら r0=0・r1=object 終端・r2=一致
+/// 末尾以降の source 残り・r3=一致末尾の 1 つ先。CC: Z=r0==0。
+fn matchc(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    const OPC: u16 = 0x39;
+    let Some(work) = str_enter(b, f, pos, OPC, |b, f, pos| {
+        let ol = eval_r(b, f, pos, 0, Width::W)? as u32;
+        let oa = eval_a(b, f, pos, 1)?;
+        let sl = eval_r(b, f, pos, 2, Width::W)? as u32;
+        let sa = eval_a(b, f, pos, 3)?;
+        r_set(b, 0, ol);
+        r_set(b, 1, oa);
+        r_set(b, 2, sl);
+        r_set(b, 3, sa);
+        Ok([ol, 0, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let (mut r0, mut r1, mut r2, mut r3) = (r_get(b, 0), r_get(b, 1), r_get(b, 2), r_get(b, 3));
+    let mut done = r0 == 0;
+    if !done && r2 < r0 {
+        // 残りが object より短い —— 一致し得ない。
+        r3 = r3.wrapping_add(r2);
+        r2 = 0;
+        done = true;
+    } else if !done {
+        if load(b, r1, 1)? == load(b, r3, 1)? {
+            r0 -= 1;
+            r1 = r1.wrapping_add(1);
+            r2 -= 1;
+            r3 = r3.wrapping_add(1);
+        } else {
+            // object を頭に戻し、起点を 1 つ進める。
+            let k = work[0] - r0;
+            r1 = r1.wrapping_sub(k);
+            r2 = r2.wrapping_add(k).wrapping_sub(1);
+            r3 = r3.wrapping_add(1).wrapping_sub(k);
+            r0 = work[0];
+        }
+        if r0 == 0 {
+            done = true;
+        } else if r2 < r0 {
+            r3 = r3.wrapping_add(r2);
+            r2 = 0;
+            done = true;
+        }
+    }
+    r_set(b, 0, r0);
+    r_set(b, 1, r1);
+    r_set(b, 2, r2);
+    r_set(b, 3, r3);
+    if done {
+        cc_strz(b, r0 == 0);
+    }
+    str_leave(b, OPC, work, pc0, done);
+    Ok(())
+}
+
+/// movtc/movtuc: srclen.rw, src.ab, fill/esc.rb, tbl.ab, dstlen.rw,
+/// dst.ab。src を表で翻して dst へ。movtc は残りを fill で埋め、
+/// movtuc は翻訳結果が esc に一致したバイトで止まる。方向の規則は
+/// movc3 と同じ（movtuc は常に前向き —— 正本は esc 版に前向き
+/// しか書かない）。r0=src 残り・r1=src 走査・r2=0・r3=tbl・
+/// r4=dst 残り・r5=dst 走査、work=[方向, fill/esc, srclen, dstlen]。
+/// 終了: movtc は r1=src+移動数・r5=dst+dstlen・V=0、movtuc は
+/// r1=原因バイト・r5=受け取るはずだった位置・V=esc で止まった。
+/// N=srclen<dstlen・Z=等値・C=符号なし比較。
+fn movtc(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    pc0: u32,
+) -> Result<(), InterpExit> {
+    let tuc = f.insn == Insn::Movtuc;
+    let opc = if tuc { 0x2f } else { 0x2e };
+    let Some(work) = str_enter(b, f, pos, opc, |b, f, pos| {
+        let sl = eval_r(b, f, pos, 0, Width::W)? as u32;
+        let s = eval_a(b, f, pos, 1)?;
+        let esc = eval_r(b, f, pos, 2, Width::B)? as u32;
+        let t = eval_a(b, f, pos, 3)?;
+        let dl = eval_r(b, f, pos, 4, Width::W)? as u32;
+        let d = eval_a(b, f, pos, 5)?;
+        let bwd = !tuc && s <= d;
+        r_set(b, 0, sl);
+        r_set(b, 1, if bwd { s.wrapping_add(sl.min(dl)) } else { s });
+        r_set(b, 2, 0);
+        r_set(b, 3, t);
+        r_set(b, 4, dl);
+        r_set(b, 5, if bwd { d.wrapping_add(dl) } else { d });
+        Ok([u32::from(bwd), esc, sl, dl])
+    })?
+    else {
+        return Ok(());
+    };
+    let esc = work[1] as u8;
+    let (mut r0, mut r1, r3, mut r4, mut r5) = (
+        r_get(b, 0),
+        r_get(b, 1),
+        r_get(b, 3),
+        r_get(b, 4),
+        r_get(b, 5),
+    );
+    let mut hit = false;
+    let done = if work[0] == 0 {
+        // 前向き: 翻訳しながら移す。movtc は src が尽きた後も
+        // dst を fill で埋め切る。movtuc は esc で止まり fill しない。
+        if r0 != 0 && r4 != 0 {
+            let x = load(b, r1, 1)? as u8;
+            let t = load(b, r3.wrapping_add(u32::from(x)), 1)? as u8;
+            if tuc && t == esc {
+                hit = true;
+            } else {
+                store(b, r5, 1, u128::from(t))?;
+                r0 -= 1;
+                r1 = r1.wrapping_add(1);
+                r4 -= 1;
+                r5 = r5.wrapping_add(1);
+            }
+        } else if r4 != 0 && !tuc {
+            store(b, r5, 1, u128::from(esc))?;
+            r4 -= 1;
+            r5 = r5.wrapping_add(1);
+        }
+        if tuc {
+            hit || r0 == 0 || r4 == 0
+        } else {
+            r4 == 0
+        }
+    } else {
+        // 後ろ向き（movtc 専用）: fill を末尾から、続いて移動。
+        if r4 > r0 {
+            r4 -= 1;
+            r5 = r5.wrapping_sub(1);
+            store(b, r5, 1, u128::from(esc))?;
+        } else if r4 != 0 {
+            r0 -= 1;
+            r1 = r1.wrapping_sub(1);
+            r4 -= 1;
+            r5 = r5.wrapping_sub(1);
+            let x = load(b, r1, 1)? as u8;
+            let t = load(b, r3.wrapping_add(u32::from(x)), 1)? as u8;
+            store(b, r5, 1, u128::from(t))?;
+        }
+        r4 == 0
+    };
+    r_set(b, 0, r0);
+    r_set(b, 1, r1);
+    r_set(b, 4, r4);
+    r_set(b, 5, r5);
+    if done {
+        if work[0] != 0 {
+            r_set(b, 1, r1.wrapping_add(work[2].min(work[3])));
+            r_set(b, 5, r5.wrapping_add(work[3]));
+        }
+        r_set(b, 2, 0);
+        if !tuc {
+            r_set(b, 4, 0);
+        }
+        cc_nzvc(
+            b,
+            work[2] < work[3],
+            work[2] == work[3],
+            tuc && hit,
+            work[2] < work[3],
+        );
+    }
+    str_leave(b, opc, work, pc0, done);
+    Ok(())
+}
+
+/// crc: tbl.ab, inicrc.rl, strlen.rw, stream.ab。各バイトを CRC の
+/// 下位バイトへ畳み、表（16 ロングワード）を 4 ビットずつ 2 回引く
+/// （正本が許す shift 量の選択 —— 4 ビット ×2 で表構造に合わせる）。
+/// r0=CRC 途中値・r1=残り・r2=stream 走査、work[0]=tbl。終了:
+/// r0=結果・r1=r2=0・r3=stream 終端、N=結果の符号・Z=零・V=0・C=0。
+fn crc(b: &mut InterpBackend, f: &Fetched, pos: &[(u32, u32)], pc0: u32) -> Result<(), InterpExit> {
+    const OPC: u16 = 0x0b;
+    let Some(work) = str_enter(b, f, pos, OPC, |b, f, pos| {
+        let t = eval_a(b, f, pos, 0)?;
+        let c = eval_r(b, f, pos, 1, Width::L)? as u32;
+        let len = eval_r(b, f, pos, 2, Width::W)? as u32;
+        let s = eval_a(b, f, pos, 3)?;
+        r_set(b, 0, c);
+        r_set(b, 1, len);
+        r_set(b, 2, s);
+        r_set(b, 3, 0);
+        Ok([t, 0, 0, 0])
+    })?
+    else {
+        return Ok(());
+    };
+    let (mut r0, mut r1, mut r2) = (r_get(b, 0), r_get(b, 1), r_get(b, 2));
+    let mut done = r1 == 0;
+    if !done {
+        let x = load(b, r2, 1)? as u32;
+        r0 = r0 & !0xff | (r0 ^ x) & 0xff;
+        r2 = r2.wrapping_add(1);
+        r1 -= 1;
+        for _ in 0..2 {
+            let i = r0 & 0xf;
+            let t = load(b, work[0].wrapping_add(4 * i), 4)? as u32;
+            r0 = r0 >> 4 ^ t;
+        }
+        r_set(b, 0, r0);
+        r_set(b, 1, r1);
+        r_set(b, 2, r2);
+        done = r1 == 0;
+    }
+    if done {
+        r_set(b, 3, r2);
+        r_set(b, 2, 0);
+        r_set(b, 1, 0);
+        cc_nzvc(b, (r0 as i32) < 0, r0 == 0, false, false);
+    }
+    str_leave(b, OPC, work, pc0, done);
+    Ok(())
+}
+
 /// 命令 1 個の意味論。`pos[i]` はオペランド i の指定子バイト列の
 /// 先頭・終端の絶対アドレス（PC 相対の基底と即値の位置に使う）。
 /// `pc0` は命令の先頭アドレス。実行時の r15 は命令の終端
@@ -696,7 +1351,7 @@ fn eval(
 pub fn exec(
     b: &mut InterpBackend,
     f: &Fetched,
-    _pc0: u32,
+    pc0: u32,
     pos: &[(u32, u32)],
 ) -> Result<(), InterpExit> {
     match f.insn {
@@ -709,7 +1364,20 @@ pub fn exec(
                 fault(scb::PRIV_INSN, None)
             });
         }
-        // 反復しない命令は開始時に部分実行の標識を消す。
+        // 反復しない命令は開始時に部分実行の標識を消す。中断可能な
+        // 文字列命令は各本体が partial_resume/partial_done を捌く。
+        Insn::Movc3
+        | Insn::Movc5
+        | Insn::Cmpc3
+        | Insn::Cmpc5
+        | Insn::Locc
+        | Insn::Skpc
+        | Insn::Scanc
+        | Insn::Spanc
+        | Insn::Matchc
+        | Insn::Movtc
+        | Insn::Movtuc
+        | Insn::Crc => {}
         _ => partial_done(b),
     }
     match f.insn {
@@ -1243,6 +1911,213 @@ pub fn exec(
             iv_trap(b)?;
         }
         Insn::Bpt => return Err(trap(scb::BPT)),
+        // ---- キュー・文字列・マスク積み降ろし・CHM（VX7）----
+        // insque: 絶対リンクの項目を先行項目の直後へ入れる。
+        // (entry) <- (pred)、(entry+4) <- pred、((pred)+4) <- entry、
+        // (pred) <- entry。N=succ LSS pred・Z=等値（先頭化）・V=0・
+        // C=succ LSSU pred。
+        Insn::Insque => {
+            let e = eval_a(b, f, pos, 0)?;
+            let p = eval_a(b, f, pos, 1)?;
+            let s = load(b, p, 4)? as u32;
+            store(b, e, 4, u128::from(s))?;
+            store(b, e.wrapping_add(4), 4, u128::from(p))?;
+            store(b, s.wrapping_add(4), 4, u128::from(e))?;
+            store(b, p, 4, u128::from(e))?;
+            cc_nzvc(b, (s as i32) < (p as i32), s == p, false, s < p);
+        }
+        // remque: 絶対リンクの項目を外してアドレスを addr.wl へ。
+        // (pred) <- succ、(succ+4) <- pred。N=succ LSS pred・
+        // Z=等値（除去で空）・V=後方リンクが項目自身（空キューの
+        // ヘッダ除去 —— 除去できる項目がなかった）・C=succ LSSU pred。
+        Insn::Remque => {
+            let e = eval_a(b, f, pos, 0)?;
+            let d = eval(b, f, pos, 1)?;
+            let s = load(b, e, 4)? as u32;
+            let p = load(b, e.wrapping_add(4), 4)? as u32;
+            store(b, p, 4, u128::from(s))?;
+            store(b, s.wrapping_add(4), 4, u128::from(p))?;
+            write(b, &d, Width::L, u128::from(e))?;
+            cc_nzvc(b, (s as i32) < (p as i32), s == p, e == p, s < p);
+        }
+        // insqhi/insqti: 自己相対リンクの項目をヘッダの直後・直前へ。
+        // 成功は N=0・Z=空からの挿入・V=0・C=0。予約オペランド:
+        // entry/ヘッダの非 8 バイト整列・ヘッダ=entry・ヘッダ語の
+        // <2:1>（insqti は末尾変位 (header+4) の整列も見る）。
+        Insn::Insqhi => {
+            let e = eval_a(b, f, pos, 0)?;
+            let h = eval_a(b, f, pos, 1)?;
+            q_check(e, h)?;
+            let Some(fw) = q_hdr(b, h)? else {
+                q_fail(b);
+                return Ok(());
+            };
+            let succ = h.wrapping_add(fw);
+            store(b, h, 4, u128::from(fw | 1))?;
+            store(b, e, 4, u128::from(succ.wrapping_sub(e)))?;
+            store(b, e.wrapping_add(4), 4, u128::from(h.wrapping_sub(e)))?;
+            store(b, succ.wrapping_add(4), 4, u128::from(e.wrapping_sub(succ)))?;
+            store(b, h, 4, u128::from(e.wrapping_sub(h)))?;
+            cc_nzvc(b, false, succ == h, false, false);
+        }
+        Insn::Insqti => {
+            let e = eval_a(b, f, pos, 0)?;
+            let h = eval_a(b, f, pos, 1)?;
+            q_check(e, h)?;
+            let Some(fw) = q_hdr(b, h)? else {
+                q_fail(b);
+                return Ok(());
+            };
+            let bw = load(b, h.wrapping_add(4), 4)? as u32;
+            if bw & 7 != 0 {
+                return Err(fault(scb::RESERVED_OPERAND, None));
+            }
+            let pred = h.wrapping_add(bw);
+            store(b, h, 4, u128::from(fw | 1))?;
+            store(b, e, 4, u128::from(h.wrapping_sub(e)))?;
+            store(b, e.wrapping_add(4), 4, u128::from(pred.wrapping_sub(e)))?;
+            store(b, pred, 4, u128::from(e.wrapping_sub(pred)))?;
+            store(b, h.wrapping_add(4), 4, u128::from(e.wrapping_sub(h)))?;
+            store(b, h, 4, u128::from(fw))?;
+            cc_nzvc(b, false, pred == h, false, false);
+        }
+        // remqhi/remqti: ヘッダ直後・直前の項目を外し、その絶対
+        // アドレスを addr.wl へ。成功は N=0・Z=除去後に空・
+        // V=除去前から空・C=0。空でも addr.wl にはヘッダの位置を
+        // 書く（アクセス検査の対象 —— 決定的な選択）。
+        Insn::Remqhi => {
+            let h = eval_a(b, f, pos, 0)?;
+            let d = eval(b, f, pos, 1)?;
+            // addr.wl がレジスタのときは等値チェック自体が
+            // 不適用（loc_addr は Reg を RESERVED_MODE にする
+            // ので、メモリ loc のときだけ比較する）。
+            let same = matches!(d, Loc::Mem(_) | Loc::Val { .. }) && loc_addr(&d)? == h;
+            if h & 7 != 0 || same {
+                return Err(fault(scb::RESERVED_OPERAND, None));
+            }
+            let Some(fw) = q_hdr(b, h)? else {
+                q_fail(b);
+                return Ok(());
+            };
+            let mut z = true;
+            if fw != 0 {
+                let head = h.wrapping_add(fw);
+                let sd = load(b, head, 4)? as u32;
+                // 新しい先頭項目が指す次項目の整列も検査する。
+                if sd & 7 != 0 {
+                    return Err(fault(scb::RESERVED_OPERAND, None));
+                }
+                let succ = head.wrapping_add(sd);
+                store(b, h, 4, u128::from(fw | 1))?;
+                store(b, succ.wrapping_add(4), 4, u128::from(h.wrapping_sub(succ)))?;
+                store(b, h, 4, u128::from(succ.wrapping_sub(h)))?;
+                z = succ == h;
+            }
+            write(b, &d, Width::L, u128::from(h.wrapping_add(fw)))?;
+            cc_nzvc(b, false, z, fw == 0, false);
+        }
+        Insn::Remqti => {
+            let h = eval_a(b, f, pos, 0)?;
+            let d = eval(b, f, pos, 1)?;
+            // addr.wl がレジスタのときは等値チェック自体が
+            // 不適用（loc_addr は Reg を RESERVED_MODE にする
+            // ので、メモリ loc のときだけ比較する）。
+            let same = matches!(d, Loc::Mem(_) | Loc::Val { .. }) && loc_addr(&d)? == h;
+            if h & 7 != 0 || same {
+                return Err(fault(scb::RESERVED_OPERAND, None));
+            }
+            let Some(fw) = q_hdr(b, h)? else {
+                q_fail(b);
+                return Ok(());
+            };
+            let bw = load(b, h.wrapping_add(4), 4)? as u32;
+            if bw & 7 != 0 {
+                return Err(fault(scb::RESERVED_OPERAND, None));
+            }
+            let mut z = true;
+            if bw != 0 {
+                let tail = h.wrapping_add(bw);
+                let po = load(b, tail.wrapping_add(4), 4)? as u32;
+                if po & 7 != 0 {
+                    return Err(fault(scb::RESERVED_OPERAND, None));
+                }
+                let pred = tail.wrapping_add(po);
+                store(b, h, 4, u128::from(fw | 1))?;
+                store(b, pred, 4, u128::from(h.wrapping_sub(pred)))?;
+                store(b, h.wrapping_add(4), 4, u128::from(pred.wrapping_sub(h)))?;
+                // 単一項目（前後リンクが一致）なら (header) への
+                // 復帰書き込みは前向きリンクを 0 に残すのが正本の
+                // 結果 —— uVAX マイクロコードはこの場合先頭側から
+                // 外す経路を取る。pred==h では (pred) <- h-pred の
+                // 時点で既に 0 なので、何も書かない。
+                if pred != h {
+                    store(b, h, 4, u128::from(fw))?;
+                }
+                z = pred == h;
+            }
+            write(b, &d, Width::L, u128::from(h.wrapping_add(bw)))?;
+            cc_nzvc(b, false, z, bw == 0, false);
+        }
+        // 中断可能な文字列群は本体側で反復 1 回ずつ進める。
+        Insn::Movc3 => movc3(b, f, pos, pc0)?,
+        Insn::Movc5 => movc5(b, f, pos, pc0)?,
+        Insn::Cmpc3 | Insn::Cmpc5 => cmpc(b, f, pos, pc0)?,
+        Insn::Locc | Insn::Skpc => locc(b, f, pos, pc0)?,
+        Insn::Scanc | Insn::Spanc => scanc(b, f, pos, pc0)?,
+        Insn::Matchc => matchc(b, f, pos, pc0)?,
+        Insn::Movtc | Insn::Movtuc => movtc(b, f, pos, pc0)?,
+        Insn::Crc => crc(b, f, pos, pc0)?,
+        // pushr/popr: mask の立ったレジスタを積む/戻す。pushr は
+        // r14 から r0 へ（push と同じく CC 不変）、popr は r0 から
+        // r14 へ取り出す。r15（PC）は mask の対象外。
+        Insn::Pushr => {
+            let s = eval(b, f, pos, 0)?;
+            let m = read(b, &s, Width::W)? as u32;
+            for i in (0..=14u8).rev() {
+                if m >> i & 1 != 0 {
+                    push(b, u128::from(r_get(b, i)))?;
+                }
+            }
+        }
+        Insn::Popr => {
+            let s = eval(b, f, pos, 0)?;
+            let m = read(b, &s, Width::W)? as u32;
+            let mut sp = r_get(b, reg::SP as u8);
+            for i in 0..=14u8 {
+                if m >> i & 1 != 0 {
+                    let v = load(b, sp, 4)? as u32;
+                    sp = sp.wrapping_add(4);
+                    r_set(b, i, v);
+                }
+            }
+            r_set(b, reg::SP as u8, sp);
+        }
+        // chm{x}: code を符号拡張して新モードのスタックへ積み、
+        // 要求モードと現モードのうち特権の強い方へ写って SCB
+        // 0x40+4*要求モード へ trap。スタックはモード別に切り替わ
+        // るのが正本だが、このモデルは単一 SP —— 同一 SP への
+        // push で近似し、実際の切り替えは trap を受けた
+        // パーソナリティの仕事にする。PRV_MOD には旧 CUR_MOD が
+        // 残る。CC は変えない。
+        // Gap: GAP-0076 — 単一スタック近似。
+        Insn::Chmk | Insn::Chme | Insn::Chms | Insn::Chmu => {
+            let req = match f.insn {
+                Insn::Chmk => 0,
+                Insn::Chme => 1,
+                Insn::Chms => 2,
+                _ => 3,
+            };
+            let s = eval(b, f, pos, 0)?;
+            let code = read(b, &s, Width::W)?;
+            let cur = cur_mod(b);
+            push(b, (sext_w(code, Width::W) as u32).into())?;
+            let p = psl_get(b);
+            let p = p & !(0x3 << psl::PRV_MOD | 0x3 << psl::CUR_MOD)
+                | cur << psl::PRV_MOD
+                | req.min(cur) << psl::CUR_MOD;
+            psl_put(b, p);
+            return Err(trap(scb::CHMK + 4 * req));
+        }
         _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
     }
     Ok(())
