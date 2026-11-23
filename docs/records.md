@@ -29,7 +29,8 @@
 | 20 | OpenRISC | 完了 |
 | 21 | IA-64 | 完了 |
 | 22 | Hexagon | 完了 |
-| 23-24 | VAX・PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 23 | VAX | 完了 |
+| 24 | PDP-11 | 未着手（作業計画は `design/roadmap.md`） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -538,6 +539,23 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 残っている事項：
 
 - GAP-0069（パケット組立規則の手書き表。属性表としての生成化は GAP-0023 の残項目）・GAP-0070（HVX 語彙の代表部分集合）・GAP-0071（HVX 意味論・配置の近似）・GAP-0072（HW スレッド交互実行モデルの近似）・GAP-0073（Linux ABI の近似）・GAP-0074（df/sf の FP 語彙と `date`/`seq` 系の残不具合）・GAP-0075（意味論の意図的な簡略化。ヒント/予測・フェンス no-op・キャッシュ/プリフェッチ系の語彙外・特権の範囲外扱い・制御レジスタの部分集合・generic Backend 化の未対応）
+
+### 段階 23：VAX
+
+対応した内容：
+
+- `guests/vax`（spec・specifier・sem・decimal・timing）と `cli` の `run_vax`（feature `guest-vax`、裸実行のみ。主流の Linux 移植がないため裸実行環境で検証し、BSD パーソナリティは段階 25 の対象）
+- 版の範囲は VAX-11/780 から NVAX までのモデル（vax11_780 は全オプション搭載のフル VAX、microvax2・ka660・nvax は機能旗でサブセット化）と F・D・G・H の浮動小数点形式。機能旗 decimal・hfp・string_ext・string_cmp・crc・editpc・compat が実装群の差を表し、削られた命令はデコードから外れて補完経路に乗る。挙動パラメータは `emul_dispatch`（hook=OS パーソナリティの `handle_unimpl` へ、scb=SCB 0xC8/0xCC の補完例外へ FPD で開始/継続を振り分ける実機配送）と `dv_hw`（KA660 は DV をハードが扱わない）
+- 命令はオペコード語（1 バイト、または 0xFD/0xFE/0xFF 接頭の 2 バイト。生成デコーダが解く）＋オペランド指定子列で、指定子は m68k ea.rs と同型の分割として `specifier.rs` が構造読み取り・長さ表・適合検査・再符号化・`insn_ops` シグネチャを担う（手書き表。属性表としての生成化は GAP-0023 の残項目）。実行は `run::step` がバイト単位の必要分フェッチで組み立て、fault 系（ACV・予約モード・予約/特権命令）は PC を動かさず配送して Handled ならやり直し、trap 系（BPT・算術）は終端に進めてから配送する正本規則
+- 実装した命令群は整数・論理・bitfield・shift/rot・分岐（Bcc 全結合子・bb 系・sob/aob/acb・case・jsb/jmp）・calls/callg/ret のフレーム構築と解除・pushr/popr・キュー（insq/remq）・文字列（movc/cmpc/locc/skpc/scanc/spanc/matchc/movtc/movtuc/crc）・chm 系・F/D/G/H 演算と cvt/emod・poly 系・パック十進・数値文字列 3 形式・editpc・index/prober/probew。中断可能命令は「1 ステップ = 1 単位」で PSL<FPD> を立てて同じ命令へ再入し、進捗は正本どおり r0–r5 に露出、内部状態は `partial.work` の器に限る。chm はモード遷移をモデル化して SCB 0x40+4*mode の trap として OS パーソナリティへ委ねる
+- `timing::Vax780` は VAX-11/780 の EBOX マイクロサイクル（200 ns）単位の専用時間モデル。命令本体＋指定子評価・データアクセスの構造で、`Rt`（分岐成立・単位数・先頭ステップ）で反復・中断可能命令の部分ステップを計時する。時間値は MEAS-VAX-USENET の μs 表をマイクロサイクル換算したアンカー＋差分近似で、未較正の approx（`Fidelity::ApproxUncalibrated`）
+- `bare_vax`（層1–3: オペコード語のデコード・指定子の読み取り/長さ/適合/往復・シグネチャ表・機能旗とモデル差・補完配送・裸実行の命令単位検査。117 件）と lib 単体テスト（13 件）で S23-1 を判定
+
+残っている事項：
+
+- S23-1 はテスト判定で確定しており、所有者確認の残件はない
+- 特権・システム系の命令（rei/ldpctx/svpctx/bugw/bugl）と PDP-11 互換モードは語彙宣言までで意味論は未実装（ユーザーモード対象の範囲。halt はユーザーモードの特権命令 fault を再現し、カーネル側は Unimplemented。REI の CM 遷移規定は GAP-0079(d)）
+- GAP-0076（キューの単一スレッド近似・中断可能文字列命令の 1 バイト粒度・chm の単一スタック近似）・GAP-0077（poly 系の中断粒度・退避形の近似）・GAP-0078（十進演算の 1 ステップ完結・UNPREDICTABLE 入力の決定化）・GAP-0079（nvax/ka650 の機能集合代用・SCB フレーム構築のパーソナリティ委譲・compat/REI）・GAP-0080（Vax780 の未較正 approx・MicroVAX 系/NVAX の時間・例外時間・probe のページ保護なし近似）
 
 ## 残っている事項（横断）
 
