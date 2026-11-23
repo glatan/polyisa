@@ -45,7 +45,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| VX2 | `guests/vax` 骨格: CpuState（r0-15（AP/FP/SP/PC）・PSL・命令の途中状態）、モデル（11/780 から NVAX・MicroVAX）の宣言 | VX1 | - |
 | VX3 | デコード: 可変長命令とオペランド指定子のフックの ISADL 拡張（指定子の評価・読み書き・長さ） | VX2 | - |
 | VX4 | `run_vax` 実行ループ: 可変長 fetch・中断可能な命令の途中状態 + bare 最小テスト | VX3 | - |
 | VX5 | 整数: mov/add/sub/mul/div/emul/ediv・cmp/tst/clr/inc/dec | VX4 | - |

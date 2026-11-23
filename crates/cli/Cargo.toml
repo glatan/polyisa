@@ -23,6 +23,7 @@ polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
 polyisa-guest-sparc = { path = "../../guests/sparc", optional = true }
 polyisa-guest-superh = { path = "../../guests/superh", optional = true }
+polyisa-guest-vax = { path = "../../guests/vax", optional = true }
 polyisa-guest-wasm = { path = "../../guests/wasm", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 polyisa-host = { path = "../host" }
@@ -72,6 +73,8 @@ guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
+# vax は実行ループ未接続のため既定には含めない（VX4 で run_vax と共に有効化）。
+guest-vax = ["dep:polyisa-guest-vax"]
 guest-wasm = [
     "dep:polyisa-guest-wasm",
     "dep:polyisa-os-wasi",

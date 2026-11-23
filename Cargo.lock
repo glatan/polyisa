@@ -27,6 +27,7 @@ dependencies = [
  "polyisa-guest-s390",
  "polyisa-guest-sparc",
  "polyisa-guest-superh",
+ "polyisa-guest-vax",
  "polyisa-guest-wasm",
  "polyisa-guest-x86",
  "polyisa-host",
@@ -311,6 +312,16 @@ dependencies = [
  "polyisa-isadl",
  "polyisa-isagen",
  "polyisa-mem",
+ "polyisa-sem",
+]
+
+[[package]]
+name = "polyisa-guest-vax"
+version = "0.0.0"
+dependencies = [
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
  "polyisa-sem",
 ]
 

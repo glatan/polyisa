@@ -1,0 +1,17 @@
+[package]
+name = "polyisa-guest-vax"
+version = "0.0.0"
+license.workspace = true
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-guest = { path = "../../crates/guest" }
+polyisa-sem = { path = "../../crates/sem" }
+
+[build-dependencies]
+polyisa-isadl = { path = "../../crates/isadl" }
+polyisa-isagen = { path = "../../crates/isagen" }
+
+[lints]
+workspace = true

@@ -52,6 +52,9 @@ mod sparc {
 mod superh {
     include!("../../../guests/superh/spec/superh.rs");
 }
+mod vax {
+    include!("../../../guests/vax/spec/vax.rs");
+}
 mod wasm {
     include!("../../../guests/wasm/spec/wasmmin.rs");
 }
@@ -146,6 +149,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "superh",
         rel_paths: &["guests/superh/spec/superh.rs"],
         build: superh::build_model,
+    },
+    IsaSpec {
+        isa: "vax",
+        rel_paths: &["guests/vax/spec/vax.rs"],
+        build: vax::build_model,
     },
     IsaSpec {
         isa: "wasm",
