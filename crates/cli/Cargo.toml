@@ -51,6 +51,7 @@ default = [
     "guest-mips",
     "guest-openrisc",
     "guest-parisc",
+    "guest-pdp11",
     "guest-power",
     "guest-riscv",
     "guest-s390",
@@ -70,7 +71,7 @@ guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-openrisc = ["dep:polyisa-guest-openrisc", "polyisa-os-linux/guest-openrisc"]
 guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
-# 骨格のみ（PD2）。default への追加と実行経路は PD4。
+# 裸実行の実行経路のみ（PD4）。OS パーソナリティは段階25 で足す。
 guest-pdp11 = ["dep:polyisa-guest-pdp11"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]

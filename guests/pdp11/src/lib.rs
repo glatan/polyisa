@@ -1,12 +1,13 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! PDP-11 のゲスト ISA。段階24の骨格（PD2）とデコード層（PD3）。
+//! PDP-11 のゲスト ISA。段階24。
 //!
 //! `CpuState`（r0-r7・PSW・オプション状態）と、ISADL から生成した
 //! 命令集合・デコード・CPU モデル宣言の殻を提供する。命令語は
 //! 16 ビット固定長で、語内のオペランド指定子（mode,reg の対）と
 //! それが消費する拡張語の読み取りは `specifier`、実行ループは
-//! PD4、命令の意味論は PD5 以降が担う。
+//! `run`、指定子の実効評価と命令の意味論は `sem` が担う
+//! （意味論本体は PD5 以降が育てる）。
 //!
 //! オプション命令群（EIS・FIS・FP11・CIS・MMU 系）とモデル間で
 //! 実装が割れる命令（MTPS/MFPS・SPL・MFPT・CSM・TSTSET/WRTLCK）
@@ -25,6 +26,12 @@ include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 /// オペランド指定子（mode,reg）のデコード・拡張語消費・評価と、
 /// long/F/D の「3412」語順写像。
 pub mod specifier;
+
+/// 実行ループ（ワードフェッチ・トラップ境界の解決）。
+pub mod run;
+
+/// 命令意味論（指定子の実効評価・トラップ配送・命令本体）。
+pub mod sem;
 
 /// PDP-11 の ISA ファミリ名。
 pub struct Pdp11;

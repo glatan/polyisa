@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PD4 | `run_pdp11` 実行ループ: ワード fetch・奇数アドレスのアドレスエラー + bare 最小テスト | PD3 | - |
 | PD5 | 整数: mov/add/sub/cmp/bit/bic/bis/clr/com/inc/dec/neg/tst（byte/word） | PD4 | - |
 | PD6 | 論理・シフト・rot/sxt/xor・adc/sbc/swab・scc/ccc | PD4 | - |
 | PD7 | 分岐・sob・jsr/rts/jmp・mark | PD4 | - |

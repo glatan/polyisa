@@ -446,3 +446,297 @@ fn word_order_3412() {
         assert_eq!(word_order(w, word_order(w, v)), v);
     }
 }
+
+// ---- PD4: 実行ループ・トラップ配送 ----
+
+use polyisa_engine::bare::BareEnv;
+use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
+use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
+
+/// 何も捌かないハンドラ — 全て実機の配送（vector 読み出し）に回る。
+struct NoSys;
+
+impl TrapHandler for NoSys {
+    fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        TrapOutcome::Unimplemented
+    }
+}
+
+/// スタックポインタの初期値（写像ページ内）。
+const SP0: u16 = 0o41000;
+
+/// ベクタ領域・語列・スタックを写像した裸実行環境。`base` に語列
+/// （LE）を置き、`model` の挙動パラメータを流す。ページ 0 は
+/// ベクタと語列の両方を兼ねる。
+fn env_at(model: &str, base: u16, words: &[u16]) -> BareEnv {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    env.backend.mem.map(VirtAddr(0), 1, Perms(0b111)).unwrap();
+    env.backend
+        .mem
+        .map(VirtAddr(0o40000), 1, Perms::RW)
+        .unwrap();
+    let mut bytes = Vec::new();
+    for w in words {
+        bytes.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend
+        .mem
+        .write(VirtAddr(u64::from(base)), &bytes)
+        .unwrap();
+    install_params(&mut env.backend, &model_params(model));
+    env.backend.addr_mask = 0xFFFF;
+    env.pc = u64::from(base);
+    sem::r_set(&mut env.backend, reg::SP as u8, SP0);
+    env
+}
+
+/// `model` で 1 ステップ実行する。
+fn step_m(env: &mut BareEnv, model: &str) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, model_feats(model))
+}
+
+/// 語を LE で書く。
+fn put16(env: &mut BareEnv, a: u16, v: u16) {
+    env.backend
+        .mem
+        .write(VirtAddr(u64::from(a)), &v.to_le_bytes())
+        .unwrap();
+}
+
+/// 語を LE で読む。
+fn get16(env: &BareEnv, a: u16) -> u16 {
+    let mut b = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(u64::from(a)),
+            &mut b,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    u16::from_le_bytes(b)
+}
+
+#[test]
+fn word_fetch_advances_pc() {
+    // nop; nop — 語フェッチで PC が命令長（2）ずつ進み、実行中の
+    // r7 も次の命令を指す。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000240, 0o000240]);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1002);
+    assert_eq!(sem::r_get(&env.backend, reg::PC as u8), 0o1002);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1004);
+}
+
+#[test]
+fn mov_immediate_consumes_extension() {
+    // mov #0o1234, r0 — 拡張語を消費して 4 バイト命令。PC は +4。
+    let words = asm(Insn::Mov, &[Spec::Imm(0o1234), Spec::Reg(0)]);
+    assert_eq!(words.len(), 2);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1234);
+    assert_eq!(env.pc, 0o1004);
+    // CC: 値は正なので N=0・Z=0・V=0。C は保存（初期 0）。
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+}
+
+#[test]
+fn movb_sign_extends_into_register() {
+    // movb @#a, r0 — byte→レジスタの書き込みは符号拡張。
+    let words = asm(Insn::Movb, &[Spec::Abs(0o2000), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    env.backend.mem.write(VirtAddr(0o2000), &[0o200]).unwrap();
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o177600);
+    // N=1（結果が負）。
+    assert_ne!(sem::psw_get(&env.backend) & (1 << psw::N), 0);
+}
+
+#[test]
+fn specifier_eval_autoinc_and_deferred() {
+    // mov (r1)+, r0; mov @(r2)+, r3 — オート増の書き戻しと間接の
+    // 指し先語の読み出しが実行経路で起きる。
+    let w1 = asm(Insn::Mov, &[Spec::AutoInc(1), Spec::Reg(0)]);
+    let w2 = asm(Insn::Mov, &[Spec::AutoIncDef(2), Spec::Reg(3)]);
+    let mut env = env_at("pdp11_34", 0o1000, &[w1[0], w2[0]]);
+    put16(&mut env, 0o2000, 0o1234);
+    put16(&mut env, 0o2002, 0o2010); // r2 が指す語 → オペランド 0o2010
+    put16(&mut env, 0o2010, 0o5670);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    sem::r_set(&mut env.backend, 2, 0o2002);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1234);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2002); // ワードで +2
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 0o5670);
+    assert_eq!(sem::r_get(&env.backend, 2), 0o2004); // 間接は常に +2
+}
+
+#[test]
+fn odd_addr_traps_to_vector4() {
+    // odd_addr_trap のモデル: @#0o2001 のワード読み出しはバスエラー
+    // → vector 004 へ配送。積む PC は命令先頭（fault）。
+    let words = asm(Insn::Mov, &[Spec::Abs(0o2001), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o17); // CC を立てて積まれるか見る
+    put16(&mut env, 0o004, 0o3000);
+    put16(&mut env, 0o006, 0o140);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, SP0 - 4);
+    // -(SP) に PSW → PC の順（RTI が PC→PSW で戻す形）。
+    assert_eq!(get16(&env, sp), 0o1000);
+    assert_eq!(get16(&env, sp + 2), 0o17);
+    assert_eq!(sem::psw_get(&env.backend), 0o140);
+}
+
+#[test]
+fn odd_addr_aligns_on_untrapped_model() {
+    // odd_addr_trap=false（pdp11_03）: 奇数アドレスのワードアクセスは
+    // 偶数に揃えて行われる（トラップ未実装の決定的な表現）。
+    let words = asm(Insn::Mov, &[Spec::Abs(0o2001), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o1234);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1234);
+    assert_eq!(env.pc, 0o1004);
+}
+
+#[test]
+fn bpt_delivers_vector014() {
+    // bpt は trap — 積む PC は次の命令で、vector 014 へ配送。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000003, 0o000240]);
+    put16(&mut env, 0o014, 0o3000);
+    put16(&mut env, 0o016, 0o140);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1002); // 次の命令
+    assert_eq!(sem::psw_get(&env.backend), 0o140);
+}
+
+#[test]
+fn trap_reaches_personality_first() {
+    // ハンドラが Handled なら実機の配送に回らない（OS 経路）。
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = env_at("pdp11_34", 0o1000, &[0o104001]); // emt 1
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, model_feats("pdp11_34")).unwrap();
+    assert_eq!(sys.0, u32::from(sem::tv::EMT));
+    assert_eq!(env.pc, 0o1002);
+    // スタックは触られていない。
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+}
+
+#[test]
+fn reserved_insn_delivers_vector010() {
+    // EIS を持たないモデルの 070RSS は予約命令 → vector 010（fault —
+    // 積む PC は命令先頭）。
+    let mut env = env_at("pdp11_03", 0o1000, &[0o070000]);
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1000);
+}
+
+#[test]
+fn jmp_reg_trap_param_selects_vector() {
+    // `jmp r0`（モード 0 の A アクセス）は jmp_reg_trap パラメータの
+    // ベクタ — 付録 B 項目 5 のモデル差。
+    let words = asm(Insn::Jmp, &[Spec::Reg(0)]);
+    for (model, vec) in [("pdp11_34", 0o004u16), ("pdp11_23", 0o010u16)] {
+        let mut env = env_at(model, 0o1000, &words);
+        put16(&mut env, vec, 0o3200);
+        step_m(&mut env, model).unwrap();
+        assert_eq!(env.pc, 0o3200, "{model}");
+    }
+}
+
+#[test]
+fn jmp_and_branch_update_pc() {
+    // br +2 で 2 命令先へ、jmp @#a で絶対跳躍、beq は CC を見る。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000402]); // br +2
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1006); // next(0o1002) + 2×2
+
+    let words = asm(Insn::Jmp, &[Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o3000);
+
+    // Z=1 で beq が取られる（変位は語単位）。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o001401]); // beq +1
+    sem::psw_put(&mut env.backend, 1 << psw::Z);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1004);
+    // Z=0 では落ちる。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o001401]);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1002);
+}
+
+#[test]
+fn fetch_from_unmapped_is_bus_error() {
+    // 未写像へのフェッチはバスエラー → vector 004。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000240]);
+    put16(&mut env, 0o004, 0o2600);
+    env.pc = 0o50000; // 未写像ページ
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2600);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o50000); // fault — フェッチ点
+}
+
+#[test]
+fn halt_stops_the_loop() {
+    // halt は CPU 停止 — 裸モデルでは終端として Unimplemented。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000000]);
+    match step_m(&mut env, "pdp11_34") {
+        Err(Outcome::Unimplemented { pc, word }) => {
+            assert_eq!(pc, 0o1000);
+            assert_eq!(word, 0);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn program_runs_to_halt() {
+    // mov #v,r0; mov r0,@#a; halt — 語列・拡張語・指定子評価・
+    // 最小命令が通して動く。
+    let mut words = asm(Insn::Mov, &[Spec::Imm(0o42), Spec::Reg(0)]);
+    words.extend(asm(Insn::Mov, &[Spec::Reg(0), Spec::Abs(0o2000)]));
+    words.extend(asm(Insn::Halt, &[]));
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    let mut sys = NoSys;
+    let feats = model_feats("pdp11_34");
+    let out = polyisa_engine::run::run(
+        &mut env,
+        &mut sys,
+        16,
+        |e| e.pc,
+        |e, s| run::step(e, s, feats),
+    );
+    match out {
+        Outcome::Unimplemented { pc, word } => {
+            assert_eq!(pc, 0o1010); // halt の位置
+            assert_eq!(word, 0);
+        }
+        o => panic!("unexpected: {o:?}"),
+    }
+    assert_eq!(get16(&env, 0o2000), 0o42);
+}

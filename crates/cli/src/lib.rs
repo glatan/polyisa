@@ -24,6 +24,8 @@ pub mod run_mips;
 pub mod run_openrisc;
 #[cfg(feature = "guest-parisc")]
 pub mod run_parisc;
+#[cfg(feature = "guest-pdp11")]
+pub mod run_pdp11;
 #[cfg(feature = "guest-power")]
 pub mod run_power;
 
