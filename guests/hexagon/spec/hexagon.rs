@@ -2341,6 +2341,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // PRM に存在しない。pause はタイミングヒント（solo 命令、
         // 建築状態を変えない）。brkpt/unpause/icinva/isync/
         // dcfetch/l2fetch は語彙外（復号不能=illegal）。
+        // Gap: GAP-0075（ヒント・フェンス・語彙外・特権の近似）
         // Ref: system instructions.
         (
             "trap0",

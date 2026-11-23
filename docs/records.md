@@ -28,7 +28,8 @@
 | 19 | LoongArch | 完了 |
 | 20 | OpenRISC | 完了 |
 | 21 | IA-64 | 完了 |
-| 22-24 | Hexagon〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 22 | Hexagon | 完了 |
+| 23-24 | VAX・PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -523,6 +524,20 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - S21-2 の所有者確認（`heavy_abi_ia64` が機械的証拠）
 - GAP-0068（意味論の意図的な簡略化。ALAT の単一スレッド近似・RSE 書き出し粒度・ヒント/予測無視・バリア no-op・特権/IA-32 系の範囲外・FP 例外配送なし・syscall ABI の単一プロセス簡略化等を包摂）
 - Insn→実行ユニット対応表は `bundle.rs` の `insn_unit` 手書き表。属性表としての生成化は GAP-0023 の残項目
+
+### 段階 22：Hexagon
+
+対応した内容：
+
+- `guests/hexagon`（spec・sem・packet・threads）・`run_hexagon`・`os-linux::hexagon`（アーチ固有の `syscall.tbl` を持たず、共通表を abi ∈ {common, 32, hexagon, time32, stat64, rlimit, renameat} で畳む（v7.3 の tbl に abi=hexagon の行はない）。`__NR_sync_file_range2`=84 の改名と `sys_mmap2→sys_mmap_pgoff`・`hexagon_fadvise64_64`(223) の差替えを反映。FdTable 系・dirfd 解決・lazymap 窓のデマンドページ・単一プロセス模型）
+- 版の範囲 V5 以降の各版と HVX のうちユーザーモード実行に要る命令群。主対象は V73（BIN-DISTRO-HEXAGON の e_flags 0x73）、主正本の最新版 V79 と `tinycore`・`hvx` は機能旗。命令語は 32 ビットで、フェッチ層が PP 桁（bits[15:14]）でパケットを確定し、duplex 語を 2 subinsn に分解、constant extender を後続の命令語の即値に併合してから decode に渡す。パケット内の命令は同時発行で、書き込みは `pkt_*` 未確定域に溜めて終端の commit で一括反映（`.new` オペランドはこの一時値を読み、dot-if 述語で命令ごとに抑制）。整数・load/store・memop・`.new` ストア・円環/brev/Mu 修飾アドレッシング・jump/call/jumpr・述語付き/複合/new-value compare-jump・allocframe/deallocframe/dealloc_return・trap0/trap1/pause・loop0/loop1 のハードウェアループ（LC/SA・endloop・ネスト）・HVX 代表部分集合（v/q/vcsr の建築状態と vmem・vALU・vmpy・vcmp・q 論理。`hvx` 旗でゲート）
+- `threads::Core` の複数 HW スレッド交互実行モデル（1 発行枠 = 1 パケットの単純 IMT ラウンドロビン、全スレッド共有メモリ、pause の休眠/復帰、trap の引き継ぎ）
+- syscall は `trap0(#1)`（nr=r6・引数 r0–r5・返り値 r0・失敗は -errno）と、ELF32 LE（EM_QDSP6=164・e_flags 0x73）ローダ・PT_INTERP `/lib/ld-musl-hexagon.so.1` の動的リンク経路（INTERP_BASE 0x0800_0000・PT_GNU_RELRO の mprotect 反映）・初期スタック・auxv（AT_HWCAP=0）
+- `bare_hexagon`・`threads_hexagon`（層1–3: デコード・エンコード往復・パケット構造と裸実行の命令単位検査・交互実行モデル）・`heavy_program_hexagon`（BIN-DISTRO-HEXAGON の musl BusyBox 1.37.0 コマンド群、basic 19 件）・`heavy_abi_hexagon`（`.testdata/uapi-hexagon` の syscall.tbl 照合。Makefile.syscalls の opt-in と改名/差替え・trap0 呼出規約の固定・nr 定数 153 件のピン留め・名表の双方向照合、5 件）・`heavy_oracle_hexagon`（BIN-DISTRO-HEXAGON の busybox の .text を `llvm-objdump --mcpu=hexagonv73` と語ごとに照合。146,804 語中 146,587 語をデコードして差分 0）
+
+残っている事項：
+
+- GAP-0069（パケット組立規則の手書き表。属性表としての生成化は GAP-0023 の残項目）・GAP-0070（HVX 語彙の代表部分集合）・GAP-0071（HVX 意味論・配置の近似）・GAP-0072（HW スレッド交互実行モデルの近似）・GAP-0073（Linux ABI の近似）・GAP-0074（df/sf の FP 語彙と `date`/`seq` 系の残不具合）・GAP-0075（意味論の意図的な簡略化。ヒント/予測・フェンス no-op・キャッシュ/プリフェッチ系の語彙外・特権の範囲外扱い・制御レジスタの部分集合・generic Backend 化の未対応）
 
 ## 残っている事項（横断）
 

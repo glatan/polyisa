@@ -13,7 +13,7 @@
 //! trap0(#1) の Trap 経路、lazymap 窓の遅延割付、
 //! statx/getdents64/mmap2 等の syscall パーソナリティ。
 //!
-//! 既知残課題（Gap: GAP-0067）: `decfloat` が使う convert_*df/
+//! 既知残課題（Gap: GAP-0074）: `decfloat` が使う convert_*df/
 //! convert_*sf 系 FP 変換命令は未実装で %f 系（seq 等）は
 //! 走らない。`__secs_to_tm` 系で remdays が異常に大きく残り
 //! date / ls -l が時刻整形前に停止するケースがある。

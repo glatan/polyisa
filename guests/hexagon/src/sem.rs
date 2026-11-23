@@ -123,7 +123,7 @@ pub fn hwt_ref() -> StateRef<W32> {
 
 /// 制御レジスタ番号 → CpuState 面。ユーザ可視分だけを持つ
 /// （UPCYCLE/FRAMELIMIT/FRAMEKEY/PKTCOUNT/UTIMER 等の残りは
-/// 後段の段階で拡張する）。
+/// 未収録 — Gap: GAP-0075）。
 fn c_ref(i: u64) -> Option<StateRef<W32>> {
     use core::mem::offset_of as off;
     let a = u8::try_from(i).ok()?;
@@ -1532,6 +1532,7 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, 31, cx.next);
             jump(b, r_get(b, ops[0] as u32));
         }
+        // hintjr は予測ヒントで建築状態を変えない（Gap: GAP-0075）。
         Insn::Hintjr => {}
         // pause(#u) は休眠要求を hwt に残すだけで建築状態を
         // 変えない（単スレッド経路では発行モデルが要求を見ない
@@ -1546,7 +1547,7 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             );
         }
         // barrier/syncht はメモリ順序フェンス。逐次実行の単一
-        // エンジンでは建築状態を変えない。
+        // エンジンでは建築状態を変えない（Gap: GAP-0075）。
         Insn::Barrier | Insn::Syncht => {}
         // ---- HX7: 述語条件分岐 ----
         // `if ([!]Pu[.new]) jump/call`（ops = target, p, 否定）。
