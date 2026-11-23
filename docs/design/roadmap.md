@@ -45,7 +45,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| VX7 | push/pop・queue 命令（insq*/remq* 系）・文字列命令（movc/cmpc/loc/skp/scan/span/matchc/movtc/movtuc/crc）・chmk/chme（段階 25 の BSD パーソナリティが使う） | VX4 | - |
 | VX9 | 浮動小数点（F・D・G・H。poly 系を含む）・cvt 系。D 形式のワード並び（middle-endian）はオペランド指定子側で扱う | VX4 | - |
 | VX10 | パック十進（movp/cmpp/addp/subp/mulp/divp/cvt 系） | VX9 | - |
 | VX11 | モデル差と MicroVAX 省略命令の OS 補完経路 | VX5-10 | - |
