@@ -170,6 +170,19 @@ fn cond_of(si: &packet::SlotInsn, insn: Insn) -> Option<sem::DotIf> {
                 new: q & 2 != 0,
             });
         }
+        // HX13: 条件付き sign/zero-extend。末尾 2 オペランドは
+        // (述語, qualifier) だが qualifier のビット順が逆
+        // （q = {bit1=否定, bit0=.new}）。
+        Insn::Czxtb | Insn::Czxth | Insn::Csxtb | Insn::Csxth => {
+            let ops = extract_ops(insn, si.word);
+            let n = ops.len();
+            let q = ops[n - 1];
+            return Some(sem::DotIf {
+                p: ops[n - 2] as u8,
+                neg: q & 2 != 0,
+                new: q & 1 != 0,
+            });
+        }
         _ => {}
     }
     let sel = match insn {

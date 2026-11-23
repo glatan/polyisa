@@ -1836,6 +1836,24 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             let v = r_get(b, ops[1] as u32);
             pkt_w(b, ops[0] as u32, v & 0xffff);
         }
+        // ---- HX13: `if ([!]Pu[.new]) Rd = *(Rs)`（条件は exec
+        // 冒頭の DotIf が裁く）。----
+        Insn::Csxtb => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, sext(u64::from(v), 8));
+        }
+        Insn::Csxth => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, sext(u64::from(v), 16));
+        }
+        Insn::Czxtb => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, v & 0xff);
+        }
+        Insn::Czxth => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, v & 0xffff);
+        }
         // ---- 半語ベクトル（32 ビット）----
         Insn::VaddhRr
         | Insn::VaddhSatRr
@@ -1986,6 +2004,13 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             ximm(cx.ext, ops[3], 0, 6)
                 .wrapping_add(r_get(b, ops[1] as u32).wrapping_mul(r_get(b, ops[2] as u32))),
         ),
+        // Rd = add(#s6,mpyi(Rs,#s6))（HX13: mpyi 側即値形）。
+        Insn::AddMpyii => pkt_w(
+            b,
+            ops[0] as u32,
+            ximm(cx.ext, ops[2], 0, 6)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_mul(sext(ops[3], 6))),
+        ),
         Insn::Mpy => pkt_w64(
             b,
             ops[0] as u32,
@@ -2017,6 +2042,13 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             b,
             ops[0] as u32,
             r64(b, ops[0] as u32).wrapping_add(
+                u64::from(r_get(b, ops[1] as u32)) * u64::from(r_get(b, ops[2] as u32)),
+            ),
+        ),
+        Insn::MpyuNa => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[0] as u32).wrapping_sub(
                 u64::from(r_get(b, ops[1] as u32)) * u64::from(r_get(b, ops[2] as u32)),
             ),
         ),

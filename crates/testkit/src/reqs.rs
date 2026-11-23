@@ -221,6 +221,13 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/bin-distro-hexagon")],
     },
     TestBinary {
+        binary: "heavy_oracle_hexagon",
+        needs: &[
+            Req::Tool("llvm-objdump"),
+            Req::Data(".testdata/bin-distro-hexagon"),
+        ],
+    },
+    TestBinary {
         binary: "heavy_abi_hexagon",
         needs: &[Req::Data(".testdata/uapi-hexagon")],
     },
