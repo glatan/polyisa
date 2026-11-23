@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PD2 | `guests/pdp11` 骨格: CpuState（r0-7・PSW）、モデル（11/03 から J-11）とオプション（EIS・FIS・FP11・CIS）の機能旗 | PD1 | - |
 | PD3 | デコード: 16 ビット固定・8 モードのオペランド指定子（byte/word の扱い）。long/D 形式の middle-endian（3412）の語順 | PD2 | - |
 | PD4 | `run_pdp11` 実行ループ: ワード fetch・奇数アドレスのアドレスエラー + bare 最小テスト | PD3 | - |
 | PD5 | 整数: mov/add/sub/cmp/bit/bic/bis/clr/com/inc/dec/neg/tst（byte/word） | PD4 | - |

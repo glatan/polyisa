@@ -41,6 +41,7 @@ members = [
     "guests/loongarch",
     "guests/openrisc",
     "guests/vax",
+    "guests/pdp11",
 ]
 resolver = "2"
 

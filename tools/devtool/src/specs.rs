@@ -37,6 +37,9 @@ mod openrisc {
 mod parisc {
     include!("../../../guests/parisc/spec/parisc.rs");
 }
+mod pdp11 {
+    include!("../../../guests/pdp11/spec/pdp11.rs");
+}
 mod power {
     include!("../../../guests/power/spec/poweri.rs");
 }
@@ -124,6 +127,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "parisc",
         rel_paths: &["guests/parisc/spec/parisc.rs"],
         build: parisc::build_model,
+    },
+    IsaSpec {
+        isa: "pdp11",
+        rel_paths: &["guests/pdp11/spec/pdp11.rs"],
+        build: pdp11::build_model,
     },
     IsaSpec {
         isa: "power",

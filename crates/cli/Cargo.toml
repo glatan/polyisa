@@ -18,6 +18,7 @@ polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-openrisc = { path = "../../guests/openrisc", optional = true }
 polyisa-guest-parisc = { path = "../../guests/parisc", optional = true }
+polyisa-guest-pdp11 = { path = "../../guests/pdp11", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
@@ -69,6 +70,8 @@ guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-openrisc = ["dep:polyisa-guest-openrisc", "polyisa-os-linux/guest-openrisc"]
 guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
+# 骨格のみ（PD2）。default への追加と実行経路は PD4。
+guest-pdp11 = ["dep:polyisa-guest-pdp11"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]

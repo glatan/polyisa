@@ -22,6 +22,7 @@ dependencies = [
  "polyisa-guest-mips",
  "polyisa-guest-openrisc",
  "polyisa-guest-parisc",
+ "polyisa-guest-pdp11",
  "polyisa-guest-power",
  "polyisa-guest-riscv",
  "polyisa-guest-s390",
@@ -234,6 +235,16 @@ dependencies = [
  "polyisa-mem",
  "polyisa-sem",
  "polyisa-softfloat",
+]
+
+[[package]]
+name = "polyisa-guest-pdp11"
+version = "0.0.0"
+dependencies = [
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-sem",
 ]
 
 [[package]]
