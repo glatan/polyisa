@@ -46,6 +46,91 @@ fn bitlen(v: u128) -> i64 {
     128 - v.leading_zeros() as i64
 }
 
+/// 丸め済み・未パックの中間形（符号, M+1 ビット係数, 未クランプの
+/// バイアス指数）。sig==0 は真の零。DEC の演算の最終段で、形式
+/// 固有の格納規則がこの生値から値を組み立てる —— VAX は飽和
+/// （`vax_pack`）、FP11 は指数を 400₈ ずらした真の結果
+/// （`fp11_pack`）。
+struct Rp {
+    neg: bool,
+    sig: u128,
+    eu: i64,
+}
+
+/// (係数, 指数) を形式に収める前段。sig はちょうど M+1 ビットで
+/// 最上位が 1（0 も可）。フラグは範囲外の指数で立つ。
+fn pack_e<const E: u32, const M: u32>(neg: bool, sig: u128, e2: i64) -> (Rp, u8) {
+    if sig == 0 {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            0,
+        );
+    }
+    // sig は M+1 ビット → 指数部 = e2 + BIAS + M + 1。
+    let eu = e2 + VaxF::<E, M>::BIAS + i64::from(M) + 1;
+    let fl = if eu < 1 {
+        FP_UF
+    } else if eu > VaxF::<E, M>::EMAX as i64 {
+        FP_OF
+    } else {
+        0
+    };
+    (Rp { neg, sig, eu }, fl)
+}
+
+/// 生値の VAX 式の格納形。アンダーフローは真の零、オーバーフローは
+/// 「結果は不定」に対する決定的な選択として符号つき最大有限値。
+fn vax_pack<const E: u32, const M: u32>(rp: Rp) -> VaxF<E, M> {
+    if rp.sig == 0 || rp.eu < 1 {
+        return VaxF::<E, M>::zero();
+    }
+    if rp.eu > VaxF::<E, M>::EMAX as i64 {
+        return VaxF::<E, M> {
+            bits: ((rp.neg as u128) << (E + M))
+                | ((VaxF::<E, M>::EMAX as u128) << M)
+                | VaxF::<E, M>::fmask(),
+        };
+    }
+    VaxF::<E, M>::from_bits(
+        ((rp.neg as u128) << (E + M))
+            | (((rp.eu as u128) & VaxF::<E, M>::EMAX as u128) << M)
+            | (rp.sig & VaxF::<E, M>::fmask()),
+    )
+}
+
+/// 生値の FP11 式の格納形。オーバーフローは指数を -400₈、
+/// アンダーフローは +400₈ ずらした真の結果（仮数と符号は正しく
+/// 格納される。fl が立たない通常値は eu のまま）。係数が 0 は
+/// 真の零。ずらした指数はフィールド幅で折り返す。
+// Gap: GAP-0083（折り返し端境は実機との照合なしの決定的選択）
+fn fp11_pack<const E: u32, const M: u32>(rp: Rp, fl: u8) -> VaxF<E, M> {
+    if rp.sig == 0 {
+        return VaxF::<E, M>::zero();
+    }
+    let d = if fl & FP_OF != 0 {
+        -0o400i64
+    } else if fl & FP_UF != 0 {
+        0o400
+    } else {
+        0
+    };
+    let eu = (rp.eu + d) & 0xff;
+    VaxF::<E, M>::from_bits(
+        ((rp.neg as u128) << (E + M))
+            | (((eu as u128) & VaxF::<E, M>::EMAX as u128) << M)
+            | (rp.sig & VaxF::<E, M>::fmask()),
+    )
+}
+
+/// (生値, フラグ) の FP11 式の結果。
+fn fp11<const E: u32, const M: u32>(raw: (Rp, u8)) -> (VaxF<E, M>, u8) {
+    (fp11_pack::<E, M>(raw.0, raw.1), raw.1)
+}
+
 /// u128 同士の積の (上位, 下位)。H 形式の係数乗算（226 ビット）や
 /// EMOD の拡張係数（241 ビット）が u128 に収まらないため。
 fn mulhilo(a: u128, b: u128) -> (u128, u128) {
@@ -158,31 +243,8 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
     /// (係数, 指数) を形式に収める。sig はちょうど M+1 ビットで最上位が 1
     /// （0 も可）。指数範囲を検査し、範囲外はフラグつき。
     fn pack(neg: bool, sig: u128, e2: i64) -> (Self, u8) {
-        if sig == 0 {
-            return (Self::zero(), 0);
-        }
-        // sig は M+1 ビット → 指数部 = e2 + BIAS + M + 1。
-        let eu = e2 + Self::BIAS + i64::from(M) + 1;
-        if eu < 1 {
-            // アンダーフロー。VAX は真の零を返す。
-            return (Self::zero(), FP_UF);
-        }
-        if eu > Self::EMAX as i64 {
-            // オーバーフロー。VAX はエラーで結果は不定。決定性のため
-            // 符号つきの最大有限値を返す。
-            let m = Self {
-                bits: ((neg as u128) << (E + M)) | ((Self::EMAX as u128) << M) | Self::fmask(),
-            };
-            return (m, FP_OF);
-        }
-        (
-            Self {
-                bits: ((neg as u128) << (E + M))
-                    | (((eu as u128) & Self::EMAX as u128) << M)
-                    | (sig & Self::fmask()),
-            },
-            0,
-        )
+        let (rp, fl) = pack_e::<E, M>(neg, sig, e2);
+        (vax_pack::<E, M>(rp), fl)
     }
 
     /// 正のゼロ。
@@ -194,66 +256,177 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
     /// 加算。
     #[must_use]
     pub fn add(self, other: Self, rm: Rm) -> (Self, u8) {
-        add_sub(self, other, false, rm)
+        let (rp, fl) = add_sub(self, other, false, rm);
+        (vax_pack::<E, M>(rp), fl)
     }
 
     /// 減算。
     #[must_use]
     pub fn sub(self, other: Self, rm: Rm) -> (Self, u8) {
-        add_sub(self, other, true, rm)
+        let (rp, fl) = add_sub(self, other, true, rm);
+        (vax_pack::<E, M>(rp), fl)
+    }
+
+    /// FP11 規則の加算。オーバーフロー/アンダーフロー時の戻り値は
+    /// 仮数と符号を正しく持ち指数フィールドが真値から 400₈
+    /// （オーバーフローは -400₈、アンダーフローは +400₈）ずれた
+    /// 真の結果 —— VAX 式の飽和値/零ではない。係数が 0 は真の零。
+    /// PDP-11 FP11 用（ARCH83 Chapter 6 の例外時格納規則）。
+    #[must_use]
+    pub fn add_fp11(self, other: Self, rm: Rm) -> (Self, u8) {
+        fp11::<E, M>(add_sub(self, other, false, rm))
+    }
+
+    /// FP11 規則の減算。`add_fp11` と同じ格納規則。
+    #[must_use]
+    pub fn sub_fp11(self, other: Self, rm: Rm) -> (Self, u8) {
+        fp11::<E, M>(add_sub(self, other, true, rm))
     }
 
     /// 乗算。
     #[must_use]
     pub fn mul(self, other: Self, rm: Rm) -> (Self, u8) {
-        let neg = self.decode().0 ^ other.decode().0;
-        if self.is_reserved() || other.is_reserved() {
-            return (Self::zero(), FP_NV);
-        }
-        if self.is_zero() || other.is_zero() {
-            return (Self::zero(), 0);
-        }
-        let (_, m1, e1) = self.unpack();
-        let (_, m2, e2) = other.unpack();
-        // 積は最大 2M+2 ビット（H は 226 ビットで u128 に収まらない
-        // ので 256 ビットに受ける）。M+2 ビット＋sticky に畳む。
-        let (ph, pl) = mulhilo(m1, m2);
-        let want = i64::from(M) + 2;
-        let drop = (bitlen256(ph, pl) - want).max(0) as u32;
-        let (q, sticky) = shr256(ph, pl, drop);
-        round_pack::<E, M>(neg, q, e1 + e2 + i64::from(drop), sticky, rm)
+        let (rp, fl) = mul_e::<E, M>(self, other, rm);
+        (vax_pack::<E, M>(rp), fl)
+    }
+
+    /// FP11 規則の乗算。`add_fp11` と同じ格納規則。
+    #[must_use]
+    pub fn mul_fp11(self, other: Self, rm: Rm) -> (Self, u8) {
+        fp11::<E, M>(mul_e::<E, M>(self, other, rm))
     }
 
     /// 除算。
     #[must_use]
     pub fn div(self, other: Self, rm: Rm) -> (Self, u8) {
-        let neg = self.decode().0 ^ other.decode().0;
-        if self.is_reserved() || other.is_reserved() {
-            return (Self::zero(), FP_NV);
+        let (rp, fl) = div_e::<E, M>(self, other, rm);
+        (vax_pack::<E, M>(rp), fl)
+    }
+
+    /// FP11 規則の除算。`add_fp11` と同じ格納規則。除数が零なら
+    /// FP_DZ（FP11 では FEC=4 の中止例外で AC は変化しない）。
+    #[must_use]
+    pub fn div_fp11(self, other: Self, rm: Rm) -> (Self, u8) {
+        fp11::<E, M>(div_e::<E, M>(self, other, rm))
+    }
+
+    /// FP11 の MOD（乗算 + 整数部/小数部分離、ARCH83 Chapter 6）。
+    /// 返す: (整数部 N, 小数部 g, フラグ)。値は FP11 の格納形 —
+    /// FP_OF 時は N だけが有効（指数 -400₈）で g は真の零、
+    /// FP_UF 時は N が真の零で g が指数 +400₈ の形。呼び出し側が
+    // Gap: GAP-0083（大指数の整数部・小数部下桁の端境は正本
+    // マイクロコードとの照合なし）
+    /// 割込み可否に応じて ACv1/AC への格納を裁く。
+    /// N は係数を L=M+1 ビットに切り詰め（2**L 以上の積では低位が
+    /// 失われ、そのとき AC 側は真の零）、g は rm で丸める。
+    /// 積の係数生成は形式の全幅（1+E+M ビット）への切り詰め —
+    /// emod と同じ近似で、実機が生成する 48/59-64 ビット積とは
+    /// 下位桁が違いうる。
+    #[must_use]
+    pub fn modf_fp11(self, muld: Self, rm: Rm) -> (Self, Self, u8) {
+        if self.is_reserved() || muld.is_reserved() {
+            return (Self::zero(), Self::zero(), FP_NV);
         }
-        if other.is_zero() {
-            return (Self::zero(), FP_DZ);
+        if self.is_zero() || muld.is_zero() {
+            return (Self::zero(), Self::zero(), 0);
         }
-        if self.is_zero() {
-            return (Self::zero(), 0);
-        }
+        let neg = self.decode().0 ^ muld.decode().0;
         let (_, m1, e1) = self.unpack();
-        let (_, m2, e2) = other.unpack();
-        // 商を M+3 ビットほど作る。整数商から始め、余りから 1 ビット
-        // ずつ下へ伸ばす（u128 に被除数を伸ばすと溢れるため）。
-        let want = i64::from(M) + 2;
-        let mut q = m1 / m2;
-        let mut r = m1 % m2;
-        let mut e = e1 - e2;
-        let mut iters = 0;
-        while bitlen(q) <= want && r != 0 && iters < 140 {
-            let r2 = r << 1;
-            q = (q << 1) | (r2 / m2);
-            r = r2 % m2;
-            e -= 1;
-            iters += 1;
+        let (_, m2, e2) = muld.unpack();
+        let (ph, pl) = mulhilo(m1, m2);
+        // 正規化前の積を形式の全幅（1+E+M）ビットへ切り詰める
+        // （emod と同じ規則）。値 = q * 2^e。
+        let drop = (bitlen256(ph, pl) - i64::from(Self::WIDTH)).max(0) as u32;
+        let (q, _) = shr256(ph, pl, drop);
+        let e = e1 + e2 + i64::from(drop);
+        // 整数部のビット長・L ビットに正規化した係数・bit0 の重みと
+        // 小数部の (係数, bit0 の重み)。値 = q * 2^e。整数部が係数の
+        // 有効幅 L を超えるとき（|PROD| >= 2**L）小数部は捨てられる。
+        let l = i64::from(M) + 1;
+        let (nsig, ne, bl_i, fsig, fe) = if e >= 0 {
+            // 全部整数部。int = q << e — 上位 L ビットが必要なときは
+            // 桁落ちしないので q の上位 L ビット（L 未満なら左寄せ）。
+            let bl = bitlen(q) + e;
+            if bl > l {
+                let bq = bitlen(q);
+                let ns = if bq >= l {
+                    q >> (bq - l)
+                } else {
+                    q << (l - bq)
+                };
+                (ns, bl - l, bl, 0u128, 0i64)
+            } else {
+                // int = q << e は L ビット以内に収まる。
+                let int = q << e as u32;
+                (int << (l - bl), -(l - bl), bl, 0, 0)
+            }
+        } else {
+            let r = (-e) as u32;
+            if r >= 128 {
+                (0, 0, 0, q, e)
+            } else {
+                let int = q >> r;
+                let bl = bitlen(int);
+                let fs = if bl > l { 0 } else { q & ((1u128 << r) - 1) };
+                if bl == 0 {
+                    (0, 0, 0, fs, e)
+                } else if bl > l {
+                    (int >> (bl - l), bl - l, bl, fs, e)
+                } else {
+                    (int << (l - bl), -(l - bl), bl, fs, e)
+                }
+            }
+        };
+        // N は係数を L ビットに切詰めて格納（規則は chop なので
+        // pack_e でよい）。
+        let n_rp = if bl_i == 0 {
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            }
+        } else {
+            pack_e::<E, M>(neg, nsig, ne).0
+        };
+        // 小数部は M+2 ビット＋sticky に正規化して丸める。
+        let g_rp = if fsig == 0 {
+            (
+                Rp {
+                    neg: false,
+                    sig: 0,
+                    eu: 0,
+                },
+                0,
+            )
+        } else {
+            let want = l + 1;
+            let bl_g = bitlen(fsig);
+            let (gq, ge, gs) = if bl_g > want {
+                let d = (bl_g - want) as u32;
+                (fsig >> d, fe + i64::from(d), fsig & ((1u128 << d) - 1) != 0)
+            } else {
+                (fsig << (want - bl_g) as u32, fe - (want - bl_g), false)
+            };
+            round_pack_e::<E, M>(neg, gq, ge, gs, rm)
+        };
+        let n_fl = if n_rp.sig != 0 && n_rp.eu > Self::EMAX as i64 {
+            FP_OF
+        } else {
+            0
+        };
+        if n_fl & FP_OF != 0 {
+            // PROD 自体のオーバーフローもここに合流する（N の指数が
+            // 表現を超えるのは |PROD| >= 2**emax+1 のとき）。
+            return (fp11_pack::<E, M>(n_rp, FP_OF), Self::zero(), FP_OF);
         }
-        round_pack::<E, M>(neg, q, e, r != 0, rm)
+        if g_rp.1 & FP_UF != 0 {
+            return (Self::zero(), fp11_pack::<E, M>(g_rp.0, FP_UF), FP_UF);
+        }
+        (
+            fp11_pack::<E, M>(n_rp, 0),
+            fp11_pack::<E, M>(g_rp.0, g_rp.1),
+            0,
+        )
     }
 
     /// 比較。等しければ 0。予約オペランドは FP_NV 相当として
@@ -635,11 +808,23 @@ impl<const E: u32, const M: u32> VaxF<E, M> {
 /// M+2 ビットの係数（最下位はガード）と sticky から最終結果を作る。
 fn round_pack<const E: u32, const M: u32>(
     neg: bool,
+    q: u128,
+    e: i64,
+    sticky: bool,
+    rm: Rm,
+) -> (VaxF<E, M>, u8) {
+    let (rp, fl) = round_pack_e::<E, M>(neg, q, e, sticky, rm);
+    (vax_pack::<E, M>(rp), fl)
+}
+
+/// `round_pack` の生値版 — VAX 式の格納前の段階で止める。
+fn round_pack_e<const E: u32, const M: u32>(
+    neg: bool,
     mut q: u128,
     mut e: i64,
     mut sticky: bool,
     rm: Rm,
-) -> (VaxF<E, M>, u8) {
+) -> (Rp, u8) {
     let want = i64::from(M) + 2;
     while bitlen(q) > want {
         sticky |= (q & 1) != 0;
@@ -651,7 +836,14 @@ fn round_pack<const E: u32, const M: u32>(
         e -= 1;
     }
     if q == 0 {
-        return (VaxF::<E, M>::zero(), 0);
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            0,
+        );
     }
     let guard = (q & 1) as u8;
     q >>= 1;
@@ -670,7 +862,103 @@ fn round_pack<const E: u32, const M: u32>(
             e += 1;
         }
     }
-    VaxF::pack(neg, q, e)
+    pack_e::<E, M>(neg, q, e)
+}
+
+/// 有限値から生値へ（sig==0 は真の零）。
+fn rp_of<const E: u32, const M: u32>(v: VaxF<E, M>) -> Rp {
+    let (neg, sig, e2) = v.unpack();
+    Rp {
+        neg,
+        sig,
+        eu: e2 + VaxF::<E, M>::BIAS + i64::from(M) + 1,
+    }
+}
+
+/// 乗算の中核 — 生値で返す。
+fn mul_e<const E: u32, const M: u32>(a: VaxF<E, M>, b: VaxF<E, M>, rm: Rm) -> (Rp, u8) {
+    let neg = a.decode().0 ^ b.decode().0;
+    if a.is_reserved() || b.is_reserved() {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            FP_NV,
+        );
+    }
+    if a.is_zero() || b.is_zero() {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            0,
+        );
+    }
+    let (_, m1, e1) = a.unpack();
+    let (_, m2, e2) = b.unpack();
+    // 積は最大 2M+2 ビット（H は 226 ビットで u128 に収まらない
+    // ので 256 ビットに受ける）。M+2 ビット＋sticky に畳む。
+    let (ph, pl) = mulhilo(m1, m2);
+    let want = i64::from(M) + 2;
+    let drop = (bitlen256(ph, pl) - want).max(0) as u32;
+    let (q, sticky) = shr256(ph, pl, drop);
+    round_pack_e::<E, M>(neg, q, e1 + e2 + i64::from(drop), sticky, rm)
+}
+
+/// 除算の中核 — 生値で返す。
+fn div_e<const E: u32, const M: u32>(a: VaxF<E, M>, b: VaxF<E, M>, rm: Rm) -> (Rp, u8) {
+    let neg = a.decode().0 ^ b.decode().0;
+    if a.is_reserved() || b.is_reserved() {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            FP_NV,
+        );
+    }
+    if b.is_zero() {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            FP_DZ,
+        );
+    }
+    if a.is_zero() {
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            0,
+        );
+    }
+    let (_, m1, e1) = a.unpack();
+    let (_, m2, e2) = b.unpack();
+    // 商を M+3 ビットほど作る。整数商から始め、余りから 1 ビット
+    // ずつ下へ伸ばす（u128 に被除数を伸ばすと溢れるため）。
+    let want = i64::from(M) + 2;
+    let mut q = m1 / m2;
+    let mut r = m1 % m2;
+    let mut e = e1 - e2;
+    let mut iters = 0;
+    while bitlen(q) <= want && r != 0 && iters < 140 {
+        let r2 = r << 1;
+        q = (q << 1) | (r2 / m2);
+        r = r2 % m2;
+        e -= 1;
+        iters += 1;
+    }
+    round_pack_e::<E, M>(neg, q, e, r != 0, rm)
 }
 
 /// 加減算の中核。
@@ -679,19 +967,33 @@ fn add_sub<const E: u32, const M: u32>(
     b: VaxF<E, M>,
     flip: bool,
     rm: Rm,
-) -> (VaxF<E, M>, u8) {
+) -> (Rp, u8) {
     let s1 = a.decode().0;
     let mut s2 = b.decode().0;
     if flip {
         s2 = !s2;
     }
     if a.is_reserved() || b.is_reserved() {
-        return (VaxF::zero(), FP_NV);
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            FP_NV,
+        );
     }
     let z1 = a.is_zero();
     let z2 = b.is_zero();
     if z1 && z2 {
-        return (VaxF::zero(), 0);
+        return (
+            Rp {
+                neg: false,
+                sig: 0,
+                eu: 0,
+            },
+            0,
+        );
     }
     if z1 {
         // b の符号を flip に応じて変えた零ではない有限値を返す。
@@ -699,10 +1001,10 @@ fn add_sub<const E: u32, const M: u32>(
         if flip {
             r.bits ^= 1u128 << (E + M);
         }
-        return (r, 0);
+        return (rp_of::<E, M>(r), 0);
     }
     if z2 {
-        return (a, 0);
+        return (rp_of::<E, M>(a), 0);
     }
     let (_, m1, e1) = a.unpack();
     let (_, m2, e2) = b.unpack();
@@ -740,7 +1042,14 @@ fn add_sub<const E: u32, const M: u32>(
     }
     if q == 0 {
         if !dropped_nz {
-            return (VaxF::zero(), 0);
+            return (
+                Rp {
+                    neg: false,
+                    sig: 0,
+                    eu: 0,
+                },
+                0,
+            );
         }
         // 粗いスケールでは 0 だが、シフトで落ちた桁を含めると残余は
         // 零ではない。異符号（減算相当）のとき：
@@ -752,7 +1061,7 @@ fn add_sub<const E: u32, const M: u32>(
         } else {
             dropped
         };
-        return round_pack::<E, M>(neg, q2, ex - i64::from(r), false, rm);
+        return round_pack_e::<E, M>(neg, q2, ex - i64::from(r), false, rm);
     }
     // q の LSB の下に続く残余（tail は r 桁）。減算で借りを
     // 起こした側（x'-y' が係数上 0 より大きく残った側）は
@@ -774,5 +1083,5 @@ fn add_sub<const E: u32, const M: u32>(
         r -= take;
     }
     let sticky = (tail & ((1u128 << r) - 1)) != 0;
-    round_pack::<E, M>(neg, q, ex, sticky, rm)
+    round_pack_e::<E, M>(neg, q, ex, sticky, rm)
 }

@@ -34,7 +34,9 @@ use polyisa_engine::interp::InterpExit;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_sem::{Backend, ExceptionKind, GuestException};
 
-use crate::{Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, psw, reg, sem, specifier};
+use crate::{
+    FEAT_FP11, Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, psw, reg, sem, specifier,
+};
 
 /// 例外をトラップ配送に写す。`vec` はベクタ（バイトアドレス）、
 /// `stacked` は積む PC で、同時にハンドラが見る再開点になる
@@ -107,6 +109,22 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
         }
     };
     let Some(insn) = decode_model_ex(u128::from(w0), 16, false, feats) else {
+        // fp11 モデルでは 17xxxx の未割当語は FP 違法オペコード
+        // （FEC=2）— FID で抑止されていなければ vector 244 へ。
+        // trap の規則（積む PC は次の語）で配送し、抑止時は
+        // 読み飛ばす（ARCH83 6章の FP 例外）。
+        if feats & FEAT_FP11 != 0 && w0 >= 0o170000 {
+            match env.step(|b| sem::fp11_illop(b, pc)) {
+                Ok(()) => {
+                    env.pc = u64::from(pc.wrapping_add(2));
+                    return Ok(());
+                }
+                Err(InterpExit::Exception(e)) => {
+                    return dispatch_err(env, sys, e, pc, pc.wrapping_add(2));
+                }
+                Err(InterpExit::Unimplemented(_)) => {}
+            }
+        }
         // 予約・違法命令。OS パーソナリティの補完を先に試し、
         // 受けなければ vector 010 へ配送する。
         if sys.handle_unimpl(env, u64::from(pc), u64::from(w0)) == TrapOutcome::Handled {
@@ -138,8 +156,12 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
         });
     };
     // 実行中の r7 は命令の終端（次の命令）を指す。分岐変位・PC
-    // 相対の基準と、実行後の次命令はここから決まる。
-    let next = pc.wrapping_add(f.len as u16);
+    // 相対の基準と、実行後の次命令はここから決まる。FP11 の
+    // 即値オペランド（F=4・D=8 バイト）は指定子デコードの 1 語を
+    // 超えて命令ストリームを消費するので、その分を足す
+    // （`sem::fp_imm_extra` —— 内容は意味論側がデータ読み出しで
+    // 取る）。
+    let next = pc.wrapping_add(f.len as u16 + sem::fp_imm_extra(&env.backend, &f));
     sem::r_set(&mut env.backend, reg::PC as u8, next);
     // フェッチ時の T ビットを標本化する —— これが立つ命令が「traced
     // な命令」で、実行で T を消しても完了時のトラップは発火する

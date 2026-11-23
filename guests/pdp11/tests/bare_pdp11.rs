@@ -77,9 +77,9 @@ fn decode_gated_by_features() {
 #[test]
 fn insn_count() {
     // 二重 12 + 単一語 20 + 単一バイト 16 + JSR/RTS/SOB 3 + EIS/XOR 5
-    // + FIS 4 + 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
+    // + FIS 4 + FP11 26 + 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
     // （条件コード操作は nop + ccc/scc のマスク形として数える）。
-    assert_eq!(INSNS.len(), 90);
+    assert_eq!(INSNS.len(), 116);
 }
 
 #[test]
@@ -1537,7 +1537,7 @@ fn jmp_jsr_specifier_forms() {
 
 // ---- PD8: トラップ・特権・システム命令 ----
 
-use polyisa_sem::{Backend, StateRef, W16};
+use polyisa_sem::{Backend, StateRef, W16, W64};
 
 /// 状態面の語（ksp/ssp/usp/mmr などの退避先）を書く。
 fn st_put(env: &mut BareEnv, off: usize, v: u16) {
@@ -2286,4 +2286,909 @@ fn fis_mul_div_implicit_sp_scratch() {
     sem::r_set(&mut env.backend, reg::SP as u8, 0o20002);
     step_f(&mut env, feats).unwrap();
     assert_eq!(getf(&env, 0o2004), 0x4140_0000); // 3.0
+}
+
+// ---- PD10: FP11（17xxxx —— F/D 浮動小数点オプション）----
+
+/// FP11 命令語（FRD: AC は <7:6> —— bit8 は命令対の選択子で
+/// パターン側が固定するので AC0-AC3 のみ表せる）。
+fn asm_fp(insn: Insn, ac: u8, specs: &[Spec]) -> Vec<u16> {
+    let base = encode(insn, &[]).expect("encodable") as u16;
+    let (w, ext) = encode_insn(base | u16::from(ac & 3) << 6, specs);
+    let mut v = vec![w];
+    v.extend(ext);
+    v
+}
+
+/// D 形式の 64 ビット値をメモリに書く（上位語が低番地）。
+fn putd(env: &mut BareEnv, a: u16, bits: u64) {
+    for k in 0..4 {
+        put16(env, a.wrapping_add(2 * k), (bits >> (48 - 16 * k)) as u16);
+    }
+}
+
+/// D 形式を読む。
+fn getd(env: &BareEnv, a: u16) -> u64 {
+    let mut v = 0u64;
+    for k in 0..4 {
+        v = v << 16 | u64::from(get16(env, a.wrapping_add(2 * k)));
+    }
+    v
+}
+
+/// FPS/FEC/FEA の状態面オフセット。
+const FPS_OFF: usize = core::mem::offset_of!(CpuState, fps);
+const FEC_OFF: usize = core::mem::offset_of!(CpuState, fec);
+const FEA_OFF: usize = core::mem::offset_of!(CpuState, fea);
+const AC_OFF: usize = core::mem::offset_of!(CpuState, ac);
+
+/// AC_n の生値（F 形式は <63:32> 左詰め）。
+fn ac_get(env: &BareEnv, n: u8) -> u64 {
+    let off = AC_OFF + usize::from(n) * 8;
+    u64::from_le_bytes(env.backend.state[off..off + 8].try_into().expect("w64"))
+}
+
+fn ac_put(env: &mut BareEnv, n: u8, v: u64) {
+    env.backend
+        .set(StateRef::<W64>::from_offset(AC_OFF + usize::from(n) * 8), v);
+}
+
+/// AC_n の F 形式ビット列（<63:32>）。
+fn acf_get(env: &BareEnv, n: u8) -> u32 {
+    (ac_get(env, n) >> 32) as u32
+}
+
+fn acf_put(env: &mut BareEnv, n: u8, bits: u32) {
+    ac_put(env, n, u64::from(bits) << 32);
+}
+
+/// FPS ビット（sem::fps と同じ配置）。
+const FPS_FER: u16 = 1 << 15;
+const FPS_FID: u16 = 1 << 14;
+const FPS_FIUV: u16 = 1 << 11;
+const FPS_FIU: u16 = 1 << 10;
+const FPS_FIV: u16 = 1 << 9;
+const FPS_FIC: u16 = 1 << 8;
+const FPS_FD: u16 = 1 << 7;
+const FPS_FL: u16 = 1 << 6;
+const FPS_FT: u16 = 1 << 5;
+const FPS_FN: u16 = 1 << 3;
+const FPS_FZ: u16 = 1 << 2;
+const FPS_FV: u16 = 1 << 1;
+const FPS_FC: u16 = 1;
+
+/// 状態面の語を読む（& 版 —— st_get は &mut 専用）。
+fn st_rd(env: &BareEnv, off: usize) -> u16 {
+    u16::from_le_bytes(env.backend.state[off..off + 2].try_into().expect("w16"))
+}
+
+fn fps_get(env: &BareEnv) -> u16 {
+    st_rd(env, FPS_OFF)
+}
+
+fn fps_put(env: &mut BareEnv, v: u16) {
+    st_put(env, FPS_OFF, v);
+}
+
+/// vector 244 の FP 例外へ飛んだことと、積まれた PC（次の命令）
+/// を検査する。戻り値はスタックに積まれた PC。
+fn expect_fp_trap(env: &BareEnv, handler: u16, stacked_pc: u16) {
+    assert_eq!(env.pc, u64::from(handler));
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(env, sp), stacked_pc);
+}
+
+/// テスト用の F 形式値（符号・指数 excess 200・仮数）。
+const F1_0: u32 = 0x4080_0000;
+const F2_0: u32 = 0x4100_0000;
+const F3_0: u32 = 0x4140_0000;
+const F5_0: u32 = 0x41A0_0000;
+const F6_0: u32 = 0x41C0_0000;
+const F_075: u32 = 0x4040_0000; // 0.75
+const F_375: u32 = 0x4170_0000; // 3.75
+const F_MAX: u32 = 0x7FFF_FFFF; // 最大正規化（exp 377・仮数全 1）
+const F_MIN: u32 = 0x0080_0000; // 最小正規化（exp 1・仮数 0）
+const F_N0: u32 = 0x8000_0000; // -0（指数 0・符号 1）
+
+#[test]
+fn fp11_decode_gated() {
+    // 既定モデル（fp11 なし）では解けず、pdp11_73（J-11 = FPJ11）
+    // では全語彙が解ける。FIS モデルでは排他なので解けない。
+    assert_eq!(dec(0o172400), None); // ldf
+    for w in [
+        0o170000u16,
+        0o170001,
+        0o170002,
+        0o170011,
+        0o170012, // 固定形
+        0o170100,
+        0o170200,
+        0o170300, // ldfps/stfps/stst
+        0o170400,
+        0o170500,
+        0o170600,
+        0o170700, // clrf..negf
+        0o171000,
+        0o171400,
+        0o172000,
+        0o172400, // mulf..ldf
+        0o173000,
+        0o173400,
+        0o174000,
+        0o174400, // subf..divf
+        0o175000,
+        0o175400,
+        0o176000,
+        0o176400, // stexp..ldexp
+        0o177000,
+        0o177400, // ldcif/ldcff
+    ] {
+        assert!(dec_m(w, "pdp11_73").is_some(), "{w:o} should decode");
+        assert_eq!(dec_m(w, "pdp11_03"), None);
+    }
+    // FIS は fp11 と排他（175xxx は FIS 空間に被るが解けない）。
+    let fis = model_feats("pdp11_03") | FEAT_FIS;
+    assert_eq!(decode_model_ex(0o172400u128, 16, false, fis), None);
+    // 未割当の 17xxxx（170003 は seti と setd の間）は解けない。
+    assert_eq!(dec_m(0o170003, "pdp11_73"), None);
+}
+
+#[test]
+fn fp11_ldf_stf_f_format_and_cc() {
+    // ldf @#2000,ac0 → AC<63:32> ← F。CC は FN/FZ に出る。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F2_0);
+    assert_eq!(fps_get(&env) & 0o17, 0); // FN=FZ=FV=FC=0
+    // stf ac0,@#2004 → メモリへ（上位語が低番地 —— 3412 配置）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stf, 0, &[Spec::Abs(0o2004)]),
+    );
+    acf_put(&mut env, 0, F_375);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2004), F_375);
+    // 負値は FN、零は FZ。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F_N0 | F2_0); // -2.0
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & (FPS_FN | FPS_FZ), FPS_FN);
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & (FPS_FN | FPS_FZ), FPS_FZ);
+}
+
+#[test]
+fn fp11_d_format_memory_order() {
+    // setd 後の ldf/stf は 8 バイト D 形式。低番地語が最上位語。
+    let mut w = asm(Insn::Setd, &[]);
+    w.extend(asm_fp(Insn::Ldf, 0, &[Spec::Abs(0o2000)]));
+    w.extend(asm_fp(Insn::Stf, 0, &[Spec::Abs(0o2010)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    let d3 = 0x4140_0000_0000_0000u64; // 3.0（D）
+    putd(&mut env, 0o2000, d3);
+    step_m(&mut env, "pdp11_73").unwrap(); // setd
+    assert_eq!(fps_get(&env) & FPS_FD, FPS_FD);
+    step_m(&mut env, "pdp11_73").unwrap(); // ldf
+    assert_eq!(ac_get(&env, 0), d3);
+    step_m(&mut env, "pdp11_73").unwrap(); // stf
+    assert_eq!(getd(&env, 0o2010), d3);
+}
+
+#[test]
+fn fp11_mode0_is_ac_and_ac67_illegal() {
+    // モード 0 は AC を選ぶ: ldf ac1,ac0（語 172401 相当）。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Ldf, 0, &[Spec::Reg(1)]));
+    acf_put(&mut env, 1, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F5_0);
+    // AC6/AC7 は浮動オペコードエラー（FEC=2）→ vector 244。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Ldf, 0, &[Spec::Reg(6)]));
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1002);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o2);
+    assert_eq!(st_rd(&env, FEA_OFF), 0o1000);
+    assert_eq!(fps_get(&env) & FPS_FER, FPS_FER);
+    // FID で抑止すると FEC/FEA は更新されるが trap せず読み飛ばす。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Ldf, 0, &[Spec::Reg(6)]));
+    fps_put(&mut env, FPS_FID);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o1002);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o2);
+}
+
+#[test]
+fn fp11_undecoded_17xxxx_is_fp_illegal() {
+    // 170003（seti と setd の間の未割当語）は FEC=2 で vector 244。
+    let mut env = env_at("pdp11_73", 0o1000, &[0o170003]);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1002);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o2);
+    // fp11 を持たないモデルでは従来の違法命令（vector 010）。
+    let mut env = env_at("pdp11_03", 0o1000, &[0o170003]);
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(env.pc, 0o2400);
+}
+
+#[test]
+fn fp11_ldfps_stfps_stst() {
+    // ldfps #v → FPS。桁 13・12・4 は読み出せない（LDFPS で消す）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm(Insn::Ldfps, &[Spec::Imm(0o167777)]),
+    );
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env), 0o167777 & !0o30020);
+    // stfps @#a → FPS を書き出す。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Stfps, &[Spec::Abs(0o2000)]));
+    fps_put(&mut env, FPS_FER | FPS_FD | FPS_FN | 0o30020);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), fps_get(&env));
+    // stst @#a → FEC・FEA を 2 語で書き出す。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Stst, &[Spec::Abs(0o2000)]));
+    st_put(&mut env, FEC_OFF, 0o10);
+    st_put(&mut env, FEA_OFF, 0o1234);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), 0o10);
+    assert_eq!(get16(&env, 0o2002), 0o1234);
+    // stst r0 は FEC のみ。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Stst, &[Spec::Reg(0)]));
+    st_put(&mut env, FEC_OFF, 0o4);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o4);
+}
+
+#[test]
+fn fp11_setf_setd_seti_setl() {
+    for (insn, bit, on) in [
+        (Insn::Setf, FPS_FD, false),
+        (Insn::Setd, FPS_FD, true),
+        (Insn::Seti, FPS_FL, false),
+        (Insn::Setl, FPS_FL, true),
+    ] {
+        let mut env = env_at("pdp11_73", 0o1000, &asm(insn, &[]));
+        fps_put(&mut env, FPS_FD | FPS_FL);
+        step_m(&mut env, "pdp11_73").unwrap();
+        assert_eq!(fps_get(&env) & bit != 0, on, "{insn:?}");
+        assert_eq!(env.pc, 0o1002);
+    }
+    // CC 系の FPS 桁は触らない。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Setd, &[]));
+    fps_put(&mut env, FPS_FN | FPS_FC);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN | FPS_FC);
+}
+
+#[test]
+fn fp11_cfcc_copies_fps_cc() {
+    // FPS<3:0> → PSW<3:0>。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Cfcc, &[]));
+    fps_put(&mut env, FPS_FN | FPS_FC);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(nzvc(&env), 0o11); // N+C
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Cfcc, &[]));
+    fps_put(&mut env, 0);
+    sem::psw_put(&mut env.backend, 0o17);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(nzvc(&env), 0);
+}
+
+#[test]
+fn fp11_clrf_tstf_negf_absf() {
+    // clrf @#a → +0。FZ=1。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Clrf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ);
+    // tstf -2.0 → FN。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Tstf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, F_N0 | F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN);
+    // negf +2.0 → -2.0（符号反転）。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Negf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), F2_0 | F_N0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN);
+    // negf +0 → 正確な零（指数 0 のオペランドは常に正確な零を
+    // 格納する FP11 の規則 —— 符号は反転されない）。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Negf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ);
+    // negf -0 も正確な +0。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Negf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, F_N0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), 0);
+    // absf -2.0 → +2.0。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Absf, &[Spec::Abs(0o2000)]));
+    putf(&mut env, 0o2000, F_N0 | F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), F2_0);
+    assert_eq!(fps_get(&env) & 0o17, 0);
+    // absf/negf の AC 宛て: 下位 32 ビットは不変。
+    let mut env = env_at("pdp11_73", 0o1000, &asm(Insn::Negf, &[Spec::Reg(2)]));
+    ac_put(&mut env, 2, u64::from(F2_0) << 32 | 0x1234_5678);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 2), F2_0 | F_N0);
+    assert_eq!(ac_get(&env, 2) & 0xffff_ffff, 0x1234_5678);
+}
+
+#[test]
+fn fp11_add_sub_mul_div() {
+    // addf src,ac: AC ← AC + src。2.0 + 3.0 = 5.0。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F3_0);
+    acf_put(&mut env, 0, F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F5_0);
+    assert_eq!(fps_get(&env) & 0o17, 0);
+    // subf: 3.0 - 5.0 = -2.0 → FN。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Subf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F5_0);
+    acf_put(&mut env, 0, F3_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F2_0 | F_N0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN);
+    // mulf: 2.0 × 3.0 = 6.0。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F3_0);
+    acf_put(&mut env, 0, F2_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F6_0);
+    // divf: 6.0 / 3.0 = 2.0。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Divf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F3_0);
+    acf_put(&mut env, 0, F6_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F2_0);
+    // 等しき引き算は正確な +0（FZ）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Subf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F1_0);
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ);
+    // -0 オペランドは零として扱う（FIUV が消えていれば）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F_N0);
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F1_0);
+    // 丸め（FT=0）: 1.0 + 2^-24 の真値は 1+ulp/2 —— FP11 の丸めは
+    // 丸めビットが立てば切捨て値に 1 LSB 加える（半値は絶対値を
+    // 増やす向き）ので 1.0+ulp。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x3480_0000); // 2^-24
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F1_0 + 1);
+    // FT=1（切捨て）: 1.0 + 2^-25 → 切捨てで 1.0。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x3400_0000); // 2^-25
+    acf_put(&mut env, 0, F1_0);
+    fps_put(&mut env, FPS_FT);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F1_0);
+}
+
+#[test]
+fn fp11_cmpf() {
+    // cmpf src,ac: (src) - (AC) の CC。src > AC → FN なし、src < AC → FN。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Cmpf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F5_0);
+    acf_put(&mut env, 0, F3_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & 0o17, 0); // 5.0 - 3.0 > 0
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Cmpf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F3_0);
+    acf_put(&mut env, 0, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN); // 3.0 - 5.0 < 0
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Cmpf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F5_0);
+    acf_put(&mut env, 0, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ); // 等しい
+    // 両方零の比較は AC ← 正確な零に掃除される（KDJ11-E UG 注記）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Cmpf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x0000_0001); // dirty zero（exp 0・frac≠0）
+    acf_put(&mut env, 0, F_N0); // -0
+    fps_put(&mut env, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ);
+}
+
+#[test]
+fn fp11_modf() {
+    // modf src,ac: N=|AC×src| の整数部 → ACv1、g=小数部 → AC。
+    // 3.75 × 1.0: N=3.0（AC1）・g=0.75（AC0）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Modf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F1_0);
+    acf_put(&mut env, 0, F_375);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 1), F3_0);
+    assert_eq!(acf_get(&env, 0), F_075);
+    assert_eq!(fps_get(&env) & 0o17, 0); // g > 0
+    // 奇数 AC では整数部を格納しない（AC2 へは書かない）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Modf, 1, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F1_0);
+    acf_put(&mut env, 1, F_375);
+    acf_put(&mut env, 2, F6_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 1), F_075); // g のみ
+    assert_eq!(acf_get(&env, 2), F6_0); // 無傷
+    // 負の積: -3.75 × 1.0 → N=-3.0・g=-0.75。FN は g で立つ。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Modf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F1_0);
+    acf_put(&mut env, 0, F_375 | F_N0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 1), F3_0 | F_N0);
+    assert_eq!(acf_get(&env, 0), F_075 | F_N0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN);
+    // |PROD| < 1 → N=0・g=PROD。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Modf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F_075);
+    acf_put(&mut env, 0, F_075); // 0.5625 = 0x4070_0000
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 1), 0);
+    assert_eq!(acf_get(&env, 0), 0x4010_0000); // 0.5625 = 0.5625×2^0
+}
+
+#[test]
+fn fp11_stexp_ldexp() {
+    // stexp ac,@#a → EXP-200₈。5.0 の指数は 203 → 3。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stexp, 0, &[Spec::Abs(0o2000)]),
+    );
+    acf_put(&mut env, 0, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), 3);
+    assert_eq!(nzvc(&env), 0); // CPU CC も立つ
+    // 指数 0（零）→ -200₈。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Stexp, 0, &[Spec::Reg(0)]));
+    acf_put(&mut env, 0, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), (-0o200i16) as u16);
+    // ldexp src,ac: EXP ← (src)+200₈。exp=2 → 4.0（仮数不変）。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Ldexp, 0, &[Spec::Imm(2)]));
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0x4100_0000); // 2.0
+    // ldexp は負の指数も取る: src=-1 → 0.25（仮数不変）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldexp, 0, &[Spec::Imm(-1i16 as u16)]),
+    );
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0x3F80_0000);
+}
+
+#[test]
+fn fp11_ldcif_stcfi() {
+    // ldcif #5,ac0 → 5.0。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Ldcif, 0, &[Spec::Imm(5)]));
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F5_0);
+    // 負の整数 → -5.0（FN）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldcif, 0, &[Spec::Imm(-5i16 as u16)]),
+    );
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F5_0 | F_N0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FN);
+    // stcfi ac,@#a → 整数へ（常に切捨て）。5.75 → 5。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stcfi, 0, &[Spec::Abs(0o2000)]),
+    );
+    acf_put(&mut env, 0, 0x41B8_0000); // 5.75
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), 5);
+    assert_eq!(nzvc(&env), 0); // CPU CC も立つ
+    // 範囲外（exp 大 → |v|≥2^15）→ dst ← 0・FC=1・CPU C=1。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stcfi, 0, &[Spec::Abs(0o2000)]),
+    );
+    acf_put(&mut env, 0, 0x4800_0000); // 32768.0
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), 0);
+    assert_eq!(nzvc(&env), 0o5); // Z+C
+    assert_eq!(fps_get(&env) & 0o17, FPS_FC | FPS_FZ);
+    // FIC を立てると同じ失敗が FEC=6 で vector 244 へ。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stcfi, 0, &[Spec::Abs(0o2000)]),
+    );
+    acf_put(&mut env, 0, 0x4800_0000);
+    fps_put(&mut env, FPS_FIC);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o6);
+    // setl の L 形変換: 32 ビット整数 ↔ 浮動。
+    let mut w = asm(Insn::Setl, &[]);
+    w.extend(asm_fp(Insn::Stcfi, 0, &[Spec::Abs(0o2000)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    acf_put(&mut env, 0, 0x4800_0000); // 32768
+    step_m(&mut env, "pdp11_73").unwrap();
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(get16(&env, 0o2000), 0); // hi
+    assert_eq!(get16(&env, 0o2002), 0o100000); // lo
+    // setl+ldcif: メモリの L 形式（hi が低番地）。
+    let mut w = asm(Insn::Setl, &[]);
+    w.extend(asm_fp(Insn::Ldcif, 0, &[Spec::Abs(0o2000)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    put16(&mut env, 0o2000, 0x0001);
+    put16(&mut env, 0o2002, 0x0000); // 65536
+    step_m(&mut env, "pdp11_73").unwrap();
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0x4880_0000); // 65536.0
+}
+
+#[test]
+fn fp11_stcfd_ldcff() {
+    // stcfd（FD=0）: AC の F → fdst の D（正確な拡大）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stcfd, 0, &[Spec::Abs(0o2000)]),
+    );
+    acf_put(&mut env, 0, F_375);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getd(&env, 0o2000), 0x4170_0000_0000_0000);
+    // stcfd（FD=1）: AC の D → fdst の F（丸めは FT）。正確な 3.75。
+    let mut w = asm(Insn::Setd, &[]);
+    w.extend(asm_fp(Insn::Stcfd, 0, &[Spec::Abs(0o2000)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    ac_put(&mut env, 0, 0x4170_0000_0000_0000);
+    step_m(&mut env, "pdp11_73").unwrap();
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(getf(&env, 0o2000), F_375);
+    // ldcff（FD=0）: fsrc の D → AC の F。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldcff, 0, &[Spec::Abs(0o2000)]),
+    );
+    putd(&mut env, 0o2000, 0x4140_0000_0000_0000); // 3.0 (D)
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F3_0);
+    // ldcff（FD=1）: fsrc の F → AC の D（正確）。
+    let mut w = asm(Insn::Setd, &[]);
+    w.extend(asm_fp(Insn::Ldcff, 0, &[Spec::Abs(0o2000)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    putf(&mut env, 0o2000, F6_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(ac_get(&env, 0), 0x41C0_0000_0000_0000);
+}
+
+#[test]
+fn fp11_div_zero_traps_unconditional() {
+    // ゼロ除算: FID でも抑止されず vector 244・FEC=4。AC は不変。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Divf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0);
+    acf_put(&mut env, 0, F1_0);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o4);
+    assert_eq!(acf_get(&env, 0), F1_0); // AC 不変
+    // FID を立てても FER/FEC/FEA は更新される（抑止は割込みのみ）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Divf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0);
+    acf_put(&mut env, 0, F1_0);
+    fps_put(&mut env, FPS_FID);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o4);
+    assert_eq!(fps_get(&env) & FPS_FER, FPS_FER);
+}
+
+#[test]
+fn fp11_overflow_result_and_trap() {
+    // FIV=0: オーバーフロー結果は正確な零・FV=1・FER=1・trap なし。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F2_0);
+    acf_put(&mut env, 0, F_MAX);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FV | FPS_FZ);
+    // 割込み不許可は「エラー」ではないので FER/FEC は立たない。
+    assert_eq!(fps_get(&env) & FPS_FER, 0);
+    assert_eq!(st_rd(&env, FEC_OFF), 0);
+    // FIV=1: 指数を 400₈ ずらした結果を AC に残して vector 244。
+    // max×4.0 の真の指数は 402₈ → 格納は 402-400=2 ではなく
+    // フィールド幅で折り返し 401-400=1 …… DEC 規則「結果の指数
+    // は真値より 400₈ 小さい」（符号・仮数は保持）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x4180_0000); // 4.0
+    acf_put(&mut env, 0, F_MAX);
+    fps_put(&mut env, FPS_FIV);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o10);
+    let ac = acf_get(&env, 0);
+    assert_eq!(ac >> 23 & 0xff, 1, "exponent shifted by -0o400");
+    assert_eq!(ac & 0x007f_ffff, F_MAX & 0x007f_ffff);
+    // FID で抑止すると FIV 許可でも trap せず結果は残る。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x4180_0000);
+    acf_put(&mut env, 0, F_MAX);
+    fps_put(&mut env, FPS_FID | FPS_FIV);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o1004);
+    assert_eq!(acf_get(&env, 0) >> 23 & 0xff, 1);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o10);
+}
+
+#[test]
+fn fp11_underflow_result_and_trap() {
+    // FIU=0: アンダーフロー → 正確な零・trap なし。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x4000_0000); // 0.5
+    acf_put(&mut env, 0, F_MIN);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), 0);
+    assert_eq!(fps_get(&env) & 0o17, FPS_FZ);
+    assert_eq!(st_rd(&env, FEC_OFF), 0);
+    // FIU=1: 指数 +400₈ の結果を残して trap。min×0.25 = 2^-130
+    // （真の指数 -1）→ 格納は -1+400₈ = 377₈。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Mulf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, 0x3F80_0000); // 0.25
+    acf_put(&mut env, 0, F_MIN);
+    fps_put(&mut env, FPS_FIU);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o12);
+    assert_eq!(acf_get(&env, 0) >> 23 & 0xff, 0o377);
+}
+
+#[test]
+fn fp11_fiuv_memory_negative_zero() {
+    // FIUV=1・メモリの -0 オペランド → FEC=14 で vector 244。
+    // addf は実行前に落ちる（AC 不変）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F_N0);
+    acf_put(&mut env, 0, F1_0);
+    fps_put(&mut env, FPS_FIUV);
+    put16(&mut env, 0o244, 0o3000);
+    put16(&mut env, 0o246, 0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    expect_fp_trap(&env, 0o3000, 0o1004);
+    assert_eq!(st_rd(&env, FEC_OFF), 0o14);
+    assert_eq!(acf_get(&env, 0), F1_0);
+    assert_eq!(fps_get(&env) & FPS_FZ, FPS_FZ); // CC は -0 の形
+    // AC 内の -0 は FIUV の対象外（メモリ由来のみ）。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F1_0);
+    acf_put(&mut env, 0, F_N0);
+    fps_put(&mut env, FPS_FIUV);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F1_0);
+    // FIUV=0 なら -0 は零として演算される。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Addf, 0, &[Spec::Abs(0o2000)]),
+    );
+    putf(&mut env, 0o2000, F_N0);
+    acf_put(&mut env, 0, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F1_0);
+}
+
+#[test]
+fn fp11_int_dst_mode0_is_gpr() {
+    // 整数宛先のモード 0 は（AC でなく）GPR —— stcfi r4 は r4 に
+    // 変換結果を書く（整数オペランドの番地指定は CPU 側）。
+    let mut env = env_at("pdp11_73", 0o1000, &asm_fp(Insn::Stcfi, 0, &[Spec::Reg(4)]));
+    acf_put(&mut env, 0, F5_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 4), 5);
+}
+
+#[test]
+fn fp11_autoinc_steps_by_format() {
+    // F 形式の (r1)+ は +4、D 形式（setd 後）は +8。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Ldf, 0, &[Spec::AutoInc(1)]),
+    );
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    putf(&mut env, 0o2000, F1_0);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2004);
+    assert_eq!(acf_get(&env, 0), F1_0);
+    let mut w = asm(Insn::Setd, &[]);
+    w.extend(asm_fp(Insn::Ldf, 0, &[Spec::AutoInc(1)]));
+    let mut env = env_at("pdp11_73", 0o1000, &w);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    putd(&mut env, 0o2000, 0x4140_0000_0000_0000);
+    step_m(&mut env, "pdp11_73").unwrap();
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2010);
+    assert_eq!(ac_get(&env, 0), 0x4140_0000_0000_0000);
+}
+
+#[test]
+fn fp11_immediate_consumes_operand_words() {
+    // ldf @#imm,ac0: F 即値は命令ストリームの 2 語を消費する
+    // （指定子デコードの 1 語 + FP 幅の残り）。PC は 6 バイト進む。
+    let mut words = asm_fp(Insn::Ldf, 0, &[Spec::Imm(0)]);
+    words[1] = 0x4140; // F3_0 の上位語
+    words.push(0x0000); // 下位語
+    words.extend(asm(Insn::Halt, &[]));
+    let mut env = env_at("pdp11_73", 0o1000, &words);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(acf_get(&env, 0), F3_0);
+    assert_eq!(env.pc, 0o1006); // 命令語 + 4 バイトの FP 即値
+    // 次の halt に届く（即値語を命令と誤読しない）。
+    match step_m(&mut env, "pdp11_73") {
+        Err(Outcome::Unimplemented { pc, word }) => {
+            assert_eq!(pc, 0o1006);
+            assert_eq!(word, 0);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn fp11_stack_operand() {
+    // FP 指定子のモード 0 以外は通常のメモリ番地 —— -(sp) は
+    // F 幅の 4 バイトを刻んでスタックに F を積む。
+    let mut env = env_at(
+        "pdp11_73",
+        0o1000,
+        &asm_fp(Insn::Stf, 0, &[Spec::AutoDec(6)]),
+    );
+    acf_put(&mut env, 0, F2_0);
+    let sp0 = sem::r_get(&env.backend, reg::SP as u8);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), sp0 - 4);
+    assert_eq!(getf(&env, sp0 - 4), F2_0);
 }

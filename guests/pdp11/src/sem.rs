@@ -51,8 +51,8 @@
 
 use polyisa_engine::interp::{InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
-use polyisa_softfloat::decfp::VaxFF;
+use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16, W64};
+use polyisa_softfloat::decfp::{FP_IOV, VaxDF, VaxF, VaxFF};
 use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
@@ -355,9 +355,24 @@ pub fn eval_op(b: &mut InterpBackend, f: &Fetched, pc0: u16, i: usize) -> Result
         };
         return Err(fault(vec));
     }
+    eval_op_w(b, f, pc0, i, ty.width)
+}
+
+/// `eval_op` の幅指定版。FP11 オペランドは幅が FPS の FD/FL で
+/// 決まる（指定子シグネチャはアクセス種別しか持てない）ので、
+/// 呼び出し側が解決した幅を渡す。適合検査は行わず、オート増減
+/// のステップは `w` に従う。
+fn eval_op_w(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pc0: u16,
+    i: usize,
+    w: Width,
+) -> Result<Loc, InterpExit> {
+    let spec = &f.ops[i];
     let ea = ext_addr(f, pc0, i);
     let regs: [u16; 8] = core::array::from_fn(|j| r_get(b, j as u8));
-    let (ea_v, wb) = specifier::eval(spec, ty.width, ea, &regs);
+    let (ea_v, wb) = specifier::eval(spec, w, ea, &regs);
     if let Some((n, v)) = wb {
         r_set(b, n, v);
     }
@@ -610,6 +625,865 @@ fn fis_exec(b: &mut InterpBackend, n: u8, insn: Insn) -> Result<(), InterpExit> 
     psw_flag_set(b, psw::V, false);
     psw_flag_set(b, psw::C, false);
     Ok(())
+}
+
+// ---- FP11（PD10）----
+//
+// ARCH83 6章の浮動小数点オプション（17xxxx 空間。FIS とは両立
+// しない —— 機能旗は `fp11`）。状態は CpuState の ac<5:0>・fps・
+// fec・fea。AC の F 形式値は上位 32 ビットに左詰めで持つ（D は
+// 64 ビット全部 —— 「32 ビットの演算は左の 32 ビットだけを使う」
+// の実装形）。
+//
+// 番地指定は CPU と同じ 8 モードで、モード 0 は AC_n（AC6/7 は
+// FP 違法オペコード = FEC 2）。メモリの F/D 形式は低番地語が
+// 最上位語の 3412 配置。二オペランド命令の AC フィールド <8:6>
+// は下位 2 ビットが実効で（bit8 は命令対の選択子）AC0-AC3 だけ
+// 指せ、AC4/5 はモード 0 指定子と MOD の AC|1 経由でのみ届く
+// （ARCH83 6章 FP アドレス指定）。
+//
+// 丸めは FT が選ぶ（消えていれば Rmm = 丸めビットが立てば増分、
+// 立っていれば Rtz = 切捨て）。例外の形: OF/UF は割込み許可が
+// あれば指数を 400₈ ずらした真の結果を AC に残して vector 244
+// に trap、なければ真の零を格納。ゼロ除算と違法オペコードは
+// 許可を問わず FER/FEC/FEA を立て、割込みの配送自体は FID が
+// 全例外で抑止する。FIUV はメモリ由来の -0 で発火 —— LDF/演算/
+// CMP/MOD/LDCFF 系は実行前、NEG/ABS/TST は実行後（FPJ11 は
+// 実行後にも実行前に移したモデル差 —— PD13 が担う）。
+
+/// FPS のビット（ARCH83 6章 Figure 6-3・KDJ11-E UG Table 9-1）。
+mod fps {
+    /// bit15: 浮動エラー。ゼロ除算・違法オペコード・許可された
+    /// 例外で立ち、LDFPS でのみ消える。
+    pub const FER: u16 = 15;
+    /// bit14: 全浮動割込みの抑止（FEC/FEA の更新は止めない）。
+    pub const FID: u16 = 14;
+    /// bit11: メモリ由来 -0 オペランド（未定義変数）の割込み許可。
+    pub const FIUV: u16 = 11;
+    /// bit10: アンダーフロー割込み許可。
+    pub const FIU: u16 = 10;
+    /// bit9: オーバーフロー割込み許可。
+    pub const FIV: u16 = 9;
+    /// bit8: 整数変換エラー割込み許可。
+    pub const FIC: u16 = 8;
+    /// bit7: 倍精度モード。
+    pub const FD: u16 = 7;
+    /// bit6: 32 ビット整数モード。
+    pub const FL: u16 = 6;
+    /// bit5: 切捨て（chop）モード。
+    pub const FT: u16 = 5;
+    /// bit3: 負の条件コード。
+    pub const FN: u16 = 3;
+    /// bit2: 零の条件コード。
+    pub const FZ: u16 = 2;
+    /// bit1: オーバーフローの条件コード。
+    pub const FV: u16 = 1;
+    /// bit0: キャリーの条件コード。
+    pub const FC: u16 = 0;
+    /// STFPS で読み出せない予約桁（13・12・4）— LDFPS で消す
+    /// （実機では桁自体が存在しない —— 0 として読む形で代替）。
+    // Gap: GAP-0083
+    pub const NOREC: u16 = 0o30020;
+}
+
+/// FEC の例外コード（ARCH83 6章・KDJ11-E UG Table 9-2）。
+mod fec {
+    /// 浮動オペコードエラー（AC6/7 指定・未割当の FP 語）。
+    pub const OP: u16 = 0o2;
+    /// 浮動ゼロ除算。
+    pub const DZ: u16 = 0o4;
+    /// 整数変換エラー。
+    pub const CVT: u16 = 0o6;
+    /// オーバーフロー。
+    pub const OV: u16 = 0o10;
+    /// アンダーフロー。
+    pub const UN: u16 = 0o12;
+    /// 未定義変数（メモリの -0 オペランド）。
+    pub const UV: u16 = 0o14;
+}
+
+fn get64(b: &InterpBackend, r: StateRef<W64>) -> u64 {
+    let off = r.offset();
+    u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"))
+}
+
+fn set64(b: &mut InterpBackend, r: StateRef<W64>, v: u64) {
+    let off = r.offset();
+    b.state[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// FPS の状態面。
+fn fps_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fps))
+}
+
+fn fps_get(b: &InterpBackend) -> u16 {
+    get16(b, fps_ref())
+}
+
+fn fps_put(b: &mut InterpBackend, v: u16) {
+    set16(b, fps_ref(), v);
+}
+
+fn fps_flag(b: &InterpBackend, bit: u16) -> bool {
+    fps_get(b) & (1 << bit) != 0
+}
+
+fn fps_flag_set(b: &mut InterpBackend, bit: u16, v: bool) {
+    let p = fps_get(b);
+    fps_put(b, if v { p | 1 << bit } else { p & !(1 << bit) });
+}
+
+fn fec_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fec))
+}
+
+fn fea_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fea))
+}
+
+/// 浮動アキュムレータ AC_i の状態面。
+fn ac_ref(i: u8) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, ac) + usize::from(i) * 8)
+}
+
+/// AC_i の F/D 形式値（F は上位 32 ビット）。
+fn fp_ac_get<const E: u32, const M: u32>(b: &InterpBackend, n: u8) -> VaxF<E, M> {
+    let v = get64(b, ac_ref(n));
+    VaxF::from_bits(u128::from(if M == 23 { v >> 32 } else { v }))
+}
+
+/// AC_i への F/D 形式値の格納（F は上位 32 ビットを書き下位は不変）。
+fn fp_ac_set<const E: u32, const M: u32>(b: &mut InterpBackend, n: u8, v: VaxF<E, M>) {
+    let bits = v.bits() as u64;
+    let nv = if M == 23 {
+        (bits << 32) | (get64(b, ac_ref(n)) & 0xffff_ffff)
+    } else {
+        bits
+    };
+    set64(b, ac_ref(n), nv);
+}
+
+/// FP 指定子の実効位置。モード 0 は AC_n、他は FP 形式の最上位語が
+/// 置かれる番地（3412 配置）。即値は命令ストリームの FP 語の位置。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FpLoc {
+    /// モード 0: AC_n。
+    Ac(u8),
+    /// F/D 形式の最上位語の番地。
+    Mem(u16),
+}
+
+/// FP 指定子の幅（M=23 → F=4 バイト、M=55 → D=8 バイト）。
+fn fp_w<const M: u32>() -> Width {
+    if M == 23 { Width::F } else { Width::D }
+}
+
+/// FP 指定子の評価（モード 0 → AC_n の写像と AC6/7 の違法検査
+/// 込み —— AC6/7 は FEC=2。FID で抑止されたときは `None` で
+/// 命令を中止する）。
+fn fp_loc<const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pc0: u16,
+) -> Result<Option<FpLoc>, InterpExit> {
+    let loc = match eval_op_w(b, f, pc0, 0, fp_w::<M>())? {
+        Loc::Reg(n) => FpLoc::Ac(n),
+        Loc::Mem(a) => FpLoc::Mem(a),
+        Loc::Imm { addr, .. } => FpLoc::Mem(addr),
+    };
+    if let FpLoc::Ac(n) = loc
+        && n >= 6
+    {
+        fp_exc(b, pc0, fec::OP)?;
+        return Ok(None);
+    }
+    Ok(Some(loc))
+}
+
+/// メモリの F/D 形式の読み出し（低番地語が最上位語）。
+fn fp_mem_get<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    a: u16,
+) -> Result<VaxF<E, M>, InterpExit> {
+    let nw = if M == 23 { 2 } else { 4 };
+    let mut bits = 0u64;
+    for k in 0..nw {
+        bits = bits << 16 | u64::from(load_w(b, a.wrapping_add(2 * k))?);
+    }
+    Ok(VaxF::from_bits(u128::from(bits)))
+}
+
+/// メモリへの F/D 形式の書き込み（低番地語が最上位語）。
+fn fp_mem_set<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    a: u16,
+    v: VaxF<E, M>,
+) -> Result<(), InterpExit> {
+    let nw = if M == 23 { 2 } else { 4 };
+    for k in 0..nw {
+        let w = (v.bits() as u64 >> (16 * (nw - 1 - k))) as u16;
+        store_w(b, a.wrapping_add(2 * k), w)?;
+    }
+    Ok(())
+}
+
+/// FP オペランドの評価と読み出し。(位置, 値) —— -0（符号 1・
+/// 指数 0）は値に残し、FIUV の扱い（実行前後のどちらで落ちるか）
+/// は命令が決める。`None` は AC6/7 での中止。
+fn fp_opnd<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pc0: u16,
+) -> Result<Option<(FpLoc, VaxF<E, M>)>, InterpExit> {
+    let Some(loc) = fp_loc::<M>(b, f, pc0)? else {
+        return Ok(None);
+    };
+    let v = match loc {
+        FpLoc::Ac(n) => fp_ac_get::<E, M>(b, n),
+        FpLoc::Mem(a) => fp_mem_get::<E, M>(b, a)?,
+    };
+    Ok(Some((loc, v)))
+}
+
+/// FP 例外の登録と割込み配送。FER=1・FEC=code・FEA=pc0 を立て、
+/// FID が消えていれば vector 244 へ trap（積む PC は次の命令）。
+/// FID でも FER/FEC/FEA は更新される（ARCH83 6章 FPS/FEC/FEA）。
+// Gap: GAP-0083（FID の抑止を全例外型で一様に適用する選択）
+fn fp_exc(b: &mut InterpBackend, pc0: u16, code: u16) -> Result<(), InterpExit> {
+    fps_put(b, fps_get(b) | 1 << fps::FER);
+    set16(b, fec_ref(), code);
+    set16(b, fea_ref(), pc0);
+    if fps_flag(b, fps::FID) {
+        Ok(())
+    } else {
+        Err(trap(tv::FPP))
+    }
+}
+
+/// fp11 機能を持つモデルで 17xxxx の語が命令表にないときの
+/// 違法オペコード経路（FEC=2。run が予約命令の前に呼ぶ）。
+/// FID で抑止されているときは `Ok` で命令を読み飛ばす。
+pub fn fp11_illop(b: &mut InterpBackend, pc0: u16) -> Result<(), InterpExit> {
+    fp_exc(b, pc0, fec::OP)
+}
+
+/// FPS の条件コード 4 桁（FN/FZ/FV/FC）をまとめて立てる。
+fn fp_fcc(b: &mut InterpBackend, n: bool, z: bool, v: bool, c: bool) {
+    let mut p = fps_get(b) & !0xF;
+    p |= (n as u16) << fps::FN
+        | (z as u16) << fps::FZ
+        | (v as u16) << fps::FV
+        | (c as u16) << fps::FC;
+    fps_put(b, p);
+}
+
+/// 形式値からの (FN, FZ)。指数 0 は零扱いで FZ=1・FN=0（-0 や
+/// dirty zero も零 —— ARCH83 6章の条件コード規則）。
+fn fp_nz<const E: u32, const M: u32>(v: VaxF<E, M>) -> (bool, bool) {
+    let bits = v.bits();
+    let exp = (bits >> M) & ((1u128 << E) - 1);
+    (v.is_neg(), exp == 0)
+}
+
+/// -0・dirty zero を真の零へ畳む（演算オペランドとしては指数 0 は
+/// すべて正確な零 —— ARCH83 6章「指数部 0 のオペランドは零と
+/// して扱う」）。
+fn fp_clean<const E: u32, const M: u32>(v: VaxF<E, M>) -> VaxF<E, M> {
+    if v.is_reserved() || v.is_zero() {
+        VaxF::zero()
+    } else {
+        v
+    }
+}
+
+/// 実行前の FIUV 検査（LDF・演算・CMP・MOD・LDCFF 系）。メモリ
+/// 由来の -0 なら、CC を -0 の読み出しの形（FZ=1）に立ててから
+/// FEC=14 の例外を出す。FID で抑止されたときは続行する（-0 は
+/// 演算では零として扱われる）。
+fn fp_iuv_pre<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    pc0: u16,
+    loc: &FpLoc,
+    v: VaxF<E, M>,
+) -> Result<(), InterpExit> {
+    if matches!(loc, FpLoc::Mem(_)) && v.is_reserved() && fps_flag(b, fps::FIUV) {
+        fp_fcc(b, false, true, false, false);
+        fp_exc(b, pc0, fec::UV)?;
+    }
+    Ok(())
+}
+
+/// 実行後の FIUV 検査（TST/ABS/NEG —— ARCH83 の FP11 の形。
+/// FPJ11 は実行前に移したモデル差）。
+// Gap: GAP-0083（FIUV 検査位置のモデル差は単一系で再現）
+fn fp_iuv_post<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    pc0: u16,
+    loc: &FpLoc,
+    v: VaxF<E, M>,
+) -> Result<(), InterpExit> {
+    if matches!(loc, FpLoc::Mem(_)) && v.is_reserved() && fps_flag(b, fps::FIUV) {
+        fp_exc(b, pc0, fec::UV)?;
+    }
+    Ok(())
+}
+
+/// FP 演算の結果格納と例外。decfp の fp11 形（値, フラグ）を受け、
+/// OF/UF は割込み許可に応じて指数ずらし形か真の零を AC に格納
+/// してから FCC を立て、許可された例外は vector 244 へ出る。
+/// FP_DZ（ゼロ除算）は AC 不変の中止（許可を問わない例外）。
+fn fp_result<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    pc0: u16,
+    acn: u8,
+    v: VaxF<E, M>,
+    fl: u8,
+) -> Result<(), InterpExit> {
+    if fl & FP_DZ != 0 {
+        return fp_exc(b, pc0, fec::DZ);
+    }
+    let (v2, exc, fv) = if fl & FP_OF != 0 {
+        (
+            if fps_flag(b, fps::FIV) {
+                v
+            } else {
+                VaxF::zero()
+            },
+            fps_flag(b, fps::FIV).then_some(fec::OV),
+            true,
+        )
+    } else if fl & FP_UF != 0 {
+        (
+            if fps_flag(b, fps::FIU) {
+                v
+            } else {
+                VaxF::zero()
+            },
+            fps_flag(b, fps::FIU).then_some(fec::UN),
+            false,
+        )
+    } else {
+        (v, None, false)
+    };
+    fp_ac_set::<E, M>(b, acn, v2);
+    let (n, z) = fp_nz(v2);
+    fp_fcc(b, n, z, fv, false);
+    if let Some(code) = exc {
+        fp_exc(b, pc0, code)?;
+    }
+    Ok(())
+}
+
+/// FP 形式値の格納（AC またはメモリ —— メモリは 3412 配置）。
+fn fp_store<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    loc: &FpLoc,
+    v: VaxF<E, M>,
+) -> Result<(), InterpExit> {
+    match *loc {
+        FpLoc::Ac(n) => {
+            fp_ac_set::<E, M>(b, n, v);
+            Ok(())
+        }
+        FpLoc::Mem(a) => fp_mem_set::<E, M>(b, a, v),
+    }
+}
+
+/// 二オペランド FP 命令の AC フィールド（<8:6> の下位 2 ビット
+/// が実効 —— bit8 は命令対の選択子なので AC0-AC3）。
+fn fp_acn(f: &Fetched) -> u8 {
+    (ops_frd(u128::from(f.word)).reg as u8) & 3
+}
+
+/// FT が選ぶ丸めモード（立っていれば切捨て Rtz、消えていれば
+/// 丸め Rmm = 「丸めビットが立てば chopped を 1 LSB 増分」）。
+fn fp_rm(b: &InterpBackend) -> Rm {
+    if fps_flag(b, fps::FT) {
+        Rm::Rtz
+    } else {
+        Rm::Rmm
+    }
+}
+
+/// FD が選ぶ FP 形式の命令群の意味論。`<8,23>` は F、`<8,55>` は D。
+fn fp_main<const E: u32, const M: u32>(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pc0: u16,
+) -> Result<(), InterpExit> {
+    match f.insn {
+        // データ移動: AC ← fsrc。-0 は FIUV で実行前に trap
+        // （FID 抑止なら -0 のまま AC に入る）。dirty zero も
+        // そのまま移動する。
+        Insn::Ldf => {
+            let acn = fp_acn(f);
+            let Some((loc, src)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            fp_iuv_pre::<E, M>(b, pc0, &loc, src)?;
+            fp_ac_set::<E, M>(b, acn, src);
+            let (n, z) = fp_nz(src);
+            fp_fcc(b, n, z, false, false);
+        }
+        // fdst ← AC（-0 もそのまま書く。FCC は変わらない）。
+        Insn::Stf => {
+            let acn = fp_acn(f);
+            let Some(loc) = fp_loc::<M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            let a = fp_ac_get::<E, M>(b, acn);
+            fp_store::<E, M>(b, &loc, a)?;
+        }
+        Insn::Clrf => {
+            let Some(loc) = fp_loc::<M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            fp_store::<E, M>(b, &loc, VaxF::zero())?;
+            fp_fcc(b, false, true, false, false);
+        }
+        Insn::Tstf => {
+            let Some((loc, v)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            let (n, z) = fp_nz(v);
+            fp_fcc(b, n, z, false, false);
+            fp_iuv_post::<E, M>(b, pc0, &loc, v)?;
+        }
+        Insn::Absf => {
+            let Some((loc, v)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            let r = if v.is_neg() {
+                v.neg()
+            } else if v.is_zero() || v.is_reserved() {
+                VaxF::zero()
+            } else {
+                v
+            };
+            fp_store::<E, M>(b, &loc, r)?;
+            let (n, z) = fp_nz(r);
+            fp_fcc(b, n, z, false, false);
+            fp_iuv_post::<E, M>(b, pc0, &loc, v)?;
+        }
+        Insn::Negf => {
+            let Some((loc, v)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            // decfp の neg は指数 0（真の零・dirty zero・-0）を
+            // 真の零に畳む —— 「EXP=0 なら正確な零を格納」の規則。
+            let r = v.neg();
+            fp_store::<E, M>(b, &loc, r)?;
+            let (n, z) = fp_nz(r);
+            fp_fcc(b, n, z, false, false);
+            fp_iuv_post::<E, M>(b, pc0, &loc, v)?;
+        }
+        // (fsrc) - (AC) の比較。両方零なら AC ← 正確な零
+        // （KDJ11-E UG の注記 —— dirty zero/-0 の掃除）。
+        Insn::Cmpf => {
+            let acn = fp_acn(f);
+            let Some((loc, src)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            fp_iuv_pre::<E, M>(b, pc0, &loc, src)?;
+            let src = fp_clean::<E, M>(src);
+            let a = fp_clean::<E, M>(fp_ac_get::<E, M>(b, acn));
+            if src.is_zero() && a.is_zero() {
+                fp_ac_set::<E, M>(b, acn, VaxF::zero());
+            }
+            let (n, z) = match src.cmp(a) {
+                Some(0) => (false, true),
+                Some(c) if c < 0 => (true, false),
+                _ => (false, false),
+            };
+            fp_fcc(b, n, z, false, false);
+        }
+        Insn::Addf | Insn::Subf | Insn::Mulf | Insn::Divf => {
+            let acn = fp_acn(f);
+            let Some((loc, src)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            fp_iuv_pre::<E, M>(b, pc0, &loc, src)?;
+            let src = fp_clean::<E, M>(src);
+            let a = fp_clean::<E, M>(fp_ac_get::<E, M>(b, acn));
+            let rm = fp_rm(b);
+            let (v, fl) = match f.insn {
+                Insn::Addf => a.add_fp11(src, rm),
+                Insn::Subf => a.sub_fp11(src, rm),
+                Insn::Mulf => a.mul_fp11(src, rm),
+                _ => a.div_fp11(src, rm),
+            };
+            return fp_result::<E, M>(b, pc0, acn, v, fl);
+        }
+        // N = |AC*fsrc| の整数部（AC|1 へ —— 奇数 AC では格納
+        // しない）、g = 小数部（AC へ）。例外の格納規則は
+        // 演算系と同じ（指数 ±400₈）。
+        Insn::Modf => {
+            let acn = fp_acn(f);
+            let Some((loc, src)) = fp_opnd::<E, M>(b, f, pc0)? else {
+                return Ok(());
+            };
+            fp_iuv_pre::<E, M>(b, pc0, &loc, src)?;
+            let src = fp_clean::<E, M>(src);
+            let a = fp_clean::<E, M>(fp_ac_get::<E, M>(b, acn));
+            let (n, g, fl) = a.modf_fp11(src, fp_rm(b));
+            if fl & FP_OF != 0 {
+                // PROD のオーバーフロー: ACv1 ← N（指数 -400₈）・
+                // AC ← 0。FIV 不許可なら双方真の零。
+                let (nv, exc) = if fps_flag(b, fps::FIV) {
+                    (n, true)
+                } else {
+                    (VaxF::zero(), false)
+                };
+                if acn & 1 == 0 {
+                    fp_ac_set::<E, M>(b, acn | 1, nv);
+                }
+                fp_ac_set::<E, M>(b, acn, VaxF::zero());
+                fp_fcc(b, false, true, true, false);
+                if exc {
+                    fp_exc(b, pc0, fec::OV)?;
+                }
+            } else if fl & FP_UF != 0 {
+                // PROD のアンダーフロー: ACv1 ← 0・AC ← g（指数
+                // +400₈）。FIU 不許可なら双方真の零。
+                let (gv, exc) = if fps_flag(b, fps::FIU) {
+                    (g, true)
+                } else {
+                    (VaxF::zero(), false)
+                };
+                if acn & 1 == 0 {
+                    fp_ac_set::<E, M>(b, acn | 1, VaxF::zero());
+                }
+                fp_ac_set::<E, M>(b, acn, gv);
+                let (n2, z2) = fp_nz(gv);
+                fp_fcc(b, n2, z2, false, false);
+                if exc {
+                    fp_exc(b, pc0, fec::UN)?;
+                }
+            } else {
+                if acn & 1 == 0 {
+                    fp_ac_set::<E, M>(b, acn | 1, n);
+                }
+                fp_ac_set::<E, M>(b, acn, g);
+                let (n2, z2) = fp_nz(g);
+                fp_fcc(b, n2, z2, false, false);
+            }
+        }
+        _ => unreachable!("fp_main の対象外"),
+    }
+    Ok(())
+}
+
+/// STCFD —— 方向が FD で決まるため専用の経路。
+fn fp_stcfd(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit> {
+    let acn = fp_acn(f);
+    if !fps_flag(b, fps::FD) {
+        // F → D: AC<63:32> を読んで D 形式へ（正確 —— 低位 32
+        // ビットは 0）。AC が零なら正確な零を格納。
+        let a = fp_ac_get::<8, 23>(b, acn);
+        let Some(loc) = fp_loc::<55>(b, f, pc0)? else {
+            return Ok(());
+        };
+        let a = fp_clean::<8, 23>(a);
+        let (d, _) = a.widen_rm::<8, 55>(Rm::Rmm);
+        fp_store::<8, 55>(b, &loc, d)?;
+        let (n, z) = fp_nz::<8, 23>(a);
+        fp_fcc(b, n, z, false, false);
+    } else {
+        // D → F: AC を読んで F 形式へ。丸めは FT。丸め上げで
+        // オーバーフローしたら FIV 不許可は正確な零、許可は
+        // 結果の ±0 を格納して trap。
+        let a = fp_ac_get::<8, 55>(b, acn);
+        let Some(loc) = fp_loc::<23>(b, f, pc0)? else {
+            return Ok(());
+        };
+        let a = fp_clean::<8, 55>(a);
+        let (v, fl) = a.widen_rm::<8, 23>(fp_rm(b));
+        if fl & FP_OF != 0 {
+            let z = if fps_flag(b, fps::FIV) {
+                VaxFF::from_bits((a.is_neg() as u128) << 31)
+            } else {
+                VaxFF::zero()
+            };
+            fp_store::<8, 23>(b, &loc, z)?;
+            fp_fcc(b, false, true, true, false);
+            if fps_flag(b, fps::FIV) {
+                fp_exc(b, pc0, fec::OV)?;
+            }
+        } else {
+            fp_store::<8, 23>(b, &loc, v)?;
+            let (n, z) = fp_nz::<8, 23>(v);
+            fp_fcc(b, n, z, false, false);
+        }
+    }
+    Ok(())
+}
+
+/// LDCFF —— 方向が FD で決まるため専用の経路（LDF に似るが
+/// ソースは逆形式）。
+fn fp_ldcff(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit> {
+    let acn = fp_acn(f);
+    if !fps_flag(b, fps::FD) {
+        // ソースは D 形式 → F へ縮めて AC<63:32> へ。丸めは FT。
+        let Some((loc, src)) = fp_opnd::<8, 55>(b, f, pc0)? else {
+            return Ok(());
+        };
+        fp_iuv_pre::<8, 55>(b, pc0, &loc, src)?;
+        let src = fp_clean::<8, 55>(src);
+        let (v, fl) = src.widen_rm::<8, 23>(fp_rm(b));
+        if fl & FP_OF != 0 {
+            let z = if fps_flag(b, fps::FIV) {
+                VaxFF::from_bits((src.is_neg() as u128) << 31)
+            } else {
+                VaxFF::zero()
+            };
+            fp_ac_set::<8, 23>(b, acn, z);
+            fp_fcc(b, false, true, true, false);
+            if fps_flag(b, fps::FIV) {
+                fp_exc(b, pc0, fec::OV)?;
+            }
+        } else {
+            fp_ac_set::<8, 23>(b, acn, v);
+            let (n, z) = fp_nz::<8, 23>(v);
+            fp_fcc(b, n, z, false, false);
+        }
+    } else {
+        // ソースは F 形式 → D へ広げて AC 全体へ（正確）。
+        let Some((loc, src)) = fp_opnd::<8, 23>(b, f, pc0)? else {
+            return Ok(());
+        };
+        fp_iuv_pre::<8, 23>(b, pc0, &loc, src)?;
+        let src = fp_clean::<8, 23>(src);
+        let (d, _) = src.widen_rm::<8, 55>(Rm::Rmm);
+        fp_ac_set::<8, 55>(b, acn, d);
+        let (n, z) = fp_nz::<8, 55>(d);
+        fp_fcc(b, n, z, false, false);
+    }
+    Ok(())
+}
+
+/// 整数オペランド（CPU 番地指定）の読み出し —— FL で I/L。
+/// L 形式は低番地語が上位語の 3412 配置。モード 0・即値の
+/// L 形は 16 ビット語を上位に左寄せ（残り 16 ビットは 0）。
+fn fp_int_src(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<i32, InterpExit> {
+    let long = fps_flag(b, fps::FL);
+    let w = if long { Width::L } else { Width::W };
+    let loc = eval_op_w(b, f, pc0, 0, w)?;
+    Ok(match loc {
+        Loc::Reg(n) if !long => r_get(b, n) as i16 as i32,
+        Loc::Reg(n) => i32::from(r_get(b, n)) << 16,
+        Loc::Mem(a) if !long => load_w(b, a)? as i16 as i32,
+        Loc::Mem(a) => {
+            let hi = load_w(b, a)?;
+            let lo = load_w(b, a.wrapping_add(2))?;
+            ((u32::from(hi) << 16) | u32::from(lo)) as i32
+        }
+        Loc::Imm { v, .. } if !long => v as i16 as i32,
+        Loc::Imm { v, .. } => i32::from(v) << 16,
+    })
+}
+
+/// 整数オペランド（CPU 番地指定）への書き込み —— L 形の
+/// モード 0・即値は上位 16 ビットのみ書く。
+fn fp_int_dst(b: &mut InterpBackend, f: &Fetched, pc0: u16, v: i32) -> Result<(), InterpExit> {
+    let long = fps_flag(b, fps::FL);
+    let w = if long { Width::L } else { Width::W };
+    let loc = eval_op_w(b, f, pc0, 0, w)?;
+    match loc {
+        Loc::Reg(n) => {
+            let wv = if long { (v >> 16) as u16 } else { v as u16 };
+            r_set(b, n, wv);
+        }
+        Loc::Mem(a) if !long => store_w(b, a, v as u16)?,
+        Loc::Mem(a) => {
+            store_w(b, a, (v >> 16) as u16)?;
+            store_w(b, a.wrapping_add(2), v as u16)?;
+        }
+        Loc::Imm { addr, .. } if !long => store_w(b, addr, v as u16)?,
+        Loc::Imm { addr, .. } => store_w(b, addr, (v >> 16) as u16)?,
+    }
+    Ok(())
+}
+
+/// FP11 命令の意味論の総合口。`exec` から呼ぶ。
+fn fp11_exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit> {
+    match f.insn {
+        Insn::Cfcc => {
+            // FPS<3:0> を PSW<3:0>（NZVC）へ写す。
+            psw_put(b, psw_get(b) & !0xF | fps_get(b) & 0xF);
+        }
+        Insn::Setf => fps_flag_set(b, fps::FD, false),
+        Insn::Setd => fps_flag_set(b, fps::FD, true),
+        Insn::Seti => fps_flag_set(b, fps::FL, false),
+        Insn::Setl => fps_flag_set(b, fps::FL, true),
+        Insn::Ldfps => {
+            let s = eval_op(b, f, pc0, 0)?;
+            let v = read(b, &s, Width::W)?;
+            // 桁 13・12・4 は STFPS で読み出せない —— 読み出し側
+            // で 0 に見えるよう書き込み時に消す。
+            fps_put(b, v & !fps::NOREC);
+        }
+        Insn::Stfps => {
+            let d = eval_op(b, f, pc0, 0)?;
+            write(b, &d, Width::W, fps_get(b))?;
+        }
+        // dst ← FEC、dst+2 ← FEA。モード 0・即値宛先は FEC のみ。
+        Insn::Stst => {
+            let d = eval_op(b, f, pc0, 0)?;
+            write(b, &d, Width::W, get16(b, fec_ref()))?;
+            if let Loc::Mem(a) = d {
+                store_w(b, a.wrapping_add(2), get16(b, fea_ref()))?;
+            }
+        }
+        // dst ← EXP[AC] - 200₈（AC の指数フィールドは F/D で同じ
+        // 位置 AC<62:55> —— F が左詰めなので）。CPU CC と FPP CC
+        // の双方を立てる。
+        Insn::Stexp => {
+            let acn = fp_acn(f);
+            let e = (get64(b, ac_ref(acn)) >> 55) & 0xff;
+            let v = (e as i32 - 0o200) as i16 as u16;
+            let d = eval_op(b, f, pc0, 0)?;
+            write(b, &d, Width::W, v)?;
+            cc_tst(b, v, Width::W);
+            fp_fcc(b, v & 0x8000 != 0, v == 0, false, false);
+        }
+        // EXP[AC] ← (src) + 200₈。src は CPU 番地の符号付き語で、
+        // 範囲外（>177 はオーバーフロー、< -177 はアンダーフロー）
+        // は許可があれば指数を 8 ビットに折り返して trap、なければ
+        // 正確な零を AC に格納（FIV/FIU の規則と同じ）。
+        Insn::Ldexp => {
+            let acn = fp_acn(f);
+            // src は常に 16 ビット語（FL は整数変換にだけ効く）。
+            let loc = eval_op_w(b, f, pc0, 0, Width::W)?;
+            let s = i32::from(read(b, &loc, Width::W)? as i16);
+            let ac = get64(b, ac_ref(acn));
+            let exc = if s > 0o177 {
+                Some((fec::OV, fps::FIV))
+            } else if s < -0o177 {
+                Some((fec::UN, fps::FIU))
+            } else {
+                None
+            };
+            let nac = match exc {
+                // 割込み不許可の範囲外指数 → AC ← 正確な零。
+                Some((_, bit)) if !fps_flag(b, bit) => 0,
+                // 範囲内、または許可された範囲外 → 8 ビットに
+                // 折り返した指数フィールド。
+                _ => (ac & !(0xffu64 << 55)) | ((((s + 0o200) & 0xff) as u64) << 55),
+            };
+            let fv = matches!(exc, Some((fec::OV, _)));
+            set64(b, ac_ref(acn), nac);
+            let (n, z) = {
+                let bits = nac;
+                let exp = (bits >> 55) & 0xff;
+                (bits & (1u64 << 63) != 0 && exp != 0, exp == 0)
+            };
+            fp_fcc(b, n, z, fv, false);
+            if let Some((code, bit)) = exc
+                && fps_flag(b, bit)
+            {
+                fp_exc(b, pc0, code)?;
+            }
+        }
+        // 整数 → 浮動（FL で I/L、FD で F/D）。L 形のモード 0・
+        // 即値は 16 ビット語の左寄せ。丸めは FT（D なら常に正確）。
+        Insn::Ldcif => {
+            let acn = fp_acn(f);
+            let v = fp_int_src(b, f, pc0)?;
+            let rm = fp_rm(b);
+            if fps_flag(b, fps::FD) {
+                let d = VaxDF::from_i32(v, rm);
+                fp_ac_set::<8, 55>(b, acn, d);
+                let (n, z) = fp_nz::<8, 55>(d);
+                fp_fcc(b, n, z, false, false);
+            } else {
+                let d = VaxFF::from_i32(v, rm);
+                fp_ac_set::<8, 23>(b, acn, d);
+                let (n, z) = fp_nz::<8, 23>(d);
+                fp_fcc(b, n, z, false, false);
+            }
+        }
+        // 浮動 → 整数（常に切捨て —— FT によらない）。範囲外は
+        // dst ← 0・FC=1 で、FIC が立っていれば trap。CC は CPU
+        // と FPP の双方に出る。
+        Insn::Stcfi => {
+            let acn = fp_acn(f);
+            let a = if fps_flag(b, fps::FD) {
+                fp_clean::<8, 55>(fp_ac_get::<8, 55>(b, acn)).to_i32(false)
+            } else {
+                fp_clean::<8, 23>(fp_ac_get::<8, 23>(b, acn)).to_i32(false)
+            };
+            let long = fps_flag(b, fps::FL);
+            let ok = a.1 & FP_IOV == 0 && (long || i32::from(a.0 as i16) == a.0);
+            let (stored, fail) = if ok { (a.0, false) } else { (0, true) };
+            fp_int_dst(b, f, pc0, stored)?;
+            let sv = if long {
+                stored
+            } else {
+                i32::from(stored as i16)
+            };
+            let (n, z) = (sv < 0, sv == 0);
+            psw_flag_set(b, psw::N, n);
+            psw_flag_set(b, psw::Z, z);
+            psw_flag_set(b, psw::V, false);
+            psw_flag_set(b, psw::C, fail);
+            fp_fcc(b, n, z, false, fail);
+            if fail && fps_flag(b, fps::FIC) {
+                fp_exc(b, pc0, fec::CVT)?;
+            }
+        }
+        Insn::Stcfd => return fp_stcfd(b, f, pc0),
+        Insn::Ldcff => return fp_ldcff(b, f, pc0),
+        // F/D 形式の命令群 —— FD で形式を選んで fp_main へ。
+        Insn::Ldf
+        | Insn::Stf
+        | Insn::Clrf
+        | Insn::Tstf
+        | Insn::Absf
+        | Insn::Negf
+        | Insn::Cmpf
+        | Insn::Addf
+        | Insn::Subf
+        | Insn::Mulf
+        | Insn::Divf
+        | Insn::Modf => {
+            return if fps_flag(b, fps::FD) {
+                fp_main::<8, 55>(b, f, pc0)
+            } else {
+                fp_main::<8, 23>(b, f, pc0)
+            };
+        }
+        _ => unreachable!("fp11_exec の対象外"),
+    }
+    Ok(())
+}
+
+/// FP 指定子が即値（モード 2 の PC 形）のとき命令が消費する
+/// 追加の語 —— F/D オペランドは 4/8 バイトを命令ストリーム
+/// から読むので、指定子デコードが見る 1 語を超える分を返す
+/// （変換系はソースの形式が FD の逆になる）。整数・制御系の
+/// オペランドと非即値指定子は 0。
+pub fn fp_imm_extra(b: &InterpBackend, f: &Fetched) -> u16 {
+    if !matches!(f.ops.first(), Some(Spec::Imm(_))) {
+        return 0;
+    }
+    let fd = fps_flag(b, fps::FD);
+    match f.insn {
+        Insn::Ldf
+        | Insn::Stf
+        | Insn::Clrf
+        | Insn::Tstf
+        | Insn::Absf
+        | Insn::Negf
+        | Insn::Cmpf
+        | Insn::Addf
+        | Insn::Subf
+        | Insn::Mulf
+        | Insn::Divf
+        | Insn::Modf => (if fd { 8 } else { 4 }) - 2,
+        Insn::Ldcff | Insn::Stcfd => (if fd { 4 } else { 8 }) - 2,
+        _ => 0,
+    }
 }
 
 // ---- トラップ配送 ----
@@ -917,6 +1791,34 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             }
             r?;
         }
+        // ---- FP11（PD10）----
+        // 17xxxx 空間。状態・例外・丸めの規則は fp11_exec 周辺。
+        Insn::Cfcc
+        | Insn::Setf
+        | Insn::Setd
+        | Insn::Seti
+        | Insn::Setl
+        | Insn::Ldfps
+        | Insn::Stfps
+        | Insn::Stst
+        | Insn::Clrf
+        | Insn::Tstf
+        | Insn::Absf
+        | Insn::Negf
+        | Insn::Mulf
+        | Insn::Modf
+        | Insn::Addf
+        | Insn::Ldf
+        | Insn::Subf
+        | Insn::Cmpf
+        | Insn::Stf
+        | Insn::Divf
+        | Insn::Stexp
+        | Insn::Stcfi
+        | Insn::Stcfd
+        | Insn::Ldexp
+        | Insn::Ldcif
+        | Insn::Ldcff => return fp11_exec(b, f, pc0),
         // 条件コード操作: マスク <3:0> の各桁が NZVC に対応する。
         // ccc 族（000240+m）は選択桁を消し、scc 族（000260+m）は立てる
         // —— clc/sec などの個別名は m=1,2,4,8 の特例で、複数桁を一度に

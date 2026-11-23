@@ -101,6 +101,9 @@ opty! {
     MB = (M, B); MW = (M, W);
     WB = (W, B); WW = (W, W);
     AW = (A, W);
+    // FP11 オペランドの印。実際の幅（F/D/I/L）は FPS の FD/FL が
+    // 実行時に決めるので、ここの width はプレースホルダ。
+    RF = (R, F); MF = (M, F); WF = (W, F);
 }
 
 /// デコードしたオペランド指定子 1 個。モード・レジスタ・拡張語を
@@ -273,6 +276,25 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         Insn::Clrb | Insn::Mfps => &[WB],
         Insn::Tstb | Insn::Mtps => &[RB],
         Insn::Jsr => &[AW],
+        // FP11（ARCH83 6章）。オペランドの型（F/D/I/L）は FPS の
+        // FD/FL が実行時に決めるので、幅の解決は sem の FP 系
+        // オペランド評価が担う。
+        Insn::Ldfps => &[RW],
+        Insn::Stfps | Insn::Stst => &[WW],
+        Insn::Clrf => &[WF],
+        Insn::Tstf => &[RF],
+        Insn::Absf | Insn::Negf => &[MF],
+        Insn::Mulf
+        | Insn::Modf
+        | Insn::Addf
+        | Insn::Ldf
+        | Insn::Subf
+        | Insn::Cmpf
+        | Insn::Divf
+        | Insn::Ldcff
+        | Insn::Ldexp
+        | Insn::Ldcif => &[RF],
+        Insn::Stf | Insn::Stcfd | Insn::Stexp | Insn::Stcfi => &[WF],
         // 指定子を持たない命令: RTS/FIS/分岐/トラップ/MARK/SPL/固定語。
         Insn::Rts
         | Insn::Sob
@@ -308,6 +330,11 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Rtt
         | Insn::Mfpt
         | Insn::Nop
+        | Insn::Cfcc
+        | Insn::Setf
+        | Insn::Setd
+        | Insn::Seti
+        | Insn::Setl
         | Insn::Ccc
         | Insn::Scc => &[],
     }
