@@ -37,14 +37,13 @@
 | ID | 条件 | 判定 |
 |---|---|---|
 | S22-1 | hexagon の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す。 | テスト：`heavy_program_hexagon` |
-| S22-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_hexagon`）。 | 未整備 |
+| S22-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_hexagon`）。 | テスト：`heavy_abi_hexagon` |
 | S22-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_hexagon`）。 | 未整備 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX12 | `heavy_abi_hexagon` | HX11 | S22-2 |
 | HX13 | `heavy_oracle_hexagon`（llvm-objdump 差分） | HX9 | S22-3 |
 | HX14 | 残件整理・判定列更新 | HX10,HX12,HX13 | - |
 

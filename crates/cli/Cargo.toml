@@ -148,6 +148,10 @@ name = "heavy_program_hexagon"
 required-features = ["guest-hexagon"]
 
 [[test]]
+name = "heavy_abi_hexagon"
+required-features = ["guest-hexagon"]
+
+[[test]]
 name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 
