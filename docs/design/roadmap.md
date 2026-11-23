@@ -44,13 +44,19 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PD1 | 着手条件: SPEC-PDP11-ARCH83・SPEC-PDP11-CIS・SPEC-PDP11-J11 の版確定、LSI-11/11/03 の根拠資料の追加登録または範囲からの除外の決定、段階 10（F・D 形式）の成果確認、GAP-0023 残項目の点検 | 段階 10 | - |
 | PD2 | `guests/pdp11` 骨格: CpuState（r0-7・PSW）、モデル（11/03 から J-11）とオプション（EIS・FIS・FP11・CIS）の機能旗 | PD1 | - |
 | PD3 | デコード: 16 ビット固定・8 モードのオペランド指定子（byte/word の扱い）。long/D 形式の middle-endian（3412）の語順 | PD2 | - |
 | PD4 | `run_pdp11` 実行ループ: ワード fetch・奇数アドレスのアドレスエラー + bare 最小テスト | PD3 | - |
 | PD5 | 整数: mov/add/sub/cmp/bit/bic/bis/clr/com/inc/dec/neg/tst（byte/word） | PD4 | - |
 | PD6 | 論理・シフト・rot/sxt/xor・adc/sbc/swab・scc/ccc | PD4 | - |
-| PD7 | 分岐・sob・jsr/rts/jmp | PD4 | - |
+| PD7 | 分岐・sob・jsr/rts/jmp・mark | PD4 | - |
+| PD8 | トラップ・特権・システム命令: emt/trap/bpt/iot・rti/rtt・wait/reset/halt・spl・mtps/mfps・mfpt・csm・tstset/wrtlck とトラップ配送 | PD4 | - |
+| PD9 | EIS（mul/div/ash/ashc）と FIS（0750xR・KEV11） | PD5 | - |
+| PD10 | FP11: F/D 形式（decfp 再利用）・AC/FPS/FEC/FEA・例外と丸めモード | PD5 | - |
+| PD11 | CIS（076nnn: 記述子形と in-line 形の文字列・数値・パック文字列） | PD5 | - |
+| PD12 | メモリ管理（PAR/PDR・MMR・3 モード・16/18/22 ビット）と命令空間/データ空間の分離（アクセス種別でアドレス空間を選ぶ mem 拡張） | PD4 | - |
+| PD13 | モデル差と挙動パラメータ（ARCH83 付録 B のファミリ差分表） | PD8-PD12 | - |
+| PD14 | `bare_pdp11` テスト群（分離 I&D のアドレス空間を含む）+ 残件整理・判定列更新 | PD13 | S24-1 |
 
 ### 段階 25：追加の OS パーソナリティ
 
