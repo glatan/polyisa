@@ -235,8 +235,11 @@ fn nv_slot0(w: u32) -> bool {
         // V2LDST 述語付 io `.new` ストア（bit27=0 で述語付、
         // bit24=0 でストア、[23:21]=101）。
         4 => w >> 27 & 1 == 0 && w >> 24 & 1 == 0 && (w >> 21) & 7 == 5,
-        // ICLASS10 の `.new` ストアはすべて [23:21]=101。
-        10 => (w >> 21) & 7 == 5,
+        // ICLASS10 の `.new` ストアはすべて [23:21]=101 かつ
+        // bit24=1。[27:24]=0000 は memw_locked 等の別命令
+        // （HX11。LL/SC は slot 0 専用でもあるが `.new` 値
+        // 消費ではない）。
+        10 => (w >> 21) & 7 == 5 && w >> 24 & 1 != 0,
         _ => false,
     }
 }
@@ -249,9 +252,11 @@ fn nt_of(w: u32) -> Option<u32> {
     match iclass(w) {
         3 if (w >> 21) & 7 == 5 && matches!((w >> 25) & 7, 2 | 3 | 5) => Some((w >> 1) & 3),
         4 if w >> 27 & 1 == 0 && w >> 24 & 1 == 0 && (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
-        10 if (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
-        // NVJ（[27:26]=00）: N.t = 生産距離 × 2。
-        2 if (w >> 26) & 3 == 0 => Some(((w >> 16) & 7) >> 1),
+        // memw_locked（[27:24]=0000）は `.new` 値消費ではない。
+        10 if (w >> 21) & 7 == 5 && w >> 24 & 1 != 0 => Some((w >> 9) & 3),
+        // NVJ（`001000`/`001001`）: N.t = 生産距離 × 2。
+        // imm 比較形（001001）も NVJ（HX11）。
+        2 if matches!((w >> 26) & 0x3f, 8 | 9) => Some(((w >> 16) & 7) >> 1),
         _ => None,
     }
 }
@@ -263,8 +268,10 @@ fn nt_of(w: u32) -> Option<u32> {
 /// Ref: SPEC-HEXAGON-PRM (V79) execution slot table.
 fn slot0_only(w: u32) -> bool {
     nv_slot0(w)
-        || (iclass(w) == 2 && (w >> 26) & 3 == 0)
         || (iclass(w) == 9 && (w >> 24) & 0xf == 6)
+        // HX11: LL/SC（memw_locked）は slot 0 専用。
+        || (iclass(w) == 9 && (w >> 24) & 0xf == 2 && (w >> 21) & 7 == 0)
+        || (iclass(w) == 10 && (w >> 24) & 0xf == 0 && (w >> 21) & 7 == 5)
 }
 
 /// 32 ビット述語付きメモリ形の `pX.new` 消費判定。`.new`
@@ -307,9 +314,53 @@ fn pred_new32(w: u32) -> Option<u8> {
         // 述語付 dealloc_return（`1001 0110`、bit11=1 が .new、
         // 述語は [9:8]）。
         9 if (w >> 24) & 0xf == 6 && w >> 11 & 1 != 0 => (w >> 8) & 3,
+        // HX11: 条件付き ALU（`1111 1x01`/`1111 1x11` 系の
+        // `if ([!]Pu[.new]) Rd = op(Rs,Rt)`）。new=bit13、
+        // 述語は [6:5]。
+        15 if matches!((w >> 24) & 0xf, 0x9 | 0xb | 0xd) && w >> 13 & 1 != 0 => (w >> 5) & 3,
+        // HX11: 条件付き add(#s8)/mov(#s12)（`0111 0100`/
+        // `0111 1110`）。new=bit13、述語は [22:21]。
+        7 if matches!((w >> 24) & 0xf, 0x4 | 0xe) && w >> 13 & 1 != 0 => (w >> 21) & 3,
         _ => return None,
     };
     Some(p as u8)
+}
+
+/// `.new` 述語の生成側判定。述語 p を生産する命令なら
+/// Some(p)。duplex subinsn（len=13・group 付き）と 32 ビット語
+/// の両方を見る。`expand` の生成側規則と `run` の生成側先行
+/// 評価が共用する。
+/// Ref: SPEC-HEXAGON-PRM (V79) dot-new predicates.
+pub(crate) fn pred_prod_cand(len: u32, group: Option<Group>, word: u128) -> Option<u8> {
+    match (len, group) {
+        // A-type cmp.eq は p0 固定。
+        (13, Some(Group::A)) if (word >> 8) & 0x1f == 0b11001 => Some(0),
+        // 32 ビット述語書き込み形。宛先はすべて pd2
+        // （bits[1:0]）。Pd=[!]cmp.* は
+        // Pd=cmp.*(Rs,Rt)（ICLASS 15、bits[27:24]=0010）と
+        // Pd=cmp.*(Rs,#imm)（ICLASS 7、bits[27:24]=0101）で、
+        // bits[4:2]=000 が cmp.*、100 が !cmp.*。
+        // HX11: cmp 系以外の述語生産も拾う — cmp64
+        // （`1101 0010 100`）、cmpb/cmph 即値形（`1101 1101`）、
+        // bitsclr/bitsset/tstbit・cmpb/cmph レジスタ形
+        // （`1100 0111`）、tstbit_i/bitsclr_i/pd_rs
+        // （`1000 0101`）、述語論理 p{d}=op(p{s},p{t})
+        // （`0110 1011`）。
+        (32, _) => {
+            let w = word as u32;
+            let ic = w >> 28;
+            let hi = (w >> 24) & 0xf;
+            let is_cmp = matches!((w >> 2) & 7, 0 | 4)
+                && ((ic == 0xf && hi == 0b0010) || (ic == 0x7 && hi == 0b0101));
+            let is_pwrite = is_cmp
+                || (ic == 0xd && matches!(hi, 0b1101 | 0b0010))
+                || (ic == 0xc && hi == 0b0111)
+                || (ic == 0x8 && hi == 0b0101)
+                || (ic == 0x6 && hi == 0b1011);
+            if is_pwrite { Some((w & 3) as u8) } else { None }
+        }
+        _ => None,
+    }
 }
 
 /// ICLASS → 命令クラス。
@@ -675,7 +726,7 @@ fn flow_of(len: u32, group: Option<Group>, word: u128, class: Class) -> Flow {
                         Flow::Both
                     }
                 }
-                // ICLASS 2: NVJ は slot 0 専用で dual を組めない。
+                // ICLASS 2: NVJ は dual を組めない。
                 2 => Flow::Never,
                 5 => match (w >> 24) & 0xf {
                     // `0101 1100` = if ([!]Pu[.new]) jump（条件付き）。
@@ -808,9 +859,15 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
     // 2a. duplex 同一グループの数値順（小さい側が slot1）。比較は
     //     「レジスタ・即値桁を 0 とみなした値」で行う（Table 10-5
     //     脚注）。オペコード桁を残すマスクはグループごとに持つ。
+    //     HX11: 実符号照合で、この正規化が働くのは A/A だけと参照アセンブラ実符号で確認
+    //     した（参照アセンブラは A/A の書いた順を符号化時に入れ替える
+    //     が、L/S 系の同組対は書いた順のまま符号化する =
+    //     どちらの順も実在しうる）。そのため規則の適用は A/A に
+    //     限る。
     if let Some(last) = pkt.words.last()
         && let Kind::Duplex { lo, hi } = last.kind
         && lo == hi
+        && lo == Group::A
     {
         let (lo_w, hi_w) = duplex_subs(last.raw);
         if order_key(lo, lo_w) < order_key(hi, hi_w) {
@@ -921,16 +978,50 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
     // 3. 貪欲に上位スロットから割当て（低アドレス側の命令ほど
     //    大きいスロット番号）。各候補は「直前の候補より小さい
     //    最大の許容スロット」を取る。
+    //    例外: NVJ（new-value compare jump）は消費する `.new`
+    //    値の生産命令より後に置かねばならず、パケット最後の命令
+    //    として順序規則の例外が認められる（J クラスだが最後に
+    //    来てよい）。HX11: `{ld; nvj}` 形が musl/busybox に実在。
+    //    Ref: SPEC-HEXAGON-PRM (V79) packet constraints.
     let mut slots = vec![0u8; cands.len()];
     let mut upper = 4i8; // 直前の命令のスロット。最初は未使用=4。
+    let mut ordered_ok = true;
     for (i, mask_i) in masks.iter().enumerate() {
         let mask = mask_i & ((1 << upper.max(0)) - 1) as u8;
         if mask == 0 {
-            return Err(ComposeError::NoSlotAssign);
+            ordered_ok = false;
+            break;
         }
         let s = (7 - mask.leading_zeros()) as u8;
         slots[i] = s;
         upper = s as i8;
+    }
+    if !ordered_ok {
+        // 順序付き割当てが失敗したら順序を外した全探索に落とす。
+        // パケット内の命令列はスロット単調を必ずしも満たさない
+        // （NVJ はパケット最後、`{alu; alu; alu; jump}` 形も
+        // musl/busybox に実在）。エミュレーションでは命令の
+        // 実行順は語の位置で決まるため、各命令の許容スロットに
+        // 空きがあれば受理する。候補・スロットとも 4 個以内。
+        fn assign(masks: &[u8], i: usize, used: u8, slots: &mut [u8]) -> bool {
+            if i == masks.len() {
+                return true;
+            }
+            let mut rest = masks[i] & !used;
+            while rest != 0 {
+                let s = rest.trailing_zeros() as u8;
+                rest &= rest - 1;
+                slots[i] = s;
+                if assign(masks, i + 1, used | (1 << s), slots) {
+                    return true;
+                }
+            }
+            false
+        }
+        slots.fill(0);
+        if !assign(&masks, 0, 0, &mut slots) {
+            return Err(ComposeError::NoSlotAssign);
+        }
     }
     // 3b. slot1 の ST 系には slot0 に ST（dual store）か LD
     //     （:mem_noshuf 形）が要る。memory 系の許容スロットは
@@ -977,30 +1068,13 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
             _ => None,
         }
     };
-    let pred_prod = |c: &Cand| -> Option<u8> {
-        match (c.len, c.group) {
-            // A-type cmp.eq は p0 固定。
-            (13, Some(Group::A)) if (c.word >> 8) & 0x1f == 0b11001 => Some(0),
-            // 32 ビット Pd=[!]cmp.* は pd2（bits[1:0]）が
-            // デスティネーション。比較族は
-            // Pd=cmp.*(Rs,Rt)（ICLASS 15、bits[27:24]=0010）と
-            // Pd=cmp.*(Rs,#imm)（ICLASS 7、bits[27:24]=0101）で、
-            // bits[4:2]=000 が cmp.*、100 が !cmp.*。
-            (32, _) => {
-                let w = c.word as u32;
-                let is_cmp = matches!((w >> 2) & 7, 0 | 4)
-                    && ((w >> 28 == 0xf && (w >> 24) & 0xf == 0b0010)
-                        || (w >> 28 == 0x7 && (w >> 24) & 0xf == 0b0101));
-                if is_cmp { Some((w & 3) as u8) } else { None }
-            }
-            _ => None,
-        }
-    };
     for c in &cands {
+        // 生成側はパケット内のどこにあってもよい（実機は同時
+        // 発行。`.new` 述語には位置規則がない）。
         if let Some(p) = pred_new(c)
             && !cands
                 .iter()
-                .any(|d| pred_prod(d) == Some(p) && d.pos < c.pos)
+                .any(|d| d.pos != c.pos && pred_prod_cand(d.len, d.group, d.word) == Some(p))
         {
             return Err(ComposeError::NewProducer);
         }

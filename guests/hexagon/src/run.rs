@@ -23,10 +23,46 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
-use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+use polyisa_mem::{Access, AccessKind, Align, Endian, PAGE_SIZE, PageNo, Perms, VirtAddr};
 use polyisa_sem::{Backend as _, ExceptionKind};
 
 use crate::{Insn, decode_model_ex, extract_ops, packet, sem};
+
+/// ページフォルト駆動の lazymap 窓（Linux の GROWSDOWN・ヒープ
+/// 事前張りの近似 — GAP-0073）。`[lo, hi)` 内の未写像アクセスは
+/// ページを遅延割付してパケットをやり直す。
+#[derive(Clone, Copy)]
+pub struct Growth {
+    /// 遅延割付の下限（elf 画像末端のページ）。
+    pub lo: u64,
+    /// 遅延割付の上限（スタック頂）。
+    pub hi: u64,
+}
+
+/// `addr` のページを窓の中で遅延割付する。割付たら true。
+fn grow(env: &mut BareEnv, g: Option<Growth>, addr: u64, exec: bool) -> bool {
+    let Some(g) = g else { return false };
+    if addr < g.lo || addr >= g.hi {
+        return false;
+    }
+    let page = addr & !PAGE_SIZE.wrapping_sub(1);
+    if env.backend.mem.is_mapped(PageNo(page / PAGE_SIZE)) {
+        return false;
+    }
+    let p = if exec {
+        Perms(Perms::RW.0 | Perms::X.0)
+    } else {
+        Perms::RW
+    };
+    env.backend.mem.map(VirtAddr(page), 1, p).is_ok()
+}
+
+/// 直近パケット PC のリングバッファ（POLYISA_HEX_TRACE 時のみ
+/// illegal の直前経路を残す）。
+use std::cell::RefCell;
+thread_local! {
+    static RING: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
 
 /// `addr` の命令語（4 バイト LE）を読む。
 fn fetch_word(env: &BareEnv, addr: u32) -> Option<u32> {
@@ -58,7 +94,20 @@ fn trap_result(
             ok(env);
             Ok(())
         }
-        TrapOutcome::Exit(code) => Err(Outcome::Exit(u64::from(code))),
+        TrapOutcome::Exit(code) => {
+            // デバッグ: POLYISA_HEX_TRACE 時は exit 直前の
+            // パケット PC 列も残す（黙った早期終了の追跡用）。
+            if std::env::var_os("POLYISA_HEX_TRACE").is_some() {
+                RING.with(|r| {
+                    let r = r.borrow();
+                    eprintln!("exit({code}): last {} pcs:", r.len());
+                    for p in r.iter().rev().take(48) {
+                        eprintln!("  {p:#x}");
+                    }
+                });
+            }
+            Err(Outcome::Exit(u64::from(code)))
+        }
         TrapOutcome::Blocked => Err(Outcome::Deadlock),
         TrapOutcome::Unimplemented => Err(Outcome::Unimplemented { pc, word }),
     }
@@ -101,7 +150,17 @@ fn cond_of(si: &packet::SlotInsn, insn: Insn) -> Option<sem::DotIf> {
         | Insn::StPqNt
         | Insn::StPqPiNt
         | Insn::StPqRoNt
-        | Insn::StPqAbsNt => {
+        | Insn::StPqAbsNt
+        // HX11: `if ([!]Pu[.new])` 条件付き ALU。末尾 2
+        // オペランドは同じく (述語, qualifier)。
+        | Insn::CandRr
+        | Insn::CorRr
+        | Insn::CxorRr
+        | Insn::CaddRr
+        | Insn::CsubRr
+        | Insn::CcombRr
+        | Insn::CaddRi
+        | Insn::CmovI => {
             let ops = extract_ops(insn, si.word);
             let n = ops.len();
             let q = ops[n - 1];
@@ -144,14 +203,71 @@ fn cond_of(si: &packet::SlotInsn, insn: Insn) -> Option<sem::DotIf> {
 /// 1 パケットぶんのフェッチ・解読・意味論。`env.pc` はパケット
 /// 先頭アドレスで、終端・分岐成立・退出で止まる。
 pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Result<(), Outcome> {
+    step_inner(env, sys, feats, None)
+}
+
+/// `step` の lazymap 窓付き。窓 `[g.lo, g.hi)` 内の未写像への
+/// データ・フェッチアクセスはページを遅延割付してパケットを
+/// やり直す（Linux の GROWSDOWN・ヒープ近似 — GAP-0073）。
+pub fn step_growth(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    feats: u128,
+    g: Growth,
+) -> Result<(), Outcome> {
+    step_inner(env, sys, feats, Some(g))
+}
+
+fn step_inner(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    feats: u128,
+    growth: Option<Growth>,
+) -> Result<(), Outcome> {
     let pc = env.pc as u32;
+    let trace = std::env::var_os("POLYISA_HEX_TRACE").is_some();
+    if trace {
+        RING.with(|r| {
+            let mut r = r.borrow_mut();
+            if r.len() >= 128 {
+                r.remove(0);
+            }
+            r.push(pc);
+        });
+        if let Some(watches) = std::env::var_os("POLYISA_HEX_WATCH").map(|s| {
+            s.to_str()
+                .unwrap_or("")
+                .split(',')
+                .filter_map(|w| u32::from_str_radix(w, 16).ok())
+                .collect::<Vec<u32>>()
+        }) && watches.contains(&pc)
+        {
+            eprint!("watch pc={pc:#x}:");
+            for i in 0..8 {
+                eprint!(" r{i}={:#x}", sem::r_get(&env.backend, i));
+            }
+            eprintln!();
+        }
+    }
     // Parse 桁を追ってパケットの語を読む（終端語は必ず見つかる
     // か 4 語で打ち切る。後の split が Unterminated を弾く）。
     let mut words = [0u32; 4];
     let mut n = 0usize;
     loop {
-        let Some(w) = fetch_word(env, pc.wrapping_add(4 * n as u32)) else {
-            return unimpl_insn(env, sys, pc, pc, 0);
+        let a = pc.wrapping_add(4 * n as u32);
+        let w = match fetch_word(env, a) {
+            Some(w) => w,
+            // フェッチも窓の中では遅延割付して一度だけ読み直す
+            // （musl ldso が画像末端直後へ書く経路の近似）。
+            None => {
+                if grow(env, growth, u64::from(a), true)
+                    && let Some(w) = fetch_word(env, a)
+                {
+                    w
+                } else {
+                    return unimpl_insn(env, sys, pc, pc, 0);
+                }
+            }
         };
         words[n] = w;
         n += 1;
@@ -176,6 +292,36 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
     env.backend.set(sem::endloop_ref(), u32::from(pkt.endloop));
     // パケット内の制御転送は先に記録された側が勝つ。
     let mut target = None;
+    // `.new` 述語の生成側を先行評価する（実機はパケット同時
+    // 発行なので生成側は消費側より後に来てもよい — musl の
+    // `if (p0.new) ...; p0 = cmp.eq(...)` 形）。pkt_pw は未確定
+    // 域なので本パスの再評価は冪等。生成側同士の `.new` 依存を
+    // 1 段まで許すため 2 回掃く（生成側は比較・述語演算だけで
+    // メモリ・分岐・積算の副作用を持たない）。
+    for _ in 0..2 {
+        for si in &slots {
+            if packet::pred_prod_cand(si.len, si.group, si.word).is_none() {
+                continue;
+            }
+            let insn = match si.group {
+                Some(g) => packet::decode_sub(g, si.word as u16, feats),
+                None => decode_model_ex(si.word, si.len, true, feats),
+            };
+            let Some(insn) = insn else { continue };
+            env.backend.ctrl = Ctrl::Fallthrough;
+            let cx = sem::Ctx {
+                cond: cond_of(si, insn),
+                ext: si.ext,
+                pc,
+                next,
+                pos: u32::from(si.pos),
+                masked: false,
+            };
+            if sem::exec(&mut env.backend, insn, si.word, cx).is_err() {
+                break;
+            }
+        }
+    }
     for si in &slots {
         let insn = match si.group {
             Some(g) => packet::decode_sub(g, si.word as u16, feats),
@@ -206,6 +352,16 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
                     target = Some(t as u32);
                 }
             }
+            Err(InterpExit::Exception(e))
+                if e.kind == ExceptionKind::PageFault
+                    && e.addr.is_some_and(|a| grow(env, growth, a, false)) =>
+            {
+                // 窓内の未写像アクセス: ページを割付けてパケットを
+                // やり直す（pkt の未確定値は捨てる。ストアの部分
+                // 適用は冪等）。
+                sem::pkt_clear(&mut env.backend);
+                return Ok(());
+            }
             Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
                 // パケットの生産値を確定してから OS パーソナリティへ。
                 // 戻り先は次のパケット（分岐が記録されていればその
@@ -219,8 +375,34 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
                     env.pc = u64::from(dest);
                 });
             }
-            Err(_) => {
+            Err(e) => {
                 // 未実装命令・その他の例外は illegal パケット扱い。
+                if std::env::var_os("POLYISA_HEX_TRACE").is_some() {
+                    let kind = match &e {
+                        InterpExit::Exception(x) => {
+                            format!("{:?} code={:#x} addr={:?}", x.kind, x.code, x.addr)
+                        }
+                        other => format!("{other:?}"),
+                    };
+                    eprintln!(
+                        "hexagon: illegal pc={pc:#x} word={:#x} insn={insn:?} {kind}",
+                        si.word
+                    );
+                    for i in 0..32 {
+                        eprint!("r{i}={:#x} ", sem::r_get(&env.backend, i));
+                        if i % 8 == 7 {
+                            eprintln!();
+                        }
+                    }
+                    eprintln!();
+                    RING.with(|r| {
+                        let r = r.borrow();
+                        eprintln!("last {} pcs:", r.len());
+                        for p in r.iter().rev().take(48) {
+                            eprintln!("  {p:#x}");
+                        }
+                    });
+                }
                 return unimpl_insn(env, sys, pc, next, si.word);
             }
         }

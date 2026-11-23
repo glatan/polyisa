@@ -337,6 +337,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("u6b", vec![(17, 16), (6, 3)], 0),
         // q2a: 述語付 abs ストアの qualifier（{bit13=.new}+{bit2=!}）。
         ("q2a", vec![(13, 13), (2, 2)], 0),
+        // ---- HX11: 条件付き ALU 系の分割桁 ----
+        // q2c: `if ([!]Pu[.new]) Rd = op(Rs,Rt)` 系の qualifier
+        // （{bit13=.new}+{bit7=!}）。
+        ("q2c", vec![(13, 13), (7, 7)], 0),
+        // q2d: `if ([!]Pu[.new]) Rd = add(Rs,#s8)` /
+        // `Rd = #s12` 系の qualifier（{bit13=.new}+{bit23=!}）。
+        ("q2d", vec![(13, 13), (23, 23)], 0),
+        // ci12: `Rd = #s12` の分割即値（bits{19:16}+{12:5}）。
+        ("ci12", vec![(19, 16), (12, 5)], 0),
         // ---- HX7: 分岐系の分割即値 ----
         // r15: `if ([!]Pu[.new]) jump/call` の PC 相対オフセット
         // （bits{23:22}+{20:16}+{13}+{7:1}、zfill 2）。
@@ -636,6 +645,23 @@ pub fn build_model() -> polyisa_isadl::Model {
             val("u", "u6a"),
             preg("p", "pv2pi", Access::Read),
             val("q", "q2p"),
+        ],
+    ));
+    // Rd = memw_locked(Rs)（load-linked）。
+    m.formats.push(fmt(
+        "FLLL",
+        &["s5", "d5"],
+        vec![gpr("d", "d5", Access::Write), gpr("s", "s5", Access::Read)],
+    ));
+    // memw_locked(Rs,Pd) = Rt（store-conditional。Pd へ
+    // 成功/失敗を書く）。
+    m.formats.push(fmt(
+        "FSCL",
+        &["s5", "t5", "pd2"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            preg("p", "pd2", Access::Write),
         ],
     ));
     // memXX(Rs+#s11) = Rt。
@@ -1275,6 +1301,17 @@ pub fn build_model() -> polyisa_isadl::Model {
             val("imm", "ai10"),
         ],
     ));
+    // Rd = add(#s6,mpyi(Rs,Rt)) の複合積和形（s6 は xa6）。
+    m.formats.push(fmt(
+        "FAMPY",
+        &["s5", "t5", "d5", "xa6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            val("imm", "xa6"),
+        ],
+    ));
     // Rx op= shift(Rs,#u5)。
     m.formats.push(fmt(
         "FXSH",
@@ -1802,6 +1839,49 @@ pub fn build_model() -> polyisa_isadl::Model {
         ],
     ));
 
+    // ---- HX11: 条件付き ALU ----
+    // `if ([!]Pu[.new]) Rd = op(Rs,Rt)` / `Rdd = combine(Rs,Rt)`。
+    // 述語は pd2m（bits[6:5]）、qualifier は q2c
+    // （bit7=否定、bit13=.new）。実符号照合済み。
+    // Ref: SPEC-HEXAGON-PRM (V79) conditional instructions.
+    m.formats.push(fmt(
+        "FCPQ",
+        &["s5", "t5", "d5", "pd2m", "q2c"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            preg("p", "pd2m", Access::Read),
+            val("q", "q2c"),
+        ],
+    ));
+    // `if ([!]Pu[.new]) Rd = add(Rs,#s8)`。述語は pu2i
+    // （bits[22:21]）、qualifier は q2d（bit23=否定、
+    // bit13=.new）。実符号照合済み。
+    m.formats.push(fmt(
+        "FCAI",
+        &["s5", "d5", "ai8", "pu2i", "q2d"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai8"),
+            preg("p", "pu2i", Access::Read),
+            val("q", "q2d"),
+        ],
+    ));
+    // `if ([!]Pu[.new]) Rd = #s12`（## 拡張可能）。qualifier は
+    // q2d、即値は ci12（bits{19:16}+{12:5}）。実符号照合済み。
+    m.formats.push(fmt(
+        "FCI12",
+        &["d5", "ci12", "pu2i", "q2d"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("imm", "ci12"),
+            preg("p", "pu2i", Access::Read),
+            val("q", "q2d"),
+        ],
+    ));
+
     let ins = |name: &str, format: &str, pattern: &str, when: Pred, syntax: &str, timing: &str| {
         Insn {
             name: name.to_string(),
@@ -1912,11 +1992,16 @@ pub fn build_model() -> polyisa_isadl::Model {
         // OS パーソナリティに委ねる（code = 0x100|u）。trap2 は
         // PRM に存在しない。pause はタイミングヒント（solo 命令、
         // 建築状態を変えない）。brkpt/unpause/icinva/isync/
-        // syncht/dcfetch/l2fetch は語彙外（復号不能=illegal）。
+        // dcfetch/l2fetch は語彙外（復号不能=illegal）。
         // Ref: system instructions.
         ("trap0", "FTRAP", "0101010000......................", "trap0(#{u})", "system"),
         ("trap1", "FTRAP1", "0101010010......................", "trap1({x},#{u})", "system"),
         ("pause", "FPAUSE", "0101010001......................", "pause(#{u})", "system"),
+        // HX11: barrier/syncht。メモリ順序のフェンスで、musl の
+        // a_barrier（stdio ロックのリリースフェンス）が使う。
+        // 単一コア・逐次実行のエミュレータでは no-op。
+        ("barrier", "FN", "1010100000000000..0.............", "barrier", "system"),
+        ("syncht", "FN", "1010100001000000..0.............", "syncht", "system"),
         // Rd = Cs / Cd = Rs。Ref: CR control register transfer.
         ("rdcr", "FRDC", "01101010000.....................", "{d}=c{c}", "system"),
         ("wrcr", "FWRC", "01100010001.....................", "c{d}={s}", "system"),
@@ -2043,6 +2128,27 @@ pub fn build_model() -> polyisa_isadl::Model {
             i
         });
     }
+    // ---- HX11: LL/SC（memw_locked）----
+    // Rd = memw_locked(Rs)（load-linked）。musl のアトミック
+    // 実装が使う。実符号照合済み。
+    m.insns.push(ins(
+        "ld_locked",
+        "FLLL",
+        "10010010000.......0.....000.....",
+        base(),
+        "{d}=memw_locked({s})",
+        "load",
+    ));
+    // memw_locked(Rs,Pd) = Rt（store-conditional）。成功時のみ
+    // ストアし Pd に真を書く。実符号照合済み。
+    m.insns.push(ins(
+        "st_locked",
+        "FSCL",
+        "10100000101.......0.....000000..",
+        base(),
+        "memw_locked({s},p{p})={t}",
+        "store",
+    ));
     // ストア即値形・述語付き即値形・memop。サイズは sz2i の
     // 2 ビット（b=0 h=1 w=2、d=3 を禁止）。memop は
     // read-modify-write でスロット 0 専用・slot1 ストア禁止
@@ -2200,8 +2306,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("pnot", "FPN", "011010111100......0.............", "p{d}=not(p{s})", "alu"),
         ("pany8", "FPN", "011010111000......0.............", "p{d}=any8(p{s})", "alu"),
         ("pall8", "FPN", "011010111010......0.............", "p{d}=all8(p{s})", "alu"),
-        ("pfc9", "FP3", "01101011000000..111000..100100..", "p{d}=fastcorner9(p{s},p{t})", "alu"),
-        ("pfc9n", "FP3", "01101011000100..111000..100100..", "p{d}=!fastcorner9(p{s},p{t})", "alu"),
+        ("pfc9", "FP3", "01101011000000....1000..100100..", "p{d}=fastcorner9(p{s},p{t})", "alu"),
+        ("pfc9n", "FP3", "01101011000100....1000..100100..", "p{d}=!fastcorner9(p{s},p{t})", "alu"),
         ("pand_a", "FP4", "011010110001......0.............", "p{d}=and(p{s},and(p{t},p{u}))", "alu"),
         ("pand_o", "FP4", "011010110011......0.............", "p{d}=and(p{s},or(p{t},p{u}))", "alu"),
         ("por_a", "FP4", "011010110101......0.............", "p{d}=or(p{s},and(p{t},p{u}))", "alu"),
@@ -2276,12 +2382,30 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("lsr64_i", "FSHI6", "10000000000.............001.....", "lsr {dd},{ss},#{imm}", "alu"),
         ("asl64_i", "FSHI6", "10000000000.............010.....", "asl {dd},{ss},#{imm}", "alu"),
         ("rol64_i", "FSHI6", "10000000000.............011.....", "rol {dd},{ss},#{imm}", "alu"),
+        // ベクトル即値シフト。bits[7:5] が op（0=asr,1=lsr,2=asl）、
+        // 即値は u6 桁だが要素幅で意味が違う（w: u5、h: u4）。
+        // vlsl*_i は実在しない（参照アセンブラ照合）。bits[15:14] は
+        // パケット parse 桁なのでパターンには入れない。
+        ("vasrw_i", "FSHI6", "10000000010.............000.....", "vasrw {dd},{ss},#{imm}", "alu"),
+        ("vlsrw_i", "FSHI6", "10000000010.............001.....", "vlsrw {dd},{ss},#{imm}", "alu"),
+        ("vaslw_i", "FSHI6", "10000000010.............010.....", "vaslw {dd},{ss},#{imm}", "alu"),
+        ("vasrh_i", "FSHI6", "10000000100.............000.....", "vasrh {dd},{ss},#{imm}", "alu"),
+        ("vlsrh_i", "FSHI6", "10000000100.............001.....", "vlsrh {dd},{ss},#{imm}", "alu"),
+        ("vaslh_i", "FSHI6", "10000000100.............010.....", "vaslh {dd},{ss},#{imm}", "alu"),
         ("asr_rr", "FRR", "1100011001..............00......", "asr {d},{s},{t}", "alu"),
         ("asl_rr", "FRR", "1100011001..............10......", "asl {d},{s},{t}", "alu"),
         ("lsr_rr", "FRR", "1100011001..............01......", "lsr {d},{s},{t}", "alu"),
         ("lsl_rr", "FRR", "1100011001..............11......", "lsl {d},{s},{t}", "alu"),
         ("asl_rr_sat", "FRR", "1100011000..............10......", "asl {d},{s},{t}:sat", "alu"),
         ("asr_rr_sat", "FRR", "1100011000..............00......", "asr {d},{s},{t}:sat", "alu"),
+        ("vasrw", "FRR", "1100001100..............00......", "vasrw {dd},{ss},{t}", "alu"),
+        ("vlsrw", "FRR", "1100001100..............01......", "vlsrw {dd},{ss},{t}", "alu"),
+        ("vaslw", "FRR", "1100001100..............10......", "vaslw {dd},{ss},{t}", "alu"),
+        ("vlslw", "FRR", "1100001100..............11......", "vlslw {dd},{ss},{t}", "alu"),
+        ("vasrh", "FRR", "1100001101..............00......", "vasrh {dd},{ss},{t}", "alu"),
+        ("vlsrh", "FRR", "1100001101..............01......", "vlsrh {dd},{ss},{t}", "alu"),
+        ("vaslh", "FRR", "1100001101..............10......", "vaslh {dd},{ss},{t}", "alu"),
+        ("vlslh", "FRR", "1100001101..............11......", "vlslh {dd},{ss},{t}", "alu"),
         ("asr64_rr", "FRR", "1100001110..............00......", "asr {dd},{ss},{t}", "alu"),
         ("asl64_rr", "FRR", "1100001110..............10......", "asl {dd},{ss},{t}", "alu"),
         ("lsr64_rr", "FRR", "1100001110..............01......", "lsr {dd},{ss},{t}", "alu"),
@@ -2338,6 +2462,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_lsr", "FXRR", "1100110000..............01......", "{x}|=lsr({s},{t})", "alu"),
         ("or_asl", "FXRR", "1100110000..............10......", "{x}|=asl({s},{t})", "alu"),
         ("or_lsl", "FXRR", "1100110000..............11......", "{x}|=lsl({s},{t})", "alu"),
+        // &= の reg-shift 系（HX11 で musl の `rX &= lsr/asr/asl(r,r)`
+        // を実測。符号の空きは or/sub/add 系と同じ末尾 2 桁の
+        // asr/lsr/asl/rol 配列）。
+        ("and_asr", "FXRR", "1100110001..............00......", "{x}&=asr({s},{t})", "alu"),
+        ("and_lsr", "FXRR", "1100110001..............01......", "{x}&=lsr({s},{t})", "alu"),
+        ("and_asl", "FXRR", "1100110001..............10......", "{x}&=asl({s},{t})", "alu"),
+        ("and_rol", "FXRR", "1100110001..............11......", "{x}&=rol({s},{t})", "alu"),
         ("add64_asr", "FXRR", "11001011110.............00......", "{xx}+=asr({ss},{t})", "alu"),
         ("add64_lsr", "FXRR", "11001011110.............01......", "{xx}+=lsr({ss},{t})", "alu"),
         ("add64_asl", "FXRR", "11001011110.............10......", "{xx}+=asl({ss},{t})", "alu"),
@@ -2355,6 +2486,58 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("addsub_acc", "FXRR", "11101111000.......0.....011.....", "{x}+=sub({t},{s})", "alu"),
         ("add_acc_i", "FXI8", "111000100.........0.............", "{x}+=add({s},#{imm})", "alu"),
         ("sub_acc_i", "FXI8", "111000101.........0.............", "{x}-=add({s},#{imm})", "alu"),
+        // ---- HX11: mpy 系 ----
+        // Rd = ±mpyi(Rs,#u8)（bits[27:24]=0000、bit23=符号、
+        // 即値は bits[12:5] の u8）。実符号照合済み。
+        ("mpyi", "FRI8", "11100000000.......0.............", "{d}=+mpyi({s},#{imm})", "alu"),
+        ("mpyin", "FRI8", "11100000100.......0.............", "{d}=-mpyi({s},#{imm})", "alu"),
+        // Rx ±= mpyi(Rs,#u8)（bits[27:24]=0001）。
+        ("mpyia", "FXI8", "11100001000.......0.............", "{x}+=mpyi({s},#{imm})", "alu"),
+        ("mpyina", "FXI8", "11100001100.......0.............", "{x}-=mpyi({s},#{imm})", "alu"),
+        // Rd = add(#s6,mpyi(Rs,Rt))（複合積和。musl の
+        // alloc_group 等が使う。実符号照合済み）。
+        ("add_mpyi", "FAMPY", "1101011100......................", "{d}=add(#{imm},mpyi({s},{t}))", "alu"),
+        // Rdd = mpy(Rs,Rt)（符号付き）/ mpyu（符号無し）。
+        // bits[27:24]=0101、bits[23:21] が 000=mpy / 010=mpyu。
+        ("mpy", "FRR", "11100101000.......0.....000.....", "{dd}=mpy({s},{t})", "alu"),
+        ("mpyu", "FRR", "11100101010.......0.....000.....", "{dd}=mpyu({s},{t})", "alu"),
+        // Rxx ±= mpy/mpyu（bits[27:24]=0111、bits[23:21] が
+        // 000=+mpy / 001=-mpy / 010=+mpyu）。
+        ("mpy_a", "FXRR", "11100111000.......0.....000.....", "{xx}+=mpy({s},{t})", "alu"),
+        ("mpy_na", "FXRR", "11100111001.......0.....000.....", "{xx}-=mpy({s},{t})", "alu"),
+        ("mpyu_a", "FXRR", "11100111010.......0.....000.....", "{xx}+=mpyu({s},{t})", "alu"),
+        // Rd = mpy(Rs,Rt)（積の下位 32 ビット）。
+        ("mpy32", "FRR", "11101101000.......0.....001.....", "{d}=mpy({s},{t})", "alu"),
+        // Rd = mpyu(Rs,Rt)（符号無し積の下位 32 ビット、bit22=1）。
+        ("mpyu32", "FRR", "11101101010.......0.....001.....", "{d}=mpyu({s},{t})", "alu"),
+        // Rd = mpyi(Rs,Rt)（積の下位 32 ビット、レジスタ形）。
+        ("mpyi_rr", "FRR", "11101101000.......0.....000.....", "{d}=mpyi({s},{t})", "alu"),
+        // Rx ±= mpyi(Rs,Rt)（bit23 が加算/減算選択、
+        // bits[22:21]=00・bits[15:13]=110・bits[7:5]=000）。
+        ("mpyia_rr", "FXRR", "11101111000.......0.....000.....", "{x}+=mpyi({s},{t})", "alu"),
+        ("mpyina_rr", "FXRR", "11101111100.......0.....000.....", "{x}-=mpyi({s},{t})", "alu"),
+        // Rdd = mpy(Rs.{h,l},Rt.{h,l})（bits[27:24]=0100、
+        // bits[7:5] が半語選択 000=ll/001=lh/010=hl/011=hh）。
+        ("mpyll", "FRR", "11100100000.......0.....000.....", "{dd}=mpy({s}.l,{t}.l)", "alu"),
+        ("mpylh", "FRR", "11100100000.......0.....001.....", "{dd}=mpy({s}.l,{t}.h)", "alu"),
+        ("mpyhl", "FRR", "11100100000.......0.....010.....", "{dd}=mpy({s}.h,{t}.l)", "alu"),
+        ("mpyhh", "FRR", "11100100000.......0.....011.....", "{dd}=mpy({s}.h,{t}.h)", "alu"),
+        // Rxx ±= mpy(Rs.{h,l},Rt.{h,l})（bits[27:24]=0110、
+        // bits[23:21] が 000=+= / 001=-=）。
+        ("mpyll_a", "FXRR", "11100110000.......0.....000.....", "{xx}+=mpy({s}.l,{t}.l)", "alu"),
+        ("mpyll_na", "FXRR", "11100110001.......0.....000.....", "{xx}-=mpy({s}.l,{t}.l)", "alu"),
+        ("mpylh_a", "FXRR", "11100110000.......0.....001.....", "{xx}+=mpy({s}.l,{t}.h)", "alu"),
+        ("mpylh_na", "FXRR", "11100110001.......0.....001.....", "{xx}-=mpy({s}.l,{t}.h)", "alu"),
+        ("mpyhl_a", "FXRR", "11100110000.......0.....010.....", "{xx}+=mpy({s}.h,{t}.l)", "alu"),
+        ("mpyhl_na", "FXRR", "11100110001.......0.....010.....", "{xx}-=mpy({s}.h,{t}.l)", "alu"),
+        ("mpyhh_a", "FXRR", "11100110000.......0.....011.....", "{xx}+=mpy({s}.h,{t}.h)", "alu"),
+        ("mpyhh_na", "FXRR", "11100110001.......0.....011.....", "{xx}-=mpy({s}.h,{t}.h)", "alu"),
+        // Rd = mpy(Rs.{h,l},Rt.{h,l})（bits[27:24]=1100、積の
+        // 下位 32 ビット）。
+        ("mpy32ll", "FRR", "11101100000.......0.....000.....", "{d}=mpy({s}.l,{t}.l)", "alu"),
+        ("mpy32lh", "FRR", "11101100000.......0.....001.....", "{d}=mpy({s}.l,{t}.h)", "alu"),
+        ("mpy32hl", "FRR", "11101100000.......0.....010.....", "{d}=mpy({s}.h,{t}.l)", "alu"),
+        ("mpy32hh", "FRR", "11101100000.......0.....011.....", "{d}=mpy({s}.h,{t}.h)", "alu"),
         ("and_and", "FXRR", "11101111010.......0.....000.....", "{x}&=and({s},{t})", "alu"),
         ("and_andn", "FXRR", "11101111001.......0.....001.....", "{x}&=and({s},~{t})", "alu"),
         ("and_or", "FXRR", "11101111010.......0.....001.....", "{x}&=or({s},{t})", "alu"),
@@ -2544,6 +2727,35 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("andn_rr", "FRR", "11110001010.....................", "and {d},{s},~{t}", "alu"),
         ("orn_rr", "FRR", "11110001110.....................", "or {d},{s},~{t}", "alu"),
         ("addpc", "FPC6", "0110101001001001................", "add {d},pc,#{imm}", "alu"),
+    ] {
+        m.insns.push(ins(name, format, pattern, base(), syntax, timing));
+    }
+
+    // ---- HX11: `if ([!]Pu[.new])` 条件付き ALU ----
+    // ICLASS 15 の `11111xxx` は `11110xxx` の無条件形に対応
+    // する条件実行形で、[26:21] の副オペコードを引き継ぐ:
+    // [26:24]=001 は論理（and=000/or=001/xor=011、andn/orn 系は
+    // なし）、011 は加減算（add=000/sub=001）、101 は combine
+    // （000）。述語は pd2m（bits[6:5]）、否定 bit7・.new
+    // bit13。combine は d5 を対レジスタの偶数側とみなす。
+    // 条件付き即値形は `01110100`（Rd=add(Rs,#s8)。述語は
+    // bits[22:21]、否定 bit23）と `01111110`（Rd=#s12。
+    // 即値は bits{19:16}+{12:5}、## 拡張可能）で、どちらも
+    // bit13 が .new。実符号は参照アセンブラの V73
+    // プロファイルと照合済み（参照アセンブラは `Rd={#0,Rs}` の
+    // 条件付き転送を add(Rs,#0)/#s12 に落とす）。
+    // Ref: SPEC-HEXAGON-PRM (V79) conditional instructions.
+    for (name, format, pattern, syntax, timing) in [
+        ("cand_rr", "FCPQ", "11111001000.....................", "and {d},{s},{t}", "alu"),
+        ("cor_rr", "FCPQ", "11111001001.....................", "or {d},{s},{t}", "alu"),
+        ("cxor_rr", "FCPQ", "11111001011.....................", "xor {d},{s},{t}", "alu"),
+        ("cadd_rr", "FCPQ", "11111011000.....................", "add {d},{s},{t}", "alu"),
+        ("csub_rr", "FCPQ", "11111011001.....................", "sub {t},{s}", "alu"),
+        ("ccomb_rr", "FCPQ", "11111101000.....................", "combine {dd},{s},{t}", "alu"),
+        // if ([!]Pu[.new]) Rd = add(Rs,#s8)。
+        ("cadd_ri", "FCAI", "01110100........................", "add {d},{s},#{imm}", "alu"),
+        // if ([!]Pu[.new]) Rd = #s12（## 拡張可能）。
+        ("cmov_i", "FCI12", "01111110........................", "{d}=#{imm}", "alu"),
     ] {
         m.insns.push(ins(name, format, pattern, base(), syntax, timing));
     }

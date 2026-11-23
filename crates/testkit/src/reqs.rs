@@ -217,6 +217,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/bin-distro-or1k")],
     },
     TestBinary {
+        binary: "heavy_program_hexagon",
+        needs: &[Req::Data(".testdata/bin-distro-hexagon")],
+    },
+    TestBinary {
         binary: "heavy_abi_loongarch",
         needs: &[Req::Data(".testdata/uapi-loongarch")],
     },

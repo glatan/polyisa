@@ -527,12 +527,13 @@ fn slot_assignment() {
     let (pkt, _) = packet::split(&[with_pp(ADD_RI, 1), with_pp(LDW, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
     assert_eq!((s[0].slot, s[1].slot), (3, 0));
-    // { LD ; ALU32 } は slot の単調減少が組めず拒否。
+    // { LD ; ALU32 } は slot の単調減少が組めないが、HX11 で
+    // 導入した順序なし全探索フォールバックで受理する（実機が
+    // 出さない並びでも語順に実行して問題ない。musl/busybox の
+    // `{alu; alu; alu; jump}` 系を動かすための近似）。
     let (pkt, _) = packet::split(&[with_pp(LDW, 1), with_pp(ADD_RI, 3)]).unwrap();
-    assert_eq!(
-        packet::expand(&pkt).unwrap_err(),
-        ComposeError::NoSlotAssign
-    );
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (0, 1));
     // { ALU32 ; duplex(S1 ストア, A) } → subinsn は slot1/slot0 固定。
     let dup = packet::pack_duplex(0x0245, 0x1322, Group::S1, Group::A).unwrap();
     let (pkt, _) = packet::split(&[with_pp(ADD_RI, 1), dup]).unwrap();
@@ -630,11 +631,11 @@ fn dual_store_and_mem_noshuf() {
     let (pkt, _) = packet::split(&[with_pp(ADD_RI, 1), with_pp(STW, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
     assert_eq!((s[0].slot, s[1].slot), (3, 0));
+    // ST 先頭も全探索フォールバックで受理（slot_assignment の
+    // { LD ; ALU32 } と同じ近似）。
     let (pkt, _) = packet::split(&[with_pp(STW, 1), with_pp(ADD_RI, 3)]).unwrap();
-    assert_eq!(
-        packet::expand(&pkt).unwrap_err(),
-        ComposeError::NoSlotAssign
-    );
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (0, 1));
 }
 
 #[test]
@@ -690,14 +691,15 @@ fn duplex_order_key() {
         let (pkt, _) = packet::split(&[dup]).unwrap();
         assert!(packet::expand(&pkt).is_ok());
     }
-    // L2/L2 の memh(0x0440) と memb(0x1012) はオペコード桁が残る
-    // ので順序が強制される（小さい memh が slot1）。
+    // L/S 系の同組対は数値順規則の適用外（HX11。llvm-mc は
+    // L2/S2 の同組対を書いた順のまま符号化し、どちらの順も実在
+    // する。正規化は A/A に限られる）。
     let dup = packet::pack_duplex(0x1012, 0x0440, Group::L2, Group::L2).unwrap();
     let (pkt, _) = packet::split(&[dup]).unwrap();
     assert!(packet::expand(&pkt).is_ok());
     let dup = packet::pack_duplex(0x0440, 0x1012, Group::L2, Group::L2).unwrap();
     let (pkt, _) = packet::split(&[dup]).unwrap();
-    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::DuplexOrder);
+    assert!(packet::expand(&pkt).is_ok());
     // A/A の条件クリアは dprd[6:4] が比較に残る（clr p0 < clr !p0）。
     let dup = packet::pack_duplex(0x1a72, 0x1a61, Group::A, Group::A).unwrap();
     let (pkt, _) = packet::split(&[dup]).unwrap();

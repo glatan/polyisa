@@ -894,6 +894,26 @@ fn uh(v: u32, i: u32) -> i64 {
     i64::from((v >> (16 * i)) & 0xffff)
 }
 
+/// HX11: mpy(Rs.{h,l},Rt.{h,l}) 系の共用部。`sh`/`th` は
+/// 被乗数・乗数の半語選択（0=.l / 1=.h）。積は符号付きで、
+/// 対レジスタ形は符号拡張して 64 ビット、Rd 形は下位 32
+/// ビットを書く。
+fn mpyh(b: &mut InterpBackend, insn: Insn, ops: &[u64], sh_i: u32, th_i: u32) {
+    let s = sh(r_get(b, ops[1] as u32), sh_i);
+    let t = sh(r_get(b, ops[2] as u32), th_i);
+    let prod = s.wrapping_mul(t) as u64;
+    match insn {
+        Insn::Mpyll | Insn::Mpylh | Insn::Mpyhl | Insn::Mpyhh => pkt_w64(b, ops[0] as u32, prod),
+        Insn::MpyllA | Insn::MpylhA | Insn::MpyhlA | Insn::MpyhhA => {
+            pkt_w64(b, ops[0] as u32, r64(b, ops[0] as u32).wrapping_add(prod))
+        }
+        Insn::MpyllNa | Insn::MpylhNa | Insn::MpyhlNa | Insn::MpyhhNa => {
+            pkt_w64(b, ops[0] as u32, r64(b, ops[0] as u32).wrapping_sub(prod))
+        }
+        _ => pkt_w(b, ops[0] as u32, prod as u32),
+    }
+}
+
 /// 64 ビット値の i 番目の符号付き半語。
 fn sh64(v: u64, i: u32) -> i64 {
     i64::from(((v >> (16 * i)) & 0xffff) as u16 as i16)
@@ -1364,15 +1384,29 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             let ea = offu(&cx, ops[2], 0);
             do_st(b, ea, ops[1], st_val(b, ops[0] as u32, ops[1]))?;
         }
+        // ---- HX11: LL/SC（memw_locked）----
+        Insn::LdLocked => {
+            let ea = u64::from(r_get(b, ops[1] as u32));
+            let v = b.load_reserved::<W32>(ea, DRD)?;
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::StLocked => {
+            let ea = u64::from(r_get(b, ops[0] as u32));
+            let ok = b.store_conditional::<W32>(ea, r_get(b, ops[1] as u32), DWR)?;
+            pkt_pw(b, ops[2] as u32, u8::from(ok));
+        }
         // ---- HX6: ストア即値形・memop ----
         // stiu6 のオフセットは符号なし（#u6:scale）。
         Insn::StI => {
-            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[2], sc2(ops[1])));
+            // ## の extender は値側（si8）にだけ付く。オフセット
+            // u6 は非拡張（HX11: musl ldso の `memw(r+#0)=##0x1505`
+            // が r+0x1500 に書いていた実測バグ）。
+            let ea = r_get(b, ops[0] as u32).wrapping_add((ops[2] as u32) << sc2(ops[1]));
             let v = ximm(cx.ext, ops[3], 0, 8);
             do_st2(b, ea, ops[1], u64::from(v))?;
         }
         Insn::StIp => {
-            let ea = r_get(b, ops[0] as u32).wrapping_add(offu(&cx, ops[2], sc2(ops[1])));
+            let ea = r_get(b, ops[0] as u32).wrapping_add((ops[2] as u32) << sc2(ops[1]));
             let v = ximm(cx.ext, ops[3], 0, 6);
             do_st2(b, ea, ops[1], u64::from(v))?;
         }
@@ -1511,6 +1545,9 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
                 h | crate::threads::hwt::PAUSE | ((ops[0] as u32) << crate::threads::hwt::COUNT),
             );
         }
+        // barrier/syncht はメモリ順序フェンス。逐次実行の単一
+        // エンジンでは建築状態を変えない。
+        Insn::Barrier | Insn::Syncht => {}
         // ---- HX7: 述語条件分岐 ----
         // `if ([!]Pu[.new]) jump/call`（ops = target, p, 否定）。
         // :t/:nt の予測桁は建築状態を変えない。
@@ -1568,7 +1605,8 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         // 複合 compare-jump。比較結果の述語を書き、条件成立で
         // 分岐する（ops = s, 即値, pd, 否定, target）。
         Insn::CjEqi | Insn::CjGti | Insn::CjGtui => {
-            let rs = r_get(b, ops[0] as u32);
+            // j4/j4t は部分集合符号（r0-7/r16-23）。
+            let rs = dxr_get(b, ops[0]);
             let u = ops[1] as u32;
             let v = match insn {
                 Insn::CjEqi => rs == u,
@@ -1583,7 +1621,7 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         }
         // 固定即値形（ops = s, pd, 否定, target）。
         Insn::CjEqi1 | Insn::CjGti1 | Insn::CjTst => {
-            let rs = r_get(b, ops[0] as u32);
+            let rs = dxr_get(b, ops[0]);
             let v = match insn {
                 Insn::CjEqi1 => rs == u32::MAX,
                 Insn::CjGti1 => (rs as i32) > -1,
@@ -1597,8 +1635,8 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         }
         // レジスタ形（ops = s, t, pd, 否定, target）。
         Insn::CjEqr | Insn::CjGtr | Insn::CjGtur => {
-            let rs = r_get(b, ops[0] as u32);
-            let rt = r_get(b, ops[1] as u32);
+            let rs = dxr_get(b, ops[0]);
+            let rt = dxr_get(b, ops[1]);
             let v = match insn {
                 Insn::CjEqr => rs == rt,
                 Insn::CjGtr => (rs as i32) > (rt as i32),
@@ -1649,12 +1687,12 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         }
         // 転送ジャンプ（`Rd=#U6; jump` / `Rd=Rs; jump`）。
         Insn::TjI => {
-            pkt_w(b, ops[0] as u32, ops[1] as u32);
+            pkt_w(b, dxr(ops[0]), ops[1] as u32);
             let off = jump_off(ops[2], 2, 11);
             jump(b, cx.pc.wrapping_add(off));
         }
         Insn::TjR => {
-            pkt_w(b, ops[1] as u32, r_get(b, ops[0] as u32));
+            pkt_w(b, dxr(ops[1]), dxr_get(b, ops[0]));
             let off = jump_off(ops[2], 2, 11);
             jump(b, cx.pc.wrapping_add(off));
         }
@@ -1878,6 +1916,142 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             let hi = (t >> 16) | (s & 0xffff_0000);
             pkt_w64(b, ops[0] as u32, (u64::from(hi) << 32) | u64::from(lo));
         }
+        // ---- HX11: `if ([!]Pu[.new])` 条件付き ALU ----
+        // 条件は exec 冒頭の DotIf が裁く（偽ならここに来ない）。
+        Insn::CandRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32),
+        ),
+        Insn::CorRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) | r_get(b, ops[2] as u32),
+        ),
+        Insn::CxorRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) ^ r_get(b, ops[2] as u32),
+        ),
+        Insn::CaddRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).wrapping_add(r_get(b, ops[2] as u32)),
+        ),
+        Insn::CsubRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32).wrapping_sub(r_get(b, ops[1] as u32)),
+        ),
+        Insn::CcombRr => {
+            let v = u64::from(r_get(b, ops[2] as u32)) | (u64::from(r_get(b, ops[1] as u32)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::CaddRi => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).wrapping_add(ximm(cx.ext, ops[2], 0, 8)),
+        ),
+        Insn::CmovI => pkt_w(b, ops[0] as u32, ximm(cx.ext, ops[1], 0, 12)),
+        // ---- HX11: mpy 系 ----
+        // 半語積（符号付き s16×s16 → s64 で対レジスタへ）。
+        Insn::Mpyi => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).wrapping_mul(ximm(cx.ext, ops[2], 0, 8)),
+        ),
+        Insn::Mpyin => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32)
+                .wrapping_mul(ximm(cx.ext, ops[2], 0, 8))
+                .wrapping_neg(),
+        ),
+        Insn::Mpyia => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_mul(ximm(cx.ext, ops[2], 0, 8))),
+        ),
+        Insn::Mpyina => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_sub(r_get(b, ops[1] as u32).wrapping_mul(ximm(cx.ext, ops[2], 0, 8))),
+        ),
+        // Rd = add(#s6,mpyi(Rs,Rt))（複合積和）。
+        Insn::AddMpyi => pkt_w(
+            b,
+            ops[0] as u32,
+            ximm(cx.ext, ops[3], 0, 6)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_mul(r_get(b, ops[2] as u32))),
+        ),
+        Insn::Mpy => pkt_w64(
+            b,
+            ops[0] as u32,
+            (r_get(b, ops[1] as u32) as i32 as i64)
+                .wrapping_mul(r_get(b, ops[2] as u32) as i32 as i64) as u64,
+        ),
+        Insn::Mpyu => pkt_w64(
+            b,
+            ops[0] as u32,
+            u64::from(r_get(b, ops[1] as u32)) * u64::from(r_get(b, ops[2] as u32)),
+        ),
+        Insn::MpyA => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[0] as u32).wrapping_add(
+                (r_get(b, ops[1] as u32) as i32 as i64)
+                    .wrapping_mul(r_get(b, ops[2] as u32) as i32 as i64) as u64,
+            ),
+        ),
+        Insn::MpyNa => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[0] as u32).wrapping_sub(
+                (r_get(b, ops[1] as u32) as i32 as i64)
+                    .wrapping_mul(r_get(b, ops[2] as u32) as i32 as i64) as u64,
+            ),
+        ),
+        Insn::MpyuA => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[0] as u32).wrapping_add(
+                u64::from(r_get(b, ops[1] as u32)) * u64::from(r_get(b, ops[2] as u32)),
+            ),
+        ),
+        Insn::Mpy32 | Insn::MpyiRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).wrapping_mul(r_get(b, ops[2] as u32)),
+        ),
+        // mpyu Rd = 積の上位 32 ビット（musl の除算定数展開
+        // `r1 = mpyu(r0,##0xCCCCCCCD); lsr r1,#3` が証拠。
+        // mpyi/mpy の Rd 形は下位 32 ビット）。Ref:
+        // SPEC-HEXAGON-PRM — ALU32/MULT mpyu。
+        Insn::Mpyu32 => pkt_w(
+            b,
+            ops[0] as u32,
+            ((u64::from(r_get(b, ops[1] as u32)) * u64::from(r_get(b, ops[2] as u32))) >> 32)
+                as u32,
+        ),
+        // Rx ±= mpyi(Rs,Rt)（積の下位 32 ビットの累積/減算）。
+        Insn::MpyiaRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_mul(r_get(b, ops[2] as u32))),
+        ),
+        Insn::MpyinaRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_sub(r_get(b, ops[1] as u32).wrapping_mul(r_get(b, ops[2] as u32))),
+        ),
+        Insn::Mpyll | Insn::MpyllA | Insn::MpyllNa | Insn::Mpy32ll => mpyh(b, insn, &ops, 0, 0),
+        Insn::Mpylh | Insn::MpylhA | Insn::MpylhNa | Insn::Mpy32lh => mpyh(b, insn, &ops, 0, 1),
+        Insn::Mpyhl | Insn::MpyhlA | Insn::MpyhlNa | Insn::Mpy32hl => mpyh(b, insn, &ops, 1, 0),
+        Insn::Mpyhh | Insn::MpyhhA | Insn::MpyhhNa | Insn::Mpy32hh => mpyh(b, insn, &ops, 1, 1),
         Insn::MuxRr => {
             let v = if pred(b, ops[1] as u32) {
                 r_get(b, ops[2] as u32)
@@ -2412,6 +2586,40 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             ops[0] as u32,
             r64(b, ops[1] as u32).rotate_left(ops[2] as u32),
         ),
+        // ベクトル即値シフト。w 形は各 32 ビット要素、
+        // h 形は各 16 ビット要素を imm だけ独立にシフト。
+        Insn::VasrwI | Insn::VlsrwI | Insn::VaslwI => {
+            let ss = r64(b, ops[1] as u32);
+            let sh = ops[2] as u32 & 31;
+            let lo = (ss & 0xffff_ffff) as u32;
+            let hi = (ss >> 32) as u32;
+            let f: fn(u32, u32) -> u32 = match insn {
+                Insn::VasrwI => |v, s| ((v as i32) >> s.min(31)) as u32,
+                Insn::VlsrwI => |v, s| v >> s,
+                Insn::VaslwI => |v, s| v.wrapping_shl(s),
+                _ => unreachable!(),
+            };
+            pkt_w64(
+                b,
+                ops[0] as u32,
+                u64::from(f(hi, sh)) << 32 | u64::from(f(lo, sh)),
+            );
+        }
+        Insn::VasrhI | Insn::VlsrhI | Insn::VaslhI => {
+            let ss = r64(b, ops[1] as u32);
+            let sh = ops[2] as u32 & 15;
+            let f: fn(u16, u32) -> u16 = match insn {
+                Insn::VasrhI => |v, s| ((v as i16) >> s.min(15)) as u16,
+                Insn::VlsrhI => |v, s| v >> s,
+                Insn::VaslhI => |v, s| v.wrapping_shl(s),
+                _ => unreachable!(),
+            };
+            let mut out = 0u64;
+            for i in 0..4 {
+                out |= u64::from(f((ss >> (i * 16)) as u16, sh)) << (i * 16);
+            }
+            pkt_w64(b, ops[0] as u32, out);
+        }
         Insn::Asr64IRnd => {
             let v = f_rnd(r64(b, ops[1] as u32) as i64, ops[2] as u32);
             pkt_w64(b, ops[0] as u32, v as u64);
@@ -2473,6 +2681,43 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             ops[0] as u32,
             f_lsl64(r64(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
         ),
+        // ---- ベクトルシフト（ワード/ハーフ要素、レジスタシフト量）----
+        // vlslw/vlsrw/vasrw: 各 32 ビット要素を Rt[4:0] だけ独立に
+        // シフト。vlslh/vlsrh/vasrh: 各 16 ビット要素を Rt[3:0] だけ。
+        // vasl* は算術左シフト（飽和あり、HX11 実機値照合は未検証で
+        // 飽和は行わず単純シフトとする）。
+        Insn::Vasrw | Insn::Vlsrw | Insn::Vaslw | Insn::Vlslw => {
+            let ss = r64(b, ops[1] as u32);
+            let sh = r_get(b, ops[2] as u32) & 31;
+            let lo = (ss & 0xffff_ffff) as u32;
+            let hi = (ss >> 32) as u32;
+            let f: fn(u32, u32) -> u32 = match insn {
+                Insn::Vasrw => |v, s| ((v as i32) >> s.min(31)) as u32,
+                Insn::Vlsrw => |v, s| v >> s,
+                Insn::Vaslw | Insn::Vlslw => |v, s| v.wrapping_shl(s),
+                _ => unreachable!(),
+            };
+            pkt_w64(
+                b,
+                ops[0] as u32,
+                u64::from(f(hi, sh)) << 32 | u64::from(f(lo, sh)),
+            );
+        }
+        Insn::Vasrh | Insn::Vlsrh | Insn::Vaslh | Insn::Vlslh => {
+            let ss = r64(b, ops[1] as u32);
+            let sh = r_get(b, ops[2] as u32) & 15;
+            let f: fn(u16, u32) -> u16 = match insn {
+                Insn::Vasrh => |v, s| ((v as i16) >> s.min(15)) as u16,
+                Insn::Vlsrh => |v, s| v >> s,
+                Insn::Vaslh | Insn::Vlslh => |v, s| v.wrapping_shl(s),
+                _ => unreachable!(),
+            };
+            let mut out = 0u64;
+            for i in 0..4 {
+                out |= u64::from(f((ss >> (i * 16)) as u16, sh)) << (i * 16);
+            }
+            pkt_w64(b, ops[0] as u32, out);
+        }
         Insn::LslIr => {
             // s は 32 ビット値として zxt してから論理シフトする。
             let s = u64::from(sext(ops[1], 6));
@@ -2600,14 +2845,19 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         | Insn::OrAsr
         | Insn::OrLsr
         | Insn::OrAsl
-        | Insn::OrLsl => {
+        | Insn::OrLsl
+        | Insn::AndAsr
+        | Insn::AndLsr
+        | Insn::AndAsl
+        | Insn::AndRol => {
             let x = ops[0] as u32;
             let s = r_get(b, ops[1] as u32);
             let sh = shamt(r_get(b, ops[2] as u32));
             let v = match insn {
-                Insn::AddAsr | Insn::SubAsr | Insn::OrAsr => f_asr32(s, sh),
-                Insn::AddLsr | Insn::SubLsr | Insn::OrLsr => f_lsr32(s, sh),
-                Insn::AddAsl | Insn::SubAsl | Insn::OrAsl => f_asl32(s, sh),
+                Insn::AddAsr | Insn::SubAsr | Insn::OrAsr | Insn::AndAsr => f_asr32(s, sh),
+                Insn::AddLsr | Insn::SubLsr | Insn::OrLsr | Insn::AndLsr => f_lsr32(s, sh),
+                Insn::AddAsl | Insn::SubAsl | Insn::OrAsl | Insn::AndAsl => f_asl32(s, sh),
+                Insn::AndRol => s.rotate_left((sh & 31) as u32),
                 _ => f_lsl32(s, sh),
             };
             let old = r_get(b, x);
@@ -2621,6 +2871,11 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
                 Insn::SubAsr | Insn::SubLsr | Insn::SubAsl | Insn::SubLsl
             ) {
                 old.wrapping_sub(v)
+            } else if matches!(
+                insn,
+                Insn::AndAsr | Insn::AndLsr | Insn::AndAsl | Insn::AndRol
+            ) {
+                old & v
             } else {
                 old | v
             };

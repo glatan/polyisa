@@ -3,8 +3,8 @@
 //! ゲストのパス文字列をホストのファイルシステム位置へ写す補助。
 //!
 //! `join_guest_path` はゲスト cwd 起点の連結、`resolve_guest_path` は
-//! その上にゲストルート閉じ込め（chroot 相当）を重ねる。`..` でルートを
-//! 抜ける解釈は拒否して `None` を返す。シンボリックリンク自体の解釈は
+//! その上にゲストルート閉じ込め（chroot 相当）を重ねる。`..` はルートで
+//! クランプする（出られない）。シンボリックリンク自体の解釈は
 //! 各パーソナリティが持つ（絶対ターゲットはここへ回す）。
 
 /// ゲスト cwd 相対で連結する。`path` が絶対か `cwd` が空なら `path` をそのまま返す。
@@ -19,7 +19,10 @@ pub fn join_guest_path(cwd: &str, path: &str) -> String {
 }
 
 /// ゲストパスをホストパスへ写す。`root` が空なら `join_guest_path` と同じ
-/// （ルート閉じ込めなし）。`..` で `root` を上に抜ける解釈は `None`。
+/// （ルート閉じ込めなし）。`..` は root でクランプする（chroot と同じく
+/// ルートから出られない。HX11 改訂 — 旧版は `None` を返していたが、
+/// 実 Linux の `/..` は `/` なので `ls -la /` 等の `..` が
+/// EACCES になっていた）。
 /// Ref: SRC-LINUX (7.3) の `fs/namei.c` 相当のパス正規化。
 pub fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
     if root.is_empty() {
@@ -30,8 +33,11 @@ pub fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
     for comp in joined.split('/') {
         match comp {
             "" | "." => {}
+            // `..` はルートでクランプ（chroot と同じく root から
+            // 出ない=pop 対象が無ければ無視）。root 直下の
+            // `a/..` は pop で 1 段戻るだけ。
             ".." => {
-                parts.pop()?;
+                parts.pop();
             }
             _ => parts.push(comp),
         }
@@ -50,8 +56,8 @@ pub fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
 /// 逐次ゲスト側のパス文字列を辿り、各段で `resolve_guest_path` へ写す。
 /// リンクのターゲットが `/` で始まるならゲストの絶対パスとして root へ
 /// 結び直す（chroot と同じ規則）。相対ターゲットはリンクの置かれたゲスト側
-/// ディレクトリを基点に連結する。`..` が root を上に抜ける解釈は各段の
-/// `resolve_guest_path` が拒否する。ループは 40 段で打ち切る。
+/// ディレクトリを基点に連結する。`..` は各段の `resolve_guest_path` と
+/// 同じくルートでクランプ。ループは 40 段で打ち切る。
 pub fn resolve_guest_path_links(root: &str, cwd: &str, path: &str) -> Option<String> {
     let mut guest = join_guest_path(cwd, path);
     if !guest.starts_with('/') {
@@ -111,9 +117,19 @@ mod tests {
             resolve_guest_path("/jail/", "/a", "b/../c"),
             Some("/jail/a/c".to_string())
         );
-        assert_eq!(resolve_guest_path("/jail", "/", ".."), None,);
-        assert_eq!(resolve_guest_path("/jail", "/", "/../x"), None,);
-        assert_eq!(resolve_guest_path("/jail", "/a", "../../x"), None,);
+        // `..` はルートでクランプ（chroot と同じ。`/..` = `/`）。
+        assert_eq!(
+            resolve_guest_path("/jail", "/", ".."),
+            Some("/jail".to_string()),
+        );
+        assert_eq!(
+            resolve_guest_path("/jail", "/", "/../x"),
+            Some("/jail/x".to_string()),
+        );
+        assert_eq!(
+            resolve_guest_path("/jail", "/a", "../../x"),
+            Some("/jail/x".to_string()),
+        );
         assert_eq!(
             resolve_guest_path("/jail", "/", "."),
             Some("/jail".to_string()),

@@ -100,6 +100,11 @@ pub mod x86_32;
 // Ref: SRC-LINUX (7.3).
 pub mod x86_64;
 
+/// Hexagon（QDSP6・32ビット・LE）のシステムコール番号と syscall 処理
+/// （`sys` の実装だけ `guest-hexagon` 機能の内側）。
+// Ref: SRC-LINUX-HEXAGON-UAPI.
+pub mod hexagon;
+
 /// x32（Linux・ILP32、EM_X86_64 + ELFCLASS32）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_x32;

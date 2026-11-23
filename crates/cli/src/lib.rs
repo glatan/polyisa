@@ -418,6 +418,37 @@ fn run_openrisc_elf(
     Err("この polyisa は openrisc ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-hexagon")]
+fn run_hexagon_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "hexagon",
+                polyisa_guest_hexagon::MODEL_DEFS,
+                polyisa_guest_hexagon::FEATURE_DEFS,
+                polyisa_guest_hexagon::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_hexagon::run_elf_hexagon_root(path, argv, sel.as_ref(), root)
+}
+
+#[cfg(not(feature = "guest-hexagon"))]
+fn run_hexagon_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+) -> Result<u64, String> {
+    Err("この polyisa は hexagon ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-arm")]
 fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -630,9 +661,10 @@ pub fn run_path_opts(
         CLASS_32 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-            if root.is_some() && ehdr.machine != 92 {
+            if root.is_some() && !matches!(ehdr.machine, 92 | 164) {
                 return Err(
-                    "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc のみ対応".to_string(),
+                    "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc・hexagon のみ対応"
+                        .to_string(),
                 );
             }
             // EM_386=3。Ref: SRC-LINUX (7.3).
@@ -671,6 +703,11 @@ pub fn run_path_opts(
                 // EM_OPENRISC=92。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("openrisc")?;
                 run_openrisc_elf(path, argv, spec.as_ref(), root)
+            } else if ehdr.machine == 164 {
+                // EM_HEXAGON=164（EM_QDSP6）。
+                // Ref: SRC-LINUX-HEXAGON-UAPI — kernel-asm/elf.h.
+                check("hexagon")?;
+                run_hexagon_elf(path, argv, spec.as_ref(), root)
             } else if ehdr.machine == 258 {
                 // EM_LOONGARCH=258・ELFCLASS32 は LA32。
                 // Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
