@@ -187,6 +187,85 @@ fn nv_pos_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, nv_pos))
 }
 
+// ---- HX9: HVX の状態アクセス ----
+// ベクトル幅は V73 系の 128B 固定（u32 32 ワード）。
+const VL: usize = 32;
+
+fn v_lane(i: u32, j: usize) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, v) + i as usize * (VL * 4) + j * 4)
+}
+
+fn pkt_v_lane(i: u32, j: usize) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(
+        core::mem::offset_of!(CpuState, pkt_v) + i as usize * (VL * 4) + j * 4,
+    )
+}
+
+fn pkt_vok_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, pkt_v_ok))
+}
+
+fn pkt_qok_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, pkt_q_ok))
+}
+
+fn vcsr_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, vcsr))
+}
+
+/// ベクトルレジスタ v_i の確定値（パケット開始時の値）。
+fn v_get(b: &InterpBackend, i: u32) -> [u32; VL] {
+    let mut a = [0u32; VL];
+    for (j, w) in a.iter_mut().enumerate() {
+        *w = get32(b, v_lane(i, j));
+    }
+    a
+}
+
+/// ベクトル述語 q_i（要素ごとの真偽ビット、128 ビット）。
+fn q_get(b: &InterpBackend, i: u32) -> u128 {
+    let off = core::mem::offset_of!(CpuState, q) + i as usize * 16;
+    u128::from_le_bytes(b.state[off..off + 16].try_into().expect("q"))
+}
+
+/// ベクトルレジスタへの書き込み（pkt_r と同様に未確定域へ
+/// 溜めて commit で確定する）。
+fn pkt_vw(b: &mut InterpBackend, i: u32, a: &[u32; VL]) {
+    for (j, w) in a.iter().enumerate() {
+        set32(b, pkt_v_lane(i, j), *w);
+    }
+    set32(b, pkt_vok_ref(), get32(b, pkt_vok_ref()) | (1 << i));
+}
+
+/// ベクトル述語への書き込み。
+fn pkt_qw(b: &mut InterpBackend, i: u32, a: u128) {
+    let off = core::mem::offset_of!(CpuState, pkt_q) + i as usize * 16;
+    b.state[off..off + 16].copy_from_slice(&a.to_le_bytes());
+    set32(b, pkt_qok_ref(), get32(b, pkt_qok_ref()) | (1 << i));
+}
+
+/// `el` バイト要素の i 番目を符号拡張して取り出す。
+fn vel(a: &[u32; VL], el: usize, i: usize) -> i64 {
+    let b8 = el * 8;
+    let x = (u64::from(a[i * el / 4]) >> ((i * el) % 4 * 8)) & ((1 << b8) - 1);
+    ((x << (64 - b8)) as i64) >> (64 - b8)
+}
+
+/// `el` バイト要素の i 番目をゼロ拡張で取り出す。
+fn velu(a: &[u32; VL], el: usize, i: usize) -> i64 {
+    let b8 = el * 8;
+    ((u64::from(a[i * el / 4]) >> ((i * el) % 4 * 8)) & ((1 << b8) - 1)) as i64
+}
+
+/// ベクトル要素 i へ `el` バイトで書き戻す。
+fn vset(a: &mut [u32; VL], el: usize, i: usize, x: u64) {
+    let b8 = el * 8;
+    let sh = ((i * el) % 4) * 8;
+    let m = if b8 >= 32 { u32::MAX } else { (1u32 << b8) - 1 };
+    let w = i * el / 4;
+    a[w] = (a[w] & !(m << sh)) | (((x as u32) & m) << sh);
+}
+
 /// スロット命令の r_i への書き込み。パケット終端の commit まで
 /// 確定値（r）には反映されない。同じパケット内位置の最初の
 /// 書き込みは `.new` ストア値の生産者として pkt_prod に記録
@@ -258,6 +337,8 @@ pub fn endloop_ref() -> StateRef<W32> {
 pub fn pkt_clear(b: &mut InterpBackend) {
     set32(b, pkt_r_ok_ref(), 0);
     set32(b, pkt_p_ok_ref(), 0);
+    set32(b, pkt_vok_ref(), 0);
+    set32(b, pkt_qok_ref(), 0);
     for i in 0..4 {
         set32(b, pkt_prod_ref(i), 0);
     }
@@ -292,6 +373,31 @@ pub fn commit(b: &mut InterpBackend) -> Result<Option<u32>, InterpExit> {
         set32(b, p_ref(), p);
     }
     set32(b, pkt_p_ok_ref(), 0);
+    // HX9: v/q の未確定域も確定値へコピーする。
+    let vok = get32(b, pkt_vok_ref());
+    if vok != 0 {
+        let v0 = core::mem::offset_of!(CpuState, v);
+        let p0 = core::mem::offset_of!(CpuState, pkt_v);
+        for i in 0..32usize {
+            if vok & (1 << i) != 0 {
+                b.state
+                    .copy_within(p0 + i * VL * 4..p0 + i * VL * 4 + VL * 4, v0 + i * VL * 4);
+            }
+        }
+    }
+    set32(b, pkt_vok_ref(), 0);
+    let qok = get32(b, pkt_qok_ref());
+    if qok != 0 {
+        let q0 = core::mem::offset_of!(CpuState, q);
+        let p0 = core::mem::offset_of!(CpuState, pkt_q);
+        for i in 0..4usize {
+            if qok & (1 << i) != 0 {
+                b.state
+                    .copy_within(p0 + i * 16..p0 + i * 16 + 16, q0 + i * 16);
+            }
+        }
+    }
+    set32(b, pkt_qok_ref(), 0);
     for i in 0..4 {
         set32(b, pkt_prod_ref(i), 0);
     }
@@ -433,6 +539,188 @@ fn circ_add(b: &InterpBackend, rx: u32, inc: u32, sel: u64) -> u32 {
 /// `EA = Rx.H + bit_reverse(Rx.L)`。
 fn brev16(v: u32) -> u32 {
     u32::from((v as u16).reverse_bits())
+}
+
+// ---- HX9: HVX の意味論ヘルパ ----
+
+/// vmem ロード。整列形（aligned=true）は ea がベクトル幅の
+/// 倍数でないと illegal。vmemu 非整列形は任意アドレス。
+fn v_ld(b: &mut InterpBackend, d: u32, ea: u32, aligned: bool) -> Result<(), InterpExit> {
+    if aligned && ea & (VL as u32 * 4 - 1) != 0 {
+        return Err(trap(TRAP_ILL));
+    }
+    let mut a = [0u32; VL];
+    if aligned {
+        for (j, w) in a.iter_mut().enumerate() {
+            *w = b.load::<W32>(u64::from(ea.wrapping_add(j as u32 * 4)), DRD)?;
+        }
+    } else {
+        // vmemu: バイト単位で集める（基底が非整列でもよい）。
+        for j in 0..VL * 4 {
+            let x = b.load::<W8>(u64::from(ea.wrapping_add(j as u32)), DRD)?;
+            vset(&mut a, 1, j, u64::from(x));
+        }
+    }
+    pkt_vw(b, d, &a);
+    Ok(())
+}
+
+/// vmem ストア。`mask` はバイトごとの書き込み可否（述語
+/// マスク付きストア。q のビット j がバイト j に対応する）。
+fn v_st(
+    b: &mut InterpBackend,
+    ea: u32,
+    s: u32,
+    aligned: bool,
+    mask: Option<u128>,
+) -> Result<(), InterpExit> {
+    if aligned && ea & (VL as u32 * 4 - 1) != 0 {
+        return Err(trap(TRAP_ILL));
+    }
+    let a = v_get(b, s);
+    match mask {
+        Some(m) => {
+            for j in 0..VL * 4 {
+                if m >> j & 1 != 0 {
+                    let x = (a[j / 4] >> (j % 4 * 8)) as u8;
+                    b.store::<W8>(u64::from(ea.wrapping_add(j as u32)), x, DWR)?;
+                }
+            }
+        }
+        None if aligned => {
+            for (j, w) in a.iter().enumerate() {
+                b.store::<W32>(u64::from(ea.wrapping_add(j as u32 * 4)), *w, DWR)?;
+            }
+        }
+        None => {
+            // vmemu: バイト単位で書く。
+            for j in 0..VL * 4 {
+                let x = (a[j / 4] >> (j % 4 * 8)) as u8;
+                b.store::<W8>(u64::from(ea.wrapping_add(j as u32)), x, DWR)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 二項のベクトル要素演算（`el` バイト要素、2 ソース）。
+fn vop3(
+    b: &mut InterpBackend,
+    d: u32,
+    u: u32,
+    v: u32,
+    el: usize,
+    signed: bool,
+    f: impl Fn(i64, i64) -> i64,
+) {
+    let a = v_get(b, u);
+    let c = v_get(b, v);
+    let mut r = [0u32; VL];
+    for i in 0..VL * 4 / el {
+        let (x, y) = if signed {
+            (vel(&a, el, i), vel(&c, el, i))
+        } else {
+            (velu(&a, el, i), velu(&c, el, i))
+        };
+        vset(&mut r, el, i, f(x, y) as u64);
+    }
+    pkt_vw(b, d, &r);
+}
+
+/// 最小・最大（is_min=true が vmin）。
+fn vminmax(b: &mut InterpBackend, d: u32, u: u32, v: u32, el: usize, signed: bool, is_min: bool) {
+    vop3(b, d, u, v, el, signed, |x, y| {
+        if is_min == (x < y) { x } else { y }
+    });
+}
+
+/// 飽和加減算。飽和した要素があれば vcsr の sticky ビット
+/// （bit0）を立てる。
+fn vsat(b: &mut InterpBackend, d: u32, u: u32, v: u32, el: usize, signed: bool, sub: bool) {
+    let b8 = (el * 8) as u32;
+    let (lo, hi) = if signed {
+        (-(1i64 << (b8 - 1)), (1i64 << (b8 - 1)) - 1)
+    } else {
+        (0i64, (1i64 << b8) - 1)
+    };
+    let a = v_get(b, u);
+    let c = v_get(b, v);
+    let mut r = [0u32; VL];
+    let mut sat = false;
+    for i in 0..VL * 4 / el {
+        let (x, y) = if signed {
+            (vel(&a, el, i), vel(&c, el, i))
+        } else {
+            (velu(&a, el, i), velu(&c, el, i))
+        };
+        let n = if sub { x - y } else { x + y };
+        let c2 = n.clamp(lo, hi);
+        sat |= c2 != n;
+        vset(&mut r, el, i, c2 as u64);
+    }
+    if sat {
+        // Gap: GAP-0071
+        // vcsr は未確定域を経由しない（棄却パケットでも残る）。
+        set32(b, vcsr_ref(), get32(b, vcsr_ref()) | 1);
+    }
+    pkt_vw(b, d, &r);
+}
+
+/// ペア出力の乗算（`ie` バイト要素 → 2*ie バイト要素。偶数側
+/// に下位要素群）。`acc` は += 累積形（dd の現値に加算）。
+fn vmpy(b: &mut InterpBackend, dd: u32, u: u32, v: u32, ie: usize, signed: bool, acc: bool) {
+    let a = v_get(b, u);
+    let c = v_get(b, v);
+    let oe = ie * 2;
+    let epv = VL * 4 / oe;
+    let mut lo = v_get(b, dd);
+    let mut hi = v_get(b, dd + 1);
+    for i in 0..VL * 4 / ie {
+        let p = if signed {
+            vel(&a, ie, i).wrapping_mul(vel(&c, ie, i))
+        } else {
+            (velu(&a, ie, i) as u64).wrapping_mul(velu(&c, ie, i) as u64) as i64
+        };
+        let j = i % epv;
+        let old = if acc {
+            if i < epv {
+                velu(&lo, oe, j)
+            } else {
+                velu(&hi, oe, j)
+            }
+        } else {
+            0
+        };
+        let n = old.wrapping_add(p);
+        if i < epv {
+            vset(&mut lo, oe, j, n as u64);
+        } else {
+            vset(&mut hi, oe, j, n as u64);
+        }
+    }
+    pkt_vw(b, dd, &lo);
+    pkt_vw(b, dd + 1, &hi);
+}
+
+/// vcmp 系（`el` バイト要素ごとの比較結果を q の対応要素幅
+/// ビット群に立てる。gt は符号付き）。
+fn vcmp(b: &mut InterpBackend, qd: u32, u: u32, v: u32, el: usize, gt: bool) {
+    let a = v_get(b, u);
+    let c = v_get(b, v);
+    let mut q: u128 = 0;
+    for i in 0..VL * 4 / el {
+        let hit = if gt {
+            vel(&a, el, i) > vel(&c, el, i)
+        } else {
+            velu(&a, el, i) == velu(&c, el, i)
+        };
+        if hit {
+            // 要素 i は `el` バイト分の q ビット（位置 i*el）を
+            // 占有する。.b なら 1 要素 1 ビット、.w なら 4。
+            q |= ((1u128 << el) - 1) << (i * el);
+        }
+    }
+    pkt_qw(b, qd, q);
 }
 
 /// ロード実行（sz3: 0=memb 1=memub 2=memh 3=memuh 4=memw
@@ -3539,6 +3827,518 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, lo, 0);
             pkt_w(b, lo + 1, dxr_get(b, ops[1]));
         }
+        // ---- HX9: HVX 代表部分集合 ----
+        // v/q の書き込みはパケット同時発行に合わせて未確定域へ
+        // 溜める（pkt_v/pkt_q。commit で一括反映）。読みは常に
+        // パケット開始時の確定値（vtmp/.new のベクトル前読みは
+        // 語彙外）。Ref: 80-N2040-61 (HVX).
+        Insn::HvldIo | Insn::HvldIont => {
+            // EA = Rs + s4*ベクトル幅（128B）。
+            let ea =
+                r_get(b, ops[1] as u32).wrapping_add(sext(ops[2], 4).wrapping_mul(VL as u32 * 4));
+            v_ld(b, ops[0] as u32, ea, true)?;
+        }
+        Insn::HvstIo | Insn::HvstIont => {
+            let ea =
+                r_get(b, ops[1] as u32).wrapping_add(sext(ops[2], 4).wrapping_mul(VL as u32 * 4));
+            v_st(b, ea, ops[0] as u32, true, None)?;
+        }
+        Insn::HvlduIo => {
+            v_ld(b, ops[0] as u32, r_get(b, ops[1] as u32), false)?;
+        }
+        Insn::HvstuIo => {
+            v_st(b, r_get(b, ops[1] as u32), ops[0] as u32, false, None)?;
+        }
+        Insn::HvstIopq | Insn::HvstIopqnt => {
+            // Qv の各ビットが対応バイトの書き込み可否。否定形
+            // （if(!Qv)）はビット反転したマスクで書く。
+            let mut m = q_get(b, ops[3] as u32);
+            if ops[4] != 0 {
+                m = !m;
+            }
+            let ea =
+                r_get(b, ops[1] as u32).wrapping_add(sext(ops[2], 4).wrapping_mul(VL as u32 * 4));
+            v_st(b, ea, ops[0] as u32, true, Some(m))?;
+        }
+        Insn::HvldPi => {
+            let ea = r_get(b, ops[1] as u32);
+            v_ld(b, ops[0] as u32, ea, true)?;
+            pkt_w(
+                b,
+                ops[1] as u32,
+                ea.wrapping_add(sext(ops[2], 3).wrapping_mul(VL as u32 * 4)),
+            );
+        }
+        Insn::HvstPi => {
+            let ea = r_get(b, ops[1] as u32);
+            v_st(b, ea, ops[0] as u32, true, None)?;
+            pkt_w(
+                b,
+                ops[1] as u32,
+                ea.wrapping_add(sext(ops[2], 3).wrapping_mul(VL as u32 * 4)),
+            );
+        }
+        Insn::HvldPr | Insn::HvldPrnt => {
+            let ea = r_get(b, ops[1] as u32);
+            v_ld(b, ops[0] as u32, ea, true)?;
+            pkt_w(b, ops[1] as u32, ea.wrapping_add(mu(b, ops[2])));
+        }
+        Insn::HvstPr => {
+            let ea = r_get(b, ops[1] as u32);
+            v_st(b, ea, ops[0] as u32, true, None)?;
+            pkt_w(b, ops[1] as u32, ea.wrapping_add(mu(b, ops[2])));
+        }
+        Insn::HvVaddB => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            |x, y| x + y,
+        ),
+        Insn::HvVaddH => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            |x, y| x + y,
+        ),
+        Insn::HvVaddW => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            false,
+            |x, y| x + y,
+        ),
+        Insn::HvVsubB => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            |x, y| x - y,
+        ),
+        Insn::HvVsubH => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            |x, y| x - y,
+        ),
+        Insn::HvVsubW => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            false,
+            |x, y| x - y,
+        ),
+        Insn::HvVand | Insn::HvVor | Insn::HvVxor => {
+            let a = v_get(b, ops[1] as u32);
+            let c = v_get(b, ops[2] as u32);
+            let mut r = [0u32; VL];
+            for i in 0..VL {
+                r[i] = match insn {
+                    Insn::HvVand => a[i] & c[i],
+                    Insn::HvVor => a[i] | c[i],
+                    _ => a[i] ^ c[i],
+                };
+            }
+            pkt_vw(b, ops[0] as u32, &r);
+        }
+        Insn::HvVavgB => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            |x, y| (x + y) >> 1,
+        ),
+        Insn::HvVavgUb => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            |x, y| (x + y) >> 1,
+        ),
+        Insn::HvVavgH => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            |x, y| (x + y) >> 1,
+        ),
+        Insn::HvVavgUh => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            |x, y| (x + y) >> 1,
+        ),
+        Insn::HvVavghr => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            |x, y| (x + y + 1) >> 1,
+        ),
+        Insn::HvVnavgH => vop3(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            |x, y| (x - y) >> 1,
+        ),
+        Insn::HvVminB => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            true,
+        ),
+        Insn::HvVminUb => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            true,
+        ),
+        Insn::HvVminH => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            true,
+        ),
+        Insn::HvVminUh => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            true,
+        ),
+        Insn::HvVminW => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            true,
+            true,
+        ),
+        Insn::HvVmaxB => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            false,
+        ),
+        Insn::HvVmaxUb => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            false,
+        ),
+        Insn::HvVmaxH => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            false,
+        ),
+        Insn::HvVmaxUh => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            false,
+        ),
+        Insn::HvVmaxW => vminmax(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            true,
+            false,
+        ),
+        Insn::HvVaddsB => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            false,
+        ),
+        Insn::HvVaddsUb => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            false,
+        ),
+        Insn::HvVaddsUh => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            false,
+        ),
+        Insn::HvVaddsH => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            false,
+        ),
+        Insn::HvVaddsW => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            true,
+            false,
+        ),
+        Insn::HvVaddsUw => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            false,
+            false,
+        ),
+        Insn::HvVsubsB => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            true,
+        ),
+        Insn::HvVsubsUb => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            true,
+        ),
+        Insn::HvVsubsUh => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            true,
+        ),
+        Insn::HvVsubsH => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            true,
+        ),
+        Insn::HvVsubsW => vsat(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            4,
+            true,
+            true,
+        ),
+        Insn::HvVmpyBb => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            false,
+        ),
+        Insn::HvVmpyUb => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            false,
+        ),
+        Insn::HvVmpyHh => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            false,
+        ),
+        Insn::HvVmpyUh => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            false,
+        ),
+        Insn::HvVmpyBbAcc => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            true,
+            true,
+        ),
+        Insn::HvVmpyUbAcc => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            1,
+            false,
+            true,
+        ),
+        Insn::HvVmpyHhAcc => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            true,
+            true,
+        ),
+        Insn::HvVmpyUhAcc => vmpy(
+            b,
+            ops[0] as u32,
+            ops[1] as u32,
+            ops[2] as u32,
+            2,
+            false,
+            true,
+        ),
+        Insn::HvVcombine => {
+            // Vdd = {Vu 側が奇数（上位）、Vv 側が偶数（下位）}。
+            pkt_vw(b, ops[0] as u32, &v_get(b, ops[2] as u32));
+            pkt_vw(b, ops[0] as u32 + 1, &v_get(b, ops[1] as u32));
+        }
+        Insn::HvVmov => pkt_vw(b, ops[0] as u32, &v_get(b, ops[1] as u32)),
+        Insn::HvVsplatB | Insn::HvVsplatH => {
+            let el = if insn == Insn::HvVsplatB { 1 } else { 2 };
+            let x = u64::from(r_get(b, ops[1] as u32)) & ((1 << (el * 8)) - 1);
+            let mut r = [0u32; VL];
+            for i in 0..VL * 4 / el {
+                vset(&mut r, el, i, x);
+            }
+            pkt_vw(b, ops[0] as u32, &r);
+        }
+        Insn::HvVinsertW => {
+            // Gap: GAP-0071
+            // 語彙では `Vd.w = vinsert(Rs)`。要素 0 に Rs、残りを
+            // 0 とする代表実装（正確な定義は語彙棚卸し参照）。
+            let mut r = [0u32; VL];
+            r[0] = r_get(b, ops[1] as u32);
+            pkt_vw(b, ops[0] as u32, &r);
+        }
+        Insn::HvVandq => {
+            // q の真偽ビットが立つバイト要素だけ Vs を残す。
+            let q = q_get(b, ops[1] as u32);
+            let a = v_get(b, ops[2] as u32);
+            let mut r = [0u32; VL];
+            for i in 0..VL {
+                for e in 0..4 {
+                    if q >> (i * 4 + e) & 1 != 0 {
+                        r[i] |= a[i] & (0xff << (e * 8));
+                    }
+                }
+            }
+            pkt_vw(b, ops[0] as u32, &r);
+        }
+        Insn::HvVcmpeqB => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 1, false),
+        Insn::HvVcmpeqH => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 2, false),
+        Insn::HvVcmpeqW => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 4, false),
+        Insn::HvVcmpgtB => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 1, true),
+        Insn::HvVcmpgtH => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 2, true),
+        Insn::HvVcmpgtW => vcmp(b, ops[0] as u32, ops[1] as u32, ops[2] as u32, 4, true),
+        Insn::HvQand => pkt_qw(
+            b,
+            ops[0] as u32,
+            q_get(b, ops[1] as u32) & q_get(b, ops[2] as u32),
+        ),
+        Insn::HvQor => pkt_qw(
+            b,
+            ops[0] as u32,
+            q_get(b, ops[1] as u32) | q_get(b, ops[2] as u32),
+        ),
+        Insn::HvQxor => pkt_qw(
+            b,
+            ops[0] as u32,
+            q_get(b, ops[1] as u32) ^ q_get(b, ops[2] as u32),
+        ),
+        Insn::HvQorn => pkt_qw(
+            b,
+            ops[0] as u32,
+            q_get(b, ops[1] as u32) | !q_get(b, ops[2] as u32),
+        ),
+        Insn::HvQandn => pkt_qw(
+            b,
+            ops[0] as u32,
+            q_get(b, ops[1] as u32) & !q_get(b, ops[2] as u32),
+        ),
+        Insn::HvQnot => pkt_qw(b, ops[0] as u32, !q_get(b, ops[1] as u32)),
     }
     Ok(true)
 }

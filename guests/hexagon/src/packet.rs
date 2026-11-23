@@ -318,7 +318,27 @@ fn pred_new32(w: u32) -> Option<u8> {
 pub fn word_class(word: u32) -> Option<Class> {
     Some(match iclass(word) {
         0 => return None, // constant extender
-        1 | 2 => Class::J,
+        // ICLASS 1 は J（[27:24]=0,1,6,7 の分岐系）と HVX の
+        // ベクトル演算系が同居する。HVX は slot 制約が緩い
+        // Alu32 側に寄せる（実機の HVX スロット配置は語彙
+        // 棚卸しの対象外）。
+        // Gap: GAP-0071
+        1 => match (word >> 24) & 0xf {
+            0 | 1 | 6 | 7 => Class::J,
+            _ => Class::Alu32,
+        },
+        2 => match (word >> 24) & 0xf {
+            // HX9: vmem 系は ICLASS 2 の [27:24]=8,9,a,b。
+            // [23:21]=0/2 はロード（:nt 含む）、他はストア。
+            8..=0xb => {
+                if matches!((word >> 21) & 7, 0 | 2) {
+                    Class::Ld
+                } else {
+                    Class::St
+                }
+            }
+            _ => Class::J,
+        },
         // ICLASS 5 は J（PC 相対）と JR（間接）が混在し、ICLASS 桁
         // だけでは切り分けられない。JR（slot 2 固定）は
         // bits[27:21] のオペコード値で判定する: 0000101=callr、

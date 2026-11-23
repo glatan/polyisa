@@ -120,6 +120,16 @@ pub fn build_model() -> polyisa_isadl::Model {
             prefix: Some(prefix.to_string()),
         });
     }
+    // HX9: HVX のレジスタ類。v0-v31（各 128B）と述語 q0-q3（各 128b、
+    // ベクトル要素ごとの真偽ビット）。ベクトル幅は V73 系の 128B 固定。
+    // Ref: SPEC-HEXAGON-PRM (V79), 80-N2040-61 (HVX).
+    for (name, prefix) in [("vreg", "v"), ("vpred", "q")] {
+        m.regclasses.push(RegClass {
+            name: name.to_string(),
+            dynamic: false,
+            prefix: Some(prefix.to_string()),
+        });
+    }
 
     // ---- 桁。
     // 全形式共通の桁（ICLASS・Parse）と、duplex・constant
@@ -226,6 +236,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("nt3", 18, 16),
         // u6t: 転送ジャンプ `Rd=#U6; jump` の U6（bits[13:8]）。
         ("u6t", 13, 8),
+        // ---- HX9: HVX ----
+        // vqt: q 論理・vand(Qv,Vs) の第 2 述語ソース（bits[23:22]）。
+        ("vqt", 23, 22),
+        // vqp: 述語付き vmem ストアのベクトル述語 Qv（bits[12:11]）。
+        ("vqp", 12, 11),
+        // vq1: 述語付き vmem ストアの否定桁（bit5）。
+        ("vq1", 5, 5),
+        // vs3: vmem post-inc 即値 s3（bits[10:8]、ベクトル幅単位）。
+        ("vs3", 10, 8),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -340,6 +359,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("lr7", vec![(12, 8), (4, 3)], 2),
         // lc10: loopN の反復回数 U10（bits{20:16}+{7:5}+{1:0}）。
         ("lc10", vec![(20, 16), (7, 5), (1, 0)], 0),
+        // ---- HX9: HVX ----
+        // vs4: vmem 基本形のオフセット s4（bits{13}+{10:8}、
+        // ベクトル幅単位。V73 系の 128B 幅に実行側が掛ける）。
+        ("vs4", vec![(13, 13), (10, 8)], 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -393,6 +416,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: name.to_string(),
         field: Some(field.to_string()),
         regclass: Some("creg".to_string()),
+        access,
+    };
+    let vreg = |name: &str, field: &str, access: Access| Operand {
+        name: name.to_string(),
+        field: Some(field.to_string()),
+        regclass: Some("vreg".to_string()),
+        access,
+    };
+    let qreg = |name: &str, field: &str, access: Access| Operand {
+        name: name.to_string(),
+        field: Some(field.to_string()),
+        regclass: Some("vpred".to_string()),
         access,
     };
     let val = |name: &str, field: &str| Operand {
@@ -1612,6 +1647,161 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![dxrd("dd", "ddp", Access::Write), dxrd("s", "dxs", Access::Read)],
     ));
 
+    // ---- HX9: HVX の形式 ----
+    // 実符号は参照アセンブラ（V73 + hvx）との照合済み。ベクトル
+    // レジスタは d5=デスティネーション、t5=第 1 ソース、s5=第 2
+    // ソースの配置が基本。vmem の即値はベクトル幅単位。
+    // Ref: SPEC-HEXAGON-PRM (V79), 80-N2040-61 (HVX).
+    // Vd = vmem(Rt+#s4) / :nt / vmemu(Rt)。
+    m.formats.push(fmt(
+        "FVLD",
+        &["d5", "s5", "vs4"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "vs4"),
+        ],
+    ));
+    // vmem(Rt+#s4)=Vs / :nt / vmemu(Rt)=Vs。
+    m.formats.push(fmt(
+        "FVST",
+        &["d5", "s5", "vs4"],
+        vec![
+            vreg("t", "d5", Access::Read),
+            gpr("s", "s5", Access::Read),
+            val("imm", "vs4"),
+        ],
+    ));
+    // Vd = vmem(Rt++#s3)。
+    m.formats.push(fmt(
+        "FVLDPI",
+        &["d5", "s5", "vs3"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("s4", "vs3"),
+        ],
+    ));
+    // vmem(Rt++#s3)=Vs。
+    m.formats.push(fmt(
+        "FVSTPI",
+        &["d5", "s5", "vs3"],
+        vec![
+            vreg("t", "d5", Access::Read),
+            gpr("x", "s5", Access::ReadWrite),
+            val("s4", "vs3"),
+        ],
+    ));
+    // Vd = vmem(Rt++Mu)。
+    m.formats.push(fmt(
+        "FVLDMU",
+        &["d5", "s5", "mu1"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            gpr("x", "s5", Access::ReadWrite),
+            val("mu", "mu1"),
+        ],
+    ));
+    // vmem(Rt++Mu)=Vs。
+    m.formats.push(fmt(
+        "FVSTMU",
+        &["d5", "s5", "mu1"],
+        vec![
+            vreg("t", "d5", Access::Read),
+            gpr("x", "s5", Access::ReadWrite),
+            val("mu", "mu1"),
+        ],
+    ));
+    // if ([!]Qv) vmem(Rt+#s4)=Vs（:nt を含む）。
+    m.formats.push(fmt(
+        "FVSTPQ",
+        &["d5", "s5", "vs4", "vqp", "vq1"],
+        vec![
+            vreg("t", "d5", Access::Read),
+            gpr("s", "s5", Access::Read),
+            val("imm", "vs4"),
+            qreg("p", "vqp", Access::Read),
+            val("q", "vq1"),
+        ],
+    ));
+    // Vd = op(Vu,Vv) / Qd = vcmp.*(Vu,Vv)（3 オペランド形）。
+    m.formats.push(fmt(
+        "FV3",
+        &["d5", "s5", "t5"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            vreg("u", "t5", Access::Read),
+            vreg("v", "s5", Access::Read),
+        ],
+    ));
+    // Vdd = op(Vu,Vv)（ペアデスティネーション。d5 は偶数側）。
+    m.formats.push(fmt(
+        "FVDD",
+        &["d5", "s5", "t5"],
+        vec![
+            vreg("dd", "d5", Access::Write),
+            vreg("u", "t5", Access::Read),
+            vreg("v", "s5", Access::Read),
+        ],
+    ));
+    // Vd = op(Vu)（vmov 等の単一ソース形）。
+    m.formats.push(fmt(
+        "FV2",
+        &["d5", "t5"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            vreg("u", "t5", Access::Read),
+        ],
+    ));
+    // Qd = op(Qs,Qt)（q 論理の 2 ソース形）。
+    m.formats.push(fmt(
+        "FVQ",
+        &["pd2", "t5", "vqt"],
+        vec![
+            qreg("qd", "pd2", Access::Write),
+            qreg("s", "t5", Access::Read),
+            qreg("t", "vqt", Access::Read),
+        ],
+    ));
+    // Qd = op(Qs)（q 論理の単一ソース形）。
+    m.formats.push(fmt(
+        "FVQ1",
+        &["pd2", "t5"],
+        vec![
+            qreg("qd", "pd2", Access::Write),
+            qreg("s", "t5", Access::Read),
+        ],
+    ));
+    // Qd = vcmp.*(Vu,Vv)。
+    m.formats.push(fmt(
+        "FVCMP",
+        &["pd2", "s5", "t5"],
+        vec![
+            qreg("qd", "pd2", Access::Write),
+            vreg("u", "t5", Access::Read),
+            vreg("v", "s5", Access::Read),
+        ],
+    ));
+    // Vd = op(Rs)（vsplat/vinsert の GPR→ベクトル形）。
+    m.formats.push(fmt(
+        "FVG",
+        &["d5", "s5"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+        ],
+    ));
+    // Vd = vand(Qv,Vu)。
+    m.formats.push(fmt(
+        "FVQV",
+        &["d5", "vqt", "t5"],
+        vec![
+            vreg("d", "d5", Access::Write),
+            qreg("p", "vqt", Access::Read),
+            vreg("u", "t5", Access::Read),
+        ],
+    ));
+
     let ins = |name: &str, format: &str, pattern: &str, when: Pred, syntax: &str, timing: &str| {
         Insn {
             name: name.to_string(),
@@ -2415,6 +2605,118 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dx_a_comb1", "DXCR", "11101....1...", wa(), "{dd}=combine({s},#0)", "alu"),
     ] {
         m.insns.push(ins(name, format, pattern, when, syntax, timing));
+    }
+
+    // ---- HX9: HVX 代表部分集合 ----
+    // Gap: GAP-0070 GAP-0071
+    // 全部 `hvx` 旗でゲート（同旗がないモデルでは復号不能＝
+    // illegal 命令例外となる）。実符号は参照アセンブラ
+    // （V73 + hvx プロファイル）と照合済み。
+    // - vmem: 整列 io 形（ld/st/:nt）・vmemu 非整列形・
+    //   post-inc 即値/++Mu・Qv 述語付きストア（:nt 含む）。
+    //   即値はベクトル幅単位（V73 系 128B）。tmp/scatter/
+    //   gather・reg-offset 系は語彙外（docs/gaps.md 参照）。
+    // - ALU: vadd/vsub（b/h/w）、論理（vand/vor/vxor）、
+    //   vavg/vnavg、vmin/vmax（b/ub/h/uh/w）、:sat 加減算、
+    //   vmpy 系（bb/ub→h、hh/uh→w、+= 累積）、vcombine/vmov/
+    //   vsplat/vinsert.w/vand(Qv,Vs)。
+    // - Q: vcmp.eq/gt（b/h/w）→Qd と q 論理（and/or/xor/not/
+    //   否定入力版）。
+    // Ref: SPEC-HEXAGON-PRM (V79), 80-N2040-61 (HVX).
+    let whvx = || Pred::Flag("hvx".to_string());
+    for (name, format, pattern, syntax) in [
+        // vmem 基本 io 形（ICLASS 系 LD/ST スロット）。bits[12:11]
+        // は無述語形で 0 固定、bits[7:5]=000 が整列形。
+        ("hvld_io", "FVLD", "00101000000........00...000.....", "{d}=vmem({s}+#{imm})"),
+        ("hvld_iont", "FVLD", "00101000010........00...000.....", "{d}=vmem({s}+#{imm}):nt"),
+        ("hvst_io", "FVST", "00101000001........00...000.....", "vmem({s}+#{imm})={t}"),
+        ("hvst_iont", "FVST", "00101000011........00...000.....", "vmem({s}+#{imm}):nt={t}"),
+        // vmemu 非整列形（bits[7:5]=111、オフセット桁は 0 固定）。
+        ("hvldu_io", "FVLD", "00101000000........00...111.....", "{d}=vmemu({s})"),
+        ("hvstu_io", "FVST", "00101000001........00...111.....", "vmemu({s})={t}"),
+        // Qv 述語付きストア（bits[12:11]=Qv、bit5=否定）。
+        ("hvst_iopq", "FVSTPQ", "00101000100.............00......", "if(...) vmem({s}+#{imm})={t}"),
+        ("hvst_iopqnt", "FVSTPQ", "00101000110.............00......", "if(...) vmem({s}+#{imm}):nt={t}"),
+        // post-inc 即値形（bits[10:8]=s3、ベクトル幅単位）。
+        ("hvld_pi", "FVLDPI", "00101001000.......000...000.....", "{d}=vmem({x}++#{s4})"),
+        ("hvst_pi", "FVSTPI", "00101001001.......000...000.....", "vmem({x}++#{s4})={t}"),
+        // post-inc ++Mu 形（bit13=M0/M1 選択）。
+        ("hvld_pr", "FVLDMU", "00101011000........00000000.....", "{d}=vmem({x}++m{mu})"),
+        ("hvld_prnt", "FVLDMU", "00101011010........00000000.....", "{d}=vmem({x}++m{mu}):nt"),
+        ("hvst_pr", "FVSTMU", "00101011001........00000000.....", "vmem({x}++m{mu})={t}"),
+        // ベクトル加減算（b/h/w）。
+        ("hv_vadd_b", "FV3", "00011111101.......0.....110.....", "{d}.b=vadd({u}.b,{v}.b)"),
+        ("hv_vadd_h", "FV3", "00011111101.......0.....111.....", "{d}.h=vadd({u}.h,{v}.h)"),
+        ("hv_vadd_w", "FV3", "00011100010.......0.....000.....", "{d}.w=vadd({u}.w,{v}.w)"),
+        ("hv_vsub_b", "FV3", "00011100010.......0.....101.....", "{d}.b=vsub({u}.b,{v}.b)"),
+        ("hv_vsub_h", "FV3", "00011100010.......0.....110.....", "{d}.h=vsub({u}.h,{v}.h)"),
+        ("hv_vsub_w", "FV3", "00011100010.......0.....111.....", "{d}.w=vsub({u}.w,{v}.w)"),
+        // ベクトル論理。
+        ("hv_vand", "FV3", "00011100001.......0.....101.....", "{d}=vand({u},{v})"),
+        ("hv_vor", "FV3", "00011100001.......0.....110.....", "{d}=vor({u},{v})"),
+        ("hv_vxor", "FV3", "00011100001.......0.....111.....", "{d}=vxor({u},{v})"),
+        // 平均系（b/ub/h/uh と :rnd・vnavg.h）。
+        ("hv_vavg_b", "FV3", "00011111000.......1.....100.....", "{d}.b=vavg({u}.b,{v}.b)"),
+        ("hv_vavg_ub", "FV3", "00011100110.......0.....100.....", "{d}.ub=vavg({u}.ub,{v}.ub)"),
+        ("hv_vavg_uh", "FV3", "00011100110.......0.....101.....", "{d}.uh=vavg({u}.uh,{v}.uh)"),
+        ("hv_vavg_h", "FV3", "00011100110.......0.....110.....", "{d}.h=vavg({u}.h,{v}.h)"),
+        ("hv_vavghr", "FV3", "00011100111.......0.....101.....", "{d}.h=vavg({u}.h,{v}.h):rnd"),
+        ("hv_vnavg_h", "FV3", "00011100111.......0.....001.....", "{d}.h=vnavg({u}.h,{v}.h)"),
+        // 最小・最大（b/ub/h/uh/w）。
+        ("hv_vmin_b", "FV3", "00011111001.......0.....100.....", "{d}.b=vmin({u}.b,{v}.b)"),
+        ("hv_vmin_ub", "FV3", "00011111000.......0.....001.....", "{d}.ub=vmin({u}.ub,{v}.ub)"),
+        ("hv_vmin_h", "FV3", "00011111000.......0.....011.....", "{d}.h=vmin({u}.h,{v}.h)"),
+        ("hv_vmin_uh", "FV3", "00011111000.......0.....010.....", "{d}.uh=vmin({u}.uh,{v}.uh)"),
+        ("hv_vmin_w", "FV3", "00011111000.......0.....100.....", "{d}.w=vmin({u}.w,{v}.w)"),
+        ("hv_vmax_b", "FV3", "00011111001.......0.....101.....", "{d}.b=vmax({u}.b,{v}.b)"),
+        ("hv_vmax_ub", "FV3", "00011111000.......0.....101.....", "{d}.ub=vmax({u}.ub,{v}.ub)"),
+        ("hv_vmax_h", "FV3", "00011111000.......0.....111.....", "{d}.h=vmax({u}.h,{v}.h)"),
+        ("hv_vmax_uh", "FV3", "00011111000.......0.....110.....", "{d}.uh=vmax({u}.uh,{v}.uh)"),
+        ("hv_vmax_w", "FV3", "00011111001.......0.....000.....", "{d}.w=vmax({u}.w,{v}.w)"),
+        // 飽和加減算（b/ub/h/uh/w/uw。飽和時は vcsr に sticky）。
+        ("hv_vadds_b", "FV3", "00011111000.......0.....000.....", "{d}.b=vadd({u}.b,{v}.b):sat"),
+        ("hv_vadds_ub", "FV3", "00011100010.......0.....001.....", "{d}.ub=vadd({u}.ub,{v}.ub):sat"),
+        ("hv_vadds_uh", "FV3", "00011100010.......0.....010.....", "{d}.uh=vadd({u}.uh,{v}.uh):sat"),
+        ("hv_vadds_h", "FV3", "00011100010.......0.....011.....", "{d}.h=vadd({u}.h,{v}.h):sat"),
+        ("hv_vadds_w", "FV3", "00011100010.......0.....100.....", "{d}.w=vadd({u}.w,{v}.w):sat"),
+        ("hv_vadds_uw", "FV3", "00011111011.......0.....001.....", "{d}.uw=vadd({u}.uw,{v}.uw):sat"),
+        ("hv_vsubs_b", "FV3", "00011111001.......0.....010.....", "{d}.b=vsub({u}.b,{v}.b):sat"),
+        ("hv_vsubs_ub", "FV3", "00011100011.......0.....000.....", "{d}.ub=vsub({u}.ub,{v}.ub):sat"),
+        ("hv_vsubs_uh", "FV3", "00011100011.......0.....001.....", "{d}.uh=vsub({u}.uh,{v}.uh):sat"),
+        ("hv_vsubs_h", "FV3", "00011100011.......0.....010.....", "{d}.h=vsub({u}.h,{v}.h):sat"),
+        ("hv_vsubs_w", "FV3", "00011100011.......0.....011.....", "{d}.w=vsub({u}.w,{v}.w):sat"),
+        // ペア出力の乗算系（bb/ub→h、hh/uh→w と += 累積形）。
+        ("hv_vmpy_bb", "FVDD", "00011100000.......0.....100.....", "{dd}.h=vmpy({u}.b,{v}.b)"),
+        ("hv_vmpy_ub", "FVDD", "00011100000.......0.....101.....", "{dd}.uh=vmpy({u}.ub,{v}.ub)"),
+        ("hv_vmpy_hh", "FVDD", "00011100000.......0.....111.....", "{dd}.w=vmpy({u}.h,{v}.h)"),
+        ("hv_vmpy_uh", "FVDD", "00011100001.......0.....000.....", "{dd}.uw=vmpy({u}.uh,{v}.uh)"),
+        ("hv_vmpy_bb_acc", "FVDD", "00011100000.......1.....100.....", "{dd}.h+=vmpy({u}.b,{v}.b)"),
+        ("hv_vmpy_ub_acc", "FVDD", "00011100000.......1.....101.....", "{dd}.uh+=vmpy({u}.ub,{v}.ub)"),
+        ("hv_vmpy_hh_acc", "FVDD", "00011100000.......1.....111.....", "{dd}.w+=vmpy({u}.h,{v}.h)"),
+        ("hv_vmpy_uh_acc", "FVDD", "00011100001.......1.....000.....", "{dd}.uw+=vmpy({u}.uh,{v}.uh)"),
+        // ムーブ系（vcombine/vmov/vsplats/vinsert.w/vand(Qv,Vs)）。
+        ("hv_vcombine", "FVDD", "00011111010.......0.....111.....", "{dd}=vcombine({u},{v})"),
+        ("hv_vmov", "FV2", "0001111000000011..1.....111.....", "{d}={u}"),
+        ("hv_vsplat_b", "FVG", "00011001110.......000000010.....", "{d}.b=vsplat({s})"),
+        ("hv_vsplat_h", "FVG", "00011001110.......000000001.....", "{d}.h=vsplat({s})"),
+        ("hv_vinsert_w", "FVG", "00011001101.......100000001.....", "{d}.w=vinsert({s})"),
+        ("hv_vandq", "FVQV", "00011110..000011..1.....000.....", "{d}=vand({p},{u})"),
+        // Q 生成の要素比較（eq/gt、b/h/w）。
+        ("hv_vcmpeq_b", "FVCMP", "00011111100.......0.....000000..", "{qd}=vcmp.eq({u}.b,{v}.b)"),
+        ("hv_vcmpeq_h", "FVCMP", "00011111100.......0.....000001..", "{qd}=vcmp.eq({u}.h,{v}.h)"),
+        ("hv_vcmpeq_w", "FVCMP", "00011111100.......0.....000010..", "{qd}=vcmp.eq({u}.w,{v}.w)"),
+        ("hv_vcmpgt_b", "FVCMP", "00011111100.......0.....000100..", "{qd}=vcmp.gt({u}.b,{v}.b)"),
+        ("hv_vcmpgt_h", "FVCMP", "00011111100.......0.....000101..", "{qd}=vcmp.gt({u}.h,{v}.h)"),
+        ("hv_vcmpgt_w", "FVCMP", "00011111100.......0.....000110..", "{qd}=vcmp.gt({u}.w,{v}.w)"),
+        // q 論理（and/or/xor/否定入力/not）。
+        ("hv_qand", "FVQ", "00011110..000011..0.....000000..", "{qd}=and({s},{t})"),
+        ("hv_qor", "FVQ", "00011110..000011..0.....000001..", "{qd}=or({s},{t})"),
+        ("hv_qxor", "FVQ", "00011110..000011..0.....000011..", "{qd}=xor({s},{t})"),
+        ("hv_qorn", "FVQ", "00011110..000011..0.....000100..", "{qd}=or({s},!{t})"),
+        ("hv_qandn", "FVQ", "00011110..000011..0.....000101..", "{qd}=and({s},!{t})"),
+        ("hv_qnot", "FVQ1", "0001111000000011..0.....000010..", "{qd}=not({s})"),
+    ] {
+        m.insns.push(ins(name, format, pattern, whvx(), syntax, "hvx"));
     }
 
     // `Rd = #-1`（条件クリアの無条件形）は dx_a_clr の dprd=0 に

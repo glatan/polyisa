@@ -34,9 +34,13 @@ fn state_layout_pinned() {
     assert_eq!(core::mem::offset_of!(CpuState, gp), pc + 36);
     assert_eq!(core::mem::offset_of!(CpuState, cs0), pc + 40);
     assert_eq!(core::mem::offset_of!(CpuState, cs1), pc + 44);
-    assert_eq!(core::mem::offset_of!(CpuState, hwt), pc + 48);
-    assert_eq!(core::mem::offset_of!(CpuState, endloop), pc + 52);
-    let pkt = pc + 56;
+    // HX9: HVX の建築状態（128B ベクトル x32・q0-3・vcsr）。
+    assert_eq!(core::mem::offset_of!(CpuState, v), pc + 48);
+    assert_eq!(core::mem::offset_of!(CpuState, q), pc + 48 + 4096);
+    assert_eq!(core::mem::offset_of!(CpuState, vcsr), pc + 48 + 4096 + 64);
+    assert_eq!(core::mem::offset_of!(CpuState, hwt), pc + 48 + 4164);
+    assert_eq!(core::mem::offset_of!(CpuState, endloop), pc + 48 + 4168);
+    let pkt = pc + 48 + 4172;
     assert_eq!(core::mem::offset_of!(CpuState, pkt_r), pkt);
     assert_eq!(core::mem::offset_of!(CpuState, pkt_r_ok), pkt + 32 * 4);
     assert_eq!(core::mem::offset_of!(CpuState, pkt_p), pkt + 32 * 4 + 4);
@@ -44,7 +48,11 @@ fn state_layout_pinned() {
     let prod = pkt + 32 * 4 + 12;
     assert_eq!(core::mem::offset_of!(CpuState, pkt_prod), prod);
     assert_eq!(core::mem::offset_of!(CpuState, nv_pos), prod + 16);
-    assert_eq!(core::mem::size_of::<CpuState>(), prod + 20);
+    assert_eq!(core::mem::offset_of!(CpuState, pkt_v), prod + 20);
+    assert_eq!(core::mem::offset_of!(CpuState, pkt_v_ok), prod + 20 + 4096);
+    assert_eq!(core::mem::offset_of!(CpuState, pkt_q), prod + 20 + 4100);
+    assert_eq!(core::mem::offset_of!(CpuState, pkt_q_ok), prod + 20 + 4164);
+    assert_eq!(core::mem::size_of::<CpuState>(), prod + 20 + 4168);
 }
 
 #[test]
@@ -3388,4 +3396,509 @@ fn hx8_loop_packet_rules() {
     let i = with_pp(encode(Insn::AddRi, &[1, 1, 1]).unwrap() as u32, 3);
     let (pkt, _) = packet::split(&[l, i]).unwrap();
     assert!(packet::expand(&pkt).is_ok());
+}
+
+// ---- HX9: HVX ----
+// 実符号は参照アセンブラ（llvm-mc の V73 + hvx）との照合済み。
+// Ref: SPEC-HEXAGON-PRM (V79), 80-N2040-61 (HVX).
+
+const HVX: u128 = polyisa_guest_hexagon::FEAT_HVX;
+
+/// テストからのメモリ確認用のデータ読みアクセス。
+const DRD: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::DataRead,
+};
+
+fn step_hvx(env: &mut BareEnv) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, HVX)
+}
+
+/// v_i の書き込み（テスト用の確定値セット）。
+fn v_set(env: &mut BareEnv, i: usize, a: &[u32; 32]) {
+    let o = core::mem::offset_of!(CpuState, v) + i * 128;
+    for (j, w) in a.iter().enumerate() {
+        env.backend.state[o + j * 4..o + j * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+}
+
+fn v_get(env: &BareEnv, i: usize) -> [u32; 32] {
+    let o = core::mem::offset_of!(CpuState, v) + i * 128;
+    let mut a = [0u32; 32];
+    for (j, w) in a.iter_mut().enumerate() {
+        *w = u32::from_le_bytes(
+            env.backend.state[o + j * 4..o + j * 4 + 4]
+                .try_into()
+                .unwrap(),
+        );
+    }
+    a
+}
+
+fn q_set(env: &mut BareEnv, i: usize, q: u128) {
+    let o = core::mem::offset_of!(CpuState, q) + i * 16;
+    env.backend.state[o..o + 16].copy_from_slice(&q.to_le_bytes());
+}
+
+fn q_get(env: &BareEnv, i: usize) -> u128 {
+    let o = core::mem::offset_of!(CpuState, q) + i * 16;
+    u128::from_le_bytes(env.backend.state[o..o + 16].try_into().unwrap())
+}
+
+#[test]
+fn hvx_decode_gated() {
+    // 実符号照合済みの代表形。hvx 旗がないと復号できない
+    // （illegal 命令として扱われる）。
+    for (w, want) in [
+        (0x2800_c000, Insn::HvldIo),
+        (0x2840_c000, Insn::HvldIont),
+        (0x2821_c001, Insn::HvstIo),
+        (0x2862_c31e, Insn::HvstIont),
+        (0x2801_c0e0, Insn::HvlduIo),
+        (0x2834_c0e9, Insn::HvstuIo),
+        (0x2881_c000, Insn::HvstIopq),
+        (0x2881_d820, Insn::HvstIopq),
+        (0x28c1_c300, Insn::HvstIopqnt),
+        (0x2901_c200, Insn::HvldPi),
+        (0x2921_c100, Insn::HvstPi),
+        (0x2b01_c000, Insn::HvldPr),
+        (0x2b21_e000, Insn::HvstPr),
+        (0x2b41_c000, Insn::HvldPrnt),
+        (0x1fa4_c3c2, Insn::HvVaddB),
+        (0x1fa7_c6e5, Insn::HvVaddH),
+        (0x1c4a_c908, Insn::HvVaddW),
+        (0x1c44_c3a2, Insn::HvVsubB),
+        (0x1c47_c6c5, Insn::HvVsubH),
+        (0x1c4a_c9e8, Insn::HvVsubW),
+        (0x1c30_cfae, Insn::HvVand),
+        (0x1c30_cfce, Insn::HvVor),
+        (0x1c30_cfee, Insn::HvVxor),
+        (0x1f0a_e988, Insn::HvVavgB),
+        (0x1cca_c988, Insn::HvVavgUb),
+        (0x1cca_c9c8, Insn::HvVavgH),
+        (0x1cca_c9a8, Insn::HvVavgUh),
+        (0x1cea_c9a8, Insn::HvVavghr),
+        (0x1cea_c928, Insn::HvVnavgH),
+        (0x1f2d_cc8b, Insn::HvVminB),
+        (0x1f0d_cc2b, Insn::HvVminUb),
+        (0x1f0d_cc6b, Insn::HvVminH),
+        (0x1f0d_cc4b, Insn::HvVminUh),
+        (0x1f0d_cc8b, Insn::HvVminW),
+        (0x1f2d_ccab, Insn::HvVmaxB),
+        (0x1f0d_ccab, Insn::HvVmaxUb),
+        (0x1f0d_cceb, Insn::HvVmaxH),
+        (0x1f0d_cccb, Insn::HvVmaxUh),
+        (0x1f2d_cc0b, Insn::HvVmaxW),
+        (0x1f03_c201, Insn::HvVaddsB),
+        (0x1c43_c221, Insn::HvVaddsUb),
+        (0x1c43_c241, Insn::HvVaddsUh),
+        (0x1c43_c261, Insn::HvVaddsH),
+        (0x1c43_c281, Insn::HvVaddsW),
+        (0x1f63_c221, Insn::HvVaddsUw),
+        (0x1f23_c241, Insn::HvVsubsB),
+        (0x1c63_c201, Insn::HvVsubsUb),
+        (0x1c63_c221, Insn::HvVsubsUh),
+        (0x1c63_c241, Insn::HvVsubsH),
+        (0x1c63_c261, Insn::HvVsubsW),
+        (0x1c13_d2f0, Insn::HvVmpyHh),
+        (0x1c13_f2f0, Insn::HvVmpyHhAcc),
+        (0x1c13_d290, Insn::HvVmpyBb),
+        (0x1c13_d2b0, Insn::HvVmpyUb),
+        (0x1c33_d210, Insn::HvVmpyUh),
+        (0x1c33_f210, Insn::HvVmpyUhAcc),
+        (0x1f4e_cff4, Insn::HvVcombine),
+        (0x1e03_eff4, Insn::HvVmov),
+        (0x19c1_c054, Insn::HvVsplatB),
+        (0x19c1_c034, Insn::HvVsplatH),
+        (0x19a1_e020, Insn::HvVinsertW),
+        (0x1e43_e200, Insn::HvVandq),
+        (0x1f82_c100, Insn::HvVcmpeqB),
+        (0x1f82_c104, Insn::HvVcmpeqH),
+        (0x1f82_c108, Insn::HvVcmpeqW),
+        (0x1f82_c110, Insn::HvVcmpgtB),
+        (0x1f82_c114, Insn::HvVcmpgtH),
+        (0x1f82_c118, Insn::HvVcmpgtW),
+        (0x1e83_c100, Insn::HvQand),
+        (0x1e83_c104, Insn::HvQor),
+        (0x1e83_c10c, Insn::HvQxor),
+        (0x1e83_c110, Insn::HvQorn),
+        (0x1e83_c114, Insn::HvQandn),
+        (0x1e03_c108, Insn::HvQnot),
+    ] {
+        assert_eq!(decode_model_ex(w, 32, true, HVX), Some(want), "{w:#x}");
+        assert_eq!(
+            decode_model_ex(w, 32, true, 0),
+            None,
+            "{w:#x} must be gated by hvx"
+        );
+    }
+}
+
+#[test]
+fn hvx_disasm() {
+    assert_eq!(
+        disasm_word_ex(0x2805_c702, 32, true, HVX).as_deref(),
+        Some("v2=vmem(r5+#7)")
+    );
+    assert_eq!(
+        disasm_word_ex(0x1fa4_c3c2, 32, true, HVX).as_deref(),
+        Some("v2.b=vadd(v3.b,v4.b)")
+    );
+    assert_eq!(
+        disasm_word_ex(0x1e83_c100, 32, true, HVX).as_deref(),
+        Some("q0=and(q1,q2)")
+    );
+    assert_eq!(
+        disasm_word_ex(0x2881_c000, 32, true, HVX).as_deref(),
+        Some("if(...) vmem(r1+#0)=v0")
+    );
+    assert_eq!(
+        disasm_word_ex(0x1e03_eff4, 32, true, HVX).as_deref(),
+        Some("v20=v15")
+    );
+    // hvx 旗がないと語彙外（逆アセンブルもできない）。
+    assert_eq!(disasm_word_ex(0x1fa4_c3c2, 32, true, 0), None);
+}
+
+#[test]
+fn hvx_vmem_ld_st() {
+    // vmem の整列形は 128B 転送。オフセットはベクトル幅単位。
+    let mut env = run_env();
+    // { v0 = vmem(r0+#0) ; vmem(r1+#0) = v0 }（同時発行なので
+    // ストアはロード前の v0 を読む。先に v0 を仕込む）。
+    let mut v0 = [0u32; 32];
+    for (i, w) in v0.iter_mut().enumerate() {
+        *w = 0xa5a5_0000 + i as u32;
+    }
+    v_set(&mut env, 0, &v0);
+    sem::r_set(&mut env.backend, 0, (BASE + 0x400) as u32);
+    sem::r_set(&mut env.backend, 1, (BASE + 0x600) as u32);
+    let mut mem_src = [0u8; 128];
+    for (i, b) in mem_src.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    env.backend
+        .mem
+        .write(VirtAddr(BASE + 0x400), &mem_src)
+        .unwrap();
+    put(
+        &mut env,
+        BASE,
+        &[with_pp(0x2800_c000, 1), with_pp(0x2821_c000, 3)],
+    );
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    // ロード側はメモリの内容を v0 に書く（ストアは古い v0 を書く）。
+    let mut want = [0u32; 32];
+    for (i, w) in want.iter_mut().enumerate() {
+        *w = u32::from_le_bytes(mem_src[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+    assert_eq!(v_get(&env, 0), want);
+    // ストア先にはパケット開始時の v0 が書かれた。
+    let mut out = [0u8; 128];
+    env.backend
+        .mem
+        .read(VirtAddr(BASE + 0x600), &mut out, DRD)
+        .unwrap();
+    assert_eq!(
+        u32::from_le_bytes(out[0..4].try_into().unwrap()),
+        0xa5a5_0000
+    );
+    assert_eq!(
+        u32::from_le_bytes(out[124..128].try_into().unwrap()),
+        0xa5a5_001f
+    );
+}
+
+#[test]
+fn hvx_vmemu_unaligned() {
+    // vmemu は非整列アドレスを許す（整列形なら illegal）。
+    let mut env = run_env();
+    let ea = BASE + 0x401;
+    let mut src = [0u8; 128];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = 0x80 - i as u8;
+    }
+    env.backend.mem.write(VirtAddr(ea), &src).unwrap();
+    sem::r_set(&mut env.backend, 1, ea as u32);
+    // { v0 = vmemu(r1) }
+    put(&mut env, BASE, &[with_pp(0x2801_c0e0, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(
+        v_get(&env, 0)[0],
+        u32::from_le_bytes(src[0..4].try_into().unwrap())
+    );
+    // 整列形の非整列アドレスは illegal（Unimplemented トラップ）。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 0, (BASE + 0x404) as u32);
+    put(&mut env, BASE, &[with_pp(0x2800_c000, 3)]);
+    env.pc = BASE;
+    assert!(matches!(
+        step_hvx(&mut env),
+        Err(Outcome::Unimplemented { .. })
+    ));
+}
+
+#[test]
+fn hvx_vmem_postinc() {
+    // post-inc はアクセス後に基底をベクトル幅単位で進める。
+    let mut env = run_env();
+    let ea = BASE + 0x400;
+    sem::r_set(&mut env.backend, 1, ea as u32);
+    let mut src = [0u8; 128];
+    src[0] = 0x5a;
+    env.backend.mem.write(VirtAddr(ea), &src).unwrap();
+    // { v0 = vmem(r1++#2) }（#2 x 128B = +256）。
+    put(&mut env, BASE, &[with_pp(0x2901_c200, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 0)[0] & 0xff, 0x5a);
+    assert_eq!(sem::r_get(&env.backend, 1), (ea + 256) as u32);
+}
+
+#[test]
+fn hvx_valu() {
+    // vadd.b は要素ごとの加算（0xff+1=0x00 折り返し）。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    let mut c = [0u32; 32];
+    a[0] = 0x0000_00ff;
+    c[0] = 0x0000_0001;
+    v_set(&mut env, 3, &a);
+    v_set(&mut env, 4, &c);
+    // { v2.b = vadd(v3.b,v4.b) }
+    put(&mut env, BASE, &[with_pp(0x1fa4_c3c2, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 2)[0], 0);
+    // vsub.h: 符号なしレーン引き算。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0x0003_0005;
+    let mut c = [0u32; 32];
+    c[0] = 0x0001_0007;
+    v_set(&mut env, 6, &a);
+    v_set(&mut env, 7, &c);
+    // { v5.h = vsub(v6.h,v7.h) }
+    put(&mut env, BASE, &[with_pp(0x1c47_c6c5, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 5)[0], 0x0002_fffe);
+    // 論理演算はワード単位。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0xf0f0_00ff;
+    let mut c = [0u32; 32];
+    c[0] = 0x0f0f_0f0f;
+    v_set(&mut env, 15, &a);
+    v_set(&mut env, 16, &c);
+    // { v14 = vxor(v15,v16) }
+    put(&mut env, BASE, &[with_pp(0x1c30_cfee, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 14)[0], 0xffff_0ff0);
+}
+
+#[test]
+fn hvx_vminmax_vavg() {
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    let mut c = [0u32; 32];
+    a[0] = 0xffff_fffe; // .b 要素 {fe, ff, ff, ff} = {-2,-1,-1,-1}
+    c[0] = 0x0000_0101;
+    v_set(&mut env, 12, &a);
+    v_set(&mut env, 13, &c);
+    // { v11.b = vmin(v12.b,v13.b) } — 符号付き最小。
+    put(&mut env, BASE, &[with_pp(0x1f2d_cc8b, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 11)[0], 0xffff_fffe);
+    // vavg.h:rnd = (x+y+1)>>1。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 3;
+    let mut c = [0u32; 32];
+    c[0] = 4;
+    v_set(&mut env, 9, &a);
+    v_set(&mut env, 10, &c);
+    put(&mut env, BASE, &[with_pp(0x1cea_c9a8, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 8)[0], 4);
+}
+
+#[test]
+fn hvx_vsat() {
+    // :sat は範囲にクランプし vcsr bit0 を立てる。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0x7f; // b: 127
+    let mut c = [0u32; 32];
+    c[0] = 1;
+    v_set(&mut env, 2, &a);
+    v_set(&mut env, 3, &c);
+    // { v1.b = vadd(v2.b,v3.b):sat }
+    put(&mut env, BASE, &[with_pp(0x1f03_c201, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 1)[0], 0x7f);
+    let vcsr = u32::from_le_bytes(
+        env.backend.state
+            [core::mem::offset_of!(CpuState, vcsr)..core::mem::offset_of!(CpuState, vcsr) + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(vcsr & 1, 1);
+}
+
+#[test]
+fn hvx_vmpy_combine() {
+    // Vdd.w = vmpy(Vu.h,Vv.h): h 要素ごとの積を w ペアに並べる。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    let mut c = [0u32; 32];
+    a[0] = 0x0002_0003; // h[0]=3 h[1]=2
+    c[0] = 0x0004_0005;
+    a[31] = 0x0007_0008;
+    c[31] = 0x0009_000a;
+    v_set(&mut env, 18, &a);
+    v_set(&mut env, 19, &c);
+    // { v17:16.w = vmpy(v18.h,v19.h) }
+    put(&mut env, BASE, &[with_pp(0x1c13_d2f0, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 16)[0], 15); // 3*5
+    assert_eq!(v_get(&env, 16)[1], 8); // 2*4
+    assert_eq!(v_get(&env, 17)[30], 80); // h[62]: 8*10
+    assert_eq!(v_get(&env, 17)[31], 63); // h[63]: 7*9
+    // vcombine: 偶数側に第 2 ソース、奇数側に第 1 ソース。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0xaaaa_0001;
+    let mut c = [0u32; 32];
+    c[0] = 0xbbbb_0002;
+    v_set(&mut env, 15, &a);
+    v_set(&mut env, 14, &c);
+    // { v21:20 = vcombine(v15,v14) }
+    put(&mut env, BASE, &[with_pp(0x1f4e_cff4, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 21)[0], 0xaaaa_0001);
+    assert_eq!(v_get(&env, 20)[0], 0xbbbb_0002);
+}
+
+#[test]
+fn hvx_vmov_splat() {
+    // vmov はレジスタ転送、vsplat はスカラを全要素に複製。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0xdead_beef;
+    v_set(&mut env, 15, &a);
+    // { v20 = v15 }
+    put(&mut env, BASE, &[with_pp(0x1e03_eff4, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 20)[0], 0xdead_beef);
+    // { v20.h = vsplat(r1) }: r1 の下位 h を全 h 要素に。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 1, 0x1234_5678);
+    put(&mut env, BASE, &[with_pp(0x19c1_c034, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 20)[0], 0x5678_5678);
+    assert_eq!(v_get(&env, 20)[31], 0x5678_5678);
+}
+
+#[test]
+fn hvx_vcmp_qops() {
+    // vcmp.eq.b は要素一致のバイト要素に q ビットを立てる。
+    let mut env = run_env();
+    let mut a = [0u32; 32];
+    a[0] = 0x0102_0305;
+    let mut c = [0u32; 32];
+    c[0] = 0x0102_0304;
+    v_set(&mut env, 1, &a);
+    v_set(&mut env, 2, &c);
+    // { q0 = vcmp.eq(v1.b,v2.b) }
+    put(&mut env, BASE, &[with_pp(0x1f82_c100, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    // バイト要素 0 以外（1..127）が一致 → q = ~1。
+    assert_eq!(q_get(&env, 0), u128::MAX - 1);
+    // q 論理と vand(Qv,Vs)。
+    let mut env = run_env();
+    q_set(&mut env, 1, 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff);
+    q_set(&mut env, 2, 0xffff_0000_ffff_0000_ffff_0000_ffff_0000);
+    // { q0 = and(q1,q2) }
+    put(&mut env, BASE, &[with_pp(0x1e83_c100, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(q_get(&env, 0), 0xffff_0000_ffff_0000_ffff_0000_ffff_0000);
+    // { v0 = vand(q1,v2) }: q の立つバイトだけ残す。
+    // q1=0b1100 はバイト 2,3 のみ残すマスク。
+    let mut env = run_env();
+    q_set(&mut env, 1, 0xc);
+    let mut a = [0u32; 32];
+    a[0] = 0xaabb_ccdd;
+    a[1] = 0x1122_3344;
+    v_set(&mut env, 2, &a);
+    put(&mut env, BASE, &[with_pp(0x1e43_e200, 3)]);
+    env.pc = BASE;
+    step_hvx(&mut env).unwrap();
+    assert_eq!(v_get(&env, 0)[0], 0xaabb_0000);
+    assert_eq!(v_get(&env, 0)[1], 0);
+}
+
+#[test]
+fn hvx_stpq() {
+    // if (Qv) / if (!Qv) のバイトマスク付きストア。q のビット j
+    // がバイト j の書き込み可否に対応する。
+    let mut v0 = [0u32; 32];
+    v0[0] = 0x5afe_cafe;
+    v0[1] = 0x0bad_f00d;
+    // (q, 否定語, 書き込まれるワード数)。q=0xff は先頭 8B（w0,w1）、
+    // if(!q0) かつ q=0 は反転マスク（全バイト）。
+    for (q, w, want_w0, want_w1) in [
+        (0u128, 0x2881_c000, 0, 0),                     // if(q0) q=0 → 書かない
+        (0xff, 0x2881_c000, 0x5afe_cafe, 0x0bad_f00d),  // 先頭 8B だけ
+        (0u128, 0x2881_c020, 0x5afe_cafe, 0x0bad_f00d), // if(!q0)
+        (1u128, 0x2881_c000, 0xfe, 0),                  // バイト 0 だけ
+    ] {
+        let mut env = run_env();
+        q_set(&mut env, 0, q);
+        v_set(&mut env, 0, &v0);
+        sem::r_set(&mut env.backend, 1, (BASE + 0x400) as u32);
+        put(&mut env, BASE, &[with_pp(w, 3)]);
+        env.pc = BASE;
+        step_hvx(&mut env).unwrap();
+        let mut out = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(BASE + 0x400), &mut out, DRD)
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(out[0..4].try_into().unwrap()),
+            want_w0,
+            "q={q:#x} w={w:#x}"
+        );
+        assert_eq!(
+            u32::from_le_bytes(out[4..8].try_into().unwrap()),
+            want_w1,
+            "q={q:#x} w={w:#x}"
+        );
+    }
+}
+
+#[test]
+fn hvx_disabled_is_illegal() {
+    // hvx 旗なしのモデルでは HVX 命令語は復号不能 → illegal。
+    let mut env = run_env();
+    put(&mut env, BASE, &[with_pp(0x1fa4_c3c2, 3)]);
+    env.pc = BASE;
+    assert!(matches!(
+        run::step(&mut env, &mut NoSys, 0),
+        Err(Outcome::Unimplemented { .. })
+    ));
 }
