@@ -30,7 +30,7 @@
 | 21 | IA-64 | 完了 |
 | 22 | Hexagon | 完了 |
 | 23 | VAX | 完了 |
-| 24 | PDP-11 | 未着手（作業計画は `design/roadmap.md`） |
+| 24 | PDP-11 | 完了 |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -556,6 +556,25 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - S23-1 はテスト判定で確定しており、所有者確認の残件はない
 - 特権・システム系の命令（rei/ldpctx/svpctx/bugw/bugl）と PDP-11 互換モードは語彙宣言までで意味論は未実装（ユーザーモード対象の範囲。halt はユーザーモードの特権命令 fault を再現し、カーネル側は Unimplemented。REI の CM 遷移規定は GAP-0079(d)）
 - GAP-0076（キューの単一スレッド近似・中断可能文字列命令の 1 バイト粒度・chm の単一スタック近似）・GAP-0077（poly 系の中断粒度・退避形の近似）・GAP-0078（十進演算の 1 ステップ完結・UNPREDICTABLE 入力の決定化）・GAP-0079（nvax/ka650 の機能集合代用・SCB フレーム構築のパーソナリティ委譲・compat/REI）・GAP-0080（Vax780 の未較正 approx・MicroVAX 系/NVAX の時間・例外時間・probe のページ保護なし近似）
+
+### 段階 24：PDP-11
+
+対応した内容：
+
+- `guests/pdp11`（spec・specifier・sem・mmu・cis・run）と `cli` の `run_pdp11`（feature `guest-pdp11`、裸実行のみ。主流の Linux 移植がないため裸実行環境で検証し、Unix V7 パーソナリティは段階 25 の対象）
+- 版の範囲は 11/03 から J-11 までの 12 モデル（pdp11_03・04・34・44・60・70・23・24・73・83・93 と t11）と EIS・FIS・FP11・CIS のオプション。機能旗 eis・fis・fp11・cis・mmu・id_split・sm・dual_regset・mtps・mfpt・spl・csm・tstset_wrtlck・sob_mark・sxt・maint が実装群の差を表し（fis と fp11 は排他）、ARCH83 付録 B のファミリ差分表（項目 1-52）の観測可能な差分は挙動パラメータへ写した（全項目の対応表は GAP-0086）
+- 命令は 16 ビット固定長の命令語と、語内の mode(3)+reg(3) 指定子フィールド（8 モードと PC の特殊解釈）で、モード 6/7 のインデックス語・PC 指定子の即値/絶対/相対語など拡張語の消費は、m68k `ea.rs` と同型の分割として `specifier.rs` が評価・長さ・再符号化を担う
+- 実装した命令群は整数・論理・shift/rot・条件コード操作・分岐（Bcc 全結合子・sob）・jmp/jsr/rts/mark・トラップと特権（emt/trap/bpt/iot・rti/rtt・wait・reset・halt・spl・mtps/mfps・mfpt・csm・tstset/wrtlck）・EIS（mul/div/ash/ashc）・FIS（0750xR）・FP11（F/D の算術・変換・modf・AC0-5/FPS/FEC/FEA）・CIS（記述子形と in-line 形のキャラクタ/数値/パック文字列・L2D/L3D）・MMU（PAR/PDR による再配置と保護・MMR0-3・kernel/supervisor/user の 3 モードとモード別 SP・16/18/22 ビット物理・MFPI/MFPD/MTPI/MTPD・スタック制限）
+- 分離 I/D は mem 層を拡張せず、ゲスト側がモード×I/D×8 ページの APR 集合で仮想→物理を変換し、物理メモリは AddressSpace 1 枚とする形を採った（`mmu::xlate` がフェッチは I 空間、データは MMR3 のモード別許可で D、許可がなければ I に畳むを選ぶ）。ロードマップが予定した「`mem` の拡張」は不要と確定し、GAP-0085(a) に記録
+- FP11 は softfloat の decfp（`VaxF<8,23>`/`VaxF<8,55>`）を再利用し、例外許可時の格納値（真の指数を ∓400₈ ずらした値）は `fp11_pack` で、MODF の整数部の切り出しは `modf_fp11` で再構成。CIS のパック十進・数値文字列は `decimal`（BcdEnv）とゲスト helper の符号規約で処理
+- タイミングは専用モデルを作らず、汎用モデル用に timing_classes（alu・move・branch・fp・cis・system・misc）だけを宣言 —— 未較正の近似（GAP-0087）
+- `bare_pdp11`（層1–3: デコード・エンコード往復・指定子評価/長さ/再符号化・機能旗とモデル差・トラップ配送・MMU と分離 I&D のアドレス空間を含む裸実行の命令単位検査。140 件）と `model_diff`（同じバイナリでモデルごとに結果が分かれる付録 B 項目の差分検査。22 件）、lib 単体テスト（6 件）で S24-1 を判定
+
+残っている事項：
+
+- S24-1 はテスト判定で確定しており、所有者確認の残件はない
+- 完全な保護/abort 回復（MMR1 による巻き戻し・赤ゾーンの CPU 停止）・割込み受理・バス/コンソール/診断系の付録 B 残項目は、段階 25 の Unix V7 パーソナリティが要る領域として残す（GAP-0085(f)・GAP-0086）
+- GAP-0081（TSTSET/WRTLCK のバスロック近似・RESET/HALT の畳み込み・11/04 の RTT 差分の未実装）・GAP-0082（DIV の予約域の決定的選択・FIS の KE11-F 照合なし）・GAP-0083（FP11 の FID 端境・FIUV 検査位置・MODF・指数ずらしの実機照合なし）・GAP-0084（CIS の反復近似・十進系の 1 ステップ完結・予約領域の決定化）・GAP-0085（MMR0<8>/MMR3<5>・イエローゾーンのみ・MMR1 は記録のみ）・GAP-0086（付録 B 棚卸しの残項目と確定した近似）・GAP-0087（汎用タイミングのみ・未較正）
 
 ## 残っている事項（横断）
 

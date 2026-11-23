@@ -33,6 +33,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
     // 汎用タイミングの区切り（専用モデルは作らない —— PD2 の計画）。
+    // Gap: GAP-0087（未較正の汎用タイミング近似）
     for class in ["alu", "move", "branch", "fp", "cis", "system", "misc"] {
         m.timing_classes.push(class.to_string());
     }
