@@ -34,6 +34,9 @@ pub mod sem;
 /// 十進文字列命令（パック十進演算・数値文字列変換・editpc）。
 pub mod decimal;
 
+/// VAX-11/780 のマイクロコード実行時間モデル（専用タイミング）。
+pub mod timing;
+
 /// VAX の ISA ファミリ名。
 pub struct Vax;
 

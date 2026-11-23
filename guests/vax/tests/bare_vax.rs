@@ -35,8 +35,30 @@ fn decode_one_byte_opcodes() {
     assert_eq!(dec1(0x06), Some(Insn::Ldpctx));
     assert_eq!(dec1(0x07), Some(Insn::Svpctx));
     assert_eq!(dec1(0x08), Some(Insn::Cvtps));
+    assert_eq!(dec1(0x0a), Some(Insn::Index));
+    assert_eq!(dec1(0x0c), Some(Insn::Prober));
+    assert_eq!(dec1(0x0d), Some(Insn::Probew));
+    // 条件分岐 0x12-0x1f の全結合子（0x16/0x17 は jsb/jmp）。
+    for (op, want) in [
+        (0x12, Insn::Bneq),
+        (0x13, Insn::Beql),
+        (0x14, Insn::Bgtr),
+        (0x15, Insn::Bleq),
+        (0x18, Insn::Bgeq),
+        (0x19, Insn::Blss),
+        (0x1a, Insn::Bgtru),
+        (0x1b, Insn::Blequ),
+        (0x1c, Insn::Bvc),
+        (0x1d, Insn::Bvs),
+        (0x1e, Insn::Bgequ),
+        (0x1f, Insn::Blssu),
+    ] {
+        assert_eq!(dec1(op), Some(want), "{op:#04x}");
+    }
     // 未宣言の語と、接頭だけの語は命令にならない。
-    assert_eq!(dec1(0x0a), None);
+    // （0x09 cvtsp・0x0b crc は機能旗を削れば解けない。xfc=0xfc は
+    // 顧客定義で語彙外 —— 正本でも予約領域。）
+    assert_eq!(dec1(0xfc), None);
     assert_eq!(dec1(0xfd), None);
     assert_eq!(dec1(0xfe), None);
     assert_eq!(dec1(0xff), None);
@@ -847,8 +869,8 @@ fn reserved_mode_and_insn_faults() {
     let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
     assert_eq!(sys.0, [sem::scb::RESERVED_MODE]);
     assert!(matches!(r, Err(Outcome::Unimplemented { .. })));
-    // 0x0a（index）は予約オペコード → 予約命令 fault 0x10。
-    put(&mut env, BASE + 0x10, &[0x0a]);
+    // 0xfc（xfc・顧客定義）は語彙にない → 予約命令 fault 0x10。
+    put(&mut env, BASE + 0x10, &[0xfc]);
     env.pc = BASE + 0x10;
     let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
     assert_eq!(sys.0.last(), Some(&sem::scb::PRIV_INSN));
@@ -3257,6 +3279,175 @@ fn unconditional_branches() {
     assert_eq!(cc(&env), (false, true, false, false));
 }
 
+/// 条件コードの組（N, Z, V, C）。
+type Nzvc = (bool, bool, bool, bool);
+
+/// PSL をユーザーモード + 指定の条件コードに置く。
+fn set_cc(env: &mut BareEnv, n: bool, z: bool, v: bool, c: bool) {
+    let mut p = psl::USER;
+    p |= u32::from(n) << psl::N;
+    p |= u32::from(z) << psl::Z;
+    p |= u32::from(v) << psl::V;
+    p |= u32::from(c) << psl::C;
+    sem::psl_put(&mut env.backend, p);
+}
+
+#[test]
+fn conditional_branches() {
+    // (opcode, 分岐が成立する NZVC, 成立しない NZVC)
+    let cases: &[(u8, Nzvc, Nzvc)] = &[
+        (
+            0x12,
+            (false, false, false, false),
+            (false, true, false, false),
+        ), // bneq
+        (
+            0x13,
+            (false, true, false, false),
+            (false, false, false, false),
+        ), // beql
+        (
+            0x14,
+            (false, false, false, false),
+            (true, false, false, false),
+        ), // bgtr
+        (
+            0x15,
+            (true, false, false, false),
+            (false, false, false, false),
+        ), // bleq
+        (
+            0x18,
+            (false, false, true, true),
+            (true, false, false, false),
+        ), // bgeq
+        (
+            0x19,
+            (true, false, false, false),
+            (false, false, false, false),
+        ), // blss
+        (
+            0x1a,
+            (false, false, false, false),
+            (false, false, false, true),
+        ), // bgtru
+        (
+            0x1b,
+            (false, false, false, true),
+            (false, false, false, false),
+        ), // blequ
+        (
+            0x1c,
+            (false, false, false, false),
+            (false, false, true, false),
+        ), // bvc
+        (
+            0x1d,
+            (false, false, true, false),
+            (false, false, false, false),
+        ), // bvs
+        (
+            0x1e,
+            (false, true, false, false),
+            (false, false, false, true),
+        ), // bgequ
+        (
+            0x1f,
+            (false, false, false, true),
+            (false, false, false, false),
+        ), // blssu
+    ];
+    for &(op, taken, not_taken) in cases {
+        // 変位 +6: 分岐すれば 終端+6、しなければ 終端。
+        let mut env = run_env(1);
+        put(&mut env, BASE, &[op, 0x06]);
+        set_cc(&mut env, taken.0, taken.1, taken.2, taken.3);
+        env.pc = BASE;
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, BASE + 8, "op {op:#04x} taken {taken:?}");
+        assert_eq!(cc(&env), taken, "op {op:#04x} は CC を変えない");
+        set_cc(&mut env, not_taken.0, not_taken.1, not_taken.2, not_taken.3);
+        env.pc = BASE;
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, BASE + 2, "op {op:#04x} not-taken {not_taken:?}");
+        assert_eq!(cc(&env), not_taken);
+    }
+    // OR 結合の端境: bgtr は Z=1（N=0）でも不成立、bleq は Z で
+    // 成立、bgtru は Z=1（C=0）で不成立、blequ は Z で成立、
+    // bgequ は Z の有無に関わらず C だけを見る。
+    for (op, taken_cc, want) in [
+        (0x14u8, (false, true, false, false), BASE + 2), // bgtr: Z で不成立
+        (0x15, (false, true, false, false), BASE + 8),   // bleq: Z で成立
+        (0x1a, (false, true, false, false), BASE + 2),   // bgtru: Z で不成立
+        (0x1b, (false, true, false, false), BASE + 8),   // blequ: Z で成立
+        (0x1e, (true, true, true, false), BASE + 8),     // bgequ: C=0 なら成立
+    ] {
+        let mut env = run_env(1);
+        put(&mut env, BASE, &[op, 0x06]);
+        set_cc(&mut env, taken_cc.0, taken_cc.1, taken_cc.2, taken_cc.3);
+        env.pc = BASE;
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, want, "op {op:#04x} cc {taken_cc:?}");
+    }
+}
+
+/// index: (indexin + subscript) * size を書き、範囲外なら結果と
+/// 条件コードを書いてから添字範囲 trap（算術型 7）。
+#[test]
+fn index_bounds_and_trap() {
+    let mut env = run_env(1);
+    // index r0,r1,r2,r3,r4,r5（全てレジスタ指定子 0x50+n）。
+    put(&mut env, BASE, &[0x0a, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55]);
+    for (i, v) in [3u32, 1, 5, 4, 100, 0].iter().enumerate() {
+        sem::r_set(&mut env.backend, i as u8, *v);
+    }
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // (100 + 3) * 4 = 412。
+    assert_eq!(r(&env, 5), 412);
+    assert_eq!(cc(&env), (false, false, false, false));
+    // 範囲外（subscript=0 < low=1）でも結果は書かれて trap。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x0a, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55]);
+    for (i, v) in [0u32, 1, 5, 4, 100, 0].iter().enumerate() {
+        sem::r_set(&mut env.backend, i as u8, *v);
+    }
+    env.pc = BASE;
+    let mut sys = Rec(Vec::new());
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(r(&env, 5), 400); // (100 + 0) * 4
+    assert_eq!(sys.0, [sem::scb::arith(sem::scb::at::SUBSCRIPT)]);
+    // trap なので復帰先は次の命令（命令終端）。
+    assert_eq!(env.pc, BASE + 7);
+}
+
+/// prober/probew: len バイトの先頭と末尾が読めるかを Z で返す
+/// （裸モデルでは写像の有無で近似）。
+#[test]
+fn probe_accessibility() {
+    let mut env = run_env(1);
+    // prober #0,#len,@#base。rb=#imm(1B)、rw=#imm(2B)、ab=@#(4B)。
+    let mut insn = vec![0x0c];
+    insn.extend_from_slice(&[0x8f, 0x00]); // mode #0
+    insn.extend_from_slice(&[0x8f, 0x10, 0x00]); // len #16
+    abs(BASE + 0x40, &mut insn); // base @#BASE+0x40
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // 写像内 → アクセス可（Z=0）。
+    assert_eq!(cc(&env), (false, false, false, false));
+    // 末尾が写像外 → Z=1（違反側）。
+    let mut env = run_env(1);
+    let mut insn = vec![0x0c];
+    insn.extend_from_slice(&[0x8f, 0x00]);
+    insn.extend_from_slice(&[0x8f, 0x00, 0x01]); // len #256 で末尾がページ外
+    abs(BASE + 0xff00, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
 #[test]
 fn bsb_jsb_rsb() {
     let mut env = run_env_stack();
@@ -4775,9 +4966,13 @@ fn vx11_model_insn_matrix() {
         assert!(dec(0x28, 8, f(n)), "{n}: movc3");
         assert!(dec(0x2c, 8, f(n)), "{n}: movc5");
     }
-    // 予約語（0x0a 未宣言）はどのモデルでも解けない。
+    // index（0x0a）は全モデルの直接実行集合にある。
     for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
-        assert!(!dec(0x0a, 8, f(n)), "{n}: 0x0a");
+        assert!(dec(0x0a, 8, f(n)), "{n}: index");
+    }
+    // 予約語（0xfc・顧客定義の xfc は語彙外）はどのモデルでも解けない。
+    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+        assert!(!dec(0xfc, 8, f(n)), "{n}: 0xfc");
     }
 }
 
@@ -4855,7 +5050,7 @@ fn vx11_hook_emulates_subset_insn() {
     assert_eq!(sys.trap_pc, BASE);
 
     let mut env = run_env(1);
-    put(&mut env, BASE, &[0x0a]); // どの集合にもない語は予約命令 fault
+    put(&mut env, BASE, &[0xfc]); // どの集合にもない語は予約命令 fault
     env.pc = BASE;
     let mut sys = Emul::default();
     run::step(&mut env, &mut sys, model_feats("ka660")).unwrap();
@@ -4973,4 +5168,57 @@ fn vx11_dv_hw_param() {
     run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
     assert_eq!(sys.trap, None);
     assert_eq!(cc(&env), (false, false, true, false));
+}
+
+// ---- VX12: VAX-11/780 マイクロコード時間 ----
+
+/// `Vax780::step` がデコード済み命令の消費 μc を見積もり、
+/// `VirtualTime` へ累積することを検査する。反復（中断可能）命令は
+/// 先頭ステップが立ち上げ費を、後続ステップが単位ぶんを足す。
+#[test]
+fn timing_step_and_accumulate() {
+    use polyisa_timing::{InstrEvent, TimingModel, VirtualTime};
+    use timing::{Rt, Vax780, insn_cycles};
+
+    let rt = |units: u64, first: bool| Rt {
+        taken: None,
+        units,
+        first,
+    };
+
+    // 3 命令列を実バイト列からデコードして時計へ流す。
+    let seq: &[&[u8]] = &[
+        &[0xd0, 0x50, 0x51],                      // addl2 r0,r1
+        &[0xc8, 0x8f, 0x01, 0, 0, 0, 0x50, 0x51], // xorl3 #1,r0,r1
+        &[0xd0, 0x50, 0x61],                      // movl r0,(r1)
+    ];
+    let mut m = Vax780::new();
+    let mut expect = 0u64;
+    for insn in seq {
+        let f = decode_insn(insn).unwrap();
+        expect += insn_cycles(&f, &rt(0, true));
+        assert!(m.step(&f, &rt(0, true)) > 0);
+    }
+    assert_eq!(m.time, expect);
+    assert_eq!(m.now(), VirtualTime(expect));
+
+    // 中断可能命令（movc3）: 先頭ステップ + 後続 9 ステップが
+    // 一括見積もり（units=10, first）に一致する。
+    // movc3 #10,r0,r1。
+    let f = decode_insn(&[0x28, 0x8f, 0x0a, 0x00, 0x50, 0x51]).unwrap();
+    let whole = insn_cycles(&f, &rt(10, true));
+    let mut m = Vax780::new();
+    m.step(&f, &rt(1, true));
+    for _ in 1..10 {
+        m.step(&f, &rt(1, false));
+    }
+    assert_eq!(m.time, whole);
+
+    // TimingModel 経路は ev.hint を計算済み μc として足す。
+    let mut m2 = Vax780::new();
+    m2.observe(&InstrEvent {
+        hint: 7,
+        ..InstrEvent::new(BASE, "alu")
+    });
+    assert_eq!(m2.now(), VirtualTime(7));
 }

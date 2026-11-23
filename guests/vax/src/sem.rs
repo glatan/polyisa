@@ -2243,6 +2243,31 @@ pub fn exec(
             cc_arith(b, quo as u128, v, false, Width::L);
             iv_trap(b)?;
         }
+        // index: indexout.wl = (indexin + subscript) * size。
+        // subscript が low..high の外なら結果と条件コードを書いた
+        // うえで添字範囲 trap（算術型 7）。加算・乗算のあふれは
+        // 通知せず下位 32 ビットを取る。N=indexout LSS 0・Z=等値・
+        // V=0・C=0。
+        // Ref: SPEC-VAX-ARM（index の項）.
+        Insn::Index => {
+            let s = eval(b, f, pos, 0)?;
+            let sub = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 1)?;
+            let low = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 2)?;
+            let high = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 3)?;
+            let size = read(b, &s, Width::L)? as u32;
+            let s = eval(b, f, pos, 4)?;
+            let indexin = read(b, &s, Width::L)? as u32;
+            let out = indexin.wrapping_add(sub as u32).wrapping_mul(size);
+            let d = eval(b, f, pos, 5)?;
+            write(b, &d, Width::L, u128::from(out))?;
+            cc_nzvc(b, (out as i32) < 0, out == 0, false, false);
+            if sub < low || sub > high {
+                return Err(trap(scb::arith(scb::at::SUBSCRIPT)));
+            }
+        }
         // 比較・テスト: cmp は N=op1<op2（真の符号付き比較。
         // 差の符号ではない）、Z=等値、V=0、C=op1 <u op2（借り）。
         // tst は 0 との比較で C=0。
@@ -2559,6 +2584,26 @@ pub fn exec(
             iv_trap(b)?;
         }
         Insn::Bpt => return Err(trap(scb::BPT)),
+        // prober/probew: mode.rb の下位 2 ビットと PSL の直前モード
+        // のうち小さい特権側で、base から len バイトの先頭と末尾が
+        // 読めるか（prober）/書けるか（probew）を調べる。結果は
+        // Z=1 が「アクセス不可」（BEQL で違反へ分岐する用法）、
+        // N=0・V=0・C 保存。この裸モデルにはページ保護がないので、
+        // 両端バイトがアドレス空間で読めるかで近似する（写像の許可
+        // 属性は読み書き一体とみなす）。モード値の上限検査
+        // （実機の TNV fault 経路）はモデルしない。
+        // Ref: SPEC-VAX-ARM（probe の項）.
+        // Gap: GAP-0080 — ページ保護なし近似の記録。
+        Insn::Prober | Insn::Probew => {
+            let s = eval(b, f, pos, 0)?;
+            let _mode = read(b, &s, Width::B)?;
+            let s = eval(b, f, pos, 1)?;
+            let len = read(b, &s, Width::W)? as u32;
+            let base = eval_a(b, f, pos, 2)?;
+            let last = base.wrapping_add(len.wrapping_sub(1));
+            let ok = len == 0 || (load(b, base, 1).is_ok() && load(b, last, 1).is_ok());
+            cc_nzvc(b, false, !ok, false, psl_flag(b, psl::C));
+        }
         // ---- キュー・文字列・マスク積み降ろし・CHM（VX7）----
         // insque: 絶対リンクの項目を先行項目の直後へ入れる。
         // (entry) <- (pred)、(entry+4) <- pred、((pred)+4) <- entry、
@@ -2767,6 +2812,43 @@ pub fn exec(
             return Err(trap(scb::CHMK + 4 * req));
         }
         // ---- 分岐・サブルーチン・手続呼出（VX8）----
+        // bcc 系: PSL の条件コードを評価して分岐。分岐命令は
+        // 条件コードを変えない。
+        // Ref: SPEC-VAX-ARM（分岐命令の節）.
+        Insn::Bneq
+        | Insn::Beql
+        | Insn::Bgtr
+        | Insn::Bleq
+        | Insn::Bgeq
+        | Insn::Blss
+        | Insn::Bgtru
+        | Insn::Blequ
+        | Insn::Bvc
+        | Insn::Bvs
+        | Insn::Bgequ
+        | Insn::Blssu => {
+            let n = psl_flag(b, psl::N);
+            let z = psl_flag(b, psl::Z);
+            let v = psl_flag(b, psl::V);
+            let c = psl_flag(b, psl::C);
+            let ok = match f.insn {
+                Insn::Bneq => !z,
+                Insn::Beql => z,
+                Insn::Bgtr => !(n | z),
+                Insn::Bleq => n | z,
+                Insn::Bgeq => !n,
+                Insn::Blss => n,
+                Insn::Bgtru => !(c | z),
+                Insn::Blequ => c | z,
+                Insn::Bvc => !v,
+                Insn::Bvs => v,
+                Insn::Bgequ => !c,
+                _ => c, // blssu
+            };
+            if ok {
+                branch(b, br_displ(f, 0));
+            }
+        }
         // brb/brw・jmp: 無条件転送。分岐変位は命令終端基準（実行時の
         // r15 は既に終端を指す）。条件コードは変えない。
         Insn::Brb | Insn::Brw => branch(b, br_displ(f, 0)),

@@ -255,6 +255,8 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | MEAS-UOPS-INFO | uops.info（Latency/Throughput/Port Usage。instructions.xml 2026-03 版） | Andreas Abel、Jan Reineke | 2026-03 | x86 のタイミング | ライセンス表示なし（引用要請のみ） | R,F | 計測値の事実を自前表現で記述。データの再配布なし |
 | MEAS-AGNER | Agner Fog の命令表（instruction_tables、2025-09-20 更新） | Agner Fog | 2025-09-20 | x86 のタイミング | © 1996–2025 Agner Fog（前文で確認。Public distribution and mirroring is not allowed） | R,F | 計測値の事実を自前表現で記述。表の再配布・ミラーなし |
 | MEAS-INSTLATX64 | InstLatx64 の CPUID ダンプ集（github.com/instlatx64/InstLatx64。実機ごとの CPUID の値の記録） | instlatx64 | commit 17be9a97 | x86（CPU モデルの識別情報） | LICENSE ファイルなし（リポジトリを確認。README は instlatx64.atw.hu のコピーと明記。公開データで利用条件の明示なし） | R,F | ベンダー・世代ごとの CPU モデルの CPUID などの識別情報の根拠。CPUID の値は事実データなので R,F 想定だが、利用条件の明示がないため R,F の範囲を超える用途は許可しない |
+| MEAS-VAX-USENET | Usenet net.unix への投稿「VAX instruction timings」（1983-09-28。VAX-11/780・11/750・11/730（FPA なし）の命令別実行時間 μs 表。投稿者注記どおり元 DEC 従業員経由の数値で精度は未保証） | Roger Bielefeld（rab@cdcvax.UUCP） | 1983-09-28 | vax（VAX-11/780 のタイミング） | ライセンス表示なし（公開 Usenet アーカイブ usenet.trashworldnews.com/?thread=125644 で確認） | R,F | 命令時間の事実値のアンカーとして自前表現（μc 換算の定数）で記述。表の再配布なし |
+| MEAS-VAX-EMERCLARK | A characterization of processor performance in the VAX-11/780（ISCA '84。μPC ヒストグラムによるマイクロコード実行時間の計測。EBOX マイクロサイクル 200 ns の根拠） | Joel S. Emer、Douglas W. Clark | 1984 | vax（VAX-11/780 のタイミング） | © ACM と推定（eecg.toronto.edu/~moshovos/ACA06/readings/emer-clark-VAX.pdf に所在） | R,F | マイクロサイクルの時間単位と構造の事実を自前表現で記述。本文・図表の複製なし |
 
 ### ツール
 
