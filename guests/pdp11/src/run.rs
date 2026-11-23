@@ -35,7 +35,8 @@ use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_sem::{Backend, ExceptionKind, GuestException};
 
 use crate::{
-    FEAT_FP11, Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, mmu, psw, reg, sem, specifier,
+    FEAT_FIS, FEAT_FP11, FETCH_NXM_INC, FetchNxmParam, FisKev11Param, Insn, RTI_TTRAP_IMM,
+    RtiTtrapParam, decode_model_ex, mmu, psw, reg, sem, specifier,
 };
 
 /// 例外をトラップ配送に写す。`vec` はベクタ（バイトアドレス）、
@@ -99,11 +100,18 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
     // 命令先頭の MMU 簿記: MMR2 ← 命令の仮想 PC・MMR1 ← 0・
     // MMR0<7>（IC）← 0。凍結中（MMR0<15:13> が立つ）は触らない。
     mmu::step_begin(&mut env.backend, pc);
+    // フェッチのバスエラーで PC が増分済みかはモデル差（付録 B
+    // 項目 28 —— inc は失敗した語の次を積む。現モデル集合は
+    // 全モデル inc）。
+    let nxm_inc = env.backend.param::<FetchNxmParam>() == FETCH_NXM_INC;
     // 命令語フェッチ。奇数アドレス・未写像はバスエラー経路に乗る
     // （奇数アドレスの可否は `odd_addr_trap` パラメータ）。
     let w0 = match sem::fetch_w(&mut env.backend, pc) {
         Ok(w) => w,
-        Err(InterpExit::Exception(e)) => return dispatch_err(env, sys, e, pc, pc),
+        Err(InterpExit::Exception(e)) => {
+            let stacked = if nxm_inc { pc.wrapping_add(2) } else { pc };
+            return dispatch_err(env, sys, e, stacked, pc);
+        }
         Err(InterpExit::Unimplemented(_)) => {
             return Err(Outcome::Unimplemented {
                 pc: u64::from(pc),
@@ -112,6 +120,22 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
         }
     };
     let Some(insn) = decode_model_ex(u128::from(w0), 16, false, feats) else {
+        // KEV11 を持つ LSI-11 では 075040-075377 が R<n> の指す語を
+        // 読んでから location 10 にトラップする疑似命令（読み出しが
+        // 失敗すれば location 4 —— 付録 B 項目 32・34）。
+        if feats & FEAT_FIS != 0
+            && (0o75040..=0o75377).contains(&w0)
+            && env.backend.param::<FisKev11Param>()
+        {
+            let a = sem::r_get(&env.backend, (w0 & 7) as u8);
+            match env.step(|b| sem::load_w(b, a)) {
+                Ok(_) => return deliver(env, sys, sem::tv::ILL, pc.wrapping_add(2)),
+                Err(InterpExit::Exception(e)) => {
+                    return dispatch_err(env, sys, e, pc, pc.wrapping_add(2));
+                }
+                Err(InterpExit::Unimplemented(_)) => {}
+            }
+        }
         // fp11 モデルでは 17xxxx の未割当語は FP 違法オペコード
         // （FEC=2）— FID で抑止されていなければ vector 244 へ。
         // trap の規則（積む PC は次の語）で配送し、抑止時は
@@ -142,7 +166,17 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
     for i in 1..(len / 2) as u16 {
         match sem::fetch_w(&mut env.backend, pc.wrapping_add(2 * i)) {
             Ok(w) => words.push(w),
-            Err(InterpExit::Exception(e)) => return dispatch_err(env, sys, e, pc, pc),
+            Err(InterpExit::Exception(e)) => {
+                // 拡張語フェッチの失敗も同じ規則 —— inc モデルは
+                // 失敗した語の次を積む（項目 28 の粒度は近似）。
+                // Gap: GAP-0086
+                let stacked = if nxm_inc {
+                    pc.wrapping_add(2 * (i + 1))
+                } else {
+                    pc
+                };
+                return dispatch_err(env, sys, e, stacked, pc);
+            }
             Err(InterpExit::Unimplemented(_)) => {
                 return Err(Outcome::Unimplemented {
                     pc: u64::from(pc),

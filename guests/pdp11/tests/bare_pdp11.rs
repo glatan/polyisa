@@ -79,8 +79,9 @@ fn insn_count() {
     // 二重 12 + 単一語 20 + 単一バイト 16 + JSR/RTS/SOB 3 + EIS/XOR 5
     // + FIS 4 + FP11 26 + CIS 52（L2D/L3D 2 + レジスタ形 25 +
     // in-line 形 25）+ 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
-    // （条件コード操作は nop + ccc/scc のマスク形として数える）。
-    assert_eq!(INSNS.len(), 168);
+    // + MAINT 1（条件コード操作は nop + ccc/scc のマスク形として
+    // 数える）。
+    assert_eq!(INSNS.len(), 169);
 }
 
 #[test]
@@ -115,9 +116,10 @@ fn cpu_models() {
         FEAT_EIS | FEAT_MMU | FEAT_ID_SPLIT | FEAT_SM | FEAT_DUAL_REGSET | FEAT_SPL
     );
     assert_eq!(f70 & (FEAT_MTPS | FEAT_FP11), 0);
-    // 11/03: MTPS/MFPS のみ。
+    // 11/03: MTPS/MFPS・MAINT・SOB/MARK・SXT（付録 B 項目 8・33 —
+    // LSI-11 系）。
     let f03 = model_feats("pdp11_03");
-    assert_eq!(f03, FEAT_MTPS);
+    assert_eq!(f03, FEAT_MTPS | FEAT_MAINT | FEAT_SOB_MARK | FEAT_SXT);
     // J-11: EIS・FP11 標準、CSM・TSTSET/WRTLCK を持つ。FIS は排他。
     let f73 = model_feats("pdp11_73");
     assert_ne!(
@@ -141,7 +143,7 @@ fn model_params_resolve() {
     let p03 = model_params("pdp11_03");
     assert!(!p03.odd_addr_trap);
     assert!(!p03.psw_mapped);
-    assert_eq!(p03.jmp_reg_trap, JMP_REG_TRAP_VEC004);
+    assert_eq!(p03.jmp_reg_trap, JMP_REG_TRAP_VEC010);
     let p70 = model_params("pdp11_70");
     assert!(p70.odd_addr_trap);
     assert!(p70.psw_mapped);
@@ -660,7 +662,11 @@ fn jmp_reg_trap_param_selects_vector() {
     // `jmp r0`（モード 0 の A アクセス）は jmp_reg_trap パラメータの
     // ベクタ — 付録 B 項目 5 のモデル差。
     let words = asm(Insn::Jmp, &[Spec::Reg(0)]);
-    for (model, vec) in [("pdp11_34", 0o004u16), ("pdp11_23", 0o010u16)] {
+    for (model, vec) in [
+        ("pdp11_34", 0o010u16),
+        ("pdp11_23", 0o010u16),
+        ("pdp11_70", 0o004u16),
+    ] {
         let mut env = env_at(model, 0o1000, &words);
         put16(&mut env, vec, 0o3200);
         step_m(&mut env, model).unwrap();
@@ -700,7 +706,9 @@ fn fetch_from_unmapped_is_bus_error() {
     step_m(&mut env, "pdp11_34").unwrap();
     assert_eq!(env.pc, 0o2600);
     let sp = sem::r_get(&env.backend, reg::SP as u8);
-    assert_eq!(get16(&env, sp), 0o50000); // fault — フェッチ点
+    // fetch_nxm=inc —— 増分済み PC（失敗した語の次）を積む
+    // （付録 B 項目 28）。
+    assert_eq!(get16(&env, sp), 0o50002);
 }
 
 #[test]
@@ -1526,7 +1534,11 @@ fn jmp_jsr_specifier_forms() {
     assert_eq!(env.pc, 0o3040);
     // jsr r0, r1 — モード 0 の A アクセスは jmp_reg_trap のベクタ。
     let words = asm_r(Insn::Jsr, 0, &[Spec::Reg(1)]);
-    for (model, vec) in [("pdp11_34", 0o004u16), ("pdp11_23", 0o010u16)] {
+    for (model, vec) in [
+        ("pdp11_34", 0o010u16),
+        ("pdp11_23", 0o010u16),
+        ("pdp11_70", 0o004u16),
+    ] {
         let mut env = env_at(model, 0o1000, &words);
         put16(&mut env, vec, 0o3200);
         step_m(&mut env, model).unwrap();
@@ -2267,19 +2279,18 @@ fn fis_mul_div_implicit_sp_scratch() {
     step_f(&mut env, feats).unwrap();
     assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
     assert_eq!(getf(&env, 0o2004), F2_0); // 2.0 × 1.0
-    // SP-2 が未写像 → fmul の push がバスエラー（vector 004）。配送
-    // の push は新 PSW（ユーザーモード）のスタック —— usp を
-    // 写像済みにしておく。
+    // SP-2 が未写像 → fmul の push がバスエラー（vector 004）。11/03
+    // は PSW モード桁を持たない（mode_enc=none —— 付録 B 項目 39）
+    // ので配送の push も同じ SP-2 を踏んで二重バスエラー → 実機は
+    // CPU 停止、裸モデルでは終端（Unimplemented）に畳まれる。
     let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fmul, 1)]);
     putf(&mut env, 0o2000, F2_0);
     putf(&mut env, 0o2004, F1_0);
     put16(&mut env, 0o004, 0o3000);
-    put16(&mut env, 0o006, 0o140000); // ユーザーモードの PSW
-    st_put(&mut env, USP, SP0);
     sem::r_set(&mut env.backend, 1, 0o2000);
     sem::r_set(&mut env.backend, reg::SP as u8, 0o20002); // SP-2 が未写像
-    step_f(&mut env, feats).unwrap();
-    assert_eq!(env.pc, 0o3000);
+    let r = step_f(&mut env, feats);
+    assert!(matches!(r, Err(Outcome::Unimplemented { .. })), "{r:?}");
     assert_eq!(getf(&env, 0o2004), F1_0); // A は演算前のまま
     // 同条件の fadd は SP を触らないので普通に実行できる。
     let mut env = env_at("pdp11_03", 0o1000, &[asm_f(Insn::Fadd, 1)]);
@@ -3204,7 +3215,7 @@ fn fp11_stack_operand() {
 // Ref: SPEC-PDP11-CIS.
 
 /// CIS を持つモデル（J-11 = KDJ11 系。cis は標準実装）。
-const CM: &str = "pdp11_73";
+const CM: &str = "pdp11_44";
 
 /// バイトを書く。
 fn putb(env: &mut BareEnv, a: u16, v: u8) {
@@ -4346,11 +4357,11 @@ fn mmu_registers_via_iop() {
 /// 相当）では 1065xx（MFPD）も違法。
 #[test]
 fn mfp_instructions_respect_feature_gates() {
-    // mmu 旗なし（pdp11_34 既定）: mfpi → vector 010。
-    let mut env = env_at("pdp11_34", 0o1000, &[0o006501]); // mfpi @r1
+    // mmu 旗なし（pdp11_04）: mfpi → vector 010。
+    let mut env = env_at("pdp11_04", 0o1000, &[0o006501]); // mfpi @r1
     put16(&mut env, 0o010, 0o2400);
     put16(&mut env, 0o012, 0);
-    step_m(&mut env, "pdp11_34").unwrap();
+    step_m(&mut env, "pdp11_04").unwrap();
     assert_eq!(env.pc, 0o2400);
     // id_split なしの mmu モデル（pdp11_60）: mfpd → vector 010。
     let mut env = env_at("pdp11_60", 0o1000, &[0o106501]); // mfpd @r1

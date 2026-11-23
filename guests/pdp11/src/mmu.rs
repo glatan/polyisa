@@ -42,8 +42,10 @@ use polyisa_sem::{Backend as _, StateRef, W16};
 
 use crate::sem::{self, tv};
 use crate::{
-    CpuState, DualRegsetParam, GprMappedParam, MMU_PA_OFF, MMU_PA_P18, MMU_PA_P22, MMU_PA_SEL22,
-    MmTrapParam, MmuPaParam, PswMappedParam, StackLimitParam, psw, reg,
+    CpuState, DualRegsetParam, GprMappedParam, MMR3_M22, MMR3_M22_DS, MMR3_NONE, MMU_PA_OFF,
+    MMU_PA_P18, MMU_PA_P22, MMU_PA_SEL22, MODE_ENC_F11, MODE_ENC_KSU, MODE_ENC_NONE, MmTrapParam,
+    Mmr0MaintParam, Mmr3Param, MmuPaParam, ModeEncParam, PAR_WIDTH_P12, ParWidthParam,
+    PdrExtraParam, PswMappedParam, STACK_LIMIT_REG, StackLimitParam, TDirectParam, psw, reg,
 };
 
 /// アドレス空間の選択子。I は命令空間（フェッチ・間接指定子の
@@ -217,10 +219,16 @@ fn eff_bits(b: &mut InterpBackend, pa: u8) -> u32 {
     }
 }
 
-/// MMR3 が存在するか（22 ビット系のみ。p18 は MMR3 を持たない —
-/// ARCH83 第9章・KDJ11-E UG）。
-fn has_mmr3(pa: u8) -> bool {
-    pa == MMU_PA_P22 || pa == MMU_PA_SEL22
+/// MMR3 の書き込み・読み出しに効く桁のマスク。`mmr3` パラメータが
+/// 表す実装範囲（付録 B 項目 48-50）: m22=<5:4>、m22_ds=+<2:0>、
+/// full=+<3>。
+fn mmr3_mask(k: u8) -> u16 {
+    match k {
+        MMR3_M22 => 0o60,
+        MMR3_M22_DS => 0o67,
+        MMR3_NONE => 0,
+        _ => 0o77,
+    }
 }
 
 /// I/O ページの物理先頭アドレス。再配置が効いていない間は搭載幅
@@ -327,10 +335,17 @@ pub fn reg_wb(b: &mut InterpBackend, n: u8, new_v: u16, old_v: u16) {
 /// 落ちているか（stack_limit モデルかつカーネルモードでのみ
 /// 判定）。
 pub fn stk_below(b: &mut InterpBackend) -> bool {
-    if !b.param::<StackLimitParam>() || cur_mode(b) != psw::KERNEL {
+    let sl = b.param::<StackLimitParam>();
+    if sl == crate::STACK_LIMIT_NONE || cur_mode(b) != psw::KERNEL {
         return false;
     }
-    let lim = sem::get16(b, stklim_ref());
+    // fixed は 0o400 固定の境界（F-11・J-11 —— KDJ11-E UG 1.2.1）、
+    // reg は 177774 の制限レジスタ +0o400。
+    let lim = if sl == STACK_LIMIT_REG {
+        sem::get16(b, stklim_ref())
+    } else {
+        0
+    };
     sem::r_get(b, reg::SP as u8) < lim.wrapping_add(0o400)
 }
 
@@ -360,7 +375,6 @@ pub fn rs_swap(b: &mut InterpBackend) {
 pub mod ops {
     use super::{InterpBackend, mmr_ref, mmr1_rec_raw, pend, stk_check};
     use crate::sem;
-    use crate::{MMU_PA_OFF, MmuPaParam};
     use polyisa_sem::Backend as _;
 
     /// 既定値の MMR1 記録を積む（MFPI/MFPD=0o366・MTPI/MTPD=0o26）。
@@ -378,13 +392,13 @@ pub mod ops {
         stk_check(b);
     }
 
-    /// トラップ配送の MMU 簿記。命令トラップ群（ILL/BPT/IOT/EMT/
-    /// TRAP = 010/014/020/030/034）以外は MMR2 ← ベクタ・MMR1 ← 0
-    /// （simh の trap_load_mmr2 規則 —— 配送側の書き込みは
-    /// MMR0<15:13> の凍結に掛からない）。
+    /// トラップ配送の MMU 簿記。MMR2 にベクタ読み出しを記録する
+    /// のは 11/45・11/70 だけ（付録 B 項目 51）—— 命令トラップ群
+    /// （ILL/BPT/IOT/EMT/TRAP = 010/014/020/030/034）はベクタでなく
+    /// 命令アドレスなので対象外（simh の trap_load_mmr2 規則）。
     pub fn trap_load(b: &mut InterpBackend, vec: u16) {
         use crate::sem::tv;
-        if b.param::<MmuPaParam>() == MMU_PA_OFF
+        if !b.param::<crate::Mmr2VecParam>()
             || matches!(vec, tv::ILL | tv::BPT | tv::IOT | tv::EMT | tv::TRAP)
         {
             return;
@@ -423,11 +437,21 @@ fn xlate(
     let page = va >> 13;
     let bn = (va >> 6) & 0o177;
     let ds = sp == Space::D && mmr_val(b, 3) & d_bit(mode) != 0;
-    // モード値 2（予約）で再配置を使うと nonresident abort
-    // （ARCH83 第9章「モード 2 は予約」の決定的表現）。
-    if mode == 2 {
-        return Err(abort(b, mode, ds, page, mmr0::NR));
-    }
+    // 予約モード値の扱いはモデル差（付録 B 項目 39）: 値 01 は
+    // スーパーバイザを持たないモデルで MM トラップ、値 10 は
+    // F-11 ではカーネル、他モデルでは MM トラップ。abort は
+    // vector 250 の fault で届ける —— 実機の「トラップ」との
+    // fault/trap 差は積む PC の近似として残す。
+    // Gap: GAP-0086
+    let enc = b.param::<ModeEncParam>();
+    let mode = match mode {
+        psw::SUPERVISOR if enc != MODE_ENC_KSU => {
+            return Err(abort(b, mode, ds, page, mmr0::NR));
+        }
+        2 if enc == MODE_ENC_F11 => psw::KERNEL,
+        2 => return Err(abort(b, mode, ds, page, mmr0::NR)),
+        _ => mode,
+    };
     let arr_mode = usize::from(if mode == psw::USER { 2 } else { mode });
     let idx = arr_mode * 16 + usize::from(ds) * 8 + usize::from(page);
     let par = sem::get16(b, par_ref(idx));
@@ -556,6 +580,13 @@ fn gpr_put(b: &mut InterpBackend, i: u16, v: u16) {
 /// 第 2 セットを交換する（`dual_regset` パラメータのモデルのみ —
 /// 無しモデルの PSW<11> は効かない）。
 pub fn psw_apply(b: &mut InterpBackend, nv: u16) {
+    // モード桁を持たないモデル（mode_enc=none）では PSW<15:12> は
+    // 0 固定 —— 直接書き込んでもモード切替は起きない。
+    let nv = if b.param::<ModeEncParam>() == MODE_ENC_NONE {
+        nv & !0o17_0000
+    } else {
+        nv
+    };
     let old = sem::psw_get(b);
     sem::psw_put(b, nv);
     let om = old >> psw::CUR_MOD & psw::MOD_MASK;
@@ -583,18 +614,51 @@ fn io_rd(b: &mut InterpBackend, off: u16) -> Option<u16> {
             return None;
         }
         return Some(if is_pdr {
-            sem::get16(b, pdr_ref(idx))
+            // PDR<0>・PDR<7> は 11/45・11/70 だけが実装する
+            // （付録 B 項目 44・45）—— 他モデルでは 0 を読む。
+            let mask = if b.param::<PdrExtraParam>() {
+                0o177777
+            } else {
+                0o177576
+            };
+            sem::get16(b, pdr_ref(idx)) & mask
         } else {
-            sem::get16(b, par_ref(idx))
+            // PAR<15:12> は 11/34・11/60 系では存在しない
+            // （付録 B 項目 46）。
+            let mask = if b.param::<ParWidthParam>() == PAR_WIDTH_P12 {
+                0o7777
+            } else {
+                0o177777
+            };
+            sem::get16(b, par_ref(idx)) & mask
         });
     }
     match off {
-        0o12516 if has_mmr3(pa_kind) => Some(mmr_val(b, 3)),
-        0o17572 if pa_kind != MMU_PA_OFF => Some(mmr_val(b, 0) & mmr0::RD),
+        0o12516 => {
+            let k = b.param::<Mmr3Param>();
+            if k == MMR3_NONE {
+                None
+            } else {
+                Some(mmr_val(b, 3) & mmr3_mask(k))
+            }
+        }
+        0o17572 if pa_kind != MMU_PA_OFF => Some(
+            // MMR0<8>（保守/宛先モード）は mmr0_maint モデルのみ
+            // 実装（付録 B 項目 37）。
+            mmr_val(b, 0)
+                & (mmr0::RD
+                    | if b.param::<Mmr0MaintParam>() {
+                        mmr0::MAINT
+                    } else {
+                        0
+                    }),
+        ),
         0o17574 if pa_kind != MMU_PA_OFF => Some(mmr_val(b, 1)),
         0o17576 if pa_kind != MMU_PA_OFF => Some(mmr_val(b, 2)),
         0o17700..=0o17717 if b.param::<GprMappedParam>() => Some(gpr_val(b, off & 0o17)),
-        0o17774 if b.param::<StackLimitParam>() => Some(sem::get16(b, stklim_ref())),
+        0o17774 if b.param::<StackLimitParam>() == STACK_LIMIT_REG => {
+            Some(sem::get16(b, stklim_ref()))
+        }
         0o17776 if b.param::<PswMappedParam>() => Some(sem::psw_get(b)),
         _ => None,
     }
@@ -610,20 +674,42 @@ fn io_wr(b: &mut InterpBackend, off: u16, v: u16) -> bool {
         }
         if is_pdr {
             // PDR は A/W（<7:6>）が書き込みで消える。PLF・ED・ACF は
-            // 書き込み値を取る。
-            sem::set16(b, pdr_ref(idx), v & pdr::WR);
+            // 書き込み値を取る。PDR<0> は pdr_extra モデルのみ
+            // （付録 B 項目 44）。
+            let mask = if b.param::<PdrExtraParam>() {
+                pdr::WR
+            } else {
+                pdr::WR & !0o1
+            };
+            sem::set16(b, pdr_ref(idx), v & mask);
         } else {
-            sem::set16(b, par_ref(idx), v);
+            // PAR<15:12> は 11/34・11/60 系では存在しない
+            // （付録 B 項目 46）。
+            let mask = if b.param::<ParWidthParam>() == PAR_WIDTH_P12 {
+                0o7777
+            } else {
+                0o177777
+            };
+            sem::set16(b, par_ref(idx), v & mask);
         }
         return true;
     }
     match off {
-        0o12516 if has_mmr3(pa_kind) => {
-            // MMR3 は <5:0> が書ける（UDS/SDS/KDS/CSM/M22E/BME）。
-            sem::set16(b, mmr_ref(3), v & 0o77);
+        0o12516 => {
+            // MMR3 の実装範囲は `mmr3` パラメータ（付録 B 項目
+            // 48-50）—— 未実装桁は書けず 0 を読む。
+            let k = b.param::<Mmr3Param>();
+            if k != MMR3_NONE {
+                sem::set16(b, mmr_ref(3), v & mmr3_mask(k));
+            }
         }
         0o17572 if pa_kind != MMU_PA_OFF => {
-            sem::set16(b, mmr_ref(0), v & mmr0::WR);
+            let mask = if b.param::<Mmr0MaintParam>() {
+                mmr0::WR
+            } else {
+                mmr0::WR & !mmr0::MAINT
+            };
+            sem::set16(b, mmr_ref(0), v & mask);
         }
         // MMR1・MMR2 は読み出し専用 —— 書き込みは無視される
         // （実機でも内容は CPU が管理する）。
@@ -631,7 +717,7 @@ fn io_wr(b: &mut InterpBackend, off: u16, v: u16) -> bool {
         0o17700..=0o17717 if b.param::<GprMappedParam>() => {
             gpr_put(b, off & 0o17, v);
         }
-        0o17774 if b.param::<StackLimitParam>() => {
+        0o17774 if b.param::<StackLimitParam>() == STACK_LIMIT_REG => {
             sem::set16(b, stklim_ref(), v & 0o177400);
         }
         0o17776 if b.param::<PswMappedParam>() => {
@@ -645,6 +731,14 @@ fn io_wr(b: &mut InterpBackend, off: u16, v: u16) -> bool {
                 (v & !(psw::PRI_MASK | 0o17_0000 | 1 << psw::RS))
                     | (cur & psw::PRI_MASK)
                     | ((cur | v) & (0o17_0000 | 1 << psw::RS))
+            };
+            // T 桁を直接参照で書けるのは t_direct モデルのみ
+            // （付録 B 項目 14 —— 他は RTI/トラップ経路の暗黙参照
+            // のみ）。
+            let nv = if b.param::<TDirectParam>() {
+                nv
+            } else {
+                (nv & !(1 << psw::T)) | (cur & 1 << psw::T)
             };
             psw_apply(b, nv);
         }
@@ -757,6 +851,15 @@ pub fn wr_b(b: &mut InterpBackend, a: u16, mode: u16, sp: Space, v: u8) -> Resul
 pub fn fetch(b: &mut InterpBackend, a: u16, mode: u16) -> Result<u16, InterpExit> {
     let pa = xlate(b, a, mode, Space::I, false)?;
     pa_rd_w(b, pa, FETCH)
+}
+
+/// mtps_map=mapped モデル（11/34）でユーザーモードの MTPS/MFPS が
+/// 踏む PSW 写像（177776）のアクセス —— ユーザーモード変換を
+/// 通し、abort なら vector 250 の fault を返す（付録 B 項目
+/// 40・41。`wr` は MTPS の書き込み側）。
+pub fn psw_io(b: &mut InterpBackend, wr: bool) -> Result<(), InterpExit> {
+    xlate(b, 0o177776, psw::USER, Space::D, wr)?;
+    Ok(())
 }
 
 /// データアクセスの属性（整列の規則は PDP-11 自身の奇数アドレス

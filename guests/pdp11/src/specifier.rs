@@ -384,6 +384,7 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Reset
         | Insn::Rtt
         | Insn::Mfpt
+        | Insn::Maint
         | Insn::Nop
         | Insn::Cfcc
         | Insn::Setf

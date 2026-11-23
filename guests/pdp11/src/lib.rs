@@ -169,6 +169,13 @@ pub struct CpuState {
     pub pendtrap: u16,
     /// 中断可能命令の途中状態（CIS。`PartialInsn`）。
     pub partial: PartialInsn,
+    /// `ea_fault_reg`=keep モデル用の「直近のオート増増減書き戻し」
+    /// 控え。0o177777 は「控えなし」、それ以外はレジスタ番号。
+    /// オペランドアクセスが fault したとき元値に戻す
+    /// （付録 B 項目 29・30 の実装 —— `wb_old` が元値）。
+    pub wb_reg: u16,
+    /// `wb_reg` に対応する書き戻し前の値。
+    pub wb_old: u16,
 }
 
 // 32 要素を越える配列（PAR/PDR）を持つため `Default` は手書きする
@@ -192,6 +199,8 @@ impl Default for CpuState {
             stklim: 0,
             pendtrap: 0,
             partial: PartialInsn::default(),
+            wb_reg: 0o177777,
+            wb_old: 0,
         }
     }
 }

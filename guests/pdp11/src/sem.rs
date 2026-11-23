@@ -56,9 +56,12 @@ use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
-    CpuState, FEAT_ID_SPLIT, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
-    OddAddrTrapParam, cis, mmu, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw,
-    reg,
+    CpuState, EA_FAULT_REG_KEEP, EaFaultRegParam, FEAT_ID_SPLIT, HALT_VEC_POWERUP, HALT_VEC_VEC004,
+    HaltVecParam, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MFP_SP2_USER, MODE_ENC_NONE,
+    MTPS_MAP_MAPPED, MfpSp2Param, MfptCodeParam, ModeEncParam, MtpsMapParam, OPR_SAME_REG_INC,
+    OddAddrTrapParam, OprSameRegParam, PC_STORED_PC2, PcStoredParam, SWAB_V_KEEP, SwabVParam,
+    WAIT_T_SEQ, WaitTParam, cis, mmu, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn,
+    psw, reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -168,9 +171,28 @@ pub(crate) fn mode_sp_ref(mode: u16) -> StateRef<W16> {
     }
 }
 
+/// MFPx/MTPx の %6 が指す前モード SP のモード値。前モード値 2
+/// （予約）は J-11 でユーザー、他モデルは不定 → カーネル枠に畳む
+/// 決定的選択（付録 B 項目 52）。
+fn sp_pm(b: &mut InterpBackend, pm: u16) -> u16 {
+    if pm == 2 && b.param::<MfpSp2Param>() == MFP_SP2_USER {
+        psw::USER
+    } else {
+        pm
+    }
+}
+
 /// 第 2 レジスタセット r_i′ の状態面（dual_regset モデル）。
 pub(crate) fn ralt_ref(i: u8) -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, ralt) + usize::from(i) * 2)
+}
+
+fn wb_reg_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, wb_reg))
+}
+
+fn wb_old_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, wb_old))
 }
 
 /// MMU 状態レジスタ MMR_i の値（mmu モデル。CSM は MMR3<3> が
@@ -368,6 +390,20 @@ pub fn eval_op(b: &mut InterpBackend, f: &Fetched, pc0: u16, i: usize) -> Result
         };
         return Err(fault(vec));
     }
+    // OPR %R,(R)+ / OPR %R,@(R)+（ソースと宛先が同じレジスタ）で
+    // R を +2 してからソースとして読むモデル —— 宛先のオート増が
+    // もう一度掛かるので R は計 +4 進む（付録 B 項目 1・2 の
+    // inc 側）。読み出しは eval 済みの Loc::Reg 経由で起きるので
+    // ここで進める。
+    if i == 0
+        && f.ops.len() == 2
+        && b.param::<OprSameRegParam>() == OPR_SAME_REG_INC
+        && let (Spec::Reg(r), Spec::AutoInc(d) | Spec::AutoIncDef(d)) = (&f.ops[0], &f.ops[1])
+        && r == d
+    {
+        let v = r_get(b, *r);
+        mmu::reg_wb(b, *r, v.wrapping_add(2), v);
+    }
     eval_op_w(b, f, pc0, i, ty.width)
 }
 
@@ -386,8 +422,15 @@ fn eval_op_w(
     let ea = ext_addr(f, pc0, i);
     let regs: [u16; 8] = core::array::from_fn(|j| r_get(b, j as u8));
     let (ea_v, wb) = specifier::eval(spec, w, ea, &regs);
+    // 直近のオート増減書き戻し控えを捨ててから今回分を記録する
+    // （keep モデルだけ意味を持つ —— 付録 B 項目 29・30）。
+    set16(b, wb_reg_ref(), 0o177777);
     if let Some((n, v)) = wb {
         mmu::reg_wb(b, n, v, regs[usize::from(n)]);
+        if b.param::<EaFaultRegParam>() == EA_FAULT_REG_KEEP {
+            set16(b, wb_reg_ref(), u16::from(n));
+            set16(b, wb_old_ref(), regs[usize::from(n)]);
+        }
     }
     Ok(match (ea_v, spec) {
         (Ea::Reg(n), _) => Loc::Reg(n),
@@ -398,19 +441,46 @@ fn eval_op_w(
         // GeteaW は isenable で読む）。
         (Ea::Addr(a), Spec::AutoIncDef(_) | Spec::AutoDecDef(_) | Spec::IndexDef { .. }) => {
             let mode = mmu::cur_mode(b);
-            Loc::Mem(load_w_as(b, a, mode, mmu::Space::I)?)
+            match load_w_as(b, a, mode, mmu::Space::I) {
+                Ok(v) => Loc::Mem(v),
+                Err(e) => {
+                    wb_rollback(b);
+                    return Err(e);
+                }
+            }
         }
         (Ea::Addr(a), _) => Loc::Mem(a),
     })
 }
 
+/// オペランドアクセスが fault したとき、控えのあるオート増減
+/// 書き戻しを元値へ戻す（`ea_fault_reg`=keep モデルのみ控えが
+/// ある —— 付録 B 項目 29・30「register is NOT incremented」側）。
+fn wb_rollback(b: &mut InterpBackend) {
+    let n = get16(b, wb_reg_ref());
+    if n != 0o177777 {
+        r_set(b, n as u8, get16(b, wb_old_ref()));
+        set16(b, wb_reg_ref(), 0o177777);
+    }
+}
+
 /// オペランドの読み出し（.r/.m）。byte はレジスタの下位バイト。
+/// r7 をモード 0 で読むときは `pc_stored` パラメータ —— pc2 の
+/// モデルは OPR+2（実行中の r7=命令終端から 2 戻る）を読む
+/// （付録 B 項目 3）。メモリアクセスの失敗は `wb_rollback`。
 pub fn read(b: &mut InterpBackend, loc: &Loc, w: Width) -> Result<u16, InterpExit> {
     Ok(match (*loc, w) {
         (Loc::Reg(n), Width::B) => r_get(b, n) & 0xff,
-        (Loc::Reg(n), _) => r_get(b, n),
-        (Loc::Mem(a), Width::B) => u16::from(load_b(b, a)?),
-        (Loc::Mem(a), _) => load_w(b, a)?,
+        (Loc::Reg(n), _) => {
+            let v = r_get(b, n);
+            if n == reg::PC as u8 && b.param::<PcStoredParam>() == PC_STORED_PC2 {
+                v.wrapping_sub(2)
+            } else {
+                v
+            }
+        }
+        (Loc::Mem(a), Width::B) => u16::from(load_b(b, a).inspect_err(|_| wb_rollback(b))?),
+        (Loc::Mem(a), _) => load_w(b, a).inspect_err(|_| wb_rollback(b))?,
         (Loc::Imm { v, .. }, Width::B) => v & 0xff,
         (Loc::Imm { v, .. }, _) => v,
     })
@@ -419,16 +489,19 @@ pub fn read(b: &mut InterpBackend, loc: &Loc, w: Width) -> Result<u16, InterpExi
 /// オペランドへの書き込み（.w/.m）。byte→レジスタは符号拡張
 /// （モード 0 の書き込み規則）。即値への書き込みは建築上
 /// UNPREDICTABLE — 即値語の位置への書き込みとして決定的に
-/// 振る舞う（VAX の Loc::Val と同じ選択）。
+/// 振る舞う（VAX の Loc::Val と同じ選択）。メモリアクセスの
+/// 失敗は `wb_rollback`。
 // Ref: SPEC-PDP11-ARCH83（第5章）.
 pub fn write(b: &mut InterpBackend, loc: &Loc, w: Width, v: u16) -> Result<(), InterpExit> {
     match (*loc, w) {
         (Loc::Reg(n), Width::B) => r_set(b, n, v as u8 as i8 as u16),
         (Loc::Reg(n), _) => r_set(b, n, v),
-        (Loc::Mem(a), Width::B) => store_b(b, a, v as u8)?,
-        (Loc::Mem(a), _) => store_w(b, a, v)?,
-        (Loc::Imm { addr, .. }, Width::B) => store_b(b, addr, v as u8)?,
-        (Loc::Imm { addr, .. }, _) => store_w(b, addr, v)?,
+        (Loc::Mem(a), Width::B) => store_b(b, a, v as u8).inspect_err(|_| wb_rollback(b))?,
+        (Loc::Mem(a), _) => store_w(b, a, v).inspect_err(|_| wb_rollback(b))?,
+        (Loc::Imm { addr, .. }, Width::B) => {
+            store_b(b, addr, v as u8).inspect_err(|_| wb_rollback(b))?
+        }
+        (Loc::Imm { addr, .. }, _) => store_w(b, addr, v).inspect_err(|_| wb_rollback(b))?,
     }
     Ok(())
 }
@@ -1522,7 +1595,13 @@ pub fn deliver(b: &mut InterpBackend, vec: u16, stacked: u16) -> Result<(), Inte
     let new_pc = mmu::rd_w(b, vec, psw::KERNEL, mmu::Space::D)?;
     let new_psw = mmu::rd_w(b, vec.wrapping_add(2), psw::KERNEL, mmu::Space::D)?;
     let old_mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
-    let new_mode = new_psw >> psw::CUR_MOD & psw::MOD_MASK;
+    // モード桁を持たないモデル（mode_enc=none）ではベクタ PSW の
+    // モード値も 0 に畳む —— モード切替自体が起きない。
+    let new_mode = if b.param::<ModeEncParam>() == MODE_ENC_NONE {
+        psw::KERNEL
+    } else {
+        new_psw >> psw::CUR_MOD & psw::MOD_MASK
+    };
     set16(b, mode_sp_ref(old_mode), r_get(b, reg::SP as u8));
     r_set(b, reg::SP as u8, get16(b, mode_sp_ref(new_mode)));
     // -(SP) ← PSW、-(SP) ← PC —— 新モードのデータ空間に積む
@@ -1538,6 +1617,11 @@ pub fn deliver(b: &mut InterpBackend, vec: u16, stacked: u16) -> Result<(), Inte
     // prev モードには旧モードを入れる（ベクタの PSW<13:12> は
     // 捨てる —— ARCH83 第8章・simh の PM 挿入規則）。
     let merged = (new_psw & !(psw::MOD_MASK << psw::PRV_MOD)) | old_mode << psw::PRV_MOD;
+    let merged = if b.param::<ModeEncParam>() == MODE_ENC_NONE {
+        merged & !0o17_0000
+    } else {
+        merged
+    };
     psw_put(b, merged);
     if b.param::<crate::DualRegsetParam>() && (old_psw ^ merged) >> psw::RS & 1 != 0 {
         mmu::rs_swap(b);
@@ -1696,7 +1780,11 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             write(b, &d, Width::W, r)?;
             psw_flag_set(b, psw::N, r & 0x80 != 0);
             psw_flag_set(b, psw::Z, r & 0xff == 0);
-            psw_flag_set(b, psw::V, false);
+            // V: ほとんどのモデルは 0 に消す。11/15・11/20 だけ保存
+            // （付録 B 項目 6 —— 現モデル集合は全て clear）。
+            if b.param::<SwabVParam>() != SWAB_V_KEEP {
+                psw_flag_set(b, psw::V, false);
+            }
             psw_flag_set(b, psw::C, false);
         }
         // 符号拡張: N が立っていれば −1、消えていれば 0 を書く。
@@ -1997,14 +2085,24 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             let s = eval_op(b, f, pc0, 0)?;
             let v = read(b, &s, Width::B)? & 0xff;
             let p = psw_get(b);
-            psw_put(
-                b,
-                if p >> psw::CUR_MOD & psw::MOD_MASK == psw::KERNEL {
-                    p & !(0xff & !(1 << psw::T)) | v & !(1 << psw::T)
-                } else {
-                    p & !0xf | v & 0xf
-                },
-            );
+            let mode = p >> psw::CUR_MOD & psw::MOD_MASK;
+            if b.param::<MtpsMapParam>() == MTPS_MAP_MAPPED && mode == psw::USER {
+                // ユーザーモードの MTPS は PSW 写像（177776）経由の
+                // バイト書き込み —— メモリ管理トラップを起こし得る。
+                // 成立すれば PS<7:5>+<3:0> に効く（付録 B 項目 40。
+                // 11/34 のみ）。
+                mmu::psw_io(b, true)?;
+                psw_put(b, p & !0o357 | v & 0o357);
+            } else {
+                psw_put(
+                    b,
+                    if mode == psw::KERNEL {
+                        p & !(0xff & !(1 << psw::T)) | v & !(1 << psw::T)
+                    } else {
+                        p & !0xf | v & 0xf
+                    },
+                );
+            }
         }
         // MFPI/MFPD: 前モード（PSW<13:12>）の空間から dst を読んで
         // 現スタックに -(SP) で積む。MFPI は前モード I 空間、MFPD は
@@ -2025,7 +2123,11 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             let v = match d {
                 Loc::Reg(n) => {
                     if n == reg::SP as u8 && cm != pm {
-                        get16(b, mode_sp_ref(pm))
+                        // 前モード値 2（予約）は J-11 でユーザー
+                        // スタック、他モデルは不定 → カーネル枠
+                        // （付録 B 項目 52）。
+                        let p = sp_pm(b, pm);
+                        get16(b, mode_sp_ref(p))
                     } else {
                         r_get(b, n)
                     }
@@ -2068,7 +2170,8 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             match d {
                 Loc::Reg(n) => {
                     if n == reg::SP as u8 && cm != pm {
-                        set16(b, mode_sp_ref(pm), v);
+                        let p = sp_pm(b, pm);
+                        set16(b, mode_sp_ref(p), v);
                     } else {
                         r_set(b, n, v);
                     }
@@ -2094,6 +2197,11 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // 規則が担う）。
         Insn::Mfps => {
             let d = eval_op(b, f, pc0, 0)?;
+            // mtps_map=mapped モデルのユーザーモード MFPS は PSW
+            // 写像経由 —— MM トラップを起こし得る（付録 B 項目 41）。
+            if b.param::<MtpsMapParam>() == MTPS_MAP_MAPPED && mmu::cur_mode(b) == psw::USER {
+                mmu::psw_io(b, false)?;
+            }
             let v = psw_get(b) & 0xff;
             write(b, &d, Width::B, v)?;
             cc_mov(b, v, Width::B);
@@ -2187,13 +2295,32 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // 割込みは裸実行で発生しない。
         Insn::Halt => {
             if psw_get(b) >> psw::CUR_MOD & psw::MOD_MASK != psw::KERNEL {
-                return Err(trap(tv::BUS));
+                // 非カーネルの HALT はモデルでトラップ先が分かれる
+                // （付録 B 項目 43）。powerup（T-11）は起動ベクタを
+                // 持たない裸モデルでは終端に畳む。
+                // Gap: GAP-0086
+                return match b.param::<HaltVecParam>() {
+                    HALT_VEC_VEC004 => Err(trap(tv::BUS)),
+                    HALT_VEC_POWERUP => Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
+                    _ => Err(trap(tv::ILL)),
+                };
             }
             return Err(InterpExit::Unimplemented(format!("{:?}", f.insn)));
         }
         Insn::Wait => {
+            // WAIT は割込み待ち —— 裸実行で割込みは来ないので止まる
+            // 以外ない。ただし wait_t=seq のモデルで T が立つと
+            // 命令として抜けて trace trap へ進む（付録 B 項目 13）。
+            if b.param::<WaitTParam>() == WAIT_T_SEQ && psw_flag(b, psw::T) {
+                return Ok(());
+            }
             return Err(InterpExit::Unimplemented(format!("{:?}", f.insn)));
         }
+        // LSI-11 の保守命令 00021x（付録 B 項目 33）。マイクロコード
+        // 内部の診断動作で建築状態への効果は正本に未規定 —— NOP と
+        // する決定的近似。
+        // Gap: GAP-0086
+        Insn::Maint => {}
         // CIS（PD11 —— 076nnn。記述子形と in-line 形の文字列・
         // 数値・パック文字列命令）。中断可能な命令は cis.rs 側で
         // 記述子の進行を書き戻して命令先頭へ再入する。

@@ -59,6 +59,11 @@ pub fn build_model() -> polyisa_isadl::Model {
     // - `spl`: SPL（割込み優先度 PSW<7:5> の設定）。
     // - `csm`: CSM（スーパーバイザモード呼出。sm を含む）。
     // - `tstset_wrtlck`: TSTSET/WRTLCK（読み書き不可分のチェック）。
+    // - `sob_mark`: SOB・MARK（付録 B 項目 8 —— 11/04・11/05・11/10・
+    //   11/15・11/20 は持たない）。
+    // - `sxt`: SXT（付録 B 項目 8 —— 同上のモデルが持たない）。
+    // - `maint`: 保守命令 000210-000217（付録 B 項目 33 —— LSI-11 系
+    //   だけが予約でなく実行する）。
     // Ref: SPEC-PDP11-ARCH83（第5章・付録 B・付録 C）,
     // SPEC-PDP11-LSI11, SPEC-PDP11-J11.
     for (name, implies, conflicts) in [
@@ -75,7 +80,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("spl", &[][..], &[][..]),
         ("csm", &["sm"][..], &[][..]),
         ("tstset_wrtlck", &[][..], &[][..]),
-    ] as [(&str, &[&str], &[&str]); 13] {
+        ("sob_mark", &[][..], &[][..]),
+        ("sxt", &[][..], &[][..]),
+        ("maint", &[][..], &[][..]),
+    ] as [(&str, &[&str], &[&str]); 16] {
         m.features.push(Feature {
             name: name.to_string(),
             implies: implies.iter().map(|s| s.to_string()).collect(),
@@ -83,8 +91,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         });
     }
 
-    // 挙動パラメータ（付録 B の項目から。棚卸しと全項目の写しは
-    // PD13 で行い、ここでは実装済み命令が要する 5 件を宣言する）。
+    // 挙動パラメータ。付録 B のファミリ差分表（項目 1-52）で可観測な
+    // 差分はここか機能旗へ写す（棚卸しの全項目対応は docs/gaps.md
+    // GAP-0086 に記録。バスサイクル・割込み受理・RESET/停電系の
+    // 項目は裸実行モデルでは不可観測なので対象外として残す）。
     // Ref: SPEC-PDP11-ARCH83（付録 B）.
     m.param(
         "odd_addr_trap",
@@ -155,10 +165,12 @@ pub fn build_model() -> polyisa_isadl::Model {
     );
     m.param(
         "stack_limit",
-        ParamKind::Bool,
-        "false",
-        "スタック制限レジスタ（177774）とカーネルスタックの \
-         イエローゾーン検査を持つか（11/45・11/60・11/70 系）",
+        ParamKind::Enum(vec!["none".to_string(), "reg".to_string(), "fixed".to_string()]),
+        "none",
+        "カーネルスタックの越境検査の形（付録 B 項目 20）。reg は \
+         制限レジスタ 177774 を持つ（11/34・11/44・11/45・11/60・\
+         11/70）、fixed は 0o400 固定境界（F-11・J-11 —— KDJ11-E \
+         UG 1.2.1）、none は検査なし",
     );
     m.param(
         "dual_regset",
@@ -169,31 +181,224 @@ pub fn build_model() -> polyisa_isadl::Model {
          RTI・PSW の I/O ページ書き込み・トラップ配送での \
          セット切替 —— を実行時の意味論が読む側",
     );
+    // PD13 —— 付録 B 棚卸しで確定した差分パラメータ。
+    // Ref: SPEC-PDP11-ARCH83（付録 B 各項目）.
+    m.param(
+        "opr_same_reg",
+        ParamKind::Enum(vec!["inc".to_string(), "init".to_string()]),
+        "init",
+        "OPR %R,(R)+ / OPR %R,@(R)+（ソースと宛先が同じレジスタ）で \
+         R をソース読み出しの前に +2 するか。inc は F-11・11/60・\
+         J-11・T-11（と 11/15・11/20・11/35・11/40）、init は \
+         それ以外（付録 B 項目 1・2）",
+    );
+    m.param(
+        "pc_stored",
+        ParamKind::Enum(vec!["pc2".to_string(), "pc4".to_string()]),
+        "pc2",
+        "r7 をソースオペランドとして書き出すときの値。pc4 は \
+         OPR+4（命令の次の語 —— F-11・11/60・J-11・T-11・11/15・\
+         11/20・11/35・11/40）、pc2 は OPR+2（付録 B 項目 3）",
+    );
+    m.param(
+        "jmp_reginc",
+        ParamKind::Enum(vec!["inc".to_string(), "init".to_string()]),
+        "init",
+        "JMP/JSR (R)+・@(R)+ が増分後の R を使うか。inc は \
+         11/05・11/10・11/15・11/20 だけ（付録 B 項目 4 —— \
+         現モデル集合では全モデル init）",
+    );
+    m.param(
+        "swab_v",
+        ParamKind::Enum(vec!["clear".to_string(), "keep".to_string()]),
+        "clear",
+        "SWAB の V 桁。clear は V=0（全現モデル）、keep は V を変えない \
+         （11/15・11/20 のみ —— 付録 B 項目 6）",
+    );
+    m.param(
+        "sp_buserr",
+        ParamKind::Enum(vec![
+            "halt".to_string(),
+            "fatal".to_string(),
+            "notrap".to_string(),
+        ]),
+        "halt",
+        "SP が奇数・存在しないアドレスを指したバスエラーの帰結（付録 B \
+         項目 15）。halt=CPU 停止（UNIBUS 系と LSI-11）、fatal=fatal \
+         trap（新スタックを 0/2 番地から取る）、notrap=T-11（バス \
+         エラー自体を持たない）。裸モデルでは halt/fatal とも終端に \
+         畳む近似 —— GAP-0086",
+    );
+    m.param(
+        "t_direct",
+        ParamKind::Bool,
+        "false",
+        "PSW への直接参照が T 桁を書けるか（付録 B 項目 14）。true は \
+         11/04（と 11/05・11/10・11/15・11/20）だけ —— 他モデルは \
+         トラップ経路の暗黙参照だけが T を変える",
+    );
+    m.param(
+        "fetch_nxm",
+        ParamKind::Enum(vec!["inc".to_string(), "same".to_string()]),
+        "inc",
+        "存在しないメモリからの命令フェッチでバスエラーになったとき \
+         PC が増分済みか（付録 B 項目 28）。same は 11/35・11/40 \
+         （と VAX）だけ —— 11/60・T-11 は表の該当桁が空欄で inc に \
+         寄せる（GAP-0086）",
+    );
+    m.param(
+        "ea_fault_reg",
+        ParamKind::Enum(vec!["inc".to_string(), "keep".to_string()]),
+        "inc",
+        "モード 2 オペランド参照の NXM・奇数値バスエラーで増分後の \
+         R が残るか（付録 B 項目 29・30）。keep は 11/44・11/04・\
+         11/34（奇数値では 11/05・11/10・11/15・11/20 も keep —— \
+         現モデル外）。11/60 は表が空欄で inc に寄せる（GAP-0086）",
+    );
+    m.param(
+        "mode_enc",
+        ParamKind::Enum(vec![
+            "none".to_string(),
+            "f11".to_string(),
+            "ku".to_string(),
+            "ksu".to_string(),
+        ]),
+        "none",
+        "PSW<15:12> のモード集合と予約値の扱い（付録 B 項目 39）。\
+         none=モード桁を持たない（11/03・11/04・T-11）、f11=値 01 が \
+         トラップ・値 10 がカーネル（F-11）、ku=値 01/10 がトラップ \
+         （11/34・11/60 —— 60 は表が空欄で ku に寄せる）、ksu=値 10 \
+         がトラップ・01 はスーパーバイザ（11/44・11/70・J-11）",
+    );
+    m.param(
+        "mmr0_maint",
+        ParamKind::Bool,
+        "false",
+        "MMR0<8>（保守/宛先モード桁）を実装するか（付録 B 項目 37）。\
+         11/34・11/44・11/45・11/60・11/70 だけが持ち、F-11・J-11 は \
+         桁が存在しない（読み出し 0・書き込み無視）",
+    );
+    m.param(
+        "mtps_map",
+        ParamKind::Enum(vec!["direct".to_string(), "mapped".to_string()]),
+        "direct",
+        "ユーザーモードの MTPS/MFPS が PSW の 177776 写像経由で \
+         メモリ管理トラップを起こすか（付録 B 項目 40・41）。mapped は \
+         11/34 だけ —— ユーザーモードで PS<7:5>+<3:0> を書く",
+    );
+    m.param(
+        "halt_vec",
+        ParamKind::Enum(vec![
+            "vec004".to_string(),
+            "vec010".to_string(),
+            "powerup".to_string(),
+        ]),
+        "vec004",
+        "カーネル以外の HALT の帰結（付録 B 項目 43）。vec004=location \
+         4（11/44・11/45・11/70・J-11）、vec010=location 10（F-11・\
+         11/34・11/60）、powerup=T-11（PS←340・PC←起動ベクタ —— \
+         起動ベクタを持たない裸モデルでは終端に畳む。GAP-0086）",
+    );
+    m.param(
+        "pdr_extra",
+        ParamKind::Bool,
+        "false",
+        "PDR<0>（副長フィールド）と PDR<7>（アクセス済み桁）を実装する \
+         か（付録 B 項目 44・45）。11/45・11/70 だけが持つ",
+    );
+    m.param(
+        "par_width",
+        ParamKind::Enum(vec!["p16".to_string(), "p12".to_string()]),
+        "p16",
+        "PAR の実装桁数（付録 B 項目 46）。p16 は全桁（F-11・11/44・\
+         11/70・J-11）、p12 は <11:0> のみ（11/34・11/35・11/40・\
+         11/45・11/60）",
+    );
+    m.param(
+        "mmr2_vec",
+        ParamKind::Bool,
+        "false",
+        "トラップ/割込みのベクタ読み出しを MMR2 に記録するか（付録 B \
+         項目 51）。11/45・11/70 だけが追跡し、他モデルは命令 PC のみ",
+    );
+    m.param(
+        "mfp_sp2",
+        ParamKind::Enum(vec!["unpred".to_string(), "user".to_string()]),
+        "unpred",
+        "MFPI/MFPD・MTPI/MTPD の %6（前モード=10 のときどの SP を \
+         選ぶか —— 付録 B 項目 52）。J-11 はユーザースタック、他 \
+         モデルは不定 → カーネル枠への決定的畳み",
+    );
+    m.param(
+        "wait_t",
+        ParamKind::Enum(vec!["seq".to_string(), "hold".to_string()]),
+        "seq",
+        "T ビットが立っている間の WAIT（付録 B 項目 13）。seq は \
+         WAIT が命令として抜けて trace trap へ進む、hold は T が \
+         あっても WAIT から出ない（LSI-11・11/45・11/70）",
+    );
+    m.param(
+        "fis_kev11",
+        ParamKind::Bool,
+        "false",
+        "KEV11 の 075040-075377 が R<n> 経由の読み出しを行ってから \
+         location 10 にトラップするか（付録 B 項目 32・34。LSI-11+\
+         KEV11 だけ —— 他モデルは即 location 10）",
+    );
+    m.param(
+        "mmr3",
+        ParamKind::Enum(vec![
+            "none".to_string(),
+            "m22".to_string(),
+            "m22_ds".to_string(),
+            "full".to_string(),
+        ]),
+        "none",
+        "MMR3 の実装範囲（付録 B 項目 48-50）。m22=<5:4> のみ（F-11）、\
+         m22_ds=さらに <2:0> の D 空間許可（11/70）、full=さらに <3> \
+         の CSM 許可（11/44・J-11）。11/34・11/60 は MMR3 を持たない",
+    );
 
     // CPU モデル。版の範囲は 11/03（KD11-F＝LSI-11 チップ）から
     // J-11 まで。オプション搭載（11/03 の KEV11、F-11 系の
     // KEF11/FPF11、11/44 の KE44-A CIS、11/70 の FP11-C 等）は
-    // 標準機能に含めず `--cpu` の +機能 で足す。モデルごとの機能
-    // 集合とパラメータ値はここでは計画段階の叩き台で、PD13 が
-    // ARCH83 付録 B と各モデルの正本で照合して確定する。
+    // 標準機能に含めず `--cpu` の +機能 で足す。機能集合と
+    // パラメータ値は PD13 で ARCH83 付録 B のファミリ差分表と
+    // J-11/LSI-11 の各 UG に照合して確定した（GAP-0086 の棚卸し表
+    // に全項目の対応を記録）。
     // - pdp11_03: LSI-11（KD11-F）。EIS/FIS は KEV11 オプション。
-    // - pdp11_04・pdp11_34・pdp11_60: MMU/EIS はオプション。
-    // - pdp11_44: EIS・MMU（分離 I/D 付き）標準。CIS は KE44-A
-    //   オプション。
+    //   保守命令 00021x を持つ。モード桁・MMU・奇数アドレス
+    //   トラップなし。
+    // - pdp11_04: 素の KD11-D。SOB/MARK/SXT を持たず RTT は異なる
+    //   動作（GAP-0086）。PSW は 177776 に写像され T 桁も直接
+    //   書ける。MMU なし。
+    // - pdp11_34: 2 モード MMU（18 ビット）・MTPS/MFPS・PSW 写像
+    //   あり（付録 B 項目 18）。EIS はオプション。
+    // - pdp11_44: EIS・3 モード 22 ビット MMU（分離 I/D 付き）・
+    //   SPL・MFPT・CSM 標準。MTPS/MFPS・PSW 写像は 177776 直付け
+    //   のみ（項目 18）。宣言は KE44-A CISP 装着形を表す（CIS は
+    //   オプション —— 未装着形の宣言はモデルを分けるほどの差が
+    //   なく GAP-0086 に記す）。
+    // - pdp11_60: EIS・MMU・FP11-E 標準（項目 8 —— 「F-floating
+    //   instructions standard」）。
     // - pdp11_70: EIS・MMU・分離 I/D・スーパーバイザ・第2レジスタ
-    //   セット・SPL 標準。FP11-C はオプション。
-    // - pdp11_23/24: F-11（KDF11-A/-B）。MMU 標準、EIS/FIS/FP11/
-    //   CIS はオプション。
-    // - pdp11_73/83/93: J-11（KDJ11-A/-B/-E）。EIS・FPJ11・CIS
-    //   標準（J-11 は CIS をマイクロコードで実装する）。
-    // - t11: T-11（FALCON。付録 B に列がある。一次資料が台帳に
-    //   ないため機能集合の確定は PD13）。
+    //   セット・SPL・スタック制限・MM トラップ・PDR<0>/<7> 標準。
+    //   FP11-C はオプション。
+    // - pdp11_23/24: F-11（KDF11-A/-B）。MMU（18 ビット系）・
+    //   MTPS/MFPS・MFPT・PSW 写像標準、EIS/FIS/FP11/CIS は
+    //   オプション。11/24 は MMR3<4> で 22 ビットを選べ
+    //   TSTSET/WRTLCK を持つ。
+    // - pdp11_73/83/93: J-11（KDJ11-A/-B/-E）。11/70 の全命令＋
+    //   EIS・FPJ11・CSM・TSTSET/WRTLCK・MFPT・SPL・3 モード
+    //   22 ビット MMU・分離 I/D 標準（KDJ11-E UG 1.2 —— CIS は
+    //   J-11 にない）。
+    // - t11: T-11（FALCON）。基本命令＋MTPS/MFPS・MFPT。バス
+    //   エラー・モード・MMU を持たない（付録 B 各脚注）。
     // Ref: SPEC-PDP11-ARCH83（付録 B）, SPEC-PDP11-LSI11,
     // SPEC-PDP11-HANDBOOK, SPEC-PDP11-J11.
     let j11: &[&str] = &[
         "eis",
         "fp11",
-        "cis",
         "mmu",
         "id_split",
         "sm",
@@ -203,16 +408,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         "spl",
         "csm",
         "tstset_wrtlck",
+        "sob_mark",
+        "sxt",
     ];
     for (name, parent, add, params) in [
         (
             "pdp11_03",
             "",
-            &["mtps"][..],
+            &["mtps", "maint", "sob_mark", "sxt"][..],
             &[
                 ("odd_addr_trap", "false"),
                 ("psw_mapped", "false"),
-                ("jmp_reg_trap", "vec004"),
+                ("jmp_reg_trap", "vec010"),
+                ("wait_t", "hold"),
+                ("fis_kev11", "true"),
+                ("halt_vec", "vec010"),
             ][..],
         ),
         (
@@ -220,66 +430,109 @@ pub fn build_model() -> polyisa_isadl::Model {
             "",
             &[][..],
             &[
-                ("odd_addr_trap", "false"),
-                ("jmp_reg_trap", "vec004"),
-                ("gpr_mapped", "true"),
+                ("jmp_reg_trap", "vec010"),
+                ("t_direct", "true"),
+                ("ea_fault_reg", "keep"),
+                ("halt_vec", "vec010"),
             ][..],
         ),
         (
             "pdp11_34",
             "",
-            &[][..],
+            &["mmu", "mtps", "sob_mark", "sxt"][..],
             &[
-                ("jmp_reg_trap", "vec004"),
+                ("jmp_reg_trap", "vec010"),
                 ("mmu_pa", "p18"),
-                ("gpr_mapped", "true"),
+                ("mode_enc", "ku"),
+                ("mtps_map", "mapped"),
+                ("stack_limit", "reg"),
+                ("ea_fault_reg", "keep"),
+                ("mmr0_maint", "true"),
+                ("par_width", "p12"),
+                ("halt_vec", "vec010"),
             ][..],
         ),
         (
             "pdp11_44",
             "",
-            &["eis", "mmu", "id_split", "spl", "mfpt"][..],
+            &[
+                "eis", "mmu", "id_split", "sm", "csm", "spl", "mfpt", "cis",
+                "sob_mark", "sxt",
+            ][..],
             &[
                 ("jmp_reg_trap", "vec004"),
                 ("mfpt_code", "1"),
                 ("mmu_pa", "sel22"),
-                ("gpr_mapped", "true"),
+                ("mode_enc", "ksu"),
+                ("stack_limit", "reg"),
+                ("ea_fault_reg", "keep"),
+                ("mmr0_maint", "true"),
+                ("mmr3", "full"),
             ][..],
         ),
         (
             "pdp11_60",
             "",
-            &["eis", "mmu"][..],
+            &["eis", "fp11", "mmu", "sob_mark", "sxt"][..],
             &[
-                ("jmp_reg_trap", "vec004"),
+                ("jmp_reg_trap", "vec010"),
                 ("mmu_pa", "p18"),
-                ("gpr_mapped", "true"),
-                ("stack_limit", "true"),
+                ("mode_enc", "ku"),
+                ("stack_limit", "reg"),
+                ("mmr0_maint", "true"),
+                ("par_width", "p12"),
+                ("halt_vec", "vec010"),
+                ("sp_buserr", "fatal"),
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
+                ("rti_ttrap", "next"),
             ][..],
         ),
         (
             "pdp11_70",
             "",
-            &["eis", "mmu", "id_split", "sm", "dual_regset", "spl"][..],
+            &[
+                "eis",
+                "mmu",
+                "id_split",
+                "sm",
+                "dual_regset",
+                "spl",
+                "sob_mark",
+                "sxt",
+            ][..],
             &[
                 ("jmp_reg_trap", "vec004"),
                 ("mmu_pa", "p22"),
-                ("gpr_mapped", "true"),
-                ("stack_limit", "true"),
+                ("mode_enc", "ksu"),
                 ("mm_trap", "true"),
                 ("dual_regset", "true"),
+                ("stack_limit", "reg"),
+                ("mmr0_maint", "true"),
+                ("mmr3", "m22_ds"),
+                ("mmr2_vec", "true"),
+                ("pdr_extra", "true"),
+                ("sp_buserr", "fatal"),
+                ("wait_t", "hold"),
+                ("rti_ttrap", "next"),
             ][..],
         ),
         (
             "pdp11_23",
             "",
-            &["mmu", "mtps", "mfpt"][..],
+            &["mmu", "mtps", "mfpt", "sob_mark", "sxt"][..],
             &[
                 ("odd_addr_trap", "false"),
-                ("psw_mapped", "false"),
                 ("jmp_reg_trap", "vec010"),
                 ("mfpt_code", "3"),
                 ("mmu_pa", "p18"),
+                ("mode_enc", "f11"),
+                ("stack_limit", "fixed"),
+                ("mmr3", "m22"),
+                ("halt_vec", "vec010"),
+                ("sp_buserr", "fatal"),
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
             ][..],
         ),
         (
@@ -293,9 +546,19 @@ pub fn build_model() -> polyisa_isadl::Model {
             "",
             j11,
             &[
+                ("jmp_reg_trap", "vec004"),
                 ("mfpt_code", "5"),
                 ("mmu_pa", "sel22"),
+                ("mode_enc", "ksu"),
+                ("stack_limit", "fixed"),
                 ("dual_regset", "true"),
+                ("mmr3", "full"),
+                ("halt_vec", "vec004"),
+                ("sp_buserr", "fatal"),
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
+                ("mfp_sp2", "user"),
+                ("rti_ttrap", "next"),
             ][..],
         ),
         ("pdp11_83", "pdp11_73", &[][..], &[][..]),
@@ -303,12 +566,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         (
             "t11",
             "",
-            &["mtps", "mfpt"][..],
+            &["mtps", "mfpt", "sob_mark", "sxt"][..],
             &[
                 ("odd_addr_trap", "false"),
                 ("psw_mapped", "false"),
                 ("jmp_reg_trap", "vec010"),
                 ("mfpt_code", "4"),
+                ("sp_buserr", "notrap"),
+                ("halt_vec", "powerup"),
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
+                ("rti_ttrap", "next"),
             ][..],
         ),
     ] {
@@ -424,7 +692,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("asl", "FS", "0000 1100 11.. ....", "alu", ""),
         ("mfpi", "FS", "0000 1101 01.. ....", "system", "mmu"),
         ("mtpi", "FS", "0000 1101 10.. ....", "system", "mmu"),
-        ("sxt", "FS", "0000 1101 11.. ....", "alu", ""),
+        ("sxt", "FS", "0000 1101 11.. ....", "alu", "sxt"),
         ("csm", "FS", "0000 1110 00.. ....", "system", "csm"),
         ("tstset", "FS", "0000 1110 10.. ....", "system", "tstset_wrtlck"),
         ("wrtlck", "FS", "0000 1110 11.. ....", "system", "tstset_wrtlck"),
@@ -448,7 +716,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // JSR・RTS・SOB。
         ("jsr", "FRD", "0000 100. .... ....", "branch", ""),
         ("rts", "FR", "0000 0000 1000 0...", "branch", ""),
-        ("sob", "FRN", "0111 111. .... ....", "branch", ""),
+        ("sob", "FRN", "0111 111. .... ....", "branch", "sob_mark"),
         // EIS（07xRSS）と XOR（074RDD）。
         ("mul", "FRD", "0111 000. .... ....", "alu", "eis"),
         ("div", "FRD", "0111 001. .... ....", "alu", "eis"),
@@ -574,7 +842,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("emt", "FB", "1000 1000 .... ....", "system", ""),
         ("trap", "FB", "1000 1001 .... ....", "system", ""),
         // MARK・SPL。
-        ("mark", "FN6", "0000 1101 00.. ....", "misc", ""),
+        ("mark", "FN6", "0000 1101 00.. ....", "misc", "sob_mark"),
         ("spl", "FN3", "0000 0000 1001 1...", "system", "spl"),
         // 固定語。
         ("halt", "F0", "0000 0000 0000 0000", "system", ""),
@@ -585,6 +853,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("reset", "F0", "0000 0000 0000 0101", "system", ""),
         ("rtt", "F0", "0000 0000 0000 0110", "system", ""),
         ("mfpt", "F0", "0000 0000 0000 0111", "system", "mfpt"),
+        // LSI-11 の保守命令 000210-000217（付録 B 項目 33 ——
+        // 他モデルは予約で location 10）。
+        ("maint", "F0", "0000 0000 1000 1...", "misc", "maint"),
     ];
     for &(name, format, pattern, timing, feat) in insns {
         m.insns.push(Insn {
