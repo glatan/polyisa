@@ -8,11 +8,9 @@
 // `decode(word, 8|16)` の長さ分岐で全オペコード空間を表す
 // （IA-64 のスロット語先例）。語へのバイトの詰め方はフェッチ順に
 // 下位ビットから（1 バイト目が bits[7:0]、2 バイト語の上位は
-// 接頭の次のバイト）。オペランド指定子の評価・消費長・読み書きは
-// 指定子ストリームの設計（VX3）が担う。
-//
-// VX2 は骨格として、オペランド指定子を伴わない命令だけを宣言して
-// 語彙の器とする。指定子を伴う命令は VX3 以降で足す。
+// 接頭の次のバイト）。オペランド指定子の読み取り・消費長・適合
+// 検査・符号化と命令ごとの指定子シグネチャは
+// `guests/vax/src/specifier.rs` が担う（VX3 で m68k 分割を採用）。
 //
 // 出典は SPEC-VAX-ARM（命令エンコーディングとサブセット化の規則）
 // と SPEC-VAX-MICROVAX（KA660 §3.7 の実装群/支援群/未実装群の
@@ -159,35 +157,164 @@ pub fn build_model() -> polyisa_isadl::Model {
         operands: vec![],
     });
 
-    // オペランド指定子を伴わない命令（骨格の検証に使う最小集合）。
-    // パターンは語の上位ビットから書く。2 バイト語は bits[7:0] が
-    // 接頭、bits[15:8]（op2）が次のバイト。
-    // Ref: SPEC-VAX-ARM（命令エンコーディング）.
-    let insns: &[(&str, &str, &str, &str)] = &[
-        ("halt", "O1", "0000 0000", "halt"),
-        ("nop", "O1", "0000 0001", "nop"),
-        ("rei", "O1", "0000 0010", "rei"),
-        ("bpt", "O1", "0000 0011", "bpt"),
-        ("ret", "O1", "0000 0100", "ret"),
-        ("rsb", "O1", "0000 0101", "rsb"),
-        ("ldpctx", "O1", "0000 0110", "ldpctx"),
-        ("svpctx", "O1", "0000 0111", "svpctx"),
-        ("bugw", "O2", "1111 1111 1111 1101", "bugw"),
-        ("bugl", "O2", "1111 1111 1111 1110", "bugl"),
+    // 命令の宣言。パターンは語の上位ビットから書く。2 バイト語は
+    // bits[7:0] が接頭、bits[15:8]（op2）が次のバイト。
+    //
+    // 指定子を伴う命令も形式は O1/O2 のまま（指定子は命令語に乗ら
+    // ない）。各命令の指定子シグネチャ（.xy 型の並び。最終列は
+    // その写し）は `guests/vax/src/specifier.rs` の `insn_ops` が
+    // 持つ —— m68k の ea.rs と同型の分割（段階23 計画 VX3）。
+    //
+    // `feat` が空でない命令はその機能旗を `when` に持ち、旗を削る
+    // モデルではデコードされず補完経路に乗る。
+    // Ref: SPEC-VAX-ARM（命令エンコーディングと各命令の形式記述）.
+    let insns: &[(&str, &str, &str, &str, &str, &str)] = &[
+        // (名前, 形式, パターン, タイミング, 機能旗, 指定子)
+        ("halt", "O1", "0000 0000", "system", "", ""),
+        ("nop", "O1", "0000 0001", "misc", "", ""),
+        ("rei", "O1", "0000 0010", "system", "", ""),
+        ("bpt", "O1", "0000 0011", "system", "", ""),
+        ("ret", "O1", "0000 0100", "call", "", ""),
+        ("rsb", "O1", "0000 0101", "call", "", ""),
+        ("ldpctx", "O1", "0000 0110", "system", "", ""),
+        ("svpctx", "O1", "0000 0111", "system", "", ""),
+        ("insque", "O1", "0000 1110", "queue", "", "ab,ab"),
+        ("remque", "O1", "0000 1111", "queue", "", "ab,wl"),
+        ("bsbb", "O1", "0001 0000", "call", "", "bb"),
+        ("brb", "O1", "0001 0001", "branch", "", "bb"),
+        ("bneq", "O1", "0001 0010", "branch", "", "bb"),
+        ("beql", "O1", "0001 0011", "branch", "", "bb"),
+        ("jsb", "O1", "0001 0110", "call", "", "ab"),
+        ("jmp", "O1", "0001 0111", "branch", "", "ab"),
+        ("movc3", "O1", "0010 1000", "string", "", "rw,ab,ab"),
+        ("cmpc3", "O1", "0010 1001", "string", "string_cmp", "rw,ab,ab"),
+        (
+            "scanc",
+            "O1",
+            "0010 1010",
+            "string",
+            "string_cmp",
+            "rw,ab,ab,rb",
+        ),
+        (
+            "spanc",
+            "O1",
+            "0010 1011",
+            "string",
+            "string_cmp",
+            "rw,ab,ab,rb",
+        ),
+        ("movc5", "O1", "0010 1100", "string", "", "rw,ab,rb,rw,ab"),
+        (
+            "cmpc5",
+            "O1",
+            "0010 1101",
+            "string",
+            "string_cmp",
+            "rb,rw,ab,rw,ab",
+        ),
+        ("bsbw", "O1", "0011 0000", "call", "", "bw"),
+        ("brw", "O1", "0011 0001", "branch", "", "bw"),
+        ("locc", "O1", "0011 1010", "string", "string_cmp", "rb,rw,ab"),
+        ("skpc", "O1", "0011 1011", "string", "string_cmp", "rb,rw,ab"),
+        ("movzwl", "O1", "0011 1100", "move", "", "rw,wl"),
+        ("movaw", "O1", "0011 1110", "move", "", "aw,wl"),
+        ("pushaw", "O1", "0011 1111", "move", "", "aw"),
+        ("clrq", "O1", "0111 1100", "move", "", "wq"),
+        ("movq", "O1", "0111 1101", "move", "", "rq,wq"),
+        ("movaq", "O1", "0111 1110", "move", "", "aq,wl"),
+        ("pushaq", "O1", "0111 1111", "move", "", "aq"),
+        ("addb2", "O1", "1000 0000", "alu", "", "rb,mb"),
+        ("addb3", "O1", "1000 0001", "alu", "", "rb,rb,wb"),
+        ("subb2", "O1", "1000 0010", "alu", "", "rb,mb"),
+        ("subb3", "O1", "1000 0011", "alu", "", "rb,rb,wb"),
+        ("caseb", "O1", "1000 1111", "branch", "", "rb,rb,rb"),
+        ("movb", "O1", "1001 0000", "move", "", "rb,wb"),
+        ("cmpb", "O1", "1001 0001", "alu", "", "rb,rb"),
+        ("mcomb", "O1", "1001 0010", "move", "", "rb,wb"),
+        ("clrb", "O1", "1001 0100", "move", "", "wb"),
+        ("tstb", "O1", "1001 0101", "alu", "", "rb"),
+        ("incb", "O1", "1001 0110", "alu", "", "mb"),
+        ("decb", "O1", "1001 0111", "alu", "", "mb"),
+        ("movzbl", "O1", "1001 1010", "move", "", "rb,wl"),
+        ("movzbw", "O1", "1001 1011", "move", "", "rb,ww"),
+        ("rotl", "O1", "1001 1100", "alu", "", "rb,rl,wl"),
+        ("movab", "O1", "1001 1110", "move", "", "ab,wl"),
+        ("pushab", "O1", "1001 1111", "move", "", "ab"),
+        ("addw2", "O1", "1010 0000", "alu", "", "rw,mw"),
+        ("addw3", "O1", "1010 0001", "alu", "", "rw,rw,ww"),
+        ("subw2", "O1", "1010 0010", "alu", "", "rw,mw"),
+        ("subw3", "O1", "1010 0011", "alu", "", "rw,rw,ww"),
+        ("casew", "O1", "1010 1111", "branch", "", "rw,rw,rw"),
+        ("movw", "O1", "1011 0000", "move", "", "rw,ww"),
+        ("cmpw", "O1", "1011 0001", "alu", "", "rw,rw"),
+        ("mcomw", "O1", "1011 0010", "move", "", "rw,ww"),
+        ("clrw", "O1", "1011 0100", "move", "", "ww"),
+        ("tstw", "O1", "1011 0101", "alu", "", "rw"),
+        ("incw", "O1", "1011 0110", "alu", "", "mw"),
+        ("decw", "O1", "1011 0111", "alu", "", "mw"),
+        ("addl2", "O1", "1100 0000", "alu", "", "rl,ml"),
+        ("addl3", "O1", "1100 0001", "alu", "", "rl,rl,wl"),
+        ("subl2", "O1", "1100 0010", "alu", "", "rl,ml"),
+        ("subl3", "O1", "1100 0011", "alu", "", "rl,rl,wl"),
+        ("mull2", "O1", "1100 0100", "alu", "", "rl,ml"),
+        ("mull3", "O1", "1100 0101", "alu", "", "rl,rl,wl"),
+        ("divl2", "O1", "1100 0110", "alu", "", "rl,ml"),
+        ("divl3", "O1", "1100 0111", "alu", "", "rl,rl,wl"),
+        ("bisl2", "O1", "1100 1000", "alu", "", "rl,ml"),
+        ("bicl2", "O1", "1100 1010", "alu", "", "rl,ml"),
+        ("xorl2", "O1", "1100 1100", "alu", "", "rl,ml"),
+        ("casel", "O1", "1100 1111", "branch", "", "rl,rl,rl"),
+        ("movl", "O1", "1101 0000", "move", "", "rl,wl"),
+        ("cmpl", "O1", "1101 0001", "alu", "", "rl,rl"),
+        ("mcoml", "O1", "1101 0010", "move", "", "rl,wl"),
+        ("clrl", "O1", "1101 0100", "move", "", "wl"),
+        ("tstl", "O1", "1101 0101", "alu", "", "rl"),
+        ("incl", "O1", "1101 0110", "alu", "", "ml"),
+        ("decl", "O1", "1101 0111", "alu", "", "ml"),
+        ("adwc", "O1", "1101 1000", "alu", "", "rl,ml"),
+        ("sbwc", "O1", "1101 1001", "alu", "", "rl,ml"),
+        ("pushl", "O1", "1101 1101", "move", "", "rl"),
+        ("moval", "O1", "1101 1110", "move", "", "al,wl"),
+        ("pushal", "O1", "1101 1111", "move", "", "al"),
+        ("bbs", "O1", "1110 0000", "branch", "", "rl,vb,bb"),
+        ("bbc", "O1", "1110 0001", "branch", "", "rl,vb,bb"),
+        ("bbss", "O1", "1110 0010", "branch", "", "rl,vb,bb"),
+        ("bbcc", "O1", "1110 0101", "branch", "", "rl,vb,bb"),
+        ("blbs", "O1", "1110 1000", "branch", "", "rl,bb"),
+        ("blbc", "O1", "1110 1001", "branch", "", "rl,bb"),
+        ("ffs", "O1", "1110 1010", "alu", "", "rl,rb,vb,wl"),
+        ("ffc", "O1", "1110 1011", "alu", "", "rl,rb,vb,wl"),
+        ("cmpv", "O1", "1110 1100", "alu", "", "rl,rb,vb,rl"),
+        ("cmpzv", "O1", "1110 1101", "alu", "", "rl,rb,vb,rl"),
+        ("extv", "O1", "1110 1110", "alu", "", "rl,rb,vb,wl"),
+        ("extzv", "O1", "1110 1111", "alu", "", "rl,rb,vb,wl"),
+        ("insv", "O1", "1111 0000", "alu", "", "rl,rl,rb,vb"),
+        ("acbl", "O1", "1111 0001", "alu", "", "rl,rl,ml,bw"),
+        ("aoblss", "O1", "1111 0010", "alu", "", "rl,ml,bb"),
+        ("aobleq", "O1", "1111 0011", "alu", "", "rl,ml,bb"),
+        ("sobgeq", "O1", "1111 0100", "branch", "", "ml,bb"),
+        ("sobgtr", "O1", "1111 0101", "branch", "", "ml,bb"),
+        ("callg", "O1", "1111 1010", "call", "", "ab,ab"),
+        ("calls", "O1", "1111 1011", "call", "", "rl,ab"),
+        ("bugw", "O2", "1111 1111 1111 1101", "system", "", ""),
+        ("bugl", "O2", "1111 1111 1111 1110", "system", "", ""),
+        ("movo", "O2", "0111 1101 1111 1101", "move", "hfp", "ro,wo"),
+        ("movah", "O2", "0111 1110 1111 1101", "move", "hfp", "ah,wl"),
+        ("pushah", "O2", "0111 1111 1111 1101", "move", "hfp", "ah"),
     ];
-    for (name, format, pattern, syntax) in insns {
-        let timing = match *name {
-            "nop" => "misc",
-            "ret" | "rsb" => "call",
-            _ => "system",
-        };
+    for &(name, format, pattern, timing, feat, _ops) in insns {
         m.insns.push(Insn {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: if feat.is_empty() {
+                Pred::True
+            } else {
+                Pred::Flag(feat.to_string())
+            },
             wheres: vec![],
-            syntax: syntax.to_string(),
+            syntax: name.to_string(),
             timing: timing.to_string(),
         });
     }

@@ -10,7 +10,9 @@
 //! 0xFD/0xFE/0xFF 接頭の 2 バイト）の後にオペランド指定子の
 //! バイト列が続く。生成デコーダはオペコード部だけを見る
 //! （`decode(word, 8|16)`、語はフェッチ順に下位ビットから詰める）。
-//! MicroVAX 系のサブセット差は機能旗と挙動パラメータで表す。
+//! 指定子の読み取り・長さ・符号化は `specifier` が担う（m68k の
+//! ea.rs と同型の分割）。MicroVAX 系のサブセット差は機能旗と
+//! 挙動パラメータで表す。
 //! 出典は SPEC-VAX-ARM と SPEC-VAX-MICROVAX である。
 //! Ref: SPEC-VAX-ARM, SPEC-VAX-MICROVAX.
 
@@ -18,6 +20,10 @@
 
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+/// オペランド指定子の読み取り・長さ・適合検査・符号化と、
+/// 命令ごとの指定子シグネチャ。
+pub mod specifier;
 
 /// VAX の ISA ファミリ名。
 pub struct Vax;
