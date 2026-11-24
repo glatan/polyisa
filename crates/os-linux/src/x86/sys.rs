@@ -111,6 +111,9 @@ pub struct Linux {
     /// MONOTONIC 時計の起点。ゲスト実行ごとに取り直す。fork した子は親と共有する。
     /// makemime は srand(monotonic_us()) で境界を作るため、起点の共有は出力を揺らす.
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの単調時計起点。初使用で張る。時刻報告（`mono_start`）
+    /// とは別系統で、最初の clock_gettime が来る前の待ちにも動く。
+    wait_start: std::cell::OnceCell<std::time::Instant>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -307,11 +310,12 @@ impl Linux {
         }
     }
 
-    /// 単調時計の今（ナノ秒。`mono_start` 起点）。
+    /// 単調時計の今（ナノ秒。fd 待ち専用。初使用の時点を起点）。
     fn mono_ns(&self) -> u64 {
-        self.mono_start
-            .map(|t| t.elapsed().as_nanos() as u64)
-            .unwrap_or(0)
+        self.wait_start
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_nanos() as u64
     }
 
     /// ソケット正準層への ABI 差分。
@@ -524,14 +528,19 @@ impl Linux {
         let mut list = Vec::new();
         let mut earliest: Option<u64> = None;
         let mut take = |w: &crate::sock::Wait, fds: &polyisa_kernel::FdTable| {
-            #[cfg(unix)]
             for &(fd, ev) in &w.fds {
+                #[cfg(unix)]
                 list.extend(fds.host_watches(fd, ev));
+                // timerfd 等のカーネル対象の期限も起床時刻に畳む。
+                if let Some(dl) = fds.wait_deadline(fd) {
+                    earliest = Some(earliest.map_or(dl, |e| e.min(dl)));
+                }
+                #[cfg(not(unix))]
+                let _ = ev;
             }
             if let Some(dl) = w.deadline {
                 earliest = Some(earliest.map_or(dl, |e| e.min(dl)));
             }
-            let _ = fds;
         };
         for task in &self.queue.0.borrow().parked {
             if let Some(w) = &task.linux.fd_wait {
@@ -926,6 +935,10 @@ impl Linux {
             cwd: self.cwd.clone(),
             guest_root: self.guest_root.clone(),
             mono_start: self.mono_start,
+            wait_start: {
+                self.wait_start.get_or_init(std::time::Instant::now);
+                self.wait_start.clone()
+            },
         }
     }
 
@@ -2046,11 +2059,56 @@ fn fd_write_other(
     left: u64,
 ) -> Option<TrapOutcome> {
     use polyisa_kernel::FdWrite;
+    let is_eventfd = matches!(
+        sys.fds.target(fd),
+        Some(polyisa_kernel::FdTarget::EventFd(_))
+    );
     if sys.fds.target(fd).is_none() {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
     let take = usize::try_from(left.min(IO_CHUNK as u64)).unwrap_or(0);
+    // eventfd の write は 8 バイトのカウンタ加算（LE 復元）。
+    if is_eventfd {
+        if take != 8 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        let mut chunk = [0u8; 8];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(buf), &mut chunk, data_access())
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        let v = u64::from_le_bytes(chunk);
+        return match sys.fds.write_eventfd(fd, v) {
+            FdWrite::Done(n) => {
+                set64(env, Gpr(0), n as u64);
+                Some(TrapOutcome::Handled)
+            }
+            FdWrite::Full if sys.fds.nonblock(fd) => {
+                set64(env, Gpr(0), cx.neg(EAGAIN));
+                Some(TrapOutcome::Handled)
+            }
+            FdWrite::Full => {
+                let r = crate::wait::write_wait(&sys.fds, fd)
+                    .map(crate::sock::Out::Wait)
+                    .ok_or(EAGAIN);
+                sys.sock_finish(env, r)
+            }
+            FdWrite::BadFd => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                Some(TrapOutcome::Handled)
+            }
+            _ => {
+                set64(env, Gpr(0), cx.neg(EIO));
+                Some(TrapOutcome::Handled)
+            }
+        };
+    }
     let mut chunk = vec![0u8; take];
     if env
         .backend
@@ -4415,8 +4473,9 @@ impl TrapHandler for Linux {
             if self.preempt(env) {
                 return true;
             }
-            // 自分の待ちが解けて実行可能に戻った。
-            if self.fd_wait.is_none() && self.self_fd_blocked() {
+            // 自分の待ちが解けて実行可能に戻った。`fd_wait_prev`
+            // が置かれるのは掃討/起床が待ちを解いたときだけ。
+            if self.fd_wait.is_none() && (self.fd_wait_prev.is_some() || self.self_fd_blocked()) {
                 let pid = self.pid;
                 self.queue
                     .0

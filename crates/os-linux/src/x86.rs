@@ -34,6 +34,7 @@ pub const ENOMEM: u32 = 12;
 pub const ENOTDIR: u32 = 20;
 pub const EISDIR: u32 = 21;
 pub const EINVAL: u32 = 22;
+pub const ESPIPE: u32 = 29;
 pub const EPIPE: u32 = 32;
 pub const ERANGE: u32 = 34;
 pub const ENOTTY: u32 = 25;
@@ -2491,7 +2492,16 @@ pub fn sys_lseek(
     let whence = get64(env, cx.r_c) as u32;
     let file = if fd < 3 { std } else { fds.file_mut(fd) };
     let Some(file) = file else {
-        set64(env, Gpr(0), cx.neg(EBADF));
+        // ファイル以外の対象（memfd 等）は fd 表の seek へ。
+        if fd >= 3 && fds.target(fd).is_some() {
+            match fds.seek(fd, offset, whence) {
+                polyisa_kernel::FdSeek::Pos(p) => set64(env, Gpr(0), p),
+                polyisa_kernel::FdSeek::Pipe => set64(env, Gpr(0), cx.neg(ESPIPE)),
+                polyisa_kernel::FdSeek::Host(_) => set64(env, Gpr(0), cx.neg(EIO)),
+            }
+        } else {
+            set64(env, Gpr(0), cx.neg(EBADF));
+        }
         return Some(TrapOutcome::Handled);
     };
     let pos = match whence {

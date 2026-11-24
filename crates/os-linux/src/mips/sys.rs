@@ -1369,7 +1369,7 @@ impl Linux {
     /// o32 の番号（4000 からの通し番号）で振り分ける。
     fn dispatch_o32(&mut self, env: &mut BareEnv, n: u64) -> Disp {
         let args: [u64; 8] = std::array::from_fn(|i| self.arg(env, i));
-        if let Some(name) = mips_o32::name(4000 + n)
+        if let Some(name) = mips_o32::name(4000u64.wrapping_add(n))
             && crate::wait::NAMES.contains(&name)
         {
             return self.wait_call(env, name, &args);

@@ -920,7 +920,17 @@ impl Linux {
         }
         let f = match self.file_of(fd) {
             Ok(f) => f,
-            Err(e) => return Self::fail(e),
+            Err(e) => {
+                // ファイル以外の対象（memfd 等）は fd 表の seek へ。
+                if e == errno::EBADF && self.fds.target(fd).is_some() {
+                    return match self.fds.seek(fd, off, whence) {
+                        polyisa_kernel::FdSeek::Pos(p) => p,
+                        polyisa_kernel::FdSeek::Pipe => Self::fail(errno::ESPIPE),
+                        polyisa_kernel::FdSeek::Host(_) => Self::fail_host(errno::EIO as i32),
+                    };
+                }
+                return Self::fail(e);
+            }
         };
         let w = match whence {
             0 => SeekFrom::Start(off as u64),

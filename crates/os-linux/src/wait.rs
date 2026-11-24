@@ -72,6 +72,9 @@ pub const NAMES: &[&str] = &[
     "timerfd_gettime",
     "timerfd_settime64",
     "timerfd_gettime64",
+    "memfd_create",
+    "signalfd",
+    "signalfd4",
 ];
 
 /// ABI ごとの差分。値はゲスト側の定数。
@@ -681,6 +684,65 @@ fn sys_timerfd_create(
     Ok(u64::from(fd))
 }
 
+/// memfd_create(name, flags)。MFD_CLOEXEC=1・MFD_ALLOW_SEALING=2
+/// を受ける（シール機構は未実装）。中身は `FdTarget::MemFd`。
+fn sys_memfd_create(
+    fds: &mut FdTable,
+    abi: &WaitAbi,
+    env: &mut BareEnv,
+    _name_addr: u64,
+    flags: u64,
+) -> Result<u64, u32> {
+    // MFD_CLOEXEC=1・MFD_ALLOW_SEALING=2・MFD_HUGETLB=4 を既知とする。
+    // 名前の正当性は検査しない（読めればよい。読めなくても受理）。
+    if flags & !7 != 0 {
+        return Err(errno::EINVAL);
+    }
+    let _ = (env, abi); // 名前の読み取りは記録しないので省略。
+    let t = fds.memfd();
+    let fd = fds.alloc(t);
+    if flags & 1 != 0 {
+        fds.set_cloexec(fd, true);
+    }
+    Ok(u64::from(fd))
+}
+
+/// signalfd4(fd, mask, flags) / signalfd(fd, mask)。fd == -1 で
+/// 新規作成、そうでなければ既存 signalfd のマスク更新。
+/// mask はゲストのシグナル番号のビット集合（sigset_t 語を読む）。
+fn sys_signalfd(
+    fds: &mut FdTable,
+    abi: &WaitAbi,
+    env: &mut BareEnv,
+    fd: u64,
+    mask_addr: u64,
+    flags: u64,
+) -> Result<u64, u32> {
+    if flags & !(abi.nonblock | abi.cloexec) != 0 {
+        return Err(errno::EINVAL);
+    }
+    // sigset_t は ptr 幅を持つ（128 ビットの語でも先頭語だけ見る）。
+    let w = usize::from(abi.ptr_size).max(8);
+    let mask = rd_u(env, abi.endian, mask_addr, w).ok_or(errno::EFAULT)?;
+    let fdu = fd as u32 as i32;
+    let out = if fdu < 0 {
+        let t = fds.signalfd(mask);
+        fds.alloc(t)
+    } else {
+        if !fds.signalfd_mask(fd as u32, mask) {
+            return Err(errno::EBADF);
+        }
+        fd as u32
+    };
+    if flags & abi.nonblock != 0 {
+        fds.set_nonblock(out, true);
+    }
+    if flags & abi.cloexec != 0 {
+        fds.set_cloexec(out, true);
+    }
+    Ok(u64::from(out))
+}
+
 /// itimerspec（it_interval・it_value の timespec 2 個）を読む。
 fn rd_itimer(env: &mut BareEnv, abi: &WaitAbi, addr: u64) -> Result<(u64, u64), u32> {
     let w = u64::from(abi.time_size);
@@ -851,6 +913,9 @@ pub fn dispatch(
         "timerfd_gettime" | "timerfd_gettime64" => {
             sys_timerfd_gettime(fds, abi, env, args[0], args[1], now).map(Out::Done)
         }
+        "memfd_create" => sys_memfd_create(fds, abi, env, args[0], args[1]).map(Out::Done),
+        "signalfd" => sys_signalfd(fds, abi, env, args[0], args[1], 0).map(Out::Done),
+        "signalfd4" => sys_signalfd(fds, abi, env, args[0], args[1], args[2]).map(Out::Done),
         _ => return None,
     };
     Some(r)
@@ -1002,7 +1067,7 @@ fn drive_read_once(
 #[allow(clippy::too_many_arguments)]
 pub fn write_other(
     fds: &mut FdTable,
-    _abi: &WaitAbi,
+    abi: &WaitAbi,
     env: &mut BareEnv,
     fd: u32,
     buf: u64,
@@ -1011,10 +1076,49 @@ pub fn write_other(
     mono_ns: &dyn Fn() -> u64,
 ) -> Result<u64, u32> {
     use polyisa_kernel::FdWrite;
+    let is_eventfd = matches!(fds.target(fd), Some(FdTarget::EventFd(_)));
     if fds.target(fd).is_none() {
         return Err(errno::EBADF);
     }
     let take = usize::try_from(len.min(65536)).unwrap_or(0);
+    // eventfd の write は 8 バイトのカウンタ加算（対象の読み取り語は
+    // ゲストのエンディアン）。`FdTarget::EventFd` の `fds.write` は
+    // Inval を返す決まりなのでここで復元して `write_eventfd` を呼ぶ。
+    if is_eventfd {
+        if take != 8 {
+            return Err(errno::EINVAL);
+        }
+        let mut chunk = [0u8; 8];
+        if !rd(env, buf, &mut chunk) {
+            return Err(errno::EFAULT);
+        }
+        let v = match abi.endian {
+            Endian::Le => u64::from_le_bytes(chunk),
+            Endian::Be => u64::from_be_bytes(chunk),
+        };
+        loop {
+            match fds.write_eventfd(fd, v) {
+                FdWrite::Done(n) => return Ok(n as u64),
+                FdWrite::Full => {
+                    if fds.nonblock(fd) {
+                        return Err(errno::EAGAIN);
+                    }
+                    let Some(w) = write_wait(fds, fd) else {
+                        return Err(errno::EAGAIN);
+                    };
+                    if serve(fds, &w, pending, mono_ns) == Served::Deadlock {
+                        return Err(errno::EDEADLK);
+                    }
+                }
+                FdWrite::BadFd => return Err(errno::EBADF),
+                FdWrite::Pipe => return Err(errno::EPIPE),
+                FdWrite::Inval => return Err(errno::EINVAL),
+                FdWrite::Host(e) => {
+                    return Err(e.raw_os_error().map_or(errno::EIO, |c| c as u32));
+                }
+            }
+        }
+    }
     let mut chunk = vec![0u8; take];
     if !rd(env, buf, &mut chunk) {
         return Err(errno::EFAULT);

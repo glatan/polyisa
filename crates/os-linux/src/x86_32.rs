@@ -132,3 +132,6 @@ pub const EVENTFD2: u64 = 328;
 pub const TIMERFD_CREATE: u64 = 324;
 pub const TIMERFD_SETTIME: u64 = 325;
 pub const TIMERFD_GETTIME: u64 = 326;
+pub const SIGNALFD: u64 = 321;
+pub const SIGNALFD4: u64 = 327;
+pub const MEMFD_CREATE: u64 = 356;
