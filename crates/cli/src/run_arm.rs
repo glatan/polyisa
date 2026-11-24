@@ -293,12 +293,38 @@ pub fn run_elf_arm_sys_jit(
     run_elf_arm_impl(path, argv, sel, sys, Some(jit))
 }
 
+/// `run_elf_arm_impl` の semihosting 版（`--os semihost`）。
+/// `svc #0x123456`（T32 は `#0xab`）が `semi` の SYS_* 演算へ届く。
+pub fn run_elf_arm_semi(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    semi: &mut polyisa_os_semihost::SemiA32,
+) -> Result<u64, String> {
+    // JIT は `POLYISA_JIT` 指定時のみ opt-in（linux 経路と同じ）。
+    let mut jit_owned = polyisa_jit::Jit::new();
+    let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
+    run_elf_arm_impl(path, argv, sel, semi, jit)
+}
+
+/// `run_elf_arm_semi` に JIT を差し込む形。差分テストが
+/// `semi.io` 等を比べるのに使う。
+pub fn run_elf_arm_semi_jit(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    semi: &mut polyisa_os_semihost::SemiA32,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<u64, String> {
+    run_elf_arm_impl(path, argv, sel, semi, Some(jit))
+}
+
 /// `run_elf_arm_sys` の実体。`jit` があればブロック実行経路を使う。
 fn run_elf_arm_impl(
     path: &str,
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
-    sys: &mut polyisa_os_linux::arm::sys::Linux,
+    sys: &mut impl crate::ElfSys,
     jit: Option<&mut polyisa_jit::Jit>,
 ) -> Result<u64, String> {
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -424,7 +450,7 @@ fn run_elf_arm_impl(
         .map_err(|e| format!("stack write: {e:?}"))?;
     // sp=r13。cpsr/r0–r12/lr は 0 のまま。
     env.backend.set(Gpr(13).state(), sp as u32);
-    sys.exe_path = path.to_string();
+    sys.set_exe_path(path);
     sys.init_brk(image_end);
     // 生成デコーダは機能旗を参照しない（ARM の粗いクラス分けのため）。
     // 選択は意味論の振る舞いに使う余地として残し、feats は 0 を渡す。

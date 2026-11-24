@@ -878,6 +878,13 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-mem",
             "polyisa-guest-vax",
         ],
+        "polyisa-os-semihost" => &[
+            "polyisa-engine",
+            "polyisa-sem",
+            "polyisa-mem",
+            "polyisa-guest-aarch64",
+            "polyisa-guest-arm",
+        ],
         "polyisa-os-wasi" => &[
             "polyisa-kernel",
             "polyisa-engine",
@@ -919,6 +926,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-mem",
             "polyisa-os-bsd",
             "polyisa-os-linux",
+            "polyisa-os-semihost",
             "polyisa-os-v7",
             "polyisa-os-wasi",
             "polyisa-sem",

@@ -49,6 +49,53 @@ impl EcallHandler for polyisa_os_linux::rv64::sys::Linux {
     }
 }
 
+/// riscv の semihosting 処理器。ebreak の標識列は step 側が確認
+/// 済みで、ここでは word が ebreak であることだけ見る。
+/// `a0`(x10) が演算番号、`a1`(x11) がパラメータ、結果は `a0` へ。
+// Gap: GAP-0024
+#[cfg(feature = "guest-riscv")]
+pub struct SemiRv {
+    /// 演算機械。入出力の capture は `semi.io` に入る。
+    pub semi: polyisa_os_semihost::Semi,
+    rv32: bool,
+}
+
+#[cfg(feature = "guest-riscv")]
+impl SemiRv {
+    /// `Semi::new` に語幅を添えて作る。
+    #[must_use]
+    pub fn new(root: &str, rv32: bool) -> Self {
+        Self {
+            semi: polyisa_os_semihost::Semi::new(root),
+            rv32,
+        }
+    }
+}
+
+#[cfg(feature = "guest-riscv")]
+impl EcallHandler for SemiRv {
+    fn handle_ecall(&mut self, env: &mut BareEnv, word: u32) -> EcallOutcome {
+        const EBREAK: u32 = 0x0010_0073;
+        if word != EBREAK {
+            return EcallOutcome::Unimplemented;
+        }
+        let (op, param) = (reg(env, 10), reg(env, 11));
+        let ws = if self.rv32 {
+            polyisa_os_semihost::WordSize::W32
+        } else {
+            polyisa_os_semihost::WordSize::W64
+        };
+        match self.semi.call(env, op as u32, param, ws) {
+            polyisa_os_semihost::Reply::Ret(v) => {
+                env.backend.set(Gpr(10).state(), v as u64);
+                EcallOutcome::Handled
+            }
+            polyisa_os_semihost::Reply::Exit(c) => EcallOutcome::Exit(c),
+            polyisa_os_semihost::Reply::Unimpl => EcallOutcome::Unimplemented,
+        }
+    }
+}
+
 fn acc_fetch() -> Access {
     Access {
         endian: Endian::Le,
@@ -1094,6 +1141,40 @@ fn step_rv(
                 });
             }
         },
+        Insn::Ebreak => {
+            // semihosting の標識列は ebreak の前後:
+            // `slli x0,x0,0x1f; ebreak; srai x0,x0,7`。
+            // 一致したときだけパーソナリティへ渡す。
+            const SLLI_MARK: u32 = 0x01f0_1013;
+            const SRAI_MARK: u32 = 0x4070_5013;
+            let fetch = |va: u64| -> u32 {
+                let mut b = [0u8; 4];
+                env.backend
+                    .mem
+                    .read(VirtAddr(va), &mut b, acc_fetch())
+                    .map(|()| u32::from_le_bytes(b))
+                    .unwrap_or(0)
+            };
+            if fetch(env.pc.wrapping_sub(4)) == SLLI_MARK && fetch(env.pc + 4) == SRAI_MARK {
+                match sys.handle_ecall(env, word) {
+                    EcallOutcome::Exit(code) => return Err(Outcome::Exit(code)),
+                    EcallOutcome::Handled => {
+                        env.pc += 4;
+                        return Ok(());
+                    }
+                    EcallOutcome::Unimplemented => {
+                        return Err(Outcome::Unimplemented {
+                            pc: env.pc,
+                            word: u128::from(word),
+                        });
+                    }
+                }
+            }
+            return Err(Outcome::Unimplemented {
+                pc: env.pc,
+                word: u128::from(word),
+            });
+        }
         _ => {
             return Err(Outcome::Unimplemented {
                 pc: env.pc,
@@ -1743,6 +1824,18 @@ pub fn run_elf_sel(
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
 ) -> Result<u64, String> {
+    let mut sys = polyisa_os_linux::rv64::sys::Linux::default();
+    run_elf_handler(path, argv, sel, &mut sys)
+}
+
+/// `run_elf_sel` に `EcallHandler` を差し込む形。semihosting は
+/// `SemiRv` を渡す（`--os semihost`）。
+pub fn run_elf_handler(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    handler: &mut impl EcallHandler,
+) -> Result<u64, String> {
     use polyisa_guest_riscv::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
@@ -1786,9 +1879,8 @@ pub fn run_elf_sel(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(Gpr(2).state(), sp);
-    let mut sys = polyisa_os_linux::rv64::sys::Linux::default();
     let feats = sel.map_or(0, |s| s.feats);
-    match run_ex(&mut env, ehdr.entry, false, feats, &mut sys) {
+    match run_ex(&mut env, ehdr.entry, false, feats, handler) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),

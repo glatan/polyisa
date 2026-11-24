@@ -13,6 +13,7 @@ fn main() {
             let mut rest = &args[1..];
             let mut cpu = None;
             let mut root = None;
+            let mut os = None;
             loop {
                 if let Some(v) = rest.first().and_then(|a| a.strip_prefix("--cpu=")) {
                     cpu = Some(v.to_string());
@@ -29,6 +30,18 @@ fn main() {
                 } else if let Some(v) = rest.first().and_then(|a| a.strip_prefix("--root=")) {
                     root = Some(v.to_string());
                     rest = &rest[1..];
+                } else if let Some(v) = rest.first().and_then(|a| a.strip_prefix("--os=")) {
+                    os = Some(v.to_string());
+                    rest = &rest[1..];
+                } else if rest.first().map(String::as_str) == Some("--os") {
+                    let Some(v) = rest.get(1) else {
+                        eprintln!(
+                            "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] [--os <linux|semihost>] <elf> [args...]"
+                        );
+                        std::process::exit(2);
+                    };
+                    os = Some(v.clone());
+                    rest = &rest[2..];
                 } else if rest.first().map(String::as_str) == Some("--root") {
                     let Some(v) = rest.get(1) else {
                         eprintln!(
@@ -48,7 +61,13 @@ fn main() {
                 );
                 std::process::exit(2);
             };
-            match polyisa_cli::run_path_opts(path, &rest[1..], cpu.as_deref(), root.as_deref()) {
+            match polyisa_cli::run_path_opts(
+                path,
+                &rest[1..],
+                cpu.as_deref(),
+                root.as_deref(),
+                os.as_deref(),
+            ) {
                 Ok(code) => std::process::exit(code as i32),
                 Err(msg) => {
                     eprintln!("{msg}");

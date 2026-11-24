@@ -44,6 +44,58 @@ pub mod run_wasm;
 #[cfg(feature = "guest-x86")]
 pub mod run_x86;
 
+/// ELF 入口がパーソナリティに要求する初期化面。`TrapHandler` と
+/// 合わせて `run_elf_*_impl` が使う。実装しないパーソナリティは
+/// 既定（何もしない）のままでよい。
+pub trait ElfSys: polyisa_engine::run::TrapHandler {
+    /// `--root` のゲストルート（パス解決の閉じ込め）。
+    fn set_guest_root(&mut self, _root: &str) {}
+    /// 実行ファイルのゲスト側パス。
+    fn set_exe_path(&mut self, _path: &str) {}
+    /// データアクセスのエンディアン（ELF の EI_DATA）。
+    fn set_endian(&mut self, _endian: polyisa_mem::Endian) {}
+}
+
+#[cfg(feature = "guest-aarch64")]
+impl ElfSys for polyisa_os_linux::aarch64::sys::Linux {
+    fn set_guest_root(&mut self, root: &str) {
+        polyisa_os_linux::aarch64::sys::Linux::set_guest_root(self, root);
+    }
+    fn set_exe_path(&mut self, path: &str) {
+        self.exe_path = path.to_string();
+    }
+    fn set_endian(&mut self, endian: polyisa_mem::Endian) {
+        polyisa_os_linux::aarch64::sys::Linux::set_endian(self, endian);
+    }
+}
+
+#[cfg(feature = "guest-arm")]
+impl ElfSys for polyisa_os_linux::arm::sys::Linux {
+    fn set_exe_path(&mut self, path: &str) {
+        self.exe_path = path.to_string();
+    }
+}
+
+#[cfg(feature = "guest-aarch64")]
+impl ElfSys for polyisa_os_semihost::SemiA64 {
+    fn set_guest_root(&mut self, root: &str) {
+        self.0.set_root(root);
+    }
+    fn set_endian(&mut self, endian: polyisa_mem::Endian) {
+        self.0.set_endian(endian);
+    }
+}
+
+#[cfg(feature = "guest-arm")]
+impl ElfSys for polyisa_os_semihost::SemiA32 {
+    fn set_guest_root(&mut self, root: &str) {
+        self.0.set_root(root);
+    }
+    fn set_endian(&mut self, endian: polyisa_mem::Endian) {
+        self.0.set_endian(endian);
+    }
+}
+
 /// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V、x86、MIPS、
 /// AArch64 を振り分ける。
 /// 番号表の出典は各 `run_elf_*` 側にある。RV32 を含むそれ以外の組み合わせは
@@ -454,7 +506,13 @@ fn run_hexagon_elf(
 }
 
 #[cfg(feature = "guest-arm")]
-fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_arm_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+    semi: bool,
+) -> Result<u64, String> {
     let sel = spec
         .map(|s| {
             resolve_sel(
@@ -466,11 +524,22 @@ fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u6
             )
         })
         .transpose()?;
+    if semi {
+        let mut semi = polyisa_os_semihost::SemiA32::new(root.unwrap_or(""));
+        semi.set_cmdline(&cmdline(path, argv));
+        return run_arm::run_elf_arm_semi(path, argv, sel.as_ref(), &mut semi);
+    }
     run_arm::run_elf_arm_sel(path, argv, sel.as_ref())
 }
 
 #[cfg(not(feature = "guest-arm"))]
-fn run_arm_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_arm_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+    _semi: bool,
+) -> Result<u64, String> {
     Err("この polyisa は arm ゲストなしでビルドされた".to_string())
 }
 
@@ -480,6 +549,7 @@ fn run_aarch64_elf(
     argv: &[String],
     spec: Option<&CpuSpec>,
     root: Option<&str>,
+    semi: bool,
 ) -> Result<u64, String> {
     let sel = spec
         .map(|s| {
@@ -492,6 +562,11 @@ fn run_aarch64_elf(
             )
         })
         .transpose()?;
+    if semi {
+        let mut semi = polyisa_os_semihost::SemiA64::new(root.unwrap_or(""));
+        semi.set_cmdline(&cmdline(path, argv));
+        return run_aarch64::run_elf_aarch64_semi(path, argv, sel.as_ref(), &mut semi, root);
+    }
     run_aarch64::run_elf_aarch64_root(path, argv, sel.as_ref(), root)
 }
 
@@ -501,6 +576,7 @@ fn run_aarch64_elf(
     _argv: &[String],
     _spec: Option<&CpuSpec>,
     _root: Option<&str>,
+    _semi: bool,
 ) -> Result<u64, String> {
     Err("この polyisa は aarch64 ゲストなしでビルドされた".to_string())
 }
@@ -568,7 +644,13 @@ fn run_s390_elf(
 }
 
 #[cfg(feature = "guest-riscv")]
-fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_riscv_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+    semi: bool,
+) -> Result<u64, String> {
     let sel = spec
         .map(|s| {
             resolve_sel(
@@ -580,11 +662,22 @@ fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<
             )
         })
         .transpose()?;
+    if semi {
+        let mut semi = run_riscv::SemiRv::new(root.unwrap_or(""), false);
+        semi.semi.set_cmdline(&cmdline(path, argv));
+        return run_riscv::run_elf_handler(path, argv, sel.as_ref(), &mut semi);
+    }
     run_riscv::run_elf_sel(path, argv, sel.as_ref())
 }
 
 #[cfg(not(feature = "guest-riscv"))]
-fn run_riscv_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_riscv_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+    _semi: bool,
+) -> Result<u64, String> {
     Err("この polyisa は riscv ゲストなしでビルドされた".to_string())
 }
 
@@ -664,10 +757,17 @@ fn feed_stdin(dst: &mut Vec<u8>) {
     }
 }
 
+/// semihosting の SYS_GET_CMDLINE に渡す `[実行ファイル, 引数...]`。
+fn cmdline(path: &str, argv: &[String]) -> Vec<String> {
+    let mut v = vec![path.to_string()];
+    v.extend(argv.iter().cloned());
+    v
+}
+
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
 /// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
 pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
-    run_path_opts(path, argv, cpu, None)
+    run_path_opts(path, argv, cpu, None, None)
 }
 
 /// `run_path_with` に `--root` のゲストルートを添える。
@@ -678,9 +778,17 @@ pub fn run_path_opts(
     argv: &[String],
     cpu: Option<&str>,
     root: Option<&str>,
+    os: Option<&str>,
 ) -> Result<u64, String> {
     use polyisa_loader::elf::{CLASS_32, CLASS_64, MAGIC};
     let spec = cpu.map(parse_cpu_spec).transpose()?;
+    // `--os` は既定の linux と semihost のみ。semihost は
+    // aarch64・arm・riscv の ELF でだけ意味を持つ。
+    match os {
+        None | Some("linux") | Some("semihost") => {}
+        Some(o) => return Err(format!("--os {o} は未対応（linux・semihost）")),
+    }
+    let semi = os == Some("semihost");
     // wasm バイナリ（`\0asm` + version 1）は WASI preview1 で実行する。
     // `--root` はプリオープン `/` として渡るだけで、モジュールファイル
     // 自体はホストのパスから読む（wasmtime の `--dir` と同じ規則）。
@@ -696,6 +804,9 @@ pub fn run_path_opts(
             {
                 return Err(format!("--cpu のファミリ {} は wasm と合わない", s.family));
             }
+            if os.is_some() {
+                return Err("--os は ELF のみ対応".to_string());
+            }
             let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
             return run_wasm_mod(&bytes, path, argv, root);
         }
@@ -710,6 +821,9 @@ pub fn run_path_opts(
     if bytes.len() < 6 || bytes[0..4] != MAGIC {
         // a.out の magic は機種を同定しない —— `--cpu` の
         // ファミリで振り分ける。
+        if os.is_some() {
+            return Err("--os は ELF のみ対応".to_string());
+        }
         if polyisa_loader::probe_kind(&bytes) == polyisa_loader::FileKind::Aout {
             match spec.as_ref().map(|s| s.family.as_str()) {
                 #[cfg(feature = "guest-pdp11")]
@@ -741,6 +855,9 @@ pub fn run_path_opts(
         CLASS_32 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if semi && ehdr.machine != 40 {
+                return Err("--os semihost は aarch64・arm・riscv のみ対応".to_string());
+            }
             if root.is_some() && !matches!(ehdr.machine, 92 | 164) {
                 return Err(
                     "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc・hexagon のみ対応"
@@ -758,7 +875,7 @@ pub fn run_path_opts(
             } else if ehdr.machine == 40 {
                 // EM_ARM（AArch32・ARM 状態）。Ref: AAELF32 §4.1。
                 check("arm")?;
-                run_arm_elf(path, argv, spec.as_ref())
+                run_arm_elf(path, argv, spec.as_ref(), root, semi)
             } else if ehdr.machine == 4 {
                 // EM_68K=4。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("m68k")?;
@@ -800,6 +917,9 @@ pub fn run_path_opts(
         CLASS_64 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if semi && !matches!(ehdr.machine, 183 | 243) {
+                return Err("--os semihost は aarch64・arm・riscv のみ対応".to_string());
+            }
             if root.is_some() && !matches!(ehdr.machine, 183 | 21 | 22 | 258) {
                 return Err(
                     "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc のみ対応".to_string(),
@@ -808,7 +928,7 @@ pub fn run_path_opts(
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
                 check("riscv")?;
-                run_riscv_elf(path, argv, spec.as_ref())
+                run_riscv_elf(path, argv, spec.as_ref(), root, semi)
             } else if ehdr.machine == 62 {
                 // EM_X86_64。Ref: SRC-LINUX (7.3)。
                 check("x86")?;
@@ -820,7 +940,7 @@ pub fn run_path_opts(
             } else if ehdr.machine == 183 {
                 // EM_AARCH64。Ref: SPEC-AARCH64-ELF（AAELF64）§4.2。
                 check("aarch64")?;
-                run_aarch64_elf(path, argv, spec.as_ref(), root)
+                run_aarch64_elf(path, argv, spec.as_ref(), root, semi)
             } else if ehdr.machine == 21 {
                 // EM_PPC64。Ref: SPEC-POWER-ABI (ELFv2 r1.5)。
                 check("power")?;

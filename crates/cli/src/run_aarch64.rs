@@ -144,6 +144,11 @@ fn step_a64(
         let imm = (word >> 5) & 0xffff;
         return svc(env, sys, imm, pc, word);
     }
+    // semihosting の入口は `hlt #0xf000`。OS パーソナリティへ
+    // 委ねる点は svc と同じ（imm が番号として渡る）。
+    if insn == Insn::Hlt && (word >> 5) & 0xffff == 0xf000 {
+        return svc(env, sys, 0xf000, pc, word);
+    }
     let le = endian;
     let ok = env.step(|b| dispatch_a64(b, insn, word, pc, le));
     match ok {
@@ -662,13 +667,41 @@ pub fn run_elf_aarch64_sys_root(
     run_elf_aarch64_impl(path, argv, sel, sys, root, None)
 }
 
+/// `run_elf_aarch64_impl` の semihosting 版（`--os semihost`）。
+/// `hlt #0xf000` が `semi` の SYS_* 演算へ届く。
+pub fn run_elf_aarch64_semi(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    semi: &mut polyisa_os_semihost::SemiA64,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    // JIT は `POLYISA_JIT` 指定時のみ opt-in（linux 経路と同じ）。
+    let mut jit_owned = polyisa_jit::Jit::new();
+    let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
+    run_elf_aarch64_impl(path, argv, sel, semi, root, jit)
+}
+
+/// `run_elf_aarch64_semi` に JIT を差し込む形。差分テストが
+/// `semi.io` 等を比べるのに使う。
+pub fn run_elf_aarch64_semi_jit(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    semi: &mut polyisa_os_semihost::SemiA64,
+    root: Option<&str>,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<u64, String> {
+    run_elf_aarch64_impl(path, argv, sel, semi, root, Some(jit))
+}
+
 /// `run_elf_aarch64_sys` にゲストルートを添えた実体。
 /// `root` は PT_INTERP の動的ローダ解決と `sys` のパス閉じ込めに使う。
 fn run_elf_aarch64_impl(
     path: &str,
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
-    sys: &mut polyisa_os_linux::aarch64::sys::Linux,
+    sys: &mut impl crate::ElfSys,
     root: Option<&str>,
     jit: Option<&mut polyisa_jit::Jit>,
 ) -> Result<u64, String> {
@@ -841,7 +874,7 @@ fn run_elf_aarch64_impl(
         .write(VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(sem::sp_ref(), sp);
-    sys.exe_path = path.to_string();
+    sys.set_exe_path(path);
     sys.set_endian(data_endian);
     sys.init_brk(image_end);
     let feats = sel.map_or(0, |s| s.feats);
@@ -894,8 +927,10 @@ impl polyisa_jit::Translate for A64Tx {
             let Some(insn) = decode_model_ex(u128::from(word), 32, true, self.feats) else {
                 break;
             };
-            // `svc` と未実装の命令はブロックの境界。インタプリタが処理する。
-            if insn == Insn::Svc {
+            // `svc`・`hlt`・未実装の命令はブロックの境界。
+            // インタプリタが処理する（semihost の hlt #0xf000 も
+            // ここで切って svc 経路へ戻す）。
+            if insn == Insn::Svc || insn == Insn::Hlt {
                 break;
             }
             irb.cur_pc = pc;

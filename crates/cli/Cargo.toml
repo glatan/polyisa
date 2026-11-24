@@ -37,6 +37,7 @@ polyisa-mem = { path = "../mem" }
 polyisa-os-linux = { path = "../os-linux" }
 polyisa-os-v7 = { path = "../os-v7", optional = true }
 polyisa-os-bsd = { path = "../os-bsd", optional = true }
+polyisa-os-semihost = { path = "../os-semihost", optional = true }
 polyisa-os-wasi = { path = "../os-wasi", optional = true }
 polyisa-sem = { path = "../sem" }
 polyisa-softfloat = { path = "../softfloat" }
@@ -63,9 +64,9 @@ default = [
     "guest-wasm",
     "guest-x86",
 ]
-guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
+guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64", "polyisa-os-semihost/guest-aarch64"]
 guest-alpha = ["dep:polyisa-guest-alpha", "polyisa-os-linux/guest-alpha"]
-guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
+guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm", "polyisa-os-semihost/guest-arm"]
 guest-hexagon = ["dep:polyisa-guest-hexagon", "polyisa-os-linux/guest-hexagon"]
 guest-ia64 = ["dep:polyisa-guest-ia64", "polyisa-os-linux/guest-ia64"]
 guest-loongarch = ["dep:polyisa-guest-loongarch", "polyisa-os-linux/guest-loongarch"]
@@ -75,7 +76,7 @@ guest-openrisc = ["dep:polyisa-guest-openrisc", "polyisa-os-linux/guest-openrisc
 guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
 guest-pdp11 = ["dep:polyisa-guest-pdp11", "dep:polyisa-os-v7"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
-guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
+guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv", "dep:polyisa-os-semihost"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
@@ -170,6 +171,10 @@ required-features = ["guest-x86"]
 [[test]]
 name = "heavy_program_x86ext"
 required-features = ["guest-x86"]
+
+[[test]]
+name = "heavy_program_semihosting"
+required-features = ["guest-aarch64", "guest-arm", "guest-riscv"]
 
 [[test]]
 name = "heavy_program_wasi"

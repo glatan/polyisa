@@ -21,6 +21,7 @@ members = [
     "crates/os-v7",
     "crates/os-bsd",
     "crates/os-wasi",
+    "crates/os-semihost",
     "crates/trace",
     "crates/gdbstub",
     "crates/cli",

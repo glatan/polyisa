@@ -1,0 +1,20 @@
+[package]
+name = "polyisa-os-semihost"
+version = "0.0.0"
+license.workspace = true
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-engine = { path = "../engine" }
+polyisa-sem = { path = "../sem" }
+polyisa-mem = { path = "../mem" }
+polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
+polyisa-guest-arm = { path = "../../guests/arm", optional = true }
+
+[features]
+guest-aarch64 = ["dep:polyisa-guest-aarch64"]
+guest-arm = ["dep:polyisa-guest-arm"]
+
+[lints]
+workspace = true

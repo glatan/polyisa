@@ -40,6 +40,7 @@ dependencies = [
  "polyisa-mem",
  "polyisa-os-bsd",
  "polyisa-os-linux",
+ "polyisa-os-semihost",
  "polyisa-os-v7",
  "polyisa-os-wasi",
  "polyisa-sem",
@@ -477,6 +478,17 @@ dependencies = [
  "polyisa-host",
  "polyisa-kernel",
  "polyisa-loader",
+ "polyisa-mem",
+ "polyisa-sem",
+]
+
+[[package]]
+name = "polyisa-os-semihost"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest-aarch64",
+ "polyisa-guest-arm",
  "polyisa-mem",
  "polyisa-sem",
 ]
