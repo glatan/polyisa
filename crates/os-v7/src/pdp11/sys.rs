@@ -12,6 +12,8 @@
 //! テンプレはデータ空間にある —— 分離 I/D では D 空間側の語だが
 //! VA=PA なので同じ読み方になる。
 //! Ref: SPEC-UNIX-V7.
+// Gap: GAP-0088 — 単一プロセス・root 模型の意図的な簡略化
+// （fork なし・シグナル配送なし・特権系は EPERM）。
 
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -41,11 +43,21 @@ const SEG_SIZE: u64 = 0o20000;
 /// 2 倍を写像して余裕を持たせる）。
 const PHYS_MAP: u64 = 0x4_0000;
 
-/// `write` 系で捕まえた標準出力と標準エラー。
+/// `write` 系で捕まえた標準出力と標準エラー、標準入力の供給列。
 #[derive(Default)]
 pub struct V7Io {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// 標準入力に返す列。`read(0)` はこれを `stdin_pos` から出す。
+    pub stdin: Vec<u8>,
+    /// `stdin` の消費済み先頭位置。
+    pub stdin_pos: usize,
+    /// fd 0-2 が close 済みか。V7 は fd を最小の空きから割る
+    /// ので `close(0)` の次の `open` が fd 0 を返す —— 追跡が要る。
+    pub closed: [bool; 3],
+    /// stdio を複写した fd → 複写元の stdio 番号（`dup(1)` が
+    /// fd 5 を返したとき 5→1。実体が置かれた fd ≤2 も入る）。
+    alias: HashMap<u32, u32>,
 }
 
 /// ディレクトリ fd の合成内容（V7 の direct 項目列）と読み位置。
@@ -68,6 +80,9 @@ pub struct V7 {
     pub io: V7Io,
     /// ゲスト fd 3 以降のホストファイル表。
     fds: polyisa_kernel::FdTable,
+    /// fd 0-2 に置かれたホストファイル（`close(0)` の後の
+    /// `open` など。FdTable は fd 3 起点なので別に持つ）。
+    low_files: [Option<std::fs::File>; 3],
     /// ディレクトリ fd の合成表。
     dirs: HashMap<u32, DirFd>,
     /// パイプ端の表。
@@ -127,6 +142,7 @@ impl V7 {
         Self {
             io: V7Io::default(),
             fds: polyisa_kernel::FdTable::default(),
+            low_files: [None, None, None],
             dirs: HashMap::new(),
             pipes: HashMap::new(),
             pipe_tab: polyisa_kernel::PipeTable::default(),
@@ -306,7 +322,9 @@ impl V7 {
             match s {
                 "" | "." => {}
                 ".." => {
-                    segs.pop()?;
+                    // ルートの上の `..` はルートに留まる
+                    // （Unix の `..` は / で飽和する）。
+                    let _ = segs.pop();
                 }
                 _ => segs.push(s),
             }
@@ -327,21 +345,44 @@ impl V7 {
 
     // ---- fd ----
 
-    /// 次に使える fd（0..2 は stdio）。NOFILE=15 の範囲内。
+    /// 次に使える fd。V7 は最小の空きを返す —— close 済みの
+    /// stdio 番号も候補になる。NOFILE=15 の範囲内。
     fn alloc_fd(&mut self) -> Option<u32> {
-        (3u32..15).find(|&fd| {
-            self.fds.get(fd).is_none()
-                && !self.dirs.contains_key(&fd)
-                && !self.pipes.contains_key(&fd)
-        })
+        (0u32..15).find(|&fd| !self.fd_used(fd))
     }
 
-    /// fd が使用中か。
+    /// fd が使用中か（0-2 は stdio の開閉・実体の有無も見る）。
     fn fd_used(&self, fd: u32) -> bool {
-        fd <= 2
-            || self.fds.get(fd).is_some()
+        self.fds.get(fd).is_some()
             || self.dirs.contains_key(&fd)
             || self.pipes.contains_key(&fd)
+            || self.io.alias.contains_key(&fd)
+            || match fd {
+                0..=2 => self.low_files[fd as usize].is_some() || !self.io.closed[fd as usize],
+                _ => false,
+            }
+    }
+
+    /// fd に対応するホストファイル（0-2 なら low_files、それ
+    /// 以降は FdTable）。
+    fn file_for(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+        match fd {
+            0..=2 => self.low_files[fd as usize].as_mut(),
+            _ => self.fds.get_mut(fd),
+        }
+    }
+
+    /// fd が指す stdio 番号。実体なしで stdio が有効なとき、
+    /// または stdio を写した alias のときだけ Some（閉じた
+    /// stdio・未使用の fd は None）。
+    fn stdio_of(&self, fd: u32) -> Option<u32> {
+        if let Some(&s) = self.io.alias.get(&fd) {
+            return Some(s);
+        }
+        match fd {
+            0..=2 if !self.io.closed[fd as usize] => Some(fd),
+            _ => None,
+        }
     }
 
     // ---- V7 struct stat（30 バイト） ----
@@ -374,8 +415,21 @@ impl V7 {
     }
 
     /// ディレクトリの V7 direct 項目列（{ino, name[14]}）を合成する。
+    /// V7 のディレクトリは `.`・`..` を先頭に持つ。
     fn dir_ents(path: &str) -> Option<Vec<u8>> {
         let mut out = Vec::new();
+        let mut dot = |ino: u64, name: &[u8]| {
+            out.extend_from_slice(&(ino as u16).to_le_bytes());
+            out.extend_from_slice(name);
+            out.resize(out.len() + 14 - name.len(), 0);
+        };
+        let here = polyisa_host::stat(path).map(|s| s.ino).unwrap_or(0);
+        dot(here, b".");
+        // `..` の inode は親 —— ルートの親は自分。
+        let parent = polyisa_host::stat(&format!("{path}/.."))
+            .map(|s| s.ino)
+            .unwrap_or(here);
+        dot(parent, b"..");
         for e in std::fs::read_dir(path).ok()? {
             let e = e.ok()?;
             let ino = (polyisa_host::dirent_ino(&e) & 0xffff) as u16;
@@ -397,61 +451,65 @@ impl V7 {
             u64::from(a[0]),
             usize::from(a[1]),
         );
-        match fd {
-            0 => {
-                // 標準入力は空（EOF）。
-                Disp::Ret(0)
+        // 実体（dir・パイプ・ファイル）を先に解決する —— close
+        // 済みの stdio 番号にも open/dup で実体が乗りうる。
+        if let Some(d) = self.dirs.get_mut(&fd) {
+            let rest = &d.ents[d.pos.min(d.ents.len() as u64) as usize..];
+            let got = rest.len().min(n);
+            let rest = rest[..got].to_vec();
+            if self.write_bytes(env, buf, &rest).is_err() {
+                return Disp::Fail(errno::EFAULT);
             }
-            1 | 2 => Disp::Fail(errno::EBADF),
-            _ => {
-                if let Some(d) = self.dirs.get_mut(&fd) {
-                    let rest = &d.ents[d.pos.min(d.ents.len() as u64) as usize..];
-                    let got = rest.len().min(n);
-                    let rest = rest[..got].to_vec();
-                    if self.write_bytes(env, buf, &rest).is_err() {
-                        return Disp::Fail(errno::EFAULT);
-                    }
-                    self.dirs.get_mut(&fd).unwrap().pos += got as u64;
-                    return Disp::Ret(got as u16);
+            self.dirs.get_mut(&fd).unwrap().pos += got as u64;
+            return Disp::Ret(got as u16);
+        }
+        if let Some(p) = self.pipes.get(&fd) {
+            if !p.read {
+                return Disp::Fail(errno::EBADF);
+            }
+            let id = p.id;
+            match self.pipe_tab.read(id, n) {
+                polyisa_kernel::PipeRead::Bytes(data) => {
+                    let k = data.len();
+                    return if self.write_bytes(env, buf, &data).is_err() {
+                        Disp::Fail(errno::EFAULT)
+                    } else {
+                        Disp::Ret(k as u16)
+                    };
                 }
-                if let Some(p) = self.pipes.get(&fd) {
-                    if !p.read {
-                        return Disp::Fail(errno::EBADF);
-                    }
-                    let id = p.id;
-                    match self.pipe_tab.read(id, n) {
-                        polyisa_kernel::PipeRead::Bytes(data) => {
-                            let k = data.len();
-                            return if self.write_bytes(env, buf, &data).is_err() {
-                                Disp::Fail(errno::EFAULT)
-                            } else {
-                                Disp::Ret(k as u16)
-                            };
-                        }
-                        polyisa_kernel::PipeRead::Eof => return Disp::Ret(0),
-                        // 単一プロセスでは書き手のブロックが起きない
-                        // （Empty = 書き手が残りバッファ空 = この時点で
-                        // データを待つ余地がない → EOF と同じ 0 を返す
-                        // 近似。fork が入ったら Blocked に写す）。
-                        polyisa_kernel::PipeRead::Empty => return Disp::Ret(0),
-                    }
-                }
-                let Some(f) = self.fds.get_mut(fd) else {
-                    return Disp::Fail(errno::EBADF);
-                };
-                let mut tmp = vec![0u8; n.min(1 << 16)];
-                match f.read(&mut tmp) {
-                    Ok(got) => {
-                        if self.write_bytes(env, buf, &tmp[..got]).is_err() {
-                            Disp::Fail(errno::EFAULT)
-                        } else {
-                            Disp::Ret(got as u16)
-                        }
-                    }
-                    Err(_) => Disp::Fail(errno::EIO),
-                }
+                polyisa_kernel::PipeRead::Eof => return Disp::Ret(0),
+                // 単一プロセスでは書き手のブロックが起きない
+                // （Empty = 書き手が残りバッファ空 = この時点で
+                // データを待つ余地がない → EOF と同じ 0 を返す
+                // 近似。fork が入ったら Blocked に写す）。
+                polyisa_kernel::PipeRead::Empty => return Disp::Ret(0),
             }
         }
+        if let Some(f) = self.file_for(fd) {
+            let mut tmp = vec![0u8; n.min(1 << 16)];
+            return match f.read(&mut tmp) {
+                Ok(got) => {
+                    if self.write_bytes(env, buf, &tmp[..got]).is_err() {
+                        Disp::Fail(errno::EFAULT)
+                    } else {
+                        Disp::Ret(got as u16)
+                    }
+                }
+                Err(_) => Disp::Fail(errno::EIO),
+            };
+        }
+        // stdio（または stdio を写した fd）だけが残る。
+        if self.stdio_of(fd) != Some(0) {
+            return Disp::Fail(errno::EBADF);
+        }
+        // 標準入力は io.stdin から出す（テストの供給口）。
+        let rest = &self.io.stdin[self.io.stdin_pos.min(self.io.stdin.len())..];
+        let got = rest.len().min(n);
+        if self.write_bytes(env, buf, &rest[..got]).is_err() {
+            return Disp::Fail(errno::EFAULT);
+        }
+        self.io.stdin_pos += got;
+        Disp::Ret(got as u16)
     }
 
     fn sys_write(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
@@ -464,39 +522,111 @@ impl V7 {
             Ok(d) => d,
             Err(e) => return Disp::Fail(e),
         };
-        match fd {
-            0 => Disp::Fail(errno::EBADF),
-            1 => {
+        if let Some(p) = self.pipes.get(&fd) {
+            if p.read {
+                return Disp::Fail(errno::EBADF);
+            }
+            return match self.pipe_tab.write(p.id, &data) {
+                Some(k) => Disp::Ret(k as u16),
+                None => Disp::Fail(errno::EPIPE),
+            };
+        }
+        if self.dirs.contains_key(&fd) {
+            return Disp::Fail(errno::EBADF);
+        }
+        if let Some(f) = self.file_for(fd) {
+            return match f.write_all(&data) {
+                Ok(()) => Disp::Ret(n as u16),
+                Err(_) => Disp::Fail(errno::EIO),
+            };
+        }
+        match self.stdio_of(fd) {
+            Some(1) => {
                 self.io.stdout.extend_from_slice(&data);
                 let _ = std::io::stdout().write_all(&data);
                 Disp::Ret(n as u16)
             }
-            2 => {
+            Some(2) => {
                 self.io.stderr.extend_from_slice(&data);
                 let _ = std::io::stderr().write_all(&data);
                 Disp::Ret(n as u16)
             }
-            _ => {
-                if let Some(p) = self.pipes.get(&fd) {
-                    if p.read {
-                        return Disp::Fail(errno::EBADF);
-                    }
-                    return match self.pipe_tab.write(p.id, &data) {
-                        Some(k) => Disp::Ret(k as u16),
-                        None => Disp::Fail(errno::EPIPE),
-                    };
-                }
-                if self.dirs.contains_key(&fd) {
-                    return Disp::Fail(errno::EBADF);
-                }
-                let Some(f) = self.fds.get_mut(fd) else {
-                    return Disp::Fail(errno::EBADF);
-                };
-                match f.write_all(&data) {
-                    Ok(()) => Disp::Ret(n as u16),
-                    Err(_) => Disp::Fail(errno::EIO),
-                }
+            _ => Disp::Fail(errno::EBADF),
+        }
+    }
+
+    /// exec(name, argp) / exece(name, argp, envp)。成功したら戻ら
+    /// ない —— アドレス空間を組み替えてエントリへ跳ぶ。fd・シグ
+    /// ナル処置のうち IGN は持ち越す（捕捉設定は DFL に戻す）。
+    /// envp の語は読むだけ（V7 の environ は crt0 側の仕事）。
+    fn sys_exec(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
+        let path = match self.host_path(env, u64::from(a[0])) {
+            Ok(p) => p,
+            Err(e) => return Disp::Fail(e),
+        };
+        // argp が指す char *argv[]（NULL 終端）を読む。
+        let mut argv: Vec<String> = Vec::new();
+        for i in 0..64u64 {
+            let Some(p) = self.r16(env, u64::from(a[1]) + 2 * i) else {
+                return Disp::Fail(errno::EFAULT);
+            };
+            if p == 0 {
+                break;
             }
+            match self.read_cstr(env, u64::from(p)) {
+                Ok(s) => argv.push(s),
+                Err(e) => return Disp::Fail(e),
+            }
+        }
+        // 実行ビットが無ければ EACCES（V7 の exec と同じ検査）。
+        match polyisa_host::stat(&path) {
+            Ok(m) if m.mode & 0o111 != 0 => {}
+            Ok(_) => return Disp::Fail(errno::EACCES),
+            Err(e) => return Disp::Fail(host_err(e.raw_os_error())),
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return Disp::Fail(host_err(e.raw_os_error())),
+        };
+        // 形式の検査は差し替え前に済ませる（壊した空間のまま
+        // 死ぬのは V7 どおりだが、起こし得る失敗は先に弾く）。
+        if aout::parse(&bytes, aout::Arch::Pdp11).is_err() {
+            return Disp::Fail(errno::ENOEXEC);
+        }
+        if argv.is_empty() {
+            // argv[0] の既定は呼ばれたプログラム名（ゲスト側の
+            // 文字列 —— 解決済みのホストパスを見せない）。
+            argv.push(self.read_cstr(env, u64::from(a[0])).unwrap_or_default());
+        }
+        // 既存の空間を外して組み替え直す。ユーザ APR・MMR を
+        // 全消去してから load_exec に張り直させる。
+        env.backend
+            .mem
+            .unmap(VirtAddr(0), PHYS_MAP / polyisa_mem::PAGE_SIZE);
+        for p in 0..8u16 {
+            for sp in [mmu::Space::I, mmu::Space::D] {
+                mmu::apr_put(&mut env.backend, mmu::apr_idx(2, sp, p), 0, 0);
+            }
+        }
+        mmu::mmr_put(&mut env.backend, 0, 0);
+        mmu::mmr_put(&mut env.backend, 1, 0);
+        mmu::mmr_put(&mut env.backend, 2, 0);
+        mmu::mmr_put(&mut env.backend, 3, 0);
+        match self.load_exec(env, &bytes, &argv) {
+            Ok(entry) => {
+                // 捕捉されたシグナル処置は exec で DFL に戻る
+                // （IGN は残る）。
+                for s in &mut self.sigact {
+                    if *s > 1 {
+                        *s = 0;
+                    }
+                }
+                let e = u64::from(entry);
+                env.pc = e;
+                sem::r_set(&mut env.backend, reg::PC as u8, entry);
+                Disp::Ret(0)
+            }
+            Err(_) => Disp::Fail(errno::ENOEXEC),
         }
     }
 
@@ -509,6 +639,9 @@ impl V7 {
         let Some(fd) = self.alloc_fd() else {
             return Disp::Fail(errno::EMFILE);
         };
+        // creat の mode は新規作成時だけ効く（既存の truncate
+        // では許可ビットを変えない）。
+        let existed = polyisa_host::stat(&path).is_ok();
         // V7: 0=read・1=write・2=read+write。
         let mut o = std::fs::OpenOptions::new();
         match mode {
@@ -542,8 +675,15 @@ impl V7 {
         }
         match o.open(&path) {
             Ok(f) => {
-                self.fds.place(fd, Some(f));
-                self.fds.remember_path(fd, path);
+                if fd <= 2 {
+                    self.low_files[fd as usize] = Some(f);
+                } else {
+                    self.fds.place(fd, Some(f));
+                }
+                if creat && !existed {
+                    let perm = u32::from(a[1]) & 0o777 & !u32::from(self.umask);
+                    let _ = polyisa_host::chmod(&path, perm);
+                }
                 Disp::Ret(fd as u16)
             }
             Err(e) => Disp::Fail(host_err(e.raw_os_error())),
@@ -553,28 +693,27 @@ impl V7 {
     fn sys_close(&mut self, env: &BareEnv, a: &[u16]) -> Disp {
         let _ = a;
         let fd = u32::from(sem::r_get(&env.backend, 0));
-        match fd {
-            0..=2 => Disp::Ret(0),
-            _ => {
-                let mut was = self.fds.get(fd).is_some() | self.dirs.remove(&fd).is_some();
-                if let Some(p) = self.pipes.remove(&fd) {
-                    self.pipe_tab.close(p.id, p.read);
-                    was = true;
-                }
-                self.fds.clear(fd);
-                if was {
-                    Disp::Ret(0)
-                } else {
-                    Disp::Fail(errno::EBADF)
-                }
-            }
+        if !self.fd_used(fd) {
+            return Disp::Fail(errno::EBADF);
         }
+        self.fds.clear(fd);
+        self.dirs.remove(&fd);
+        if let Some(p) = self.pipes.remove(&fd) {
+            self.pipe_tab.close(p.id, p.read);
+        }
+        self.io.alias.remove(&fd);
+        if fd <= 2 {
+            self.low_files[fd as usize] = None;
+            self.io.closed[fd as usize] = true;
+        }
+        Disp::Ret(0)
     }
 
     fn sys_seek(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
         let fd = u32::from(sem::r_get(&env.backend, 0));
-        // PDP-11 の long は上位語が先。
-        let off = (i32::from(a[0] as i16) << 16) | i32::from(a[1] as i16);
+        // PDP-11 の long は上位語が先。下位語は符号拡張しない
+        // （0x8000 超の正の変位を負にしない）。
+        let off = (i32::from(a[0] as i16) << 16) | i32::from(a[1]);
         let whence = a[2];
         if let Some(d) = self.dirs.get_mut(&fd) {
             let base: i64 = match whence {
@@ -590,7 +729,7 @@ impl V7 {
             d.pos = np as u64;
             return Disp::Ret2((np >> 16) as u16, (np & 0xffff) as u16);
         }
-        let Some(f) = self.fds.get_mut(fd) else {
+        let Some(f) = self.file_for(fd) else {
             return if self.fd_used(fd) {
                 Disp::Fail(errno::ESPIPE)
             } else {
@@ -610,21 +749,22 @@ impl V7 {
     }
 
     fn sys_sbreak(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
-        let new = a[0];
-        // 上限はスタック下端、下限はデータ先頭。
-        if new < self.data_lo || u64::from(new) >= u64::from(self.stack_lo) << 13 {
+        // 上限はスタック下端、下限はデータ先頭（カーネルは下限
+        // 未満を 0 サイズに飽和させる —— 失敗ではなく丸める）。
+        let new = a[0].max(self.data_lo);
+        if u64::from(new) >= u64::from(self.stack_lo) << 13 {
             return Disp::Fail(errno::ENOMEM);
         }
         // 新しく写像が要るページを有効にする（データ側の PAR を
         // 延ばす —— VA=PA、物理は全面写像済み）。
-        let top_page = u64::from(new.wrapping_sub(1)) >> 13;
+        let top_page = u64::from(new.saturating_sub(1)) >> 13;
         let space = if self.sep_id {
             mmu::Space::D
         } else {
             mmu::Space::I
         };
         let d_first = self.data_lo >> 13;
-        for p in 0..=top_page as u16 {
+        for p in d_first..=top_page as u16 {
             let i = mmu::apr_idx(2, space, p);
             // 未写像のページにだけ PAR/PDR を立てる（書き込み可・全域）。
             if Self::pdr_of(env, i) & mmu::pdr::ACF == 0 {
@@ -663,21 +803,20 @@ impl V7 {
                     Err(_) => return Disp::Fail(errno::EIO),
                 }
             } else {
-                match self.fds.get(fd).map(polyisa_host::fstat) {
+                match self.file_for(fd).map(|f| polyisa_host::fstat(f)) {
                     Some(Ok(m)) => m,
                     Some(Err(_)) => return Disp::Fail(errno::EIO),
                     None => {
                         // stdio はキャラクタデバイスとして報告しない
                         // （ENOTTY 側へ寄せる —— /dev/null 相当の
-                        // 最小属性）。
-                        let zero_md = match polyisa_host::stat("/dev/null") {
-                            Ok(m) => m,
-                            Err(_) => return Disp::Fail(errno::EBADF),
-                        };
-                        if fd > 2 && !self.pipes.contains_key(&fd) {
+                        // 最小属性）。閉じた番号は EBADF。
+                        if !self.fd_used(fd) {
                             return Disp::Fail(errno::EBADF);
                         }
-                        zero_md
+                        match polyisa_host::stat("/dev/null") {
+                            Ok(m) => m,
+                            Err(_) => return Disp::Fail(errno::EBADF),
+                        }
                     }
                 }
             }
@@ -719,7 +858,8 @@ impl V7 {
 
     fn sys_signal(&mut self, a: &[u16]) -> Disp {
         let s = a[0] as usize;
-        if s == 0 || s >= self.sigact.len() {
+        // V7: 0・NSIG 以上・SIGKILL は EINVAL。
+        if s == 0 || s >= self.sigact.len() || s == usize::from(sig::KILL) {
             return Disp::Fail(errno::EINVAL);
         }
         let old = self.sigact[s];
@@ -739,14 +879,20 @@ impl V7 {
         let b = &mut env.backend;
         let m0 = mmu::mmr_val(b, 0);
         let err = m0 & mmu::mmr0::FREEZE;
-        let page = (m0 & mmu::mmr0::PAGE) >> 1;
+        // MMR0<6:1> は {mode<6:5>, ds<4>, page<3:1>} の並び ——
+        // page だけ取るには下位 3 桁を拾う。
+        let page = (m0 >> 1) & 0o7;
         let mode = (m0 >> 5) & 0o3;
+        let ds = (m0 >> 4) & 1 != 0;
         // MMR0 の凍結桁を戻す（エラーの記録を残し、凍結だけ解く）。
         mmu::mmr_put(b, 0, m0 & !(mmu::mmr0::FREEZE | mmu::mmr0::TRAP));
         let can_grow = mode == psw::USER
             && err & (mmu::mmr0::NR | mmu::mmr0::PL) != 0
+            // スタックが住む空間の fault だけを成長させる（0411
+            // の I 空間 fault で D 頁を育てても再 fault する）。
+            && ds == self.sep_id
             && page < self.stack_lo
-            && u64::from(page) << 13 >= u64::from(self.data_lo);
+            && u64::from(page) << 13 >= u64::from(self.brk);
         if !can_grow {
             return Self::die(sig::SEGV);
         }
@@ -816,7 +962,8 @@ impl V7 {
         let Some(w) = Self::r16i(env, pc.wrapping_sub(2)) else {
             return Disp::Fail(errno::EFAULT);
         };
-        let n = usize::from(w & 0o377);
+        // 番号は trap の語の下位 6 桁（カーネルの &077 と同じ）。
+        let n = usize::from(w & 0o77);
         let Some(ent) = SYSENT.get(n) else {
             return Disp::Fail(errno::EINVAL);
         };
@@ -830,14 +977,17 @@ impl V7 {
             let Some(ptr) = Self::r16i(env, pc) else {
                 return Disp::Fail(errno::EFAULT);
             };
-            let w2 = self.r16(env, u64::from(ptr));
-            if trace() {
-                eprintln!("indir ptr={ptr:o} w2={w2:?}");
-            }
-            let Some(w2) = w2 else {
+            let Some(w2) = self.r16(env, u64::from(ptr)) else {
                 return Disp::Fail(errno::EFAULT);
             };
-            let n2 = usize::from(w2 & 0o377);
+            // テンプレの先頭語は `sys n`（01044nn）でなければ
+            // ならない —— 違う形はカーネルでは 077（nosys）に
+            // 化けて SIGSYS で死ぬ。
+            let n2 = if w2 & !0o77 == 0o104400 {
+                usize::from(w2 & 0o77)
+            } else {
+                63
+            };
             let ent2 = SYSENT.get(n2);
             let Some(ent2) = ent2 else {
                 return Disp::Fail(errno::EINVAL);
@@ -879,8 +1029,12 @@ impl V7 {
                 &args[..usize::from(ent.args).min(8)]
             );
         }
-        match n {
-            1 => Disp::Exit(u32::from(args[0])),
+        let disp = match n {
+            // exit: {1,1} —— 状態は r0。
+            1 => Disp::Exit(u32::from(sem::r_get(&env.backend, 0))),
+            // fork: 単一プロセス模型 —— V7 の「プロセスが作れない」
+            // 側の errno（EAGAIN = no more processes）。
+            2 => Disp::Fail(errno::EAGAIN),
             3 => self.sys_read(env, &args),
             4 => self.sys_write(env, &args),
             5 => self.sys_open(env, &args, false),
@@ -906,11 +1060,19 @@ impl V7 {
                     Ok(p) => p,
                     Err(e) => return Disp::Fail(e),
                 };
-                match std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path)) {
+                // V7 の unlink はディレクトリに EPERM。
+                if std::fs::metadata(&path)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
+                    return Disp::Fail(errno::EPERM);
+                }
+                match std::fs::remove_file(&path) {
                     Ok(()) => Disp::Ret(0),
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
             }
+            11 | 59 => self.sys_exec(env, &args),
             12 => {
                 let path = match self.host_path(env, u64::from(args[0])) {
                     Ok(p) => p,
@@ -952,18 +1114,57 @@ impl V7 {
             16 => {
                 // chown: 実行はホストの権限内。root モデルでは
                 // 成功扱い（ホスト側の chown は権限が要る）。
-                Disp::Ret(0)
+                // 存在の検査はする（V7 と同じ ENOENT）。
+                let path = match self.host_path(env, u64::from(args[0])) {
+                    Ok(p) => p,
+                    Err(e) => return Disp::Fail(e),
+                };
+                match polyisa_host::stat(&path) {
+                    Ok(_) => Disp::Ret(0),
+                    Err(e) => Disp::Fail(host_err(e.raw_os_error())),
+                }
+            }
+            // mknod: デバイスノードはホスト権限外 —— 通常ファイル
+            // （型桁 0）だけ作り、残りは V7 の EPERM。
+            14 => {
+                let path = match self.host_path(env, u64::from(args[0])) {
+                    Ok(p) => p,
+                    Err(e) => return Disp::Fail(e),
+                };
+                if args[1] & 0o170000 != 0 {
+                    return Disp::Fail(errno::EPERM);
+                }
+                match std::fs::File::create(&path) {
+                    Ok(_) => Disp::Ret(0),
+                    Err(e) => Disp::Fail(host_err(e.raw_os_error())),
+                }
             }
             17 => self.sys_sbreak(env, &args),
             18 => self.sys_stat(env, &args, false),
             19 => self.sys_seek(env, &args),
             20 => Disp::Ret(self.pid),
+            // mount/umount/ptrace/profil/acct/phys/lock/mpx —— 特権
+            // または模型の外。V7 は非特権に EPERM を返す。
+            21 | 22 | 26 | 44 | 51 | 52 | 53 | 56 => Disp::Fail(errno::EPERM),
+            // pause: シグナル配送経路がないためシグナルは来ない ——
+            // 唯一の定義済み戻りである EINTR を返す。
+            29 => Disp::Fail(errno::EINTR),
             23 | 46 => Disp::Ret(0), // setuid/setgid —— root モデル
             24 => Disp::Ret2(0, 0),  // getuid —— root モデル
             25 => Disp::Ret(0),      // stime —— 時計は書かない
             27 => Disp::Ret(0),      // alarm —— タイマなし
             28 => self.sys_stat(env, &args, true),
-            30 => Disp::Ret(0), // utime —— 時刻更新は省略
+            30 => {
+                // utime: 時刻更新は省略。存在の検査はする。
+                let path = match self.host_path(env, u64::from(args[0])) {
+                    Ok(p) => p,
+                    Err(e) => return Disp::Fail(e),
+                };
+                match polyisa_host::stat(&path) {
+                    Ok(_) => Disp::Ret(0),
+                    Err(e) => Disp::Fail(host_err(e.raw_os_error())),
+                }
+            }
             33 => {
                 let path = match self.host_path(env, u64::from(args[0])) {
                     Ok(p) => p,
@@ -995,20 +1196,26 @@ impl V7 {
             }
             36 => Disp::Ret(0), // sync
             37 => {
-                // kill(pid, sig): pid は r0、sig は u.u_arg[0]。
-                // 自プロセスへの配送のみ。
-                if sem::r_get(&env.backend, 0) == self.pid || sem::r_get(&env.backend, 0) == 0 {
-                    let s = args[1] as u8;
-                    if (1..16).contains(&s) && s != sig::KILL {
-                        let d = self.sigact[s as usize];
-                        if d > 1 {
-                            // ハンドラ配送は OS4 の範囲。
-                            return Self::die(s);
-                        }
-                    }
-                    Self::die(s.min(15))
-                } else {
-                    Disp::Fail(errno::ESRCH)
+                // kill(pid, sig): {2,1} —— pid は r0、sig は
+                // u.u_arg[1]（args[0]）。自プロセスへの配送のみ。
+                let s = args[0];
+                if s >= 16 {
+                    return Disp::Fail(errno::EINVAL);
+                }
+                let pid = u32::from(sem::r_get(&env.backend, 0));
+                if pid != u32::from(self.pid) && pid != 0 {
+                    return Disp::Fail(errno::ESRCH);
+                }
+                if s == 0 {
+                    // sig=0 は存在確認 —— 対象があれば成功。
+                    return Disp::Ret(0);
+                }
+                match self.sigact[s as usize] {
+                    // SIG_IGN は無効化 —— 落とさない。
+                    1 => Disp::Ret(0),
+                    // DFL・ハンドラ設定済み —— ハンドラ配送は
+                    // OS4 の範囲で、現状は既定動作どおり終了。
+                    _ => Self::die(s as u8),
                 }
             }
             40 => {
@@ -1018,28 +1225,45 @@ impl V7 {
                     let p = d.pos;
                     return Disp::Ret2((p >> 16) as u16, (p & 0xffff) as u16);
                 }
-                match self.fds.get_mut(fd).map(|f| f.stream_position()) {
+                match self.file_for(fd).map(|f| f.stream_position()) {
                     Some(Ok(p)) => Disp::Ret2((p >> 16) as u16, (p & 0xffff) as u16),
                     Some(Err(_)) => Disp::Fail(errno::EIO),
-                    None => Disp::Fail(errno::ESPIPE),
+                    None => {
+                        if self.fd_used(fd) {
+                            Disp::Fail(errno::ESPIPE)
+                        } else {
+                            Disp::Fail(errno::EBADF)
+                        }
+                    }
                 }
             }
             41 => {
-                // dup(fd[, fd2]): fd は r0、dup2 先は r1。fd2 が
-                // 指されていて fd と違うなら、そこを閉じてから写す
-                // （V7 の dup は r1 の指定を見る）。
-                let fd = u32::from(sem::r_get(&env.backend, 0));
-                let fd2 = u32::from(sem::r_get(&env.backend, 1));
-                let nf = if fd2 != 0 && fd2 != fd && fd2 < 15 {
-                    if !self.fd_used(fd) {
+                // dup(fdes[, fdes2]): {2,2} —— fdes は r0、fdes2
+                // は r1。fdes の上位桁（0100）が立つときだけ dup2
+                // で、コピー先は fdes2 が指定する番号。
+                let coded = u32::from(sem::r_get(&env.backend, 0));
+                let fd = coded & 0o77;
+                if !self.fd_used(fd) {
+                    return Disp::Fail(errno::EBADF);
+                }
+                let nf = if coded & 0o100 != 0 {
+                    let fd2 = u32::from(sem::r_get(&env.backend, 1));
+                    if fd2 >= 15 {
                         return Disp::Fail(errno::EBADF);
                     }
-                    if self.fd_used(fd2) {
+                    if fd2 != fd {
+                        // 先送り先が開いていれば閉じる（V7 の
+                        // dup2 相当の動作）。
                         self.dirs.remove(&fd2);
                         if let Some(p) = self.pipes.remove(&fd2) {
                             self.pipe_tab.close(p.id, p.read);
                         }
                         self.fds.clear(fd2);
+                        self.io.alias.remove(&fd2);
+                        if fd2 <= 2 {
+                            self.low_files[fd2 as usize] = None;
+                            self.io.closed[fd2 as usize] = true;
+                        }
                     }
                     fd2
                 } else {
@@ -1048,6 +1272,9 @@ impl V7 {
                         None => return Disp::Fail(errno::EMFILE),
                     }
                 };
+                if nf == fd {
+                    return Disp::Ret(nf as u16);
+                }
                 if let Some(d) = self.dirs.get(&fd) {
                     // ディレクトリの dup は同じ項目列を別位置で持つ
                     // （V7 の実装も別の open file description になる）。
@@ -1065,16 +1292,27 @@ impl V7 {
                     self.pipes.insert(nf, PipeEnd { id, read });
                     return Disp::Ret(nf as u16);
                 }
-                let Some(f) = self.fds.get_mut(fd) else {
-                    return Disp::Fail(errno::EBADF);
-                };
-                match f.try_clone() {
-                    Ok(n) => {
-                        self.fds.place(nf, Some(n));
-                        Disp::Ret(nf as u16)
-                    }
-                    Err(_) => Disp::Fail(errno::EIO),
+                if let Some(f) = self.file_for(fd) {
+                    return match f.try_clone() {
+                        Ok(n) => {
+                            if nf <= 2 {
+                                self.low_files[nf as usize] = Some(n);
+                            } else {
+                                self.fds.place(nf, Some(n));
+                            }
+                            Disp::Ret(nf as u16)
+                        }
+                        Err(_) => Disp::Fail(errno::EIO),
+                    };
                 }
+                // 複写元が stdio —— alias を張って stdio 側へ
+                // 写す（実体ファイルはないので記録で足す）。
+                let s = self.io.alias.get(&fd).copied().unwrap_or(fd);
+                if s > 2 {
+                    return Disp::Fail(errno::EBADF);
+                }
+                self.io.alias.insert(nf, s);
+                Disp::Ret(nf as u16)
             }
             42 => self.sys_pipe(env, &args),
             43 => {
@@ -1087,12 +1325,31 @@ impl V7 {
                     Disp::Fail(errno::EFAULT)
                 }
             }
+            47 => Disp::Ret2(0, 0), // getgid —— root モデル
             48 => self.sys_signal(&args),
             54 => Disp::Fail(errno::ENOTTY), // ioctl —— tty なし
+            31 | 32 => Disp::Fail(errno::ENOTTY), // stty/gtty —— tty なし
             60 => {
                 let old = self.umask;
                 self.umask = args[0] & 0o777;
                 Disp::Ret(old)
+            }
+            61 => {
+                // chroot: ルートを張り替える（resolve は `..` を
+                // ルートで飽和させるので閉じ込めは保たれる）。
+                let path = match self.host_path(env, u64::from(args[0])) {
+                    Ok(p) => p,
+                    Err(e) => return Disp::Fail(e),
+                };
+                match std::fs::metadata(&path) {
+                    Ok(m) if m.is_dir() => {
+                        self.root = path;
+                        self.cwd = "/".to_string();
+                        Disp::Ret(0)
+                    }
+                    Ok(_) => Disp::Fail(errno::ENOTDIR),
+                    Err(e) => Disp::Fail(host_err(e.raw_os_error())),
+                }
             }
             _ => {
                 if !self.reported.contains(&(n as u8)) {
@@ -1101,7 +1358,12 @@ impl V7 {
                 }
                 Self::die(sig::SYS)
             }
+        };
+        // 失敗・終了だけを補足する（成功の戻りは遡る必要がない）。
+        if trace() && matches!(disp, Disp::Fail(_) | Disp::Exit(_)) {
+            eprintln!("v7 -> {disp:?}");
         }
+        disp
     }
 }
 
@@ -1168,10 +1430,18 @@ impl V7 {
         } else {
             data_va
         };
-        self.d_base_par = (d_phys >> 6) as u16;
+        let d_first_par = (data_va >> 13) as u16;
+        // d_base_par = データ最初頁の PAR。0411 は別物理、
+        // それ以外は VA=PA 恒等（data_va が頁内にずれていても
+        // PAR は頁頭の物理 —— 0407 の非頁整列で誤差が出る）。
+        self.d_base_par = if sep {
+            (d_phys >> 6) as u16
+        } else {
+            d_first_par * 0o200
+        };
         let bss_lo = data_va + h.data;
         self.data_lo = data_va as u16;
-        self.brk = bss_lo as u16;
+        self.brk = (bss_lo + h.bss) as u16;
         if bss_lo + h.bss >= USPACE_TOP {
             return Err("data+bss がユーザ空間を超える".to_string());
         }
@@ -1203,15 +1473,11 @@ impl V7 {
         let d_first = (d_va >> 13) as u16;
         let d_last = ((bss_lo + h.bss + SEG_SIZE - 1) >> 13) as u16;
         for p in d_first..d_last.max(d_first) {
-            // PAR = データ物理先頭 + データ起点からの頁距離
+            // PAR = データ最初頁の PAR + データ起点からの頁距離
             // （0411 は d_base_par=別物理・d_first=0、その他は
-            // 恒等で d_base_par=d_first*0o200）。
+            // 恒等で p*0o200）。
             let par = self.d_base_par.wrapping_add((p - d_first) * 0o200);
             mmu::apr_put(b, mmu::apr_idx(2, d_space, p), par, pdr_rw_full());
-        }
-        if sep {
-            // I 空間は text のみ、D 空間は data+stack。
-            // data は vaddr 0 からの D 空間 —— 物理は同じ場所。
         }
 
         // 初期スタック: 文字列を上端から下へ、続いてポインタ表。
@@ -1338,10 +1604,6 @@ impl TrapHandler for V7 {
             return TrapOutcome::Handled;
         }
         TrapOutcome::Unimplemented
-    }
-
-    fn init_brk(&mut self, image_end: u64) {
-        self.brk = image_end as u16;
     }
 }
 

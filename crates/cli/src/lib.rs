@@ -625,22 +625,7 @@ fn run_pdp11_aout(
         spec.model.as_str()
     };
     let mut sys = polyisa_os_v7::pdp11::sys::V7::new(root.unwrap_or(""));
-    let mut env =
-        polyisa_engine::bare::BareEnv::new(core::mem::size_of::<polyisa_guest_pdp11::CpuState>());
-    // argv[0] はプログラムのパス（ELF の各実行経路と同じ規則）。
-    let mut gargv = Vec::with_capacity(argv.len() + 1);
-    gargv.push(path.to_string());
-    gargv.extend(argv.iter().cloned());
-    let entry = sys.load_exec(&mut env, bytes, &gargv)?;
-    let m = run_pdp11::Pdp11Model::named(model);
-    match run_pdp11::run(&mut env, u64::from(entry), m, &mut sys) {
-        polyisa_engine::run::Outcome::Exit(code) => Ok(code),
-        polyisa_engine::run::Outcome::Unimplemented { pc, word } => {
-            Err(format!("unimplemented at {pc:#x}: {word:#x}"))
-        }
-        polyisa_engine::run::Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
-        polyisa_engine::run::Outcome::Deadlock => Err("deadlock".to_string()),
-    }
+    run_pdp11::run_aout_v7_sys(bytes, path, argv, model, &mut sys)
 }
 
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の

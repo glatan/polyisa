@@ -310,11 +310,10 @@ fn mmr1_rec_raw(b: &mut InterpBackend, rec: u16) {
 /// 残りを上位へ繰り上げる。`ea_fault_reg`=keep モデルの
 /// `wb_rollback` が書き戻しを戻したあとの帳合わせに使う
 /// （戻した分の記録を除かないと `reg_unwind` が二重に戻す）。
-/// ゲート条件は `mmr1_rec` と同じ —— 記録されない系では
-/// 除く分も無い。
+/// FREEZE は見ない —— rollback は fault 記録（FREEZE 済み）の
+/// あとに走るが、除く記録は fault 前に立てられたものだから。
 fn mmr1_pop(b: &mut InterpBackend) {
-    let pa = b.param::<MmuPaParam>();
-    if pa == MMU_PA_OFF || mmr_val(b, 0) & mmr0::FREEZE != 0 {
+    if b.param::<MmuPaParam>() == MMU_PA_OFF {
         return;
     }
     let m1 = mmr_val(b, 1);

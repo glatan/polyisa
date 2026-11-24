@@ -46,11 +46,10 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| OS4 | V7 の残りの syscall（signal・time・dup・pipe 等の範囲の確定を含む）と `heavy_program_unixv7`（層 7） | OS3 | S25-1 |
 | OS5 | BSD パーソナリティ骨格: `chmk` の syscall 機械、BSD の a.out の配置と初期スタック、`cli` の `run_vax` への接続 | OS2 | - |
 | OS6 | BSD の残りの syscall と `heavy_program_bsdvax`（層 7） | OS5 | S25-2 |
 | OS7 | セミホスティング: 入口の検出（aarch64 は `hlt #0xf000`、arm は `svc #0xab`/`bkpt #0xab` 系、riscv は `ebreak` 前後の `slli x0,x0,0x1f`/`srai x0,x0,7` の標識列 — riscv の ebreak は `Break` 退出の処理点で前後語を読んで判定。二系統の trap 経路は GAP-0024 に注意）と `SYS_*` 演算のホスト入出力への写像、`heavy_program_semihosting`（層 7、clang 静的リンクの自前プログラム） | OS1 | S25-3 |
-| OS8 | 残件整理・判定列更新（`workspace.md` のクレート表と依存規則、`gaps.md`/`records.md` の整合を含む） | OS4・OS6・OS7 | - |
+| OS8 | 残件整理・判定列更新（`workspace.md` のクレート表と依存規則、`gaps.md`/`records.md` の整合を含む） | OS6・OS7 | - |
 
 ### 段階 26：システムコールの段階 5
 

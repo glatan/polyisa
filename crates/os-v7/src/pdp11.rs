@@ -97,7 +97,7 @@ pub const SYSENT: [SysEnt; 64] = [
     SysEnt { name: "creat",  args: 2 }, //  8
     SysEnt { name: "link",   args: 2 }, //  9
     SysEnt { name: "unlink", args: 1 }, // 10
-    SysEnt { name: "exec",   args: 3 }, // 11
+    SysEnt { name: "exec",   args: 2 }, // 11
     SysEnt { name: "chdir",  args: 1 }, // 12
     SysEnt { name: "time",   args: 0 }, // 13
     SysEnt { name: "mknod",  args: 3 }, // 14
@@ -112,14 +112,14 @@ pub const SYSENT: [SysEnt; 64] = [
     SysEnt { name: "setuid", args: 0 }, // 23
     SysEnt { name: "getuid", args: 0 }, // 24
     SysEnt { name: "stime",  args: 0 }, // 25
-    SysEnt { name: "ptrace", args: 3 }, // 26
+    SysEnt { name: "ptrace", args: 4 }, // 26
     SysEnt { name: "alarm",  args: 0 }, // 27
     SysEnt { name: "fstat",  args: 1 }, // 28
     SysEnt { name: "pause",  args: 0 }, // 29
     SysEnt { name: "utime",  args: 2 }, // 30
-    SysEnt { name: "nosys",  args: 1 }, // 31 — 旧 stty
-    SysEnt { name: "nosys",  args: 1 }, // 32 — 旧 gtty
-    SysEnt { name: "access", args: 3 }, // 33
+    SysEnt { name: "stty",   args: 1 }, // 31 — fd は r0
+    SysEnt { name: "gtty",   args: 1 }, // 32 — fd は r0
+    SysEnt { name: "access", args: 2 }, // 33
     SysEnt { name: "nice",   args: 0 }, // 34
     SysEnt { name: "ftime",  args: 1 }, // 35
     SysEnt { name: "sync",   args: 0 }, // 36
@@ -140,9 +140,9 @@ pub const SYSENT: [SysEnt; 64] = [
     SysEnt { name: "acct",   args: 1 }, // 51
     SysEnt { name: "phys",   args: 3 }, // 52
     SysEnt { name: "lock",   args: 1 }, // 53
-    SysEnt { name: "ioctl",  args: 3 }, // 54
+    SysEnt { name: "ioctl",  args: 2 }, // 54 — fd は r0
     SysEnt { name: "nosys",  args: 0 }, // 55
-    SysEnt { name: "mpx",    args: 2 }, // 56
+    SysEnt { name: "mpx",    args: 4 }, // 56
     SysEnt { name: "nosys",  args: 0 }, // 57
     SysEnt { name: "nosys",  args: 0 }, // 58
     SysEnt { name: "exece",  args: 3 }, // 59
