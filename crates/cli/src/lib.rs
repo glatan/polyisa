@@ -628,6 +628,26 @@ fn run_pdp11_aout(
     run_pdp11::run_aout_v7_sys(bytes, path, argv, model, &mut sys)
 }
 
+/// VAX の a.out を 4.3BSD パーソナリティで実行する。
+/// 4.3BSD の実機がフル VAX なので、`--cpu` のモデル省略時は
+/// `vax`。
+#[cfg(feature = "guest-vax")]
+fn run_vax_aout(
+    bytes: &[u8],
+    path: &str,
+    argv: &[String],
+    spec: &CpuSpec,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let model = if spec.model.is_empty() {
+        "vax"
+    } else {
+        spec.model.as_str()
+    };
+    let mut sys = polyisa_os_bsd::vax::sys::Bsd::new(root.unwrap_or(""));
+    run_vax::run_aout_bsd_sys(bytes, path, argv, model, &mut sys)
+}
+
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
 /// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
 pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
@@ -680,8 +700,9 @@ pub fn run_path_opts(
                 Some("pdp11") => {
                     return run_pdp11_aout(&bytes, path, argv, spec.as_ref().unwrap(), root);
                 }
+                #[cfg(feature = "guest-vax")]
                 Some("vax") => {
-                    return Err("vax の a.out は段階25 の BSD 側で足す".to_string());
+                    return run_vax_aout(&bytes, path, argv, spec.as_ref().unwrap(), root);
                 }
                 Some(f) => {
                     return Err(format!("--cpu {f} では a.out を実行できない"));

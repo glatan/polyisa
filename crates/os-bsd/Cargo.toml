@@ -1,0 +1,17 @@
+[package]
+name = "polyisa-os-bsd"
+version = "0.0.0"
+license.workspace = true
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-kernel = { path = "../kernel" }
+polyisa-loader = { path = "../loader" }
+polyisa-engine = { path = "../engine" }
+polyisa-host = { path = "../host" }
+polyisa-mem = { path = "../mem" }
+polyisa-guest-vax = { path = "../../guests/vax" }
+
+[lints]
+workspace = true

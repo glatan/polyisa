@@ -2128,7 +2128,7 @@ pub fn exec(
             let s1 = eval(b, f, pos, 1)?;
             let s = read(b, &s1, w)?;
             let d = eval(b, f, pos, 2)?;
-            let (r, v, c) = sub_op(a, s, 0, w);
+            let (r, v, c) = sub_op(s, a, 0, w);
             write(b, &d, w, r)?;
             cc_arith(b, r, v, c, w);
             iv_trap(b)?;

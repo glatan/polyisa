@@ -49,3 +49,57 @@ pub fn run(env: &mut BareEnv, entry: u64, model: VaxModel, sys: &mut impl TrapHa
         |env, sys| polyisa_guest_vax::run::step(env, sys, model.feats),
     )
 }
+
+/// VAX の a.out を 4.3BSD パーソナリティ `sys` で実行する。
+/// `model` は `MODELS` のモデル名 —— 4.3BSD の実機がフル VAX
+/// なので、指定がなければ `vax`。
+/// `path` は argv[0] にも使う実行ファイルのゲスト側パス。
+pub fn run_aout_bsd_sys(
+    bytes: &[u8],
+    path: &str,
+    argv: &[String],
+    model: &str,
+    sys: &mut polyisa_os_bsd::vax::sys::Bsd,
+) -> Result<u64, String> {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_vax::CpuState>());
+    // argv[0] はプログラムのパス（ELF の各実行経路と同じ規則）。
+    let mut gargv = Vec::with_capacity(argv.len() + 1);
+    gargv.push(path.to_string());
+    gargv.extend(argv.iter().cloned());
+    let entry = sys.load_exec(&mut env, bytes, &gargv)?;
+    let m = VaxModel::named(model);
+    finish_bsd(run(&mut env, u64::from(entry), m, sys))
+}
+
+/// `Outcome` を cli の戻り値に写す。
+fn finish_bsd(o: Outcome) -> Result<u64, String> {
+    match o {
+        Outcome::Exit(code) => Ok(code),
+        Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
+        Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
+        Outcome::Deadlock => Err("deadlock".to_string()),
+    }
+}
+
+/// 標準出力を集めたいテスト用（戻り値は終了コードと stdout）。
+/// `root` はゲストパスを引くホスト側のルート。標準入力は
+/// `input` を `sys.io.stdin` に渡す。
+pub fn run_aout_bsd_captured_in(
+    path: &str,
+    argv: &[String],
+    root: &str,
+    input: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = polyisa_os_bsd::vax::sys::Bsd::new(root);
+    sys.io.stdin = input.to_vec();
+    // ゲスト側から見える実行パスは root 相対のパス。
+    let gpath = path.strip_prefix(root).unwrap_or(path).to_string();
+    let gpath = if gpath.starts_with('/') {
+        gpath
+    } else {
+        format!("/{gpath}")
+    };
+    let code = run_aout_bsd_sys(&bytes, &gpath, argv, "vax", &mut sys)?;
+    Ok((code, sys.io.stdout))
+}

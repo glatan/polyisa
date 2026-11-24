@@ -19,6 +19,7 @@ members = [
     "crates/kernel",
     "crates/os-linux",
     "crates/os-v7",
+    "crates/os-bsd",
     "crates/os-wasi",
     "crates/trace",
     "crates/gdbstub",

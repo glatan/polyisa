@@ -36,6 +36,7 @@ polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
 polyisa-os-linux = { path = "../os-linux" }
 polyisa-os-v7 = { path = "../os-v7", optional = true }
+polyisa-os-bsd = { path = "../os-bsd", optional = true }
 polyisa-os-wasi = { path = "../os-wasi", optional = true }
 polyisa-sem = { path = "../sem" }
 polyisa-softfloat = { path = "../softfloat" }
@@ -78,7 +79,7 @@ guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
-guest-vax = ["dep:polyisa-guest-vax"]
+guest-vax = ["dep:polyisa-guest-vax", "dep:polyisa-os-bsd"]
 guest-wasm = [
     "dep:polyisa-guest-wasm",
     "dep:polyisa-os-wasi",

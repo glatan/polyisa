@@ -1086,15 +1086,16 @@ fn add_results_and_cc() {
 
 #[test]
 fn sub_results_and_cc() {
-    // subl3 #0, #1, r0 —— 借り: N=1 C=1。
+    // subl3 #0, #1, r0 —— dif = min - sub = 1 - 0 = 1: CC すべて 0。
     let env = exec1(&[0xc3, 0x8f, 0, 0, 0, 0, 0x8f, 1, 0, 0, 0, 0x50]);
-    assert_eq!(r(&env, 0), 0xffff_ffff);
-    assert_eq!(cc(&env), (true, false, false, true));
+    assert_eq!(r(&env, 0), 1);
+    assert_eq!(cc(&env), (false, false, false, false));
 
-    // subl3 #0x80000000, #1, r0 —— 最負値 - 1: V=1 C=0。
+    // subl3 #0x80000000, #1, r0 —— 1 - (-2^31) = 0x80000001:
+    // N=1 V=1（正 - 負で負化）、C=1（符号なしでは 1 < 0x80000000 で借り）。
     let env = exec1(&[0xc3, 0x8f, 0, 0, 0, 0x80, 0x8f, 1, 0, 0, 0, 0x50]);
-    assert_eq!(r(&env, 0), 0x7fff_ffff);
-    assert_eq!(cc(&env), (false, false, true, false));
+    assert_eq!(r(&env, 0), 0x8000_0001);
+    assert_eq!(cc(&env), (true, false, true, true));
 
     // subb2 #1, r0 —— 0 - 1 = 0xff: N=1 C=1。
     let mut env = run_env(1);

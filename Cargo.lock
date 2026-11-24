@@ -38,6 +38,7 @@ dependencies = [
  "polyisa-kernel",
  "polyisa-loader",
  "polyisa-mem",
+ "polyisa-os-bsd",
  "polyisa-os-linux",
  "polyisa-os-v7",
  "polyisa-os-wasi",
@@ -437,6 +438,18 @@ name = "polyisa-mem"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",
+]
+
+[[package]]
+name = "polyisa-os-bsd"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest-vax",
+ "polyisa-host",
+ "polyisa-kernel",
+ "polyisa-loader",
+ "polyisa-mem",
 ]
 
 [[package]]
