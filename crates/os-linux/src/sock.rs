@@ -20,10 +20,15 @@ use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 /// asm-generic の errno。ABI 値への写像は `SockAbi::errno`。
 // Ref: SRC-LINUX (7.3) — include/uapi/asm-generic/errno.h.
 pub mod errno {
+    pub const EPERM: u32 = 1;
+    pub const ENOENT: u32 = 2;
+    pub const EIO: u32 = 5;
     pub const EBADF: u32 = 9;
     pub const EAGAIN: u32 = 11;
     pub const ENOMEM: u32 = 12;
     pub const EFAULT: u32 = 14;
+    pub const EEXIST: u32 = 17;
+    pub const EISDIR: u32 = 21;
     pub const EINVAL: u32 = 22;
     pub const EMFILE: u32 = 24;
     pub const EPIPE: u32 = 32;
@@ -46,6 +51,7 @@ pub mod errno {
     pub const EINPROGRESS: u32 = 115;
     /// 単一スレッドの待ちが進行不能だったときのデッドロック報告値。
     pub const EDEADLK: u32 = 35;
+    pub const ELOOP: u32 = 40;
 }
 
 /// `dispatch` が受ける syscall 名の集合。ABI が「ソケット系か」を
@@ -72,29 +78,9 @@ pub const NAMES: &[&str] = &[
     "socketcall",
 ];
 
-/// ソケット系の結果。`Done` の語を ABI が結果レジスタへ置く。
-/// `Wait` は fd 準備待ちの要求で、ABI が駐車へ写す。
-#[derive(Debug)]
-pub enum Out {
-    /// 完了（結果語）。
-    Done(u64),
-    /// fd 準備待ち。ABI は待ちを張って syscall を後で再実行する。
-    Wait(Wait),
-}
-
-/// fd 準備待ちの中身。ABI の `Linux` が `fd_wait` として持つ。
-#[derive(Clone, Debug)]
-pub struct Wait {
-    /// （ゲスト fd, 興味ビット）。POLLIN=1・POLLOUT=4。
-    pub fds: Vec<(u32, u32)>,
-    /// 期限（ナノ秒。ABI の単調時計起点）。None は無期限。
-    pub deadline: Option<u64>,
-}
-
-/// 興味ビット。poll 規約と同じ値。
-pub const WANT_READ: u32 = 1;
-/// 興味ビット（POLLOUT）。
-pub const WANT_WRITE: u32 = 4;
+// fd 待ちの語彙（`Wait`・`Out`・興味ビット・消化機構）は
+// 待ち合わせ系の正準層 `wait` が正本で、ソケット系もそれを使う。
+pub use crate::wait::{Out, WANT_READ, WANT_WRITE, Wait};
 
 /// ABI ごとの差分。値はゲスト側の定数。
 pub struct SockAbi {
@@ -174,7 +160,7 @@ fn acc(e: Endian) -> Access {
     }
 }
 
-fn rd(env: &mut BareEnv, addr: u64, buf: &mut [u8]) -> bool {
+pub(crate) fn rd(env: &mut BareEnv, addr: u64, buf: &mut [u8]) -> bool {
     // バイト列の読み出しにエンディアンは関係しない。
     env.backend
         .mem
@@ -183,14 +169,15 @@ fn rd(env: &mut BareEnv, addr: u64, buf: &mut [u8]) -> bool {
 }
 
 /// 値をゲストエンディアンで読む。
-fn rd_u(env: &mut BareEnv, abi: &SockAbi, addr: u64, width: usize) -> Option<u64> {
-    let mut a = acc(abi.endian);
+pub(crate) fn rd_u(env: &mut BareEnv, endian: Endian, addr: u64, width: usize) -> Option<u64> {
+    let mut a = acc(endian);
     a.align = Align::Unaligned;
     env.backend.mem.read_value(VirtAddr(addr), width, a).ok()
 }
 
-fn wr_u(env: &mut BareEnv, abi: &SockAbi, addr: u64, v: u64, width: usize) -> bool {
-    let mut a = acc(abi.endian);
+/// 値をゲストエンディアンで書く。
+pub(crate) fn wr_u(env: &mut BareEnv, endian: Endian, addr: u64, v: u64, width: usize) -> bool {
+    let mut a = acc(endian);
     a.align = Align::Unaligned;
     env.backend
         .mem
@@ -198,13 +185,13 @@ fn wr_u(env: &mut BareEnv, abi: &SockAbi, addr: u64, v: u64, width: usize) -> bo
         .is_ok()
 }
 
-fn wr(env: &mut BareEnv, addr: u64, buf: &[u8]) -> bool {
+pub(crate) fn wr(env: &mut BareEnv, addr: u64, buf: &[u8]) -> bool {
     env.backend.mem.write(VirtAddr(addr), buf).is_ok()
 }
 
 /// ポインタ語を読む（`ptr_size` 幅）。
-fn rd_ptr(env: &mut BareEnv, abi: &SockAbi, addr: u64) -> Option<u64> {
-    rd_u(env, abi, addr, abi.ptr_size as usize)
+fn rd_ptr(env: &mut BareEnv, endian: Endian, ptr_size: u8, addr: u64) -> Option<u64> {
+    rd_u(env, endian, addr, ptr_size as usize)
 }
 
 /// ゲストの sockaddr をホスト形（先頭 family 2 バイト＋本体）へ写す。
@@ -268,7 +255,7 @@ fn sockaddr_out(
         bytes[0..2].reverse();
     }
     let n = if addrlen != 0 {
-        let cap = match rd_u(env, abi, addrlen, 4) {
+        let cap = match rd_u(env, abi.endian, addrlen, 4) {
             Some(c) => c as usize,
             None => return Err(errno::EFAULT),
         };
@@ -279,7 +266,7 @@ fn sockaddr_out(
     if addr != 0 && !wr(env, addr, &bytes[..n]) {
         return Err(errno::EFAULT);
     }
-    if addrlen != 0 && !wr_u(env, abi, addrlen, sa.len as u64, 4) {
+    if addrlen != 0 && !wr_u(env, abi.endian, addrlen, sa.len as u64, 4) {
         return Err(errno::EFAULT);
     }
     Ok(())
@@ -773,7 +760,7 @@ pub fn sys_setsockopt(
     if len < 4 {
         return Err(errno::EINVAL);
     }
-    let v = rd_u(env, abi, val, 4).ok_or(errno::EFAULT)? as u32;
+    let v = rd_u(env, abi.endian, val, 4).ok_or(errno::EFAULT)? as u32;
     s.sock
         .setopt(level as i32, host_name, v)
         .map(|()| 0)
@@ -814,10 +801,10 @@ pub fn sys_getsockopt(
             } else {
                 v as u64
             };
-            if !wr_u(env, abi, val, out, 4) {
+            if !wr_u(env, abi.endian, val, out, 4) {
                 return Err(errno::EFAULT);
             }
-            if len != 0 && !wr_u(env, abi, len, 4, 4) {
+            if len != 0 && !wr_u(env, abi.endian, len, 4, 4) {
                 return Err(errno::EFAULT);
             }
             Ok(0)
@@ -834,8 +821,14 @@ fn read_iov(env: &mut BareEnv, abi: &SockAbi, iov: u64, cnt: u64) -> Result<Vec<
     let item = (abi.ptr_size as u64) * 2;
     let mut out = Vec::with_capacity(cnt as usize);
     for i in 0..cnt {
-        let base = rd_ptr(env, abi, iov + i * item).ok_or(errno::EFAULT)?;
-        let len = rd_ptr(env, abi, iov + i * item + abi.ptr_size as u64).ok_or(errno::EFAULT)?;
+        let base = rd_ptr(env, abi.endian, abi.ptr_size, iov + i * item).ok_or(errno::EFAULT)?;
+        let len = rd_ptr(
+            env,
+            abi.endian,
+            abi.ptr_size,
+            iov + i * item + abi.ptr_size as u64,
+        )
+        .ok_or(errno::EFAULT)?;
         out.push((base, len));
     }
     Ok(out)
@@ -853,10 +846,10 @@ pub fn sys_sendmsg(
     path_map: &dyn Fn(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Out, u32> {
     let p = abi.ptr_size as u64;
-    let name = rd_ptr(env, abi, msg).ok_or(errno::EFAULT)?;
-    let namelen = rd_u(env, abi, msg + p, 4).ok_or(errno::EFAULT)?;
-    let iov = rd_ptr(env, abi, msg + p * 2).ok_or(errno::EFAULT)?;
-    let iovlen = rd_ptr(env, abi, msg + p * 3).ok_or(errno::EFAULT)?;
+    let name = rd_ptr(env, abi.endian, abi.ptr_size, msg).ok_or(errno::EFAULT)?;
+    let namelen = rd_u(env, abi.endian, msg + p, 4).ok_or(errno::EFAULT)?;
+    let iov = rd_ptr(env, abi.endian, abi.ptr_size, msg + p * 2).ok_or(errno::EFAULT)?;
+    let iovlen = rd_ptr(env, abi.endian, abi.ptr_size, msg + p * 3).ok_or(errno::EFAULT)?;
     let iovs = read_iov(env, abi, iov, iovlen)?;
     // 全部連結して一つの送信にする（dgram の境界維持のため）。
     let total: u64 = iovs.iter().map(|&(_, l)| l).sum();
@@ -916,10 +909,10 @@ pub fn sys_recvmsg(
     flags: u64,
 ) -> Result<Out, u32> {
     let p = abi.ptr_size as u64;
-    let name = rd_ptr(env, abi, msg).ok_or(errno::EFAULT)?;
+    let name = rd_ptr(env, abi.endian, abi.ptr_size, msg).ok_or(errno::EFAULT)?;
     let namelen_addr = msg + p;
-    let iov = rd_ptr(env, abi, msg + p * 2).ok_or(errno::EFAULT)?;
-    let iovlen = rd_ptr(env, abi, msg + p * 3).ok_or(errno::EFAULT)?;
+    let iov = rd_ptr(env, abi.endian, abi.ptr_size, msg + p * 2).ok_or(errno::EFAULT)?;
+    let iovlen = rd_ptr(env, abi.endian, abi.ptr_size, msg + p * 3).ok_or(errno::EFAULT)?;
     // controllen: {name(8/4), namelen(4), iov, iovlen, control, controllen, flags}
     // 構造は p*4 以降に control・p*5 に controllen・p*6 に flags（64bit）。
     // 32bit では u32 並びで同じ配置になる（name,namelen,iov,iovlen,control,controllen,flags の
@@ -1037,7 +1030,7 @@ pub fn sys_socketcall(
     // 借用が衝突するため）。
     let mut a = [0u64; 6];
     for (i, slot) in a.iter_mut().enumerate() {
-        *slot = rd_u(env, abi, argsp + i as u64 * 4, 4).ok_or(errno::EFAULT)?;
+        *slot = rd_u(env, abi.endian, argsp + i as u64 * 4, 4).ok_or(errno::EFAULT)?;
     }
     match call {
         call::SOCKET => sys_socket(fds, abi, a[0], a[1], a[2]).map(Out::Done),
@@ -1063,69 +1056,6 @@ pub fn sys_socketcall(
         call::RECVMSG => sys_recvmsg(fds, abi, env, a[0], a[1], a[2]),
         call::ACCEPT4 => sys_accept(fds, abi, env, a[0], a[1], a[2], a[3]),
         _ => Err(errno::EINVAL),
-    }
-}
-
-/// 単一スレッド ABI の `Wait` の消化。ホスト fd は `host::poll` で、
-/// カーネル対象は `ready` の再評価で待つ。期限は `mono_ns` の時計
-/// （ナノ秒）。戻るのは待ち対象が満たされるか期限が切れたとき。
-/// カーネル対象だけを待ち、変化の余地がない（待っているスレッドが
-/// 自分だけ）場合は実機のデッドロック相当として `false` を返す
-/// （ABI はデッドロック報告へ写す）。
-///
-/// `pending` は signalfd 判定用の保留シグナル集合（無い ABI は 0）。
-pub fn serve_wait(fds: &FdTable, wait: &Wait, pending: u64, mono_ns: &dyn Fn() -> u64) -> bool {
-    // 監視対象を集める。ホストソケットは生 fd を poll へ、
-    // それ以外は ready の再評価対象へ。
-    let mut host_list: Vec<(polyisa_host::RawFd, i16)> = Vec::new();
-    for &(fd, ev) in &wait.fds {
-        #[cfg(unix)]
-        if let Some(s) = fds.host_sock_of(fd) {
-            host_list.push((s.sock.raw(), ev as i16));
-            continue;
-        }
-        let _ = fd;
-    }
-    // どれか一つでも既に準備が立っていれば即終了。
-    let check = |now: u64| -> bool {
-        wait.fds.iter().any(|&(fd, ev)| {
-            let r = fds.ready(fd, now, pending);
-            (ev & WANT_READ != 0 && (r.read || r.hup || r.err))
-                || (ev & WANT_WRITE != 0 && (r.write || r.err))
-        })
-    };
-    let now = mono_ns();
-    if check(now) {
-        return true;
-    }
-    if host_list.is_empty() {
-        // ホスト資源を待たない単一スレッドの待ちはデッドロック相当。
-        return false;
-    }
-    loop {
-        let now = mono_ns();
-        let remain = match wait.deadline {
-            Some(dl) if now < dl => dl - now,
-            Some(_) => return false, // 期限切れ
-            None => u64::MAX,
-        };
-        let chunk = remain.min(50_000_000); // 50ms ごとにカーネル側も見る
-        let timeout = i32::try_from(chunk / 1_000_000).unwrap_or(i32::MAX);
-        #[cfg(unix)]
-        {
-            let mut list = host_list.clone();
-            let _ = polyisa_host::sock::poll(&mut list, timeout.max(0));
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = timeout;
-            std::thread::sleep(std::time::Duration::from_millis(
-                chunk.min(50_000_000) / 1_000_000,
-            ));
-        }
-        if check(mono_ns()) {
-            return true;
-        }
     }
 }
 
@@ -1207,10 +1137,15 @@ pub fn drive(
             Ok(Out::Done(v)) => return Some(Ok(v)),
             Err(e) => return Some(Err(e)),
             Ok(Out::Wait(w)) => {
-                if !serve_wait(fds, &w, pending, mono_ns) {
-                    return Some(Err(errno::EDEADLK));
+                match crate::wait::serve(fds, &w, pending, mono_ns) {
+                    crate::wait::Served::Ready => {
+                        r = dispatch(fds, abi, env, name, args, path_map)
+                            .unwrap_or(Err(errno::EINVAL));
+                    }
+                    // ソケットの待ちは期限を持たないので Expired は
+                    // 起きえない。Deadlock と同じく進行不能として戻す。
+                    _ => return Some(Err(errno::EDEADLK)),
                 }
-                r = dispatch(fds, abi, env, name, args, path_map).unwrap_or(Err(errno::EINVAL));
             }
         }
     }

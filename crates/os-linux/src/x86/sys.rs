@@ -97,6 +97,9 @@ pub struct Linux {
     pipe_wait: Option<u64>,
     /// fd 準備待ち（ソケット・待ち合わせ系）の中身。
     fd_wait: Option<crate::sock::Wait>,
+    /// 解けたばかりの fd 待ち。解除時に退避し、起きて再実行された
+    /// syscall へ `prev` として渡す（期限切れ起きの判定用）。
+    fd_wait_prev: Option<crate::sock::Wait>,
     /// HostIo 作業スレッド。プロセス系で共有し、初使用で起動する。
     host_io: SharedHostIo,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
@@ -317,6 +320,42 @@ impl Linux {
         crate::sock::SockAbi::generic(ptr, Endian::Le)
     }
 
+    /// 待ち合わせ正準層への ABI 差分。x86 は epoll_event が
+    /// 12 バイト詰め。i386 の select(82) は 5 語ブロックの旧形式。
+    /// x32 は ILP32 でも timespec が 64 ビット幅。
+    fn wait_abi(&self) -> crate::wait::WaitAbi {
+        let ptr = if self.is64 && !self.x32 { 8 } else { 4 };
+        let time = if self.is64 { 8 } else { 4 };
+        let mut abi = crate::wait::WaitAbi::generic(ptr, time, Endian::Le);
+        abi.epoll_ev_size = 12;
+        abi.old_select = !self.is64;
+        abi
+    }
+
+    /// 待ち合わせ系 syscall の正準層呼び出し。`prev` は前回張った
+    /// 待ち（起きて再実行された呼び出しの期限切れ判定に使う）。
+    fn wait_call(
+        &mut self,
+        env: &mut BareEnv,
+        cx: &SysCtx,
+        name: &str,
+        prev: Option<&crate::sock::Wait>,
+    ) -> Option<TrapOutcome> {
+        let abi = self.wait_abi();
+        let args: [u64; 6] = [
+            get64(env, cx.r_a),
+            get64(env, cx.r_b),
+            get64(env, cx.r_c),
+            get64(env, cx.r_d),
+            get64(env, cx.r_e),
+            get64(env, cx.r_f),
+        ];
+        let now = self.mono_ns();
+        let pending = self.sig_pending;
+        let r = crate::wait::dispatch(&mut self.fds, &abi, env, name, &args, prev, now, pending)?;
+        self.sock_finish(env, r)
+    }
+
     /// AF_UNIX のパス写像器を作る（guest_root・cwd を束縛した
     /// closure。`sock` 正準層へ渡す）。
     fn unix_path_map(&self) -> impl Fn(&[u8]) -> Option<Vec<u8>> + use<> {
@@ -384,7 +423,7 @@ impl Linux {
         #[cfg(unix)]
         if w.fds
             .iter()
-            .any(|&(fd, _)| self.fds.host_sock_of(fd).is_some())
+            .any(|&(fd, ev)| !self.fds.host_watches(fd, ev).is_empty())
         {
             return polyisa_kernel::ThreadWait::HostFd;
         }
@@ -456,7 +495,7 @@ impl Linux {
                 continue;
             };
             if Self::wait_ready(&task.linux.fds, w, now, task.linux.sig_pending) {
-                task.linux.fd_wait = None;
+                task.linux.fd_wait_prev = task.linux.fd_wait.take();
                 ready.push(polyisa_kernel::ThreadId(task.linux.pid));
             }
         }
@@ -469,7 +508,7 @@ impl Linux {
             .as_ref()
             .is_some_and(|w| Self::wait_ready(&self.fds, w, now, self.sig_pending));
         if self_ready {
-            self.fd_wait = None;
+            self.fd_wait_prev = self.fd_wait.take();
             let pid = self.pid;
             self.queue
                 .0
@@ -487,9 +526,7 @@ impl Linux {
         let mut take = |w: &crate::sock::Wait, fds: &polyisa_kernel::FdTable| {
             #[cfg(unix)]
             for &(fd, ev) in &w.fds {
-                if let Some(s) = fds.host_sock_of(fd) {
-                    list.push((s.sock.raw(), ev as i16));
-                }
+                list.extend(fds.host_watches(fd, ev));
             }
             if let Some(dl) = w.deadline {
                 earliest = Some(earliest.map_or(dl, |e| e.min(dl)));
@@ -517,16 +554,22 @@ impl Linux {
             let Some(w) = &task.linux.fd_wait else {
                 continue;
             };
-            let hit = w.fds.iter().any(|&(fd, _)| {
+            let hit = w.fds.iter().any(|&(fd, ev)| {
                 #[cfg(unix)]
-                if let Some(s) = task.linux.fds.host_sock_of(fd) {
-                    return events.iter().any(|&(raw, _)| raw == s.sock.raw());
+                return task
+                    .linux
+                    .fds
+                    .host_watches(fd, ev)
+                    .iter()
+                    .any(|&(raw, _)| events.iter().any(|&(r, _)| r == raw));
+                #[allow(unreachable_code)]
+                {
+                    let _ = (fd, ev);
+                    false
                 }
-                let _ = fd;
-                false
             });
             if hit {
-                task.linux.fd_wait = None;
+                task.linux.fd_wait_prev = task.linux.fd_wait.take();
                 woke.push(polyisa_kernel::ThreadId(task.linux.pid));
             }
         }
@@ -536,17 +579,22 @@ impl Linux {
         let mut woke = !woke.is_empty();
         drop(borrowed);
         let self_hit = self.fd_wait.as_ref().is_some_and(|w| {
-            w.fds.iter().any(|&(fd, _)| {
+            w.fds.iter().any(|&(fd, ev)| {
                 #[cfg(unix)]
-                if let Some(s) = self.fds.host_sock_of(fd) {
-                    return events.iter().any(|&(raw, _)| raw == s.sock.raw());
+                return self
+                    .fds
+                    .host_watches(fd, ev)
+                    .iter()
+                    .any(|&(raw, _)| events.iter().any(|&(r, _)| r == raw));
+                #[allow(unreachable_code)]
+                {
+                    let _ = (fd, ev);
+                    false
                 }
-                let _ = fd;
-                false
             })
         });
         if self_hit {
-            self.fd_wait = None;
+            self.fd_wait_prev = self.fd_wait.take();
             let pid = self.pid;
             self.queue
                 .0
@@ -873,6 +921,7 @@ impl Linux {
             queue: self.queue.clone(),
             pipe_wait: None,
             fd_wait: None,
+            fd_wait_prev: None,
             host_io: self.host_io.clone(),
             cwd: self.cwd.clone(),
             guest_root: self.guest_root.clone(),
@@ -1206,9 +1255,6 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("lsetxattr", sys_lsetxattr),
     ("fsetxattr", sys_fsetxattr),
     ("mount", sys_mount),
-    ("poll", sys_poll),
-    ("select", sys_select),
-    ("pselect6", sys_pselect6),
     ("sysfs", sys_sysfs),
     ("tkill", sys_tkill),
     ("inotify_init1", sys_inotify_init1),
@@ -1885,8 +1931,7 @@ fn sys_read(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         return Some(TrapOutcome::Handled);
     }
     let Some(file) = sys.file_mut(fd) else {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
+        return fd_read_other(sys, env, cx, fd, buf, left);
     };
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
@@ -1913,6 +1958,144 @@ fn sys_read(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     }
     set64(env, Gpr(0), done);
     Some(TrapOutcome::Handled)
+}
+
+/// ファイル・パイプ端・stdin 以外の対象の read。fd 表の対象別
+/// 実装へ流し、阻止で読めなければ待ちを張る。
+fn fd_read_other(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    fd: u32,
+    buf: u64,
+    left: u64,
+) -> Option<TrapOutcome> {
+    use polyisa_kernel::FdRead;
+    if sys.fds.target(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let max = usize::try_from(left.min(IO_CHUNK as u64)).unwrap_or(0);
+    // TimerFd は ready が catch_up を進める。
+    let _ = sys.fds.ready(fd, sys.mono_ns(), sys.sig_pending);
+    match sys.fds.read(fd, max) {
+        FdRead::Bytes(bytes) => {
+            if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            set64(env, Gpr(0), bytes.len() as u64);
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Count(v) => {
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(buf), &v.to_le_bytes())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            set64(env, Gpr(0), 8);
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Eof => {
+            set64(env, Gpr(0), 0);
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Empty if sys.fds.nonblock(fd) => {
+            set64(env, Gpr(0), cx.neg(EAGAIN));
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Empty => {
+            let r = crate::wait::read_wait(&sys.fds, fd)
+                .map(crate::sock::Out::Wait)
+                .ok_or(EAGAIN);
+            sys.sock_finish(env, r)
+        }
+        FdRead::IsDir => {
+            set64(env, Gpr(0), cx.neg(EISDIR));
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::BadFd => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Inval => {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            Some(TrapOutcome::Handled)
+        }
+        FdRead::Host(e) => {
+            set64(
+                env,
+                Gpr(0),
+                cx.neg(e.raw_os_error().unwrap_or(EIO as i32) as u32),
+            );
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+/// ファイル・パイプ端・stdio 以外の対象の write。eventfd への
+/// カウンタ書き込み（8 バイト）も `fd 表` が裁く。
+fn fd_write_other(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    fd: u32,
+    buf: u64,
+    left: u64,
+) -> Option<TrapOutcome> {
+    use polyisa_kernel::FdWrite;
+    if sys.fds.target(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let take = usize::try_from(left.min(IO_CHUNK as u64)).unwrap_or(0);
+    let mut chunk = vec![0u8; take];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(buf), &mut chunk, data_access())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    match sys.fds.write(fd, &chunk) {
+        FdWrite::Done(n) => {
+            set64(env, Gpr(0), n as u64);
+            Some(TrapOutcome::Handled)
+        }
+        FdWrite::Pipe => {
+            set64(env, Gpr(0), cx.neg(EPIPE));
+            Some(TrapOutcome::Handled)
+        }
+        FdWrite::Full if sys.fds.nonblock(fd) => {
+            set64(env, Gpr(0), cx.neg(EAGAIN));
+            Some(TrapOutcome::Handled)
+        }
+        FdWrite::Full => {
+            let r = crate::wait::write_wait(&sys.fds, fd)
+                .map(crate::sock::Out::Wait)
+                .ok_or(EAGAIN);
+            sys.sock_finish(env, r)
+        }
+        FdWrite::BadFd => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            Some(TrapOutcome::Handled)
+        }
+        FdWrite::Inval => {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            Some(TrapOutcome::Handled)
+        }
+        FdWrite::Host(e) => {
+            set64(
+                env,
+                Gpr(0),
+                cx.neg(e.raw_os_error().unwrap_or(EIO as i32) as u32),
+            );
+            Some(TrapOutcome::Handled)
+        }
+    }
 }
 
 fn sys_close(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -1965,8 +2148,7 @@ fn sys_write(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
     // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
     let Some(file) = sys.file_mut(fd) else {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
+        return fd_write_other(sys, env, cx, fd, buf, left);
     };
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
@@ -2674,21 +2856,6 @@ fn sys_mount(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
     crate::x86::sys_mount(&root, &cwd, env, cx)
-}
-
-fn sys_poll(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_poll(env, cx)
-}
-
-fn sys_select(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_select(env, cx)
-}
-
-fn sys_pselect6(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_pselect6(env, cx)
 }
 
 fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -4323,6 +4490,18 @@ impl TrapHandler for Linux {
                 .map(|r| get64(env, *r))
                 .collect();
             eprintln!("sys {}({}) args={args:x?}", nr, name.unwrap_or("?"));
+        }
+        // 前回張った待ちは 1 回限り消費する（起きて再実行された
+        // syscall だけが `prev` として使う。他の呼び出しでは捨てる）。
+        let fd_wait_prev = self.fd_wait_prev.take();
+        if let Some(name) = name
+            && crate::wait::NAMES.contains(&name)
+            && let Some(out) = self.wait_call(env, &cx, name, fd_wait_prev.as_ref())
+        {
+            if trace {
+                eprintln!("  -> {:#x}", get64(env, Gpr(0)));
+            }
+            return out;
         }
         if let Some(name) = name
             && let Some((_, handler)) = table.iter().find(|(n, _)| *n == name)

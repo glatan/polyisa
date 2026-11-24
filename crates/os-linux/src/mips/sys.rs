@@ -775,7 +775,30 @@ impl Linux {
         let len = len.min(1 << 20) as usize;
         let r = match self.reader(fd) {
             Ok(r) => r,
-            Err(e) => return self.fail(env, e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+                if e == mips::errno::EBADF && self.fds.target(fd).is_some() {
+                    let w = (self.abi.ptr_bits() / 8) as u8;
+                    let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
+                    abi.errno = mips::host_to_mips_errno;
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::read_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len as u64,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => Self::ok(env, v),
+                        Err(e) => self.fail(env, (abi.errno)(e)),
+                    };
+                }
+                return self.fail(env, e);
+            }
         };
         match r {
             ReadFd::Stdin => {
@@ -817,7 +840,30 @@ impl Linux {
         };
         let w = match self.writer(fd) {
             Ok(w) => w,
-            Err(e) => return self.fail(env, e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd 等）は fd 表経由。
+                if e == mips::errno::EBADF && self.fds.target(fd).is_some() {
+                    let w = (self.abi.ptr_bits() / 8) as u8;
+                    let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
+                    abi.errno = mips::host_to_mips_errno;
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::write_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => Self::ok(env, v),
+                        Err(e) => self.fail(env, (abi.errno)(e)),
+                    };
+                }
+                return self.fail(env, e);
+            }
         };
         match w {
             WriteFd::Stdout => {
@@ -1297,9 +1343,37 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// errno・O_* は MIPS 独自系。時刻幅は o32/n32=4・n64=8。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 8]) -> Disp {
+        let w = (self.abi.ptr_bits() / 8) as u8;
+        let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
+        abi.errno = mips::host_to_mips_errno;
+        abi.nonblock = 0x80; // mips O_NONBLOCK
+        abi.cloexec = 0x80000; // mips O_CLOEXEC
+        let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, a6, 0, &mono) {
+            Some(Ok(v)) => ret(Self::ok(env, v)),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("mips: deadlock in fd wait");
+                }
+                self.fail_ret(env, (abi.errno)(e))
+            }
+            None => self.fail_ret(env, mips::errno::ENOSYS),
+        }
+    }
+
     /// o32 の番号（4000 からの通し番号）で振り分ける。
     fn dispatch_o32(&mut self, env: &mut BareEnv, n: u64) -> Disp {
         let args: [u64; 8] = std::array::from_fn(|i| self.arg(env, i));
+        if let Some(name) = mips_o32::name(4000 + n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &args);
+        }
         match n {
             // exit=1, exit_group=246
             1 => Disp::Exit((args[0] & 0xff) as u32),
@@ -1979,6 +2053,9 @@ impl Linux {
         };
         if crate::sock::NAMES.contains(&name) {
             return self.sock_call(env, name, &args);
+        }
+        if crate::wait::NAMES.contains(&name) {
+            return self.wait_call(env, name, &args);
         }
         match name {
             "exit" | "exit_group" => Disp::Exit((args[0] & 0xff) as u32),

@@ -279,6 +279,17 @@ impl Linux {
     }
 
     fn sys_write(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let data = self.get_bytes(env, buf, len as usize)?;
         match self.writer(fd)? {
             WriteFd::Stdout => {
@@ -317,6 +328,25 @@ impl Linux {
     /// `read`。
     fn sys_read(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
         let len = (len as usize).min(1 << 20);
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(
+                &mut self.fds,
+                &abi,
+                env,
+                fd,
+                buf,
+                len as u64,
+                0,
+                &mono,
+            ) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let mut tmp = vec![0u8; len];
         let n = match fd {
             0 => {
@@ -1422,6 +1452,25 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64]) -> Result<u64, u64> {
+        let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+        let mut a6 = [0u64; 6];
+        a6[..a.len().min(6)].copy_from_slice(&a[..a.len().min(6)]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, &a6, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("loongarch: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     fn syscall(&mut self, env: &mut BareEnv) -> TrapOutcome {
         let nr = self.rget(env, 11);
         let a: Vec<u64> = (0..6).map(|i| self.rget(env, 4 + i)).collect();
@@ -1438,6 +1487,16 @@ impl Linux {
             && crate::sock::NAMES.contains(&name)
         {
             match self.sock_call(env, name, &a) {
+                Ok(v) => self.rset(env, 4, v),
+                Err(e) => self.rset(env, 4, e.wrapping_neg()),
+            }
+            return TrapOutcome::Handled;
+        }
+        // 待ち合わせ系は `wait` 正準層へ委譲する。
+        if let Some(name) = loongarch::name(nr)
+            && crate::wait::NAMES.contains(&name)
+        {
+            match self.wait_call(env, name, &a) {
                 Ok(v) => self.rset(env, 4, v),
                 Err(e) => self.rset(env, 4, e.wrapping_neg()),
             }

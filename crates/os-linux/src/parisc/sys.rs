@@ -493,6 +493,18 @@ impl Linux {
         if !self.fd_open(fd) || (fd == 0 && self.std_fds[0].is_none()) {
             return Err(errno::EBADF);
         }
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+            abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err((abi.errno)(e)),
+            };
+        }
         let n = usize::try_from(len).unwrap_or(1 << 20).min(1 << 20);
         let data = self.read_bytes(env, buf, n).ok_or(errno::EFAULT)?;
         self.out_write(fd, &data).map(|n| n as u64)
@@ -510,6 +522,16 @@ impl Linux {
         }
         let data = if fd == 0 && self.std_fds[0].is_none() {
             self.stdin_read(n)
+        } else if self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+            abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
+                Ok(v) => Ok(v),
+                Err(e) => Err((abi.errno)(e)),
+            };
         } else {
             self.file_read(fd, n)?
         };
@@ -2377,36 +2399,6 @@ impl Linux {
         Ok(0)
     }
 
-    /// `poll`/`ppoll`/`ppoll_time64` のスタブ。revents を 0 にして
-    /// タイムアウト相当（0）を返す。pollfd = {fd i32, events i16,
-    /// revents i16}（8B）。
-    fn sys_poll(&mut self, env: &mut BareEnv, fds: u64, nfds: u64) -> Result<u64, u32> {
-        for i in 0..nfds.min(1024) {
-            let a = fds.wrapping_add(i * 8);
-            if !self.write_bytes(env, a + 6, &[0, 0]) {
-                return Err(errno::EFAULT);
-            }
-        }
-        Ok(0)
-    }
-
-    /// `_newselect`/`pselect6`/`pselect6_time64` のスタブ。
-    /// hppa32 の fd_set は u32 語の配列 — n ビットぶん全 0 クリア
-    /// してタイムアウト相当（0）を返す。
-    fn sys_select(&mut self, env: &mut BareEnv, args: &[u64; 6]) -> Result<u64, u32> {
-        let n = args[0];
-        let bytes = n.min(1024).div_ceil(32) * 4;
-        for &a in args.iter().take(4).skip(1) {
-            if a != 0 {
-                let z = vec![0u8; bytes as usize];
-                if !self.write_bytes(env, a, &z) {
-                    return Err(errno::EFAULT);
-                }
-            }
-        }
-        Ok(0)
-    }
-
     /// ソケット系 syscall を `sock` 正準層へ委譲する。errno は
     /// HP-UX 系の独自値・SO_* と O_* も独自系。待ち要求は単一
     /// スレッド消化で進め、進行不能はデッドロックとして報告。
@@ -2431,6 +2423,29 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno は
+    /// HP-UX 系の独自値・O_* も独自系。hppa32 は u64 が 8B 整列
+    /// なので epoll_event は 16B。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
+        let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+        abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+        abi.epoll_ev_size = 16;
+        abi.nonblock = oflag::NONBLOCK;
+        abi.cloexec = oflag::CLOEXEC;
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
+            Some(Ok(v)) => Disp::Ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("parisc: deadlock in fd wait");
+                }
+                bad((abi.errno)(e))
+            }
+            None => bad(errno::ENOSYS),
+        }
+    }
+
     /// 通常 syscall（code=0x100）のディスパッチ。
     // Ref: SRC-LINUX (7.3) — syscall 規約（r20=nr, r26..r21=args, r28=ret）。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64, args: &[u64; 6]) -> Disp {
@@ -2438,6 +2453,11 @@ impl Linux {
             && crate::sock::NAMES.contains(&name)
         {
             return self.sock_call(env, name, args);
+        }
+        if let Some(name) = crate::parisc::name(n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, args);
         }
         match n {
             nr::EXIT | nr::EXIT_GROUP => Disp::Exit((args[0] & 0xff) as u32),
@@ -3043,12 +3063,6 @@ impl Linux {
                     }
                     _ => ok(0),
                 }
-            }
-            nr::POLL | nr::PPOLL | nr::PPOLL_TIME64 => {
-                res(self.sys_poll(env, args[0], args[1]))
-            }
-            nr::_NEWSELECT | nr::PSELECT6 | nr::PSELECT6_TIME64 => {
-                res(self.sys_select(env, args))
             }
             // xattr: set/remove 系は成功扱い、get/list 系は
             // ENOTSUP（hppa では ENOTSUP=EOPNOTSUPP=223）。

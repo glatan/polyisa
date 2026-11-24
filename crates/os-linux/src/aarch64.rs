@@ -225,6 +225,10 @@ pub mod ioc {
 /// `task status` の `syscalls.md` はこの表から生成する。
 pub const SYSCALLS: &[(u64, &str)] = &[
     (17, "getcwd"),
+    (19, "eventfd2"),
+    (20, "epoll_create1"),
+    (21, "epoll_ctl"),
+    (22, "epoll_pwait"),
     (23, "dup"),
     (24, "dup3"),
     (25, "fcntl"),
@@ -271,6 +275,9 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (81, "sync"),
     (82, "fsync"),
     (83, "fdatasync"),
+    (85, "timerfd_create"),
+    (86, "timerfd_settime"),
+    (87, "timerfd_gettime"),
     (88, "utimensat"),
     (89, "acct"),
     (92, "personality"),
@@ -362,6 +369,7 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (291, "statx"),
     (293, "rseq"),
     (439, "faccessat2"),
+    (441, "epoll_pwait2"),
 ];
 
 /// 番号から名前を引く。表は番号順なので二分探索する。

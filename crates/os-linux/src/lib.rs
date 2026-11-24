@@ -116,6 +116,11 @@ pub mod guest_path;
 // Ref: SRC-LINUX (7.3).
 pub mod sock;
 
+/// 待ち合わせ系 syscall の正準実装と fd 待ちの消化機構
+/// （段階26・NS6）。
+// Ref: SRC-LINUX (7.3).
+pub mod wait;
+
 /// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
 /// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
 pub const ENOSYS: u32 = 38;
@@ -302,6 +307,22 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::SETGID32 => Some("setgid"),
             x86_32::FCNTL64 => Some("fcntl"),
             x86_32::SOCKETCALL => Some("socketcall"),
+            x86_32::SELECT => Some("select"),
+            x86_32::NEWSELECT => Some("_newselect"),
+            x86_32::POLL => Some("poll"),
+            x86_32::PSELECT6 => Some("pselect6"),
+            x86_32::PPOLL => Some("ppoll"),
+            x86_32::EPOLL_CREATE => Some("epoll_create"),
+            x86_32::EPOLL_CTL => Some("epoll_ctl"),
+            x86_32::EPOLL_WAIT => Some("epoll_wait"),
+            x86_32::EPOLL_PWAIT => Some("epoll_pwait"),
+            x86_32::EPOLL_CREATE1 => Some("epoll_create1"),
+            x86_32::EPOLL_PWAIT2 => Some("epoll_pwait2"),
+            x86_32::EVENTFD => Some("eventfd"),
+            x86_32::EVENTFD2 => Some("eventfd2"),
+            x86_32::TIMERFD_CREATE => Some("timerfd_create"),
+            x86_32::TIMERFD_SETTIME => Some("timerfd_settime"),
+            x86_32::TIMERFD_GETTIME => Some("timerfd_gettime"),
             x86_32::CLOCK_GETTIME64 => Some("clock_gettime"),
             _ => None,
         },
@@ -505,6 +526,18 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::POLL => Some("poll"),
             x86_64::SELECT => Some("select"),
             x86_64::PSELECT6 => Some("pselect6"),
+            x86_64::PPOLL => Some("ppoll"),
+            x86_64::EPOLL_CREATE => Some("epoll_create"),
+            x86_64::EPOLL_CTL => Some("epoll_ctl"),
+            x86_64::EPOLL_WAIT => Some("epoll_wait"),
+            x86_64::EPOLL_PWAIT => Some("epoll_pwait"),
+            x86_64::EPOLL_CREATE1 => Some("epoll_create1"),
+            x86_64::EPOLL_PWAIT2 => Some("epoll_pwait2"),
+            x86_64::EVENTFD => Some("eventfd"),
+            x86_64::EVENTFD2 => Some("eventfd2"),
+            x86_64::TIMERFD_CREATE => Some("timerfd_create"),
+            x86_64::TIMERFD_SETTIME => Some("timerfd_settime"),
+            x86_64::TIMERFD_GETTIME => Some("timerfd_gettime"),
             x86_64::SYSFS => Some("sysfs"),
             x86_64::TKILL => Some("tkill"),
             x86_64::INOTIFY_INIT1 => Some("inotify_init1"),

@@ -408,6 +408,18 @@ impl Linux {
         if !self.fd_open(fd) || (fd == 0 && self.std_fds[0].is_none()) {
             return Err(errno::EBADF);
         }
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err((abi.errno)(e)),
+            };
+        }
         let n = usize::try_from(len).unwrap_or(1 << 20).min(1 << 20);
         let data = self.read_bytes(env, buf, n).ok_or(errno::EFAULT)?;
         self.out_write(fd, &data).map(|n| n as u64)
@@ -425,6 +437,16 @@ impl Linux {
         }
         let data = if fd == 0 && self.std_fds[0].is_none() {
             self.stdin_read(n)
+        } else if self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
+                Ok(v) => Ok(v),
+                Err(e) => Err((abi.errno)(e)),
+            };
         } else {
             self.file_read(fd, n)?
         };
@@ -1685,6 +1707,27 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno
+    /// ・O_* は OSF 系の独自値。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> AlphaResult {
+        let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+        abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+        abi.nonblock = 0x4; // O_NONBLOCK (OSF)
+        abi.cloexec = 1 << 21; // O_CLOEXEC
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
+            Some(Ok(v)) => AlphaResult::Value(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("alpha: deadlock in fd wait");
+                }
+                AlphaResult::Fail((abi.errno)(e))
+            }
+            None => AlphaResult::Fail(errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は (v0, a3) の組または終了。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> AlphaResult {
         let args: [u64; 6] = std::array::from_fn(|i| self.arg(env, i));
@@ -1692,6 +1735,11 @@ impl Linux {
             && crate::sock::NAMES.contains(&name)
         {
             return self.sock_call(env, name, &args);
+        }
+        if let Some(name) = crate::alpha::name(n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &args);
         }
         match n {
             nr::EXIT | nr::EXIT_GROUP => AlphaResult::Exit((args[0] & 0xff) as u32),

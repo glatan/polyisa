@@ -987,7 +987,7 @@ const SYSCALLS: &[(u64, &str)] = &[
     (227, "afs_syscall"),
     (228, "setfsuid"),
     (229, "setfsgid"),
-    (230, "newselect"),
+    (230, "_newselect"),
     (231, "time"),
     (232, "splice"),
     (233, "stime"),

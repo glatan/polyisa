@@ -22,6 +22,7 @@ use super::TrapOutcome;
 pub const EPERM: u32 = 1;
 pub const ENOENT: u32 = 2;
 pub const ESRCH: u32 = 3;
+pub const EIO: u32 = 5;
 pub const ENOEXEC: u32 = 8;
 pub const EBADF: u32 = 9;
 pub const ECHILD: u32 = 10;
@@ -31,6 +32,7 @@ pub const EFAULT: u32 = 14;
 pub const EACCES: u32 = 13;
 pub const ENOMEM: u32 = 12;
 pub const ENOTDIR: u32 = 20;
+pub const EISDIR: u32 = 21;
 pub const EINVAL: u32 = 22;
 pub const EPIPE: u32 = 32;
 pub const ERANGE: u32 = 34;
@@ -298,12 +300,6 @@ pub fn sys_pivot_root(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     Some(TrapOutcome::Handled)
 }
 
-pub fn sys_poll(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // poll。待ちはせずタイムアウトとして 0 を返す。top / powertop の前進用。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
-}
-
 pub fn sys_reboot(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
     set64(env, Gpr(0), cx.neg(EPERM));
@@ -332,12 +328,6 @@ pub fn sys_sched_get_priority_min(env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         return Some(TrapOutcome::Handled);
     };
     set64(env, Gpr(0), min as u64);
-    Some(TrapOutcome::Handled)
-}
-
-pub fn sys_select(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // select。待ちはせずタイムアウトとして 0 を返す。vi / inetd の前進用。
-    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -2761,9 +2751,7 @@ pub fn sys_setreuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
 pub fn sys_setresuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     sys_setuid(env, cx)
 }
-pub fn sys_pselect6(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_select(env, cx)
-}
+
 pub fn sys_fsync(valid: bool, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // fsync(fd)。ホストへは流さず、開いている fd なら 0。
     // Ref: SRC-LINUX (7.3).

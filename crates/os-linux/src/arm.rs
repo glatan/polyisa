@@ -237,6 +237,7 @@ pub const SETFSUID: u64 = 138;
 pub const SETFSGID: u64 = 139;
 pub const LLSEEK: u64 = 140;
 pub const GETDENTS: u64 = 141;
+pub const SELECT: u64 = 82;
 pub const NEWSELECT: u64 = 142;
 pub const FLOCK: u64 = 143;
 pub const MSYNC: u64 = 144;
@@ -651,6 +652,7 @@ const SYSCALLS: &[(u64, &str)] = &[
     (139, "setfsgid"),
     (140, "_llseek"),
     (141, "getdents"),
+    (82, "select"),
     (142, "_newselect"),
     (143, "flock"),
     (144, "msync"),

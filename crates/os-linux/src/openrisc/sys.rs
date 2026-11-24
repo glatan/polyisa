@@ -265,6 +265,17 @@ impl Linux {
     }
 
     fn sys_write(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let data = self.get_bytes(env, buf, len as usize)?;
         match self.writer(fd)? {
             WriteFd::Stdout => {
@@ -300,6 +311,25 @@ impl Linux {
 
     fn sys_read(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
         let len = (len as usize).min(1 << 20);
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(
+                &mut self.fds,
+                &abi,
+                env,
+                fd,
+                buf,
+                len as u64,
+                0,
+                &mono,
+            ) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let mut tmp = vec![0u8; len];
         let n = match fd {
             0 => {
@@ -814,11 +844,33 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64; 6]) -> Result<u64, u64> {
+        let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, a, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("openrisc: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     fn dispatch(&mut self, env: &mut BareEnv, nr_: u64, a: [u64; 6]) -> Result<u64, u64> {
         if let Some(name) = crate::openrisc::name(nr_)
             && crate::sock::NAMES.contains(&name)
         {
             return self.sock_call(env, name, &a);
+        }
+        if let Some(name) = crate::openrisc::name(nr_)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &a);
         }
         match nr_ {
             nr::IOCTL => Err(errno::ENOTTY),

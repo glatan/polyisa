@@ -764,7 +764,30 @@ impl Linux {
         let len = len.min(1 << 20) as usize;
         let r = match self.reader(fd) {
             Ok(r) => r,
-            Err(e) => return fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+                if e == sparc::errno::EBADF && self.fds.target(fd).is_some() {
+                    let w = if is_v9(env) { 8 } else { 4 };
+                    let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
+                    abi.errno = |e| host_errno(e as i32);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::read_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len as u64,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => fail((abi.errno)(e)),
+                    };
+                }
+                return fail(e);
+            }
         };
         match r {
             ReadFd::Stdin => {
@@ -821,7 +844,30 @@ impl Linux {
         };
         let w = match self.writer(fd) {
             Ok(w) => w,
-            Err(e) => return fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd 等）は fd 表経由。
+                if e == sparc::errno::EBADF && self.fds.target(fd).is_some() {
+                    let w = if is_v9(env) { 8 } else { 4 };
+                    let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
+                    abi.errno = |e| host_errno(e as i32);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::write_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => fail((abi.errno)(e)),
+                    };
+                }
+                return fail(e);
+            }
         };
         match w {
             WriteFd::Stdout => {
@@ -1675,12 +1721,39 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno は
+    /// SunOS 系の独自値へ写し、ポインタ/時刻幅は v8=4・v9=8。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
+        let w = if is_v9(env) { 8 } else { 4 };
+        let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
+        abi.errno = |e| host_errno(e as i32);
+        abi.nonblock = u64::from(sparc::oflag::NONBLOCK);
+        abi.cloexec = u64::from(sparc::oflag::CLOEXEC);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
+            Some(Ok(v)) => ok_ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("sparc: deadlock in fd wait");
+                }
+                fail_ret((abi.errno)(e))
+            }
+            None => fail_ret(sparc::errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は Disp で返し、%o0 は syscall が書く。
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> Disp {
         use sparc::errno as E;
         use sparc::nr as N;
         let args: [u64; 6] = std::array::from_fn(|i| self.arg(env, i));
+        if let Some(name) = sparc::name(n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &args);
+        }
         match n {
             // ---- プロセス ----
             N::EXIT | N::EXIT_GROUP => Disp::Exit((args[0] & 0xff) as u32),
@@ -2362,14 +2435,7 @@ impl Linux {
             }
             N::SET_ROBUST_LIST => ok_ret(0),
             N::GET_ROBUST_LIST => fail_ret(E::ENOSYS),
-            // ---- 選択・poll ----
-            N::SELECT
-            | N::NEWSELECT
-            | N::POLL
-            | N::PSELECT6
-            | N::PSELECT6_TIME64
-            | N::PPOLL
-            | N::PPOLL_TIME64 => ok_ret(0), // 即時「準備なし」。fd 群の健全性は見ない。
+            // ---- 選択・poll・epoll・eventfd・timerfd は wait 正準層へ ----
             N::PAUSE => ok_ret(0),
             // ---- ファイルシステム情報 ----
             N::STATFS => Disp::Ret(self.do_statfs(env, args[1], false)),
@@ -2423,7 +2489,6 @@ impl Linux {
             | N::CLOSE_RANGE
             | N::OPENAT2
             | N::PROCESS_MADVISE
-            | N::EPOLL_PWAIT2
             | N::FUTEX_WAITV
             | N::KCMP
             | N::PROCESS_VM_READV
@@ -2539,18 +2604,6 @@ impl Linux {
             | N::INOTIFY_ADD_WATCH
             | N::INOTIFY_RM_WATCH
             | N::INOTIFY_INIT1
-            | N::EPOLL_CREATE
-            | N::EPOLL_CTL
-            | N::EPOLL_WAIT
-            | N::EPOLL_CREATE1
-            | N::EPOLL_PWAIT
-            | N::TIMERFD_CREATE
-            | N::TIMERFD_SETTIME
-            | N::TIMERFD_GETTIME
-            | N::TIMERFD_SETTIME64
-            | N::TIMERFD_GETTIME64
-            | N::EVENTFD
-            | N::EVENTFD2
             | N::TIMER_CREATE
             | N::TIMER_SETTIME
             | N::TIMER_GETTIME

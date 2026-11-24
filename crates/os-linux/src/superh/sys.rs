@@ -284,6 +284,25 @@ impl Linux {
     /// `read`/`pread64` の共通部。
     fn sys_read(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
         let len = len.min(1 << 20) as usize;
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(
+                &mut self.fds,
+                &abi,
+                env,
+                fd,
+                buf,
+                len as u64,
+                0,
+                &mono,
+            ) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let r = self.reader(fd)?;
         match r {
             ReadFd::Stdin => {
@@ -336,6 +355,17 @@ impl Linux {
 
     /// `write`/`pwrite64` の共通部。
     fn sys_write(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let data = self.get_bytes(env, buf, len as usize)?;
         let w = self.writer(fd)?;
         match w {
@@ -1073,6 +1103,26 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, nr: u64, a: &[u64; 6]) -> Result<u64, u64> {
+        let Some(name) = superh::name(nr) else {
+            return Err(u64::from(superh::errno::ENOSYS));
+        };
+        let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, a, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("superh: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(u64::from(superh::errno::ENOSYS)),
+        }
+    }
+
     /// 番号で振り分ける。`Err(e)` は errno（正の値）で返す。
     #[allow(clippy::too_many_lines)]
     fn syscall(&mut self, env: &mut BareEnv, nr: u64, a: &[u64; 6]) -> Result<u64, u64> {
@@ -1721,13 +1771,26 @@ impl Linux {
             }
             N::SET_ROBUST_LIST => Ok(0),
             N::GET_ROBUST_LIST => Err(e(E::ENOSYS)),
-            // ---- 選択・poll（即時「準備なし」。revents 群は 0 クリア）----
+            // ---- 選択・poll・epoll・eventfd・timerfd は wait 正準層へ ----
             N::_NEWSELECT
             | N::POLL
             | N::PSELECT6
             | N::PSELECT6_TIME64
             | N::PPOLL
-            | N::PPOLL_TIME64 => Ok(0),
+            | N::PPOLL_TIME64
+            | N::EPOLL_PWAIT2
+            | N::EPOLL_CREATE
+            | N::EPOLL_CTL
+            | N::EPOLL_WAIT
+            | N::EPOLL_CREATE1
+            | N::EPOLL_PWAIT
+            | N::TIMERFD_CREATE
+            | N::TIMERFD_SETTIME
+            | N::TIMERFD_GETTIME
+            | N::TIMERFD_SETTIME64
+            | N::TIMERFD_GETTIME64
+            | N::EVENTFD
+            | N::EVENTFD2 => self.wait_call(env, nr, a),
             N::PAUSE => Ok(0),
             // ---- ファイルシステム情報 ----
             N::STATFS | N::FSTATFS => self.sys_statfs(env, a[1], false),
@@ -1804,7 +1867,6 @@ impl Linux {
             | N::PIDFD_GETFD
             | N::CLOSE_RANGE
             | N::PROCESS_MADVISE
-            | N::EPOLL_PWAIT2
             | N::KCMP
             | N::PROCESS_VM_READV
             | N::PROCESS_VM_WRITEV
@@ -1833,18 +1895,6 @@ impl Linux {
             | N::INOTIFY_ADD_WATCH
             | N::INOTIFY_RM_WATCH
             | N::INOTIFY_INIT1
-            | N::EPOLL_CREATE
-            | N::EPOLL_CTL
-            | N::EPOLL_WAIT
-            | N::EPOLL_CREATE1
-            | N::EPOLL_PWAIT
-            | N::TIMERFD_CREATE
-            | N::TIMERFD_SETTIME
-            | N::TIMERFD_GETTIME
-            | N::TIMERFD_SETTIME64
-            | N::TIMERFD_GETTIME64
-            | N::EVENTFD
-            | N::EVENTFD2
             | N::TIMER_CREATE
             | N::TIMER_SETTIME
             | N::TIMER_GETTIME

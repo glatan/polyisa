@@ -745,7 +745,28 @@ impl Linux {
         let len = len.min(1 << 20) as usize;
         let r = match self.reader(fd) {
             Ok(r) => r,
-            Err(e) => return Self::fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+                if e == errno::EBADF && self.fds.target(fd).is_some() {
+                    let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::read_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len as u64,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => Self::fail((abi.errno)(e)),
+                    };
+                }
+                return Self::fail(e);
+            }
         };
         match r {
             ReadFd::Stdin => {
@@ -785,7 +806,28 @@ impl Linux {
         };
         let w = match self.writer(fd) {
             Ok(w) => w,
-            Err(e) => return Self::fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd 等）は fd 表経由。
+                if e == errno::EBADF && self.fds.target(fd).is_some() {
+                    let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::write_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => Self::fail((abi.errno)(e)),
+                    };
+                }
+                return Self::fail(e);
+            }
         };
         match w {
             WriteFd::Stdout => {
@@ -1104,6 +1146,23 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
+        let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
+            Some(Ok(v)) => ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("power: deadlock in fd wait");
+                }
+                Self::fail_ret((abi.errno)(e))
+            }
+            None => Self::fail_ret(errno::ENOSYS),
+        }
+    }
+
     /// メインの振り分け。戻りは `Disp`。
     fn dispatch(&mut self, env: &mut BareEnv, name: Option<&'static str>) -> Disp {
         let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
@@ -1112,6 +1171,9 @@ impl Linux {
         };
         if crate::sock::NAMES.contains(&name) {
             return self.sock_call(env, name, &args);
+        }
+        if crate::wait::NAMES.contains(&name) {
+            return self.wait_call(env, name, &args);
         }
         match name {
             "exit" | "exit_group" => Disp::Exit((args[0] & 0xff) as u32),

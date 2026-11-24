@@ -419,7 +419,7 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (139, "setfsgid"),
     (140, "llseek"),
     (141, "getdents"),
-    (142, "newselect"),
+    (142, "_newselect"),
     (143, "flock"),
     (144, "msync"),
     (145, "readv"),
@@ -553,6 +553,7 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (379, "copy_file_range"),
     (383, "statx"),
     (387, "rseq"),
+    (441, "epoll_pwait2"),
 ];
 
 /// 番号から名前を引く。表は番号順なので二分探索する。

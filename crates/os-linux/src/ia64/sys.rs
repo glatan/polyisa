@@ -388,6 +388,17 @@ impl Linux {
         if !self.fd_open(fd) || (fd == 0 && self.std_fds[0].is_none()) {
             return Err(errno::EBADF);
         }
+        if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
+            {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
+        }
         let n = usize::try_from(len).unwrap_or(1 << 20).min(1 << 20);
         let data = self.read_bytes(env, buf, n).ok_or(errno::EFAULT)?;
         self.out_write(fd, &data).map(|n| n as u64)
@@ -405,6 +416,15 @@ impl Linux {
         }
         let data = if fd == 0 && self.std_fds[0].is_none() {
             self.stdin_read(n)
+        } else if self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
+            // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+            let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+            let t0 = std::time::Instant::now();
+            let mono = move || t0.elapsed().as_nanos() as u64;
+            return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(u64::from((abi.errno)(e))),
+            };
         } else {
             self.file_read(fd, n)?
         };
@@ -1576,12 +1596,34 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Result<u64, u64> {
+        let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("ia64: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     /// 表番号 `n`（r15 − NR_BASE）の実装本体。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64, args: [u64; 6]) -> Ia64Result {
         if let Some(name) = crate::ia64::name(n)
             && crate::sock::NAMES.contains(&name)
         {
             return self.sock_call(env, name, &args).into();
+        }
+        if let Some(name) = crate::ia64::name(n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &args).into();
         }
         match n {
             nr::EXIT | nr::EXIT_GROUP => Ia64Result::Exit((args[0] & 0xff) as u32),

@@ -303,7 +303,33 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    fn wait_call(&mut self, env: &mut BareEnv, nr: u64) -> Disp {
+        let Some(name) = s390::name(nr) else {
+            return Self::fail_ret(errno::ENOSYS);
+        };
+        let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
+        let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, &args, 0, &mono) {
+            Some(Ok(v)) => ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("s390: deadlock in fd wait");
+                }
+                Self::fail_ret((abi.errno)(e))
+            }
+            None => Self::fail_ret(errno::ENOSYS),
+        }
+    }
+
     fn dispatch(&mut self, env: &mut BareEnv, nr: u64) -> Disp {
+        if let Some(name) = s390::name(nr)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, nr);
+        }
         match nr {
             s390::EXIT | s390::EXIT_GROUP => Disp::Exit(arg(env, 0) as u32),
             s390::READ => {
@@ -320,6 +346,27 @@ impl Linux {
                         self.stdin_pos += take;
                         take
                     }
+                } else if self.fds.file(fd as u32).is_none() {
+                    // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+                    if self.fds.target(fd as u32).is_none() {
+                        return Self::fail_ret(errno::EBADF);
+                    }
+                    let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::read_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd as u32,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => Self::fail_ret((abi.errno)(e)),
+                    };
                 } else {
                     let Some(f) = self.fds.file_mut(fd as u32) else {
                         return Self::fail_ret(errno::EBADF);
@@ -375,6 +422,28 @@ impl Linux {
             }
             s390::WRITE => {
                 let (fd, buf, len) = (arg(env, 0), arg(env, 1), arg(env, 2));
+                if fd >= 3
+                    && self.fds.file(fd as u32).is_none()
+                    && self.fds.target(fd as u32).is_some()
+                {
+                    // ファイル以外の対象（eventfd 等）は fd 表経由。
+                    let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::write_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd as u32,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => Self::fail_ret((abi.errno)(e)),
+                    };
+                }
                 let mut tmp = vec![0u8; len.min(1 << 20) as usize];
                 if env.backend.mem.read(VirtAddr(buf), &mut tmp, ACC).is_err() {
                     return Self::fail_ret(errno::EFAULT);

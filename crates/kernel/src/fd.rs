@@ -1246,6 +1246,39 @@ impl FdTable {
         out
     }
 
+    /// fd が指す epoll 集合。epoll_ctl/epoll_wait の正準層が使う。
+    #[must_use]
+    pub fn epoll_of(&self, fd: u32) -> Option<Rc<RefCell<EpollSet>>> {
+        match self.target(fd) {
+            Some(FdTarget::Epoll(s)) => Some(Rc::clone(s)),
+            _ => None,
+        }
+    }
+
+    /// fd 待ちに使う最速の期限（ナノ秒）。今のところ TimerFd の
+    /// deadline だけを返す。他の対象・無い fd では None。
+    #[must_use]
+    pub fn wait_deadline(&self, fd: u32) -> Option<u64> {
+        match self.target(fd) {
+            Some(FdTarget::TimerFd(s)) => s.borrow().deadline,
+            _ => None,
+        }
+    }
+
+    /// fd 待ちでホスト側を poll すべき生 fd の列。HostSock は
+    /// `ev`（POLLIN/POLLOUT 値の興味ビット）をそのまま返し、
+    /// epoll 集合は登録対象を興味イベントつきで展開する。
+    /// それ以外の対象は空。
+    #[cfg(unix)]
+    #[must_use]
+    pub fn host_watches(&self, fd: u32, ev: u32) -> Vec<(polyisa_host::RawFd, i16)> {
+        let mut out = Vec::new();
+        if let Some(t) = self.target(fd) {
+            target_host_watches(t, ev, 0, &mut out);
+        }
+        out
+    }
+
     /// ftruncate。File はホストの `set_len`、MemFd は中身の長さを
     /// 変える（伸びた分は 0）。対象外は偽。
     pub fn truncate(&mut self, fd: u32, len: u64) -> bool {
@@ -1709,6 +1742,35 @@ fn target_ready(
                 ..Ready::default()
             }
         }
+    }
+}
+
+/// 一つの対象について、ホスト側を poll すべき生 fd を `out` へ
+/// 足す。epoll 集合は登録ごとの興味イベントで再帰展開する。
+/// `ev` は POLLIN/POLLOUT 値の興味ビット。
+#[cfg(unix)]
+fn target_host_watches(
+    target: &FdTarget,
+    ev: u32,
+    depth: u8,
+    out: &mut Vec<(polyisa_host::RawFd, i16)>,
+) {
+    if depth > FdTable::EPOLL_MAX_DEPTH {
+        return;
+    }
+    match target {
+        FdTarget::HostSock(s) => out.push((s.sock.raw(), ev as i16)),
+        FdTarget::Epoll(set) => {
+            for reg in &set.borrow().regs {
+                // EPOLLIN/PRI/RDNORM/RDBAND/RDHUP → POLLIN、
+                // EPOLLOUT/WRNORM/WRBAND → POLLOUT。ERR/HUP は
+                // ホストの poll が興味無しでも報告する。
+                let ev = (u32::from(reg.events & 0x2043 != 0))
+                    | (u32::from(reg.events & 0x304 != 0) << 2);
+                target_host_watches(&reg.target, ev, depth + 1, out);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -595,7 +595,28 @@ impl Linux {
         let len = len.min(1 << 20) as usize;
         let r = match self.reader(fd) {
             Ok(r) => r,
-            Err(e) => return fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
+                if e == m68k::errno::EBADF && self.fds.target(fd).is_some() {
+                    let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::read_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len as u64,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => fail((abi.errno)(e)),
+                    };
+                }
+                return fail(e);
+            }
         };
         match r {
             ReadFd::Stdin => {
@@ -652,7 +673,28 @@ impl Linux {
         };
         let w = match self.writer(fd) {
             Ok(w) => w,
-            Err(e) => return fail(e),
+            Err(e) => {
+                // ファイル以外の対象（eventfd 等）は fd 表経由。
+                if e == m68k::errno::EBADF && self.fds.target(fd).is_some() {
+                    let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+                    let t0 = std::time::Instant::now();
+                    let mono = move || t0.elapsed().as_nanos() as u64;
+                    return match crate::wait::write_other(
+                        &mut self.fds,
+                        &abi,
+                        env,
+                        fd,
+                        buf,
+                        len,
+                        0,
+                        &mono,
+                    ) {
+                        Ok(v) => ret(v),
+                        Err(e) => fail((abi.errno)(e)),
+                    };
+                }
+                return fail(e);
+            }
         };
         match w {
             WriteFd::Stdout => {
@@ -1082,11 +1124,36 @@ impl Linux {
         }
     }
 
+    /// 待ち合わせ系 syscall の正準層呼び出し。m68k の
+    /// select(82) は 5 語ブロックの旧形式。
+    fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 8]) -> Disp {
+        let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
+        abi.old_select = true;
+        let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::wait::drive(&mut self.fds, &abi, env, name, a6, 0, &mono) {
+            Some(Ok(v)) => ok_ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("m68k: deadlock in fd wait");
+                }
+                fail_ret((abi.errno)(e))
+            }
+            None => fail_ret(m68k::errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は Disp で返し、r0 は handle_trap が書く。
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> Disp {
         use m68k::errno as E;
         let args: [u64; 8] = std::array::from_fn(|i| self.arg(env, i));
+        if let Some(name) = m68k::name(n)
+            && crate::wait::NAMES.contains(&name)
+        {
+            return self.wait_call(env, name, &args);
+        }
         match n {
             // ---- プロセス ----
             m68k::EXIT | m68k::EXIT_GROUP => Disp::Exit((args[0] & 0xff) as u32),
@@ -1756,17 +1823,7 @@ impl Linux {
             }
             m68k::SET_ROBUST_LIST => ok_ret(0),
             m68k::GET_ROBUST_LIST => fail_ret(E::ENOSYS),
-            // ---- 選択・poll ----
-            m68k::NEWSELECT
-            | m68k::POLL
-            | m68k::PSELECT6
-            | m68k::PSELECT6_TIME64
-            | m68k::PPOLL
-            | m68k::PPOLL_TIME64 => {
-                // 即時「準備なし」。fd 群の健全性は見ない。
-                let _ = env;
-                ok_ret(0)
-            }
+            // ---- 選択・poll・epoll・eventfd・timerfd は wait 正準層へ ----
             m68k::PAUSE => ok_ret(0),
             // ---- ファイルシステム情報 ----
             m68k::STATFS => Disp::Ret(self.do_statfs(env, args[1], false)),
@@ -1818,7 +1875,6 @@ impl Linux {
             | m68k::CLOSE_RANGE
             | m68k::OPENAT2
             | m68k::PROCESS_MADVISE
-            | m68k::EPOLL_PWAIT2
             | m68k::FUTEX_WAITV
             | m68k::KCMP
             | m68k::PROCESS_VM_READV
@@ -1887,18 +1943,6 @@ impl Linux {
             | m68k::INOTIFY_ADD_WATCH
             | m68k::INOTIFY_RM_WATCH
             | m68k::INOTIFY_INIT1
-            | m68k::EPOLL_CREATE
-            | m68k::EPOLL_CTL
-            | m68k::EPOLL_WAIT
-            | m68k::EPOLL_CREATE1
-            | m68k::EPOLL_PWAIT
-            | m68k::TIMERFD_CREATE
-            | m68k::TIMERFD_SETTIME
-            | m68k::TIMERFD_GETTIME
-            | m68k::TIMERFD_SETTIME64
-            | m68k::TIMERFD_GETTIME64
-            | m68k::EVENTFD
-            | m68k::EVENTFD2
             | m68k::TIMER_CREATE
             | m68k::TIMER_SETTIME
             | m68k::TIMER_GETTIME
