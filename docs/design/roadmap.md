@@ -64,8 +64,7 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| NS2 | `kernel`: fd 表の多態化（対象の器: ホストのファイル・ディレクトリ、パイプ、端末に加え、ソケット・eventfd・timerfd・signalfd・epoll・memfd）と、対象の準備状態を集める機構。GAP-0025 解消 | NS1 | - |
-| NS3 | `host`: `std::net` と `std::os::unix` が直に足りない分の補助（socketpair・Unix domain ソケット、非阻止への設定、send/recv 系） | NS1 | - |
+
 | NS4 | `kernel`: ソケット（AF_UNIX/AF_INET。socketpair はカーネル内対象、ホスト socket は作業スレッド経由）・eventfd・timerfd（仮想時間）・signalfd・epoll・memfd の fd 対象 | NS2・NS3 | - |
 | NS5 | `os-linux`: ソケット関連 syscall（socket・bind・listen・accept・connect・send/recv 系・shutdown・sockopt・get*name・socketpair）の正準実装と各 ABI への接続 | NS4 | - |
 | NS6 | `os-linux`: 待ち合わせ syscall（select/pselect6・poll・ppoll・epoll_create1/epoll_ctl/epoll_wait/epoll_pwait・eventfd2・timerfd_*）と、暫定スタブ（x86 の EPERM 系と、x86・alpha・parisc の 0 返しの待ち合わせ系）の置き換え | NS4 | - |
