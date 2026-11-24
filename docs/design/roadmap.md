@@ -22,7 +22,7 @@
 
 判定が `未整備` の条件は、判定に使うテストの名前を条件の文に書く。テストはその段階の作業の中で作り、判定を `テスト：` に更新する。
 
-段階 15 以降の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。作業計画の判定列には対応する完了条件の ID を記し、完了の判定は完了条件の表で行う。
+段階 15 以降の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。段階 25 以降は ISA の段階ではないため、共通の構成を対象に合わせて読み替える。骨格はローダやサーバなどの受け口の実装に、命令群は本体の実装に対応する。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。作業計画の判定列には対応する完了条件の ID を記し、完了の判定は完了条件の表で行う。
 
 この文書は未完のタスクだけを載せる。完了した作業計画の行はその時点で削除し、完了条件をすべて満たした段階は節ごと削除する。完了した段階の実績と残件は `docs/records.md` に記録する。段階の詳細な計画（実装項目と事実の出所の対応表）とレビューの記録は `.local/` に置く作業文書に残す。詳しい手順は [開発の流れ](dev-workflow.md) の「段階の進め方」を見る。
 
@@ -42,6 +42,19 @@
 | S25-2 | BSD のプログラムが VAX で正しく動く（テスト `heavy_program_bsdvax`）。 | 未整備 |
 | S25-3 | セミホスティングを使うプログラムが正しく動く（テスト `heavy_program_semihosting`）。 | 未整備 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| OS1 | 着手条件: 台帳の版確定（SPEC-UNIX-V7・SPEC-BSD-43・SPEC-ARM-SEMIHOST は登録済み。BSD の対象は 4.3BSD-Reno で確定 — 4.4BSD-Lite は VAX 対応を除いた）、SPEC-RISCV-SEMIHOST の新規登録（RISC-V Semihosting v1.0 ratified。入口列は同仕様、SYS_* 演算は SPEC-ARM-SEMIHOST が正本）、テスト入力の台帳登録（V7 は TUHS の `Henry_Spencer_v7/v7.tar.gz` から bin/* の a.out（0410 が主体・0411 と 0407 も含む）。BSD は `4.3BSD-Reno/usr.tar.gz` の /usr/bin と `rootdump.gz` から復元した /bin・/sbin（ほぼ全数 ZMAGIC。dump 形式の復元は自前パーサで検証済み）— いずれも BIN 系・用途 T・リポジトリに含めない。精密な syscall 検査は手組み a.out で補う）、パーソナリティのクレート構成（`os-v7`・`os-bsd` の新規クレート — `os-wasi` の先例に倣い kernel・engine・guest・host・mem・sem・loader と対象ゲストへ依存）、段階 24 の残件の取り込み判断（GAP-0085(f) の MMR1 巻き戻しは再試行可能な fault（スタック成長）に要るので対象。GAP-0086 の割込み受理・RESET・コンソール/診断系はユーザーモードでは不可観測なので残す） | 段階 23・24 | - |
+| OS2 | `loader`: a.out 変種の解析（V7 の 0407/0410/0411、VAX・BSD の ZMAGIC 系）と `FileKind` の拡張。アドレス空間への配置の方針はパーソナリティ側 | OS1 | - |
+| OS3 | Unix V7 パーソナリティ骨格: `trap` の syscall 機械（番号は `handle_trap` の code に乗らない — pc-2 の命令語の下位バイト。引数規約・キャリーフラグによるエラー）、ファイル系・`brk`/`sbrk`・`exit`、a.out の配置と初期スタック、`cli` の `run_pdp11` への接続 | OS2 | - |
+| OS4 | V7 の残りの syscall（signal・time・dup・pipe 等の範囲の確定を含む）と `heavy_program_unixv7`（層 7） | OS3 | S25-1 |
+| OS5 | BSD パーソナリティ骨格: `chmk` の syscall 機械、BSD の a.out の配置と初期スタック、`cli` の `run_vax` への接続 | OS2 | - |
+| OS6 | BSD の残りの syscall と `heavy_program_bsdvax`（層 7） | OS5 | S25-2 |
+| OS7 | セミホスティング: 入口の検出（aarch64 は `hlt #0xf000`、arm は `svc #0xab`/`bkpt #0xab` 系、riscv は `ebreak` 前後の `slli x0,x0,0x1f`/`srai x0,x0,7` の標識列 — riscv の ebreak は `Break` 退出の処理点で前後語を読んで判定。二系統の trap 経路は GAP-0024 に注意）と `SYS_*` 演算のホスト入出力への写像、`heavy_program_semihosting`（層 7、clang 静的リンクの自前プログラム） | OS1 | S25-3 |
+| OS8 | 残件整理・判定列更新（`workspace.md` のクレート表と依存規則、`gaps.md`/`records.md` の整合を含む） | OS4・OS6・OS7 | - |
+
 ### 段階 26：システムコールの段階 5
 
 [ユーザーモード](user-mode.md) の実装の段階の 5（ネットワークと待ち合わせ）。
@@ -54,6 +67,19 @@
 | ID | 条件 | 判定 |
 |---|---|---|
 | S26-1 | ソケットと待ち合わせを使うプログラムが正しく動く（テスト `heavy_program_net`）。 | 未整備 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| NS1 | 着手条件: GAP-0025 の解消方針の確定（fd の対象を列挙型で表す一つの表へ作り替え — パイプはその一種、ファイル・パイプの二表構造と `extra_free` 調整を撤去。os-wasi の `FdKind` が先例）、対象 syscall の一覧と ABI ごとの番号・構造体（sockaddr・msghdr・pollfd・epoll_event・itimerspec。socketcall 系の多重化を含む）の根拠表の確認、ホストの資源への待ちを作業用ホストスレッドへ渡す経路の設計（現状カーネルに作業スレッド機構はなく新設が要る — [ユーザーモード](user-mode.md)）、テスト入力は clang 静的リンクの自前プログラム（層 7 の種類 1）で BIN 登録は不要 | - | - |
+| NS2 | `kernel`: fd 表の多態化（対象の器: ホストのファイル・ディレクトリ、パイプ、端末に加え、ソケット・eventfd・timerfd・signalfd・epoll・memfd）と、対象の準備状態を集める機構。GAP-0025 解消 | NS1 | - |
+| NS3 | `host`: `std::net` と `std::os::unix` が直に足りない分の補助（socketpair・Unix domain ソケット、非阻止への設定、send/recv 系） | NS1 | - |
+| NS4 | `kernel`: ソケット（AF_UNIX/AF_INET。socketpair はカーネル内対象、ホスト socket は作業スレッド経由）・eventfd・timerfd（仮想時間）・signalfd・epoll・memfd の fd 対象 | NS2・NS3 | - |
+| NS5 | `os-linux`: ソケット関連 syscall（socket・bind・listen・accept・connect・send/recv 系・shutdown・sockopt・get*name・socketpair）の正準実装と各 ABI への接続 | NS4 | - |
+| NS6 | `os-linux`: 待ち合わせ syscall（select/pselect6・poll・ppoll・epoll_create1/epoll_ctl/epoll_wait/epoll_pwait・eventfd2・timerfd_*）と、暫定スタブ（x86 の EPERM 系と、x86・alpha・parisc の 0 返しの待ち合わせ系）の置き換え | NS4 | - |
+| NS7 | `heavy_program_net`（ソケットと待ち合わせを使うプログラム。カーネル内対象とループバックで決定的に） | NS5・NS6 | S26-1 |
+| NS8 | 残件整理・判定列更新 | NS7 | - |
 
 ### 段階 27：タイミングの残りの汎用モデルと較正
 
@@ -69,22 +95,39 @@ ISA 固有のタイミング（68000、80486、Pentium、VAX）は各 ISA の段
 | S27-1 | アウトオブオーダーの汎用モデルが、マイクロベンチマークで宣言した誤差の範囲に収まる（テスト `heavy_timing_ooo`）。 | 未整備 |
 | S27-2 | U74 の `approx` が実機の計測で較正され、宣言した誤差の範囲に収まる（実機の計測が条件）。 | 所有者 |
 
-### 段階 28：ホストの移植
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| TM1 | 着手条件: SPEC-SIFIVE-U74 の版確定（21G3.02.00 登録済み）、較正ベンチマーク集の構成と実機計測の環境記録の形の決定（方法は timing.md「検証」どおり）、`approx` の誤差宣言と「未較正」表示の形、`InstrEvent` と engine→timing の結線の棚卸し（GAP-0027 の `timing_hint` が InterpBackend で空のまま。VAX は意味論側が `hint` に計算済み μc を載せる先例。キャッシュ・分岐予測・OoO に要る情報 — メモリアクセス・分岐方向・誤予測のペナルティと誤経路の扱い） | - | - |
+| TM2 | `timing`: キャッシュ階層モデル（段ごとの容量・連想度・ラインサイズ・置換・書き込み方式・レイテンシ）と、命令イベントのメモリアクセス（仮の物理アドレス近似）との接続 | TM1 | - |
+| TM3 | `timing`: 分岐予測器モデル（静的・2 ビットカウンタ・履歴を使う予測器・分岐先バッファ） | TM1 | - |
+| TM4 | `timing`: アウトオブオーダーの汎用モデル（フロントエンドの幅・リネーム・リオーダーバッファ・スケジューラとポート・ロード/ストアキュー・退役の幅）。TM2・TM3 のモデルとの合成 | TM2・TM3 | - |
+| TM5 | U74 の `approx` CPU モデル（`guests/riscv` のモデル定義とタイミング表。U74 はインオーダー・デュアルイシューなので、インオーダー汎用モデルの発行幅・演算器占有の拡張を必要に応じて含める。SC-1 の層 1–3 のモデル差検査を備える。未較正の間は `ApproxUncalibrated` と `cpus` 等での「未較正」表示） | TM2・TM3 | - |
+| TM6 | 較正ベンチマーク集と `heavy_timing_ooo`（汎用モデルの出力が宣言した誤差の範囲に収まることの判定。比較の根拠は TM1 で決める） | TM4 | S27-1 |
+| TM7 | 残件整理・判定列更新（S27-2 の実機計測を所有者が行う手順の記録を含む） | TM5・TM6 | S27-2 |
+
+### 段階 28：wasm32 のホスト
 
 [ホスト抽象化](host.md) の段階表に従い、ホストを増やす。各ホストの OS の文書は、使う前に台帳へ登録する。
 
-- 段階 2：Linux AArch64 と macOS（Apple Silicon）。インタプリタから始める。AArch64 の JIT のバックエンドはこの段階で追加を検討する。macOS の JIT は `MAP_JIT` と書き込み保護の切り替えが必要になる
-- 段階 3：Windows x86_64。ゲストの uid、gid、パーミッションは仮想カーネルで合成する
-- 段階 4：wasm32。インタプリタのみ。ホストのスレッドがない環境では、ホストの入出力を直接行う
+- 段階 4：wasm32（wasip1・wasip2・wasip3）。インタプリタのみ。ホストのスレッドがない環境では、ホストの入出力を直接行う
 
 完了条件：
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S28-1 | Linux AArch64 のホストで `task test:full` が通る（ホストの環境が条件）。 | 所有者 |
-| S28-2 | macOS（Apple Silicon）のホストで `task test:full` が通る（同上）。 | 所有者 |
-| S28-3 | Windows x86_64 のホストで `task test:full` が通る（同上）。 | 所有者 |
-| S28-4 | wasm32 のホストでインタプリタによる実行が動く（同上）。 | 所有者 |
+| S28-4 | wasm32 のホスト（wasip1・wasip2・wasip3）でインタプリタによる実行が動く（ホストの環境が条件）。 | 所有者 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| HP1 | 着手条件: ターゲットの確定（wasm32-wasip1・wasip2・wasip3 + wasmtime — std の入出力に wasi 系が要る。p2・p3 はコンポーネントモデルで `wasi:sockets` 系の API がある（実行時に wasmtime の許可旗が要る）。実行器は TOOL-WASMTIME 登録済み、用途 X の範囲確認のみ。wasip2・wasip3 のターゲットの導入を含む）、仕様の台帳登録（WebAssembly/WASI repo の `snapshot-01` タグ＝SPEC-WASI-P1、`v0.2.x` タグ＝SPEC-WASI-P2、`v0.3.x` タグ＝SPEC-WASI-P3）、`check:targets` の現状確認（現在は wasm32-unknown-unknown。wasip1 では polyisa-jit が `sysv64` ABI 未対応でビルドに落ちる）、kernel の直接入出力経路の設計（作業スレッド機構は未実装。`std::thread::spawn` は wasi 系では実行時に失敗するので直接入出力が既定の形） | - | - |
+| HP2 | `host`: wasi 系ターゲットでビルドするための構成（exec_mem は wasm では Unsupported。`std::os::unix` の直接使用箇所の cfg 整理 — wasi 系は `cfg(unix)` が偽で `target_family="wasm"`。`target_os="wasi"` と `target_env="p1"/"p2"/"p3"` で切り分ける）と、`jit` のホストバックエンドの cfg 分割（`sysv64` 系は対応ホストのみ、wasm では Unsupported — host.md の JIT 例外に従う） | HP1 | - |
+| HP3 | `kernel`: ホストのスレッドがない環境では作業スレッドへ渡さず、ホストの入出力を直接行う経路 | HP1 | - |
+| HP4 | wasip1・wasip2・wasip3 の各ターゲットでインタプリタによる実行の検証（実行器上の `polyisa run` で、ゲストのプログラムの実行と出力を確認） | HP2・HP3 | S28-4 |
+| HP5 | 残件整理・判定列更新 | HP4 | - |
 
 ### 段階 29：GDB 接続
 
@@ -94,7 +137,18 @@ ISA 固有のタイミング（68000、80486、Pentium、VAX）は各 ISA の段
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S29-1 | GDB からの接続、シングルステップ、ブレークポイント、レジスタの読み書きが動く（テスト `heavy_gdbstub`）。 | 未整備 |
+| S29-1 | GDB からの接続、シングルステップ、ブレークポイント、レジスタの読み書きが動く（テスト `heavy_program_gdbstub`）。 | 未整備 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| GD1 | 着手条件: SPEC-GDB-RSP・TOOL-GDB の版確定（いずれも 18.1 登録済み。手元の gdb は riscv:rv64 を含むマルチアーチ）、最初の対象 ISA を riscv に決定（レジスタ構成が単純・gdb が対応・clang でテストバイナリを自前ビルド可）、レジスタ記述の供給源（ISADL のレジスタ記述生成は GAP-0023 の残項目 — 当面は gdbstub 側に riscv の手書き表）、ブレークポイント検査の方式（ブロック未接続（GAP-0028）の間は観測点のステップ前呼出しで PC を照合。設計のブロック構築時検査はブロック接続後の形） | - | - |
+| GD2 | `engine`: 観測点（`Observer` トレイトと `NoObserver`、ステップ前後・メモリアクセス・退出の呼出点）と、ブレークポイントの表から `Stop::Breakpoint` への接続、`trace` の命令トレースへの接続（GAP-0008 解消） | GD1 | - |
+| GD3 | `gdbstub`: RSP のパケット層（`std::net` の TCP 受付・チェックサム・ACK/NAK）と最小のパケット集合（`?`・`qSupported`・`qXfer:features`・`g`/`G`・`m`/`M`・`c`・`s`・`Z`/`z`・`k`） | GD1 | - |
+| GD4 | レジスタ記述からのターゲット記述（`org.gnu.gdb.*` の機能名）の生成と `g`/`G` の転送（決まったエンディアンへの変換）、シングルステップとブレークポイントの観測点経由の実行 | GD2・GD3 | - |
+| GD5 | `cli` の `run -g <ポート>` の配線と `heavy_program_gdbstub`（TOOL-GDB での接続・継続/単歩・ブレークポイント・レジスタ読み書き） | GD4 | S29-1 |
+| GD6 | 残件整理・判定列更新（ウォッチポイント・複数スレッド・シグナルによる停止の報告、`format_syscall` の配線の扱いを残件として記録） | GD5 | - |
 
 ## ISA の実装の着手の条件
 
