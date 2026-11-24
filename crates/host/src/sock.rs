@@ -15,7 +15,9 @@
 
 use std::io;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+pub use std::os::fd::RawFd;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// ホストの fd 番号。非 Unix ホストでは番号系がないので i32 で済ませる。
 #[cfg(not(unix))]
@@ -30,6 +32,48 @@ pub struct SockFd(OwnedFd);
 #[cfg(not(unix))]
 #[derive(Debug)]
 pub struct SockFd;
+
+/// 非 Unix では全操作が unsupported。`HostIo` 等の汎用コードが
+/// 条件分岐なしで呼べるよう形だけ揃える。
+#[cfg(not(unix))]
+impl SockFd {
+    /// 常に -1（無効 fd）。
+    #[must_use]
+    pub fn raw(&self) -> RawFd {
+        -1
+    }
+
+    /// 常に unsupported。
+    pub fn send(&self, _bytes: &[u8]) -> io::Result<usize> {
+        Err(unsupported())
+    }
+
+    /// 常に unsupported。
+    pub fn recv(&self, _max: usize) -> io::Result<Vec<u8>> {
+        Err(unsupported())
+    }
+
+    /// 常に偽。
+    #[must_use]
+    pub fn is_nonblock(&self) -> bool {
+        false
+    }
+
+    /// 常に unsupported。
+    pub fn set_nonblock(&self, _on: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    /// 常に unsupported。
+    pub fn ready(&self) -> io::Result<SockReady> {
+        Err(unsupported())
+    }
+
+    /// 常に unsupported。
+    pub fn shutdown(&self, _how: u32) -> io::Result<()> {
+        Err(unsupported())
+    }
+}
 
 /// poll の結果（準備状態）。呼び出し側が自分の Ready 型に写す。
 #[derive(Clone, Copy, Default, Debug)]

@@ -301,6 +301,15 @@ impl Linux {
                 polyisa_kernel::ThreadWait::Pipe { id: pipe } => {
                     eprintln!("run: pid {} waits for pipe {pipe}", id.0);
                 }
+                polyisa_kernel::ThreadWait::Fd => {
+                    eprintln!("run: pid {} waits for fd readiness", id.0);
+                }
+                polyisa_kernel::ThreadWait::HostFd => {
+                    eprintln!("run: pid {} waits for host fd readiness", id.0);
+                }
+                polyisa_kernel::ThreadWait::Timer => {
+                    eprintln!("run: pid {} waits for timer", id.0);
+                }
             }
         }
     }

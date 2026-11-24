@@ -1051,6 +1051,167 @@ impl FdTable {
         )
     }
 
+    /// カーネル内ソケット対（socketpair(AF_UNIX)）の両端。
+    /// `dgram` は SOCK_DGRAM。呼び出し側が `alloc` する。
+    pub fn socket_pair(&mut self, dgram: bool) -> (FdTarget, FdTarget) {
+        let pair = Rc::new(RefCell::new(PairSock::new(dgram)));
+        (
+            FdTarget::PairSock {
+                pair: Rc::clone(&pair),
+                end: PairEnd::A,
+            },
+            FdTarget::PairSock {
+                pair,
+                end: PairEnd::B,
+            },
+        )
+    }
+
+    /// eventfd。`init` は初期値、`semaphore` は EFD_SEMAPHORE。
+    pub fn eventfd(&self, init: u64, semaphore: bool) -> FdTarget {
+        FdTarget::EventFd(Rc::new(EventState {
+            count: Cell::new(init),
+            semaphore,
+            nonblock: Cell::new(false),
+        }))
+    }
+
+    /// timerfd。deadline/interval は `TimerState` を直接入れる。
+    pub fn timerfd(&self) -> FdTarget {
+        FdTarget::TimerFd(Rc::new(RefCell::new(TimerState {
+            deadline: None,
+            interval: 0,
+            expirations: 0,
+            nonblock: false,
+        })))
+    }
+
+    /// signalfd。`mask` は興味のあるシグナルのビット集合。
+    pub fn signalfd(&self, mask: u64) -> FdTarget {
+        FdTarget::SignalFd(Rc::new(SignalState {
+            mask: Cell::new(mask),
+            nonblock: Cell::new(false),
+        }))
+    }
+
+    /// signalfd のマスクを入れ替える（signalfd(fd, mask) の更新経路）。
+    /// 対象が signalfd でなければ偽。
+    pub fn signalfd_mask(&mut self, fd: u32, mask: u64) -> bool {
+        match self.target(fd) {
+            Some(FdTarget::SignalFd(s)) => {
+                s.mask.set(mask);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// epoll_create。
+    pub fn epoll(&self) -> FdTarget {
+        FdTarget::Epoll(Rc::new(RefCell::new(EpollSet::default())))
+    }
+
+    /// memfd_create。
+    pub fn memfd(&self) -> FdTarget {
+        FdTarget::MemFd(Rc::new(RefCell::new(MemFile::default())))
+    }
+
+    /// epoll 集合へ登録する（EPOLL_CTL_ADD/MOD。`target` は
+    /// `dup_of` で複製済みのもの）。自分自身や循環になる登録は
+    /// 偽を返す（このとき `target` はその場で閉じる）。
+    pub fn epoll_add(
+        &self,
+        set: &Rc<RefCell<EpollSet>>,
+        key: u64,
+        target: FdTarget,
+        events: u32,
+        data: u64,
+    ) -> bool {
+        // 循環: 登録対象が epoll なら、その中（推移的）にこの集合が
+        // 現れてはいけない。
+        if let FdTarget::Epoll(inner) = &target
+            && (Rc::ptr_eq(inner, set) || epoll_holds(inner, set, 0))
+        {
+            let _ = self.close_target(&target);
+            return false;
+        }
+        let mut set = set.borrow_mut();
+        if let Some(reg) = set.regs.iter_mut().find(|r| r.key == key) {
+            // 同じ鍵は MOD 相当。対象は登録時のものを保つので、
+            // 新しく渡された複製は閉じる。
+            reg.events = events;
+            reg.data = data;
+            drop(set);
+            let _ = self.close_target(&target);
+            return true;
+        }
+        set.regs.push(EpollReg {
+            key,
+            target,
+            events,
+            data,
+        });
+        true
+    }
+
+    /// epoll_wait の一回分: 登録のうち準備のあるものを
+    /// （events, data）で返す。レベルトリガ相当の再評価なので
+    /// 毎回同じ並び（登録順）で同じ結果を返す。
+    /// `now`/`pending` は `ready` と同じ時計・保留マスク。
+    #[must_use]
+    pub fn epoll_collect(
+        &self,
+        set: &Rc<RefCell<EpollSet>>,
+        now: u64,
+        pending: u64,
+        max: usize,
+    ) -> Vec<(u32, u64)> {
+        let set = set.borrow();
+        let mut out = Vec::new();
+        for reg in &set.regs {
+            let r = target_ready(&reg.target, &self.pipes, now, pending, 0);
+            // LT 近似: events は興味側の値をそのまま、実際の成立は
+            // read/write/err/hup に応じて POLL* ビットへ写す。
+            let mut fired = 0u32;
+            if r.read {
+                fired |= 1; // POLLIN
+            }
+            if r.write {
+                fired |= 4; // POLLOUT
+            }
+            if r.err {
+                fired |= 8; // POLLERR
+            }
+            if r.hup {
+                fired |= 0x10; // POLLHUP
+            }
+            if reg_events_match(reg.events, r) {
+                out.push((fired & (reg.events | 8 | 0x10), reg.data));
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// ftruncate。File はホストの `set_len`、MemFd は中身の長さを
+    /// 変える（伸びた分は 0）。対象外は偽。
+    pub fn truncate(&mut self, fd: u32, len: u64) -> bool {
+        match self.target(fd) {
+            Some(FdTarget::File(f)) => f.set_len(len).is_ok(),
+            Some(FdTarget::MemFd(m)) => {
+                let mut m = m.borrow_mut();
+                m.data.resize(len as usize, 0);
+                if m.pos > len {
+                    m.pos = len;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// fd の O_NONBLOCK。対象種別ごとの置き場所を見る。
     /// ホストのファイルには記録しない（通常ファイルでは読み書きに
     /// 影響しないため、旗だけ持っても読み出せない場所がない）。
@@ -1495,6 +1656,20 @@ fn target_ready(
             }
         }
     }
+}
+
+/// `hay` の登録の中に `needle` の epoll 集合が（推移的に）含まれるか。
+/// epoll_add の循環検査に使う。
+fn epoll_holds(hay: &Rc<RefCell<EpollSet>>, needle: &Rc<RefCell<EpollSet>>, depth: u8) -> bool {
+    if depth >= FdTable::EPOLL_MAX_DEPTH {
+        return false;
+    }
+    hay.borrow().regs.iter().any(|reg| match &reg.target {
+        FdTarget::Epoll(inner) => {
+            Rc::ptr_eq(inner, needle) || epoll_holds(inner, needle, depth + 1)
+        }
+        _ => false,
+    })
 }
 
 /// epoll の興味イベントと準備状態の照合。ERR・HUP は興味に

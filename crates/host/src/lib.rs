@@ -11,7 +11,7 @@
 pub mod exec_mem;
 pub mod sock;
 
-pub use sock::{SockAddr, SockFd, SockReady};
+pub use sock::{RawFd, SockAddr, SockFd, SockReady};
 
 /// 利用可能な並列数。作業スレッドの数の目安に使う。
 #[must_use]

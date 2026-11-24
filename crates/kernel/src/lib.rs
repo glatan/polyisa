@@ -7,8 +7,10 @@
 #![forbid(unsafe_code)]
 
 pub mod fd;
+pub mod host_io;
 
 pub use fd::*;
+pub use host_io::{HostEvent, HostIo};
 
 /// ゲストプロセスの識別子。ホストのプロセスとは対応しない。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -190,6 +192,16 @@ pub enum ThreadWait {
     Child { which: i64 },
     /// 空のパイプの読み。
     Pipe { id: u64 },
+    /// カーネル内 fd 対象の準備待ち（select/poll/epoll・accept・
+    /// ソケット対の送受）。監視の中身は ABI 側の `fd_wait` が持ち、
+    /// 状態変化のたびに parked 全件を再評価して解除する。
+    Fd,
+    /// ホスト fd の準備待ち。`HostIo` 作業スレッドの完了イベントで
+    /// 解除する。中身は ABI 側の `fd_wait` が持つ。
+    HostFd,
+    /// 時計の満了待ち（poll/select/epoll の timeout・timerfd・
+    /// nanosleep）。期限は ABI 側の `fd_wait` が持つ。
+    Timer,
 }
 
 #[derive(Debug)]
