@@ -179,7 +179,7 @@ fn body(insn: Insn, rt: &Rt) -> u64 {
         | Insn::Pushal
         | Insn::Pushaq
         | Insn::Pushah => 2,
-        Insn::Pushl => 3,
+        Insn::Pushl | Insn::Movpsl => 3,
         Insn::Mulb2 | Insn::Mulb3 => 16,
         Insn::Mulw2 | Insn::Mulw3 => 24,
         Insn::Mull2 | Insn::Mull3 => 32,

@@ -488,6 +488,7 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         Insn::Clrl => &[WL],
         Insn::Clrq => &[WQ],
         Insn::Pushl => &[RL],
+        Insn::Movpsl => &[WL],
         Insn::Movab => &[AB, WL],
         Insn::Movaw => &[AW, WL],
         Insn::Moval => &[AL, WL],

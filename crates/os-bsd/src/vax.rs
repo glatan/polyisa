@@ -117,6 +117,8 @@ pub const NAMES: &[&str] = &[
     "setreuid", "setregid", "rename", "truncate", "ftruncate", "flock",
     "msexec", "sendto", "shutdown", "socketpair", "mkdir", "rmdir",
     "utimes", "sigcleanup", "adjtime", "getpeername", "gethostid",
-    "sethostid", "getrlimit", "setrlimit", "killpg", "-", "setquota",
-    "quota", "getsockname", "getdirentries", "vhangup2", "-", "-",
+    "sethostid", "getrlimit", "setrlimit", "killpg", "setsid", "quotactl",
+    "oquota", "ogetsockname", "nfssvc", "ogetdirentries", "ostatfs",
+    "ofstatfs", "asyncdaemon", "getdirentries", "statfs", "fstatfs",
+    "onfssvc", "getfh", "getdomainname", "setdomainname", "uname",
 ];

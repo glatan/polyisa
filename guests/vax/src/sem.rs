@@ -2078,6 +2078,12 @@ pub fn exec(
             let v = read(b, &s, Width::L)?;
             push(b, v)?;
         }
+        Insn::Movpsl => {
+            // PSL の読み出しは非特権（setjmp のコンテキスト保存が使う）。
+            // 条件コードは変わらない。
+            let d = eval(b, f, pos, 0)?;
+            write(b, &d, Width::L, u128::from(psl_get(b)))?;
+        }
         // ---- 整数演算（VX5）----
         // 加算: 2 項は sum.mx = sum + add、3 項は sum.wx = add1 + add2。
         // adwc は C を桁入れとして足す。C は桁出し、V は符号付き

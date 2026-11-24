@@ -625,6 +625,7 @@ fn run_pdp11_aout(
         spec.model.as_str()
     };
     let mut sys = polyisa_os_v7::pdp11::sys::V7::new(root.unwrap_or(""));
+    feed_stdin(&mut sys.io.stdin);
     run_pdp11::run_aout_v7_sys(bytes, path, argv, model, &mut sys)
 }
 
@@ -645,7 +646,22 @@ fn run_vax_aout(
         spec.model.as_str()
     };
     let mut sys = polyisa_os_bsd::vax::sys::Bsd::new(root.unwrap_or(""));
+    feed_stdin(&mut sys.io.stdin);
     run_vax::run_aout_bsd_sys(bytes, path, argv, model, &mut sys)
+}
+
+/// ホスト stdin がパイプなら全部読んでゲストの stdin 列へ
+/// 渡す（対話 tty では読まない —— ブロックするので）。
+fn feed_stdin(dst: &mut Vec<u8>) {
+    use std::io::IsTerminal;
+    use std::io::Read;
+    if std::io::stdin().is_terminal() {
+        return;
+    }
+    let mut buf = Vec::new();
+    if std::io::stdin().read_to_end(&mut buf).is_ok() {
+        *dst = buf;
+    }
 }
 
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の

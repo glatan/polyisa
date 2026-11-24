@@ -499,6 +499,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("decl", "O1", "1101 0111", "alu", "", "ml"),
         ("adwc", "O1", "1101 1000", "alu", "", "rl,ml"),
         ("sbwc", "O1", "1101 1001", "alu", "", "rl,ml"),
+        ("movpsl", "O1", "1101 1100", "misc", "", "wl"),
         ("pushl", "O1", "1101 1101", "move", "", "rl"),
         ("moval", "O1", "1101 1110", "move", "", "al,wl"),
         ("pushal", "O1", "1101 1111", "move", "", "al"),

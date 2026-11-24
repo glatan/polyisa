@@ -44,6 +44,10 @@ pub struct BsdIo {
     pub stdin: Vec<u8>,
     /// `stdin` の消費済み先頭位置。
     pub stdin_pos: usize,
+    /// close(0-2) で立つ。消した stdio を次の open が拾える。
+    pub closed: [bool; 3],
+    /// stdio を複写した fd → 元の stdio 番号。
+    alias: HashMap<u32, u32>,
 }
 
 /// パイプの読み側（`kernel::PipeTable` の id）。
@@ -58,9 +62,11 @@ pub struct Bsd {
     pub io: BsdIo,
     /// ゲスト fd 3 以降のホストファイル表。
     fds: polyisa_kernel::FdTable,
-    /// ディレクトリ fd（開けた記録 —— 列挙は getdirentries 側。
-    /// read は EISDIR）。
-    dirs: HashMap<u32, String>,
+    /// fd 0-2 に置かれたホストファイル（open/dup2 で stdio を
+    /// 置き換えたもの）。
+    low_files: [Option<std::fs::File>; 3],
+    /// ディレクトリ fd（read は EISDIR、列挙は getdirentries）。
+    dirs: HashMap<u32, DirFd>,
     /// パイプ端の表。
     pipes: HashMap<u32, PipeEnd>,
     pipe_tab: polyisa_kernel::PipeTable,
@@ -76,8 +82,33 @@ pub struct Bsd {
     pid: u32,
     /// `umask` の現値。
     umask: u32,
+    /// シグナルマスク（配送経路はない —— GAP-0089）。
+    sigmask: u32,
+    /// ハンドラ表（ssig/sigvec が記録するだけで呼ばれない）。
+    sigh: [SigEnt; 32],
+    /// sigstack の置き場（受理のみ）。
+    sigstack: (u32, u32),
     /// 一度だけ報告した未実装 syscall。
     reported: Vec<u32>,
+}
+
+/// ディレクトリ fd の記録。
+#[derive(Clone)]
+struct DirFd {
+    /// ホスト側の実パス。
+    host: String,
+    /// ゲスト側のパス（fchdir の cwd 用）。
+    guest: String,
+    /// getdirentries の合成ストリーム内オフセット。
+    pos: u64,
+}
+
+/// sigvec/ssig が保持するハンドラ記録（{handler, mask, flags}）。
+#[derive(Clone, Copy, Default)]
+struct SigEnt {
+    handler: u32,
+    mask: u32,
+    flags: u32,
 }
 
 impl Default for Bsd {
@@ -106,6 +137,7 @@ impl Bsd {
         Self {
             io: BsdIo::default(),
             fds: polyisa_kernel::FdTable::default(),
+            low_files: [None, None, None],
             dirs: HashMap::new(),
             pipes: HashMap::new(),
             pipe_tab: polyisa_kernel::PipeTable::default(),
@@ -115,6 +147,9 @@ impl Bsd {
             data_lo: 0,
             pid: 42,
             umask: 0o22,
+            sigmask: 0,
+            sigh: [SigEnt::default(); 32],
+            sigstack: (0, 0),
             reported: Vec::new(),
         }
     }
@@ -193,8 +228,8 @@ impl Bsd {
 
     // ---- パス解決 ----
 
-    /// ゲストパスをルート内に解決する（`..` はルートで飽和）。
-    fn resolve(&self, g: &str) -> Option<String> {
+    /// ゲストパスを正規化した絶対形にする（`..` はルートで飽和）。
+    fn guest_abs(&self, g: &str) -> String {
         let abs = if g.starts_with('/') {
             g.to_string()
         } else {
@@ -210,11 +245,16 @@ impl Bsd {
                 _ => segs.push(s),
             }
         }
-        let joined = segs.join("/");
+        format!("/{}", segs.join("/"))
+    }
+
+    /// ゲストパスをルート内に解決する（`..` はルートで飽和）。
+    fn resolve(&self, g: &str) -> Option<String> {
+        let abs = self.guest_abs(g);
         Some(if self.root.is_empty() {
-            format!("/{joined}")
+            abs
         } else {
-            format!("{}/{joined}", self.root.trim_end_matches('/'))
+            format!("{}{}", self.root.trim_end_matches('/'), abs)
         })
     }
 
@@ -226,16 +266,42 @@ impl Bsd {
 
     // ---- fd ----
 
-    /// 次に使える fd（最小の空き。stdio 0-2 は占有扱い）。
+    /// 次に使える fd（最小の空き。stdio を消した fd 0-2 も候補）。
     fn alloc_fd(&mut self) -> Option<u32> {
-        (3u32..NOFILE).find(|&fd| !self.fd_used(fd))
+        (0..NOFILE).find(|&fd| !self.fd_used(fd))
     }
 
     fn fd_used(&self, fd: u32) -> bool {
         self.fds.get(fd).is_some()
             || self.dirs.contains_key(&fd)
             || self.pipes.contains_key(&fd)
-            || fd <= 2
+            || self.io.alias.contains_key(&fd)
+            || match fd {
+                0..=2 => self.low_files[fd as usize].is_some() || !self.io.closed[fd as usize],
+                _ => false,
+            }
+    }
+
+    /// fd に対応するホストファイル（0-2 なら low_files、それ
+    /// 以降は FdTable）。
+    fn file_for(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+        match fd {
+            0..=2 => self.low_files[fd as usize].as_mut(),
+            _ => self.fds.get_mut(fd),
+        }
+    }
+
+    /// fd が指す stdio 番号。実体なしで stdio が有効なとき、
+    /// または stdio を写した alias のときだけ Some（閉じた
+    /// stdio・未使用の fd は None）。
+    fn stdio_of(&self, fd: u32) -> Option<u32> {
+        if let Some(&s) = self.io.alias.get(&fd) {
+            return Some(s);
+        }
+        match fd {
+            0..=2 if !self.io.closed[fd as usize] => Some(fd),
+            _ => None,
+        }
     }
 
     // ---- BSD struct stat ----
@@ -270,6 +336,105 @@ impl Bsd {
         }
     }
 
+    // ---- BSD struct statfs ----
+    // 4.3BSD-Reno（statfs(2)）: f_type(2) f_flags(2) f_fsize(4)
+    // f_bsize(4) f_blocks f_bfree f_bavail f_files f_ffree（各4）
+    // f_fsid(8) f_spare[6](24) f_mntonname[32] f_mntfromname[32]
+    // = 128 B。擬 UFS のルート 1 項目。
+
+    fn write_statfs(&self, env: &mut BareEnv, buf: u64) -> Disp {
+        let mut s = [0u8; 128];
+        s[0..2].copy_from_slice(&1u16.to_le_bytes()); // MOUNT_UFS
+        let mut l = |off: usize, v: u32| s[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        l(4, 1024); // f_fsize
+        l(8, 8192); // f_bsize
+        l(12, 100_000); // f_blocks
+        l(16, 50_000); // f_bfree
+        l(20, 40_000); // f_bavail
+        l(24, 20_000); // f_files
+        l(28, 18_000); // f_ffree
+        let to = "/".as_bytes();
+        s[64..64 + to.len()].copy_from_slice(to);
+        let from = "/dev/root".as_bytes();
+        s[96..96 + from.len()].copy_from_slice(from);
+        match self.write_bytes(env, buf, &s) {
+            Ok(()) => Disp::Ret(0),
+            Err(e) => Disp::Fail(e),
+        }
+    }
+
+    /// `getdirentries(fd, buf, nbytes, basep)`。
+    /// dirent は {u32 fileno, u16 reclen, u16 namlen, name + NUL}
+    /// で 4 バイト揃え（dirent.h の正本）。`.`・`..` を先頭に
+    /// 合成し、残りはホストの read_dir 順。`pos` は合成ストリーム
+    /// 上のオフセットで lseek(SEEK_SET) が触る。
+    fn sys_getdirentries(
+        &mut self,
+        env: &mut BareEnv,
+        fd: u32,
+        buf: u32,
+        nbytes: u32,
+        basep: u32,
+    ) -> Disp {
+        let Some(d) = self.dirs.get(&fd) else {
+            return Disp::Fail(errno::EBADF);
+        };
+        let host = d.host.clone();
+        let pos = d.pos;
+        // 合成ストリームを作る: ".", ".." つづいて read_dir 順。
+        let mut names: Vec<(u64, String)> = Vec::new();
+        let di = polyisa_host::stat(&host).map(|m| m.ino).unwrap_or(0);
+        let pi = polyisa_host::stat(&format!("{host}/.."))
+            .map(|m| m.ino)
+            .unwrap_or(0);
+        names.push((di, ".".to_string()));
+        names.push((pi, "..".to_string()));
+        match std::fs::read_dir(&host) {
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    if let Ok(name) = e.file_name().into_string() {
+                        names.push((polyisa_host::dirent_ino(&e), name));
+                    }
+                }
+            }
+            Err(e) => return Disp::Fail(host_err(e.raw_os_error())),
+        }
+        // pos の位置から、nbytes に収まる分だけ dirent を書く。
+        // pos がレコード途中や末尾を越えていても、次のレコード
+        // 境界から（または EOF として 0）進める。
+        let mut off = 0u64;
+        let mut written = 0u64;
+        let mut out = Vec::new();
+        for (ino, name) in &names {
+            let name = &name[..name.len().min(255)];
+            let reclen = (8 + name.len() + 1 + 3) & !3;
+            if off + reclen as u64 <= pos {
+                off += reclen as u64;
+                continue;
+            }
+            if written + reclen as u64 > u64::from(nbytes) {
+                break;
+            }
+            let mut rec = vec![0u8; reclen];
+            rec[0..4].copy_from_slice(&(*ino.min(&u64::from(u32::MAX)) as u32).to_le_bytes());
+            rec[4..6].copy_from_slice(&(reclen as u16).to_le_bytes());
+            rec[6..8].copy_from_slice(&(name.len() as u16).to_le_bytes());
+            rec[8..8 + name.len()].copy_from_slice(name.as_bytes());
+            out.extend_from_slice(&rec);
+            off += reclen as u64;
+            written += reclen as u64;
+        }
+        // basep にはこの呼出しで読み始めた位置を入れる。
+        if !Self::w32(env, u64::from(basep), pos.min(u64::from(u32::MAX)) as u32) {
+            return Disp::Fail(errno::EFAULT);
+        }
+        if self.write_bytes(env, u64::from(buf), &out).is_err() {
+            return Disp::Fail(errno::EFAULT);
+        }
+        self.dirs.get_mut(&fd).unwrap().pos = off;
+        Disp::Ret(written as u32)
+    }
+
     // ---- syscall 実体 ----
     // Gap: GAP-0089
 
@@ -299,7 +464,7 @@ impl Bsd {
                 polyisa_kernel::PipeRead::Eof | polyisa_kernel::PipeRead::Empty => Disp::Ret(0),
             };
         }
-        if let Some(f) = self.fds.get_mut(fd) {
+        if let Some(f) = self.file_for(fd) {
             let mut tmp = vec![0u8; n.min(1 << 16)];
             return match f.read(&mut tmp) {
                 Ok(got) => {
@@ -312,7 +477,7 @@ impl Bsd {
                 Err(e) => Disp::Fail(host_err(e.raw_os_error())),
             };
         }
-        if fd != 0 {
+        if self.stdio_of(fd) != Some(0) {
             return Disp::Fail(errno::EBADF);
         }
         let rest = &self.io.stdin[self.io.stdin_pos.min(self.io.stdin.len())..];
@@ -345,35 +510,42 @@ impl Bsd {
                 None => Disp::Fail(errno::EPIPE),
             };
         }
-        if let Some(f) = self.fds.get_mut(fd) {
+        let k = data.len() as u32;
+        if let Some(f) = self.file_for(fd) {
             return match f.write_all(&data) {
-                Ok(()) => Disp::Ret(n as u32),
+                Ok(()) => Disp::Ret(k),
                 Err(e) => Disp::Fail(host_err(e.raw_os_error())),
             };
         }
-        match fd {
-            1 => {
+        match self.stdio_of(fd) {
+            Some(1) => {
                 self.io.stdout.extend_from_slice(&data);
                 let _ = std::io::stdout().write_all(&data);
-                Disp::Ret(n as u32)
+                Disp::Ret(k)
             }
-            2 => {
+            Some(2) => {
                 self.io.stderr.extend_from_slice(&data);
                 let _ = std::io::stderr().write_all(&data);
-                Disp::Ret(n as u32)
+                Disp::Ret(k)
             }
             _ => Disp::Fail(errno::EBADF),
         }
     }
 
     fn sys_open(&mut self, env: &mut BareEnv, a: &[u32], creat: bool) -> Disp {
-        let path = match self.host_path(env, u64::from(a[0])) {
-            Ok(p) => p,
+        let gpath = match self.read_cstr(env, u64::from(a[0])) {
+            Ok(g) => g,
             Err(e) => return Disp::Fail(e),
+        };
+        let path = match self.resolve(&gpath) {
+            Some(p) => p,
+            None => return Disp::Fail(errno::EACCES),
         };
         // BSD の open 旗: 0-2 がアクセスモード、O_NDELAY=4・
         // O_APPEND=010・O_CREAT=01000・O_TRUNC=02000・O_EXCL=04000。
-        let flags = if creat { 0o1000 } else { a[1] };
+        // creat は O_WRONLY|O_CREAT|O_TRUNC（呼び側は 1 を渡すが
+        // 明示する）。
+        let flags = if creat { 0o1001 } else { a[1] };
         let Some(fd) = self.alloc_fd() else {
             return Disp::Fail(errno::EMFILE);
         };
@@ -404,16 +576,28 @@ impl Bsd {
             .unwrap_or(false)
         {
             // BSD でもディレクトリは open できる（read は EISDIR、
-            // 列挙は getdirentries —— OS6）。
+            // 列挙は getdirentries）。
             if flags & 3 != 0 {
                 return Disp::Fail(errno::EISDIR);
             }
-            self.dirs.insert(fd, path);
+            self.dirs.insert(
+                fd,
+                DirFd {
+                    host: path,
+                    guest: self.guest_abs(&gpath),
+                    pos: 0,
+                },
+            );
             return Disp::Ret(fd);
         }
         match o.open(&path) {
             Ok(f) => {
-                self.fds.place(fd, Some(f));
+                if fd <= 2 {
+                    self.low_files[fd as usize] = Some(f);
+                    self.io.closed[fd as usize] = false;
+                } else {
+                    self.fds.place(fd, Some(f));
+                }
                 if (creat || flags & 0o1000 != 0) && !existed {
                     let perm = a[2] & 0o777 & !self.umask;
                     let _ = polyisa_host::chmod(&path, perm);
@@ -430,13 +614,13 @@ impl Bsd {
             if !self.fd_used(fd) {
                 return Disp::Fail(errno::EBADF);
             }
-            if let Some(f) = self.fds.get(fd) {
+            if let Some(f) = self.file_for(fd) {
                 match polyisa_host::fstat(f) {
                     Ok(m) => m,
                     Err(_) => return Disp::Fail(errno::EIO),
                 }
             } else if let Some(p) = self.dirs.get(&fd) {
-                match polyisa_host::stat(p) {
+                match polyisa_host::stat(&p.host) {
                     Ok(m) => m,
                     Err(_) => return Disp::Fail(errno::EIO),
                 }
@@ -467,7 +651,10 @@ impl Bsd {
     /// さもなくば増分。戻りは `abs` で 0、増分で旧ブレーク。
     fn sys_brk(&mut self, env: &mut BareEnv, v: u32, abs: bool) -> Disp {
         let old = self.brk;
-        let new = if abs { v } else { self.brk.wrapping_add(v) }.max(self.data_lo);
+        let new = if abs { v } else { self.brk.wrapping_add(v) };
+        if new < self.data_lo {
+            return Disp::Fail(errno::EINVAL);
+        }
         if u64::from(new) >= u64::from(STACK_TOP - STACK_SZ) {
             return Disp::Fail(errno::ENOMEM);
         }
@@ -502,18 +689,31 @@ impl Bsd {
             self.dirs.insert(nf, p);
             return Disp::Ret(nf);
         }
-        if let Some(f) = self.fds.get_mut(fd) {
+        if let Some(f) = self.file_for(fd) {
             return match f.try_clone() {
                 Ok(n) => {
-                    self.fds.place(nf, Some(n));
+                    if nf <= 2 {
+                        self.low_files[nf as usize] = Some(n);
+                        self.io.closed[nf as usize] = false;
+                    } else {
+                        self.fds.place(nf, Some(n));
+                    }
                     Disp::Ret(nf)
                 }
                 Err(e) => Disp::Fail(host_err(e.raw_os_error())),
             };
         }
-        // stdio の複写は未対応（dup'd stdio への実体結び付けが
-        // ない —— 要るときになったら V7 式の alias を持つ）。
-        Disp::Fail(errno::EBADF)
+        // 複写元が stdio —— alias を張って stdio 側へ写す
+        // （実体ファイルはないので記録で足す）。
+        let s = self.io.alias.get(&fd).copied().unwrap_or(fd);
+        if s > 2 {
+            return Disp::Fail(errno::EBADF);
+        }
+        self.io.alias.insert(nf, s);
+        if nf <= 2 {
+            self.io.closed[nf as usize] = false;
+        }
+        Disp::Ret(nf)
     }
 
     /// execve(name, argv, envp)。成功したら戻らない —— 空間を
@@ -524,7 +724,10 @@ impl Bsd {
             Err(e) => return Disp::Fail(e),
         };
         match polyisa_host::stat(&path) {
-            Ok(m) if m.mode & 0o111 != 0 => {}
+            // ホストの実行ビットは見ない（ディストリ固めのパーミッ
+            // ションは失われている）。通常ファイルであることだけ確認
+            // し、実行可能性は a.out のパースに委ねる。
+            Ok(m) if m.mode & 0o170000 == 0o100000 => {}
             Ok(_) => return Disp::Fail(errno::EACCES),
             Err(e) => return Disp::Fail(host_err(e.raw_os_error())),
         }
@@ -546,8 +749,17 @@ impl Bsd {
             Ok(b) => b,
             Err(e) => return Disp::Fail(host_err(e.raw_os_error())),
         };
-        if aout::parse(&bytes, aout::Arch::Vax).is_err() {
-            return Disp::Fail(errno::ENOEXEC);
+        let h = match aout::parse(&bytes, aout::Arch::Vax) {
+            Ok(h) => h,
+            Err(_) => return Disp::Fail(errno::ENOEXEC),
+        };
+        // 空間を潰す前に境界を検査しておく（失敗時に旧像が残る）。
+        let data_va: u64 = match h.magic {
+            aout::OMAGIC => h.text,
+            _ => h.text.next_multiple_of(1024),
+        };
+        if data_va + h.data + h.bss >= u64::from(STACK_TOP - STACK_SZ) {
+            return Disp::Fail(errno::ENOMEM);
         }
         if argv.is_empty() {
             argv.push(self.read_cstr(env, u64::from(name)).unwrap_or_default());
@@ -573,7 +785,21 @@ impl Bsd {
     fn dispatch(&mut self, env: &mut BareEnv, n: u32, ap: u32) -> Disp {
         match n {
             // indir: a[0] が呼ぶ番号、残りが引数（ap を 4 進める）。
-            0 => self.dispatch(env, Self::ag(env, ap, 0), ap + 4),
+            0 => {
+                // indir（chmk $0 の arg0 が実 syscall 番号）。再帰は
+                // ホストスタックを食うので逐次でたどる。
+                let (mut n2, mut ap2) = (Self::ag(env, ap, 0), ap + 4);
+                let mut depth = 0;
+                while n2 == 0 {
+                    if depth > 8 {
+                        return Disp::Fail(errno::EINVAL);
+                    }
+                    n2 = Self::ag(env, ap2, 0);
+                    ap2 += 4;
+                    depth += 1;
+                }
+                self.dispatch(env, n2, ap2)
+            }
             1 => Disp::Exit(Self::ag(env, ap, 0) & 0xff),
             2 | 66 => Disp::Fail(errno::EAGAIN), // fork/vfork —— 単一プロセス
             7 | 84 => Disp::Fail(errno::ECHILD), // wait4/wait
@@ -606,6 +832,11 @@ impl Bsd {
                 }
                 self.fds.clear(fd);
                 self.dirs.remove(&fd);
+                self.io.alias.remove(&fd);
+                if fd <= 2 {
+                    self.low_files[fd as usize] = None;
+                    self.io.closed[fd as usize] = true;
+                }
                 if let Some(p) = self.pipes.remove(&fd) {
                     self.pipe_tab.close(p.id, p.read);
                 }
@@ -668,13 +899,28 @@ impl Bsd {
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
             }
+            13 => {
+                // fchdir(fd): ディレクトリ fd の guest パスを cwd に。
+                let fd = Self::ag(env, ap, 0);
+                match self.dirs.get(&fd) {
+                    Some(d) => {
+                        self.cwd = d.guest.clone();
+                        Disp::Ret(0)
+                    }
+                    None if self.fd_used(fd) => Disp::Fail(errno::ENOTDIR),
+                    None => Disp::Fail(errno::EBADF),
+                }
+            }
             14 => {
                 // mknod: 通常ファイルのみ（デバイスはホスト権限外）。
                 let path = match self.host_path(env, u64::from(Self::ag(env, ap, 0))) {
                     Ok(p) => p,
                     Err(e) => return Disp::Fail(e),
                 };
-                if Self::ag(env, ap, 1) & 0o170000 != 0 {
+                let ty = Self::ag(env, ap, 1) & 0o170000;
+                // 型なしと S_IFREG(0100000) は作れる。CHR/BLK/FIFO は
+                // ホスト権限外。
+                if ty != 0 && ty != 0o100000 {
                     return Disp::Fail(errno::EPERM);
                 }
                 match std::fs::File::create(&path) {
@@ -687,7 +933,7 @@ impl Bsd {
                     Ok(p) => p,
                     Err(e) => return Disp::Fail(e),
                 };
-                match polyisa_host::chmod(&path, Self::ag(env, ap, 1)) {
+                match polyisa_host::chmod(&path, Self::ag(env, ap, 1) & 0o7777) {
                     Ok(()) => Disp::Ret(0),
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
@@ -704,12 +950,33 @@ impl Bsd {
                 }
             }
             17 => self.sys_brk(env, Self::ag(env, ap, 0), true),
+            18 => {
+                // getfsstat(buf, bufsize, flags): 単一の擬 UFS 項目。
+                // buf==0 なら個数だけ返す。
+                let (buf, sz) = (u64::from(Self::ag(env, ap, 0)), Self::ag(env, ap, 1));
+                let n = if buf == 0 { 1 } else { (sz / 128).min(1) };
+                for i in 0..n {
+                    if let d @ Disp::Fail(_) = self.write_statfs(env, buf + 128 * u64::from(i)) {
+                        return d;
+                    }
+                }
+                Disp::Ret(n)
+            }
             19 => {
                 // lseek(fd, off, whence) —— off は 32 ビット符号付き。
+                // ディレクトリは SEEK_SET の cookie 移動だけ受理
+                // （getdirentries の合成ストリーム上の位置）。
                 let fd = Self::ag(env, ap, 0);
-                let Some(f) = self.fds.get_mut(fd) else {
-                    return if fd <= 2 || self.pipes.contains_key(&fd) || self.dirs.contains_key(&fd)
-                    {
+                if let Some(d) = self.dirs.get_mut(&fd) {
+                    return if Self::ag(env, ap, 2) == 0 {
+                        d.pos = u64::from(Self::ag(env, ap, 1));
+                        Disp::Ret(Self::ag(env, ap, 1))
+                    } else {
+                        Disp::Fail(errno::EINVAL)
+                    };
+                }
+                let Some(f) = self.file_for(fd) else {
+                    return if self.pipes.contains_key(&fd) || self.stdio_of(fd).is_some() {
                         Disp::Fail(errno::ESPIPE)
                     } else {
                         Disp::Fail(errno::EBADF)
@@ -726,14 +993,111 @@ impl Bsd {
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
             }
-            20 => Disp::Ret(self.pid),
-            23 | 46 | 34 | 44 | 82 | 83 | 95 | 103 | 108 | 109 | 110 | 112 => Disp::Ret(0),
-            // ^ setuid/setgid/nice/profil/setpgrp/setitimer/fsync/
-            //   sigreturn/sigvec/sigblock/sigsetmask/sigstack ——
+            20 => Disp::Ret2(self.pid, 1), // getpid: r1 は ppid（親は init 相当）
+            23 | 46 | 34 | 44 | 82 | 95 => Disp::Ret(0),
+            // ^ setuid/setgid/nice/profil/setpgrp/fsync ——
             //   効かないが成功扱いにする近似。
-            24 | 47 => Disp::Ret(0),  // getuid/getgid —— root モデル
-            25 | 122 => Disp::Ret(0), // stime/settimeofday —— 時計は書かない
-            27 => Disp::Ret(0),       // alarm —— タイマなし
+            96 | 100 => Disp::Ret(0), // setpriority/getpriority —— nice は固定 0 扱い
+            83 => {
+                // setitimer(which, value, ovalue): タイマは張らないが
+                // 旧値の書き戻し（4 timeval 語）は約束する。
+                let ov = u64::from(Self::ag(env, ap, 2));
+                if ov != 0 && !(0..4).all(|i| Self::w32(env, ov + 4 * i, 0)) {
+                    return Disp::Fail(errno::EFAULT);
+                }
+                Disp::Ret(0)
+            }
+            48 => {
+                // ssig(signo, fun): 旧 signal。旧ハンドラを返す。
+                let s = Self::ag(env, ap, 0) as usize;
+                if s == 0 || s >= 32 || s == sig::KILL as usize || s == sig::STOP as usize {
+                    return Disp::Fail(errno::EINVAL);
+                }
+                let old = self.sigh[s].handler;
+                self.sigh[s] = SigEnt {
+                    handler: Self::ag(env, ap, 1),
+                    mask: 0,
+                    flags: 0,
+                };
+                Disp::Ret(old)
+            }
+            103 => Disp::Fail(errno::EINVAL), // sigreturn —— 配送経路なし
+            108 => {
+                // sigvec(signo, sv, osv): struct sigvec は 12B
+                // {handler, mask, flags}。配送はしないが表は保持する。
+                let s = Self::ag(env, ap, 0) as usize;
+                // 4.3BSD は signo が KILL/STOP なら osv を見る前に EINVAL。
+                if s == 0 || s >= 32 || s == sig::KILL as usize || s == sig::STOP as usize {
+                    return Disp::Fail(errno::EINVAL);
+                }
+                let (sv, osv) = (
+                    u64::from(Self::ag(env, ap, 1)),
+                    u64::from(Self::ag(env, ap, 2)),
+                );
+                let cur = self.sigh[s];
+                if osv != 0 {
+                    for (i, v) in [cur.handler, cur.mask, cur.flags].iter().enumerate() {
+                        if !Self::w32(env, osv + 4 * i as u64, *v) {
+                            return Disp::Fail(errno::EFAULT);
+                        }
+                    }
+                }
+                if sv != 0 {
+                    let (h, m, f) = (
+                        Self::r32(env, sv),
+                        Self::r32(env, sv + 4),
+                        Self::r32(env, sv + 8),
+                    );
+                    let (Some(h), Some(m), Some(f)) = (h, m, f) else {
+                        return Disp::Fail(errno::EFAULT);
+                    };
+                    self.sigh[s] = SigEnt {
+                        handler: h,
+                        mask: m,
+                        flags: f,
+                    };
+                }
+                Disp::Ret(0)
+            }
+            109 => {
+                // sigblock(mask): 旧マスクを返し mask を OR する。
+                // KILL/STOP は止められない。
+                let old = self.sigmask;
+                self.sigmask |= Self::ag(env, ap, 0)
+                    & !(1 << (sig::KILL as u32 - 1) | 1 << (sig::STOP as u32 - 1));
+                Disp::Ret(old)
+            }
+            110 => {
+                // sigsetmask(mask): 旧マスクを返して設定。
+                let old = self.sigmask;
+                self.sigmask = Self::ag(env, ap, 0)
+                    & !(1 << (sig::KILL as u32 - 1) | 1 << (sig::STOP as u32 - 1));
+                Disp::Ret(old)
+            }
+            112 => {
+                // sigstack(ss, oss): {ss_sp, ss_onstack} 8B。
+                let (ss, oss) = (
+                    u64::from(Self::ag(env, ap, 0)),
+                    u64::from(Self::ag(env, ap, 1)),
+                );
+                if oss != 0
+                    && !(Self::w32(env, oss, self.sigstack.0)
+                        && Self::w32(env, oss + 4, self.sigstack.1))
+                {
+                    return Disp::Fail(errno::EFAULT);
+                }
+                if ss != 0 {
+                    let (sp, on) = (Self::r32(env, ss), Self::r32(env, ss + 4));
+                    let (Some(sp), Some(on)) = (sp, on) else {
+                        return Disp::Fail(errno::EFAULT);
+                    };
+                    self.sigstack = (sp, on);
+                }
+                Disp::Ret(0)
+            }
+            24 | 47 => Disp::Ret2(0, 0), // getuid/getgid —— root モデル、r1 は euid/egid
+            25 | 122 => Disp::Ret(0),    // stime/settimeofday —— 時計は書かない
+            27 => Disp::Ret(0),          // alarm —— タイマなし
             29 | 111 => Disp::Fail(errno::EINTR), // pause/sigsuspend
             30 | 138 => {
                 // utime/utimes: 時刻更新は省略。存在の検査はする。
@@ -793,6 +1157,11 @@ impl Bsd {
                 if s > 31 {
                     return Disp::Fail(errno::EINVAL);
                 }
+                // 配送経路はないので記録した mask/handler だけ見る:
+                // ブロック済み・SIG_IGN 設定済みのものは殺さない。
+                if self.sigmask & (1 << (s - 1)) != 0 || self.sigh[s as usize].handler == 1 {
+                    return Disp::Ret(0);
+                }
                 Self::die(s as u8)
             }
             38 => self.sys_stat(
@@ -834,6 +1203,11 @@ impl Bsd {
                 }
                 self.fds.clear(fd2);
                 self.dirs.remove(&fd2);
+                self.io.alias.remove(&fd2);
+                if fd2 <= 2 {
+                    self.low_files[fd2 as usize] = None;
+                    self.io.closed[fd2 as usize] = true;
+                }
                 if let Some(p) = self.pipes.remove(&fd2) {
                     self.pipe_tab.close(p.id, p.read);
                 }
@@ -841,7 +1215,7 @@ impl Bsd {
             }
             42 => {
                 // pipe() → r0=読み側・r1=書き側。
-                let Some(r) = (3u32..NOFILE).find(|&f| !self.fd_used(f)) else {
+                let Some(r) = self.alloc_fd() else {
                     return Disp::Fail(errno::EMFILE);
                 };
                 self.pipes.insert(r, PipeEnd { id: 0, read: true });
@@ -982,9 +1356,9 @@ impl Bsd {
                 }
             }
             117 => {
-                // getrusage(who, ru): 16 long = 64 B を 0 で埋める。
+                // getrusage(who, ru): rusage = 18 long = 72 B を 0 で埋める。
                 let r = u64::from(Self::ag(env, ap, 1));
-                if (0..16).all(|i| Self::w32(env, r + 4 * i, 0)) {
+                if (0..18).all(|i| Self::w32(env, r + 4 * i, 0)) {
                     Disp::Ret(0)
                 } else {
                     Disp::Fail(errno::EFAULT)
@@ -1046,7 +1420,9 @@ impl Bsd {
                     Ok(p) => p,
                     Err(e) => return Disp::Fail(e),
                 };
-                match std::fs::File::create(&path)
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
                     .and_then(|f| f.set_len(u64::from(Self::ag(env, ap, 1))))
                 {
                     Ok(()) => Disp::Ret(0),
@@ -1055,7 +1431,7 @@ impl Bsd {
             }
             130 => {
                 // ftruncate(fd, len)。
-                match self.fds.get(Self::ag(env, ap, 0)) {
+                match self.file_for(Self::ag(env, ap, 0)) {
                     Some(f) => match f.set_len(u64::from(Self::ag(env, ap, 1))) {
                         Ok(()) => Disp::Ret(0),
                         Err(e) => Disp::Fail(host_err(e.raw_os_error())),
@@ -1089,10 +1465,76 @@ impl Bsd {
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
             }
+            79 => {
+                // getgroups(n, buf): 補助グループはない。
+                Disp::Ret(0)
+            }
+            131 => Disp::Ret(0), // flock —— 単一プロセス近似
+            142 => Disp::Ret(0), // gethostid
+            143 => Disp::Ret(0), // sethostid —— root モデル
+            144 => {
+                // getrlimit(res, rlp): {cur,max} 8B。RLIM_INFINITY 相当。
+                let rl = u64::from(Self::ag(env, ap, 1));
+                if Self::ag(env, ap, 0) > 8 {
+                    return Disp::Fail(errno::EINVAL);
+                }
+                if Self::w32(env, rl, 0x7fff_ffff) && Self::w32(env, rl + 4, 0x7fff_ffff) {
+                    Disp::Ret(0)
+                } else {
+                    Disp::Fail(errno::EFAULT)
+                }
+            }
+            145 => Disp::Ret(0), // setrlimit —— 受理のみ
+            146 => {
+                // killpg(pgrp, sig): 自プロセスのみ。
+                let (pg, s) = (Self::ag(env, ap, 0), Self::ag(env, ap, 1));
+                if pg != self.pid && pg != 0 {
+                    return Disp::Fail(errno::ESRCH);
+                }
+                if s == 0 {
+                    return Disp::Ret(0);
+                }
+                if s > 31 {
+                    return Disp::Fail(errno::EINVAL);
+                }
+                if self.sigmask & (1 << (s - 1)) != 0 || self.sigh[s as usize].handler == 1 {
+                    return Disp::Ret(0);
+                }
+                Self::die(s as u8)
+            }
+            156 => self.sys_getdirentries(
+                env,
+                Self::ag(env, ap, 0),
+                Self::ag(env, ap, 1),
+                Self::ag(env, ap, 2),
+                Self::ag(env, ap, 3),
+            ),
+            157 | 158 => {
+                // statfs(path|fd, buf): 擬 UFS 項目を 128B で書く。
+                if n == 157 {
+                    if Self::ag(env, ap, 0) == 0 {
+                        return Disp::Fail(errno::EINVAL);
+                    }
+                    match self.host_path(env, u64::from(Self::ag(env, ap, 0))) {
+                        Ok(p) => {
+                            if let Err(e) = polyisa_host::stat(&p) {
+                                return Disp::Fail(host_err(e.raw_os_error()));
+                            }
+                        }
+                        Err(e) => return Disp::Fail(e),
+                    }
+                } else if !self.fd_used(Self::ag(env, ap, 0)) {
+                    return Disp::Fail(errno::EBADF);
+                }
+                match self.write_statfs(env, u64::from(Self::ag(env, ap, 1))) {
+                    Disp::Fail(e) => Disp::Fail(e),
+                    _ => Disp::Ret(0),
+                }
+            }
             // mount/umount/ptrace/acct/reboot/vhangup/swapon —
             // 特権または模型の外。
             21 | 22 | 26 | 51 | 55 | 76 | 85 => Disp::Fail(errno::EPERM),
-            // socket 一族・mmap 一族・getdirentries・select 等の
+            // socket 一族・mmap 一族・select・quotactl 等の
             // 未実装 —— nosys 相当として EINVAL に倒す。
             _ => {
                 if !self.reported.contains(&n) {
@@ -1147,11 +1589,11 @@ impl Bsd {
             _ => h.text.next_multiple_of(1024),
         };
         let bss_lo = data_va + h.data;
-        self.data_lo = data_va as u32;
-        self.brk = (bss_lo + h.bss) as u32;
         if bss_lo + h.bss >= u64::from(STACK_TOP - STACK_SZ) {
             return Err("data+bss がユーザ空間を超える".to_string());
         }
+        self.data_lo = data_va as u32;
+        self.brk = (bss_lo + h.bss) as u32;
 
         // P0 側の写像（text+data+bss までを一続きで）。
         let perms = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
@@ -1192,17 +1634,24 @@ impl Bsd {
             strs.push(sp as u32);
         }
         strs.reverse();
-        // envp 終端・argv 終端・argv・argc（envp は空）。
+        // envp 終端・argv 終端・argv・argc（envp は空）。ポインタ
+        // 表がスタック領域を割り込むような巨大 argv は E2BIG 相当。
+        let put = |env: &mut BareEnv, sp: u64, v: u32| -> Result<(), String> {
+            if sp < sb || !Self::w32(env, sp, v) {
+                return Err("argv がスタックに収まらない".to_string());
+            }
+            Ok(())
+        };
         sp -= 4;
-        Self::w32(env, sp, 0);
+        put(env, sp, 0)?;
         sp -= 4;
-        Self::w32(env, sp, 0);
+        put(env, sp, 0)?;
         for a in strs.iter().rev() {
             sp -= 4;
-            Self::w32(env, sp, *a);
+            put(env, sp, *a)?;
         }
         sp -= 4;
-        Self::w32(env, sp, strs.len() as u32);
+        put(env, sp, strs.len() as u32)?;
 
         // レジスタと PSL: r0-r11 = 0、sp = argc の位置、
         // pc = a_entry + 2（calls マスクを飛び越す）、CUR=PRV=user。
@@ -1307,10 +1756,13 @@ impl TrapHandler for Bsd {
             }
         } else {
             // 権限外のチェンジモード・実機 fault 系はプロセス終了へ。
-            let Disp::Exit(c) = (match code {
+            // 算術 fault は下位 16 ビットが SCB 基底コードで上位に
+            // 種別（FPE_*）が載る。
+            let Disp::Exit(c) = (match code & 0xffff {
                 sem::scb::ACV | sem::scb::TNV => Self::die(sig::SEGV),
                 sem::scb::BPT => Self::die(sig::TRAP),
                 sem::scb::ARITHMETIC => Self::die(sig::FPE),
+                sem::scb::PRIV_INSN => Self::die(sig::ILL),
                 _ => Self::die(sig::SYS),
             }) else {
                 unreachable!()
