@@ -64,7 +64,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| NS1 | 着手条件: GAP-0025 の解消方針の確定（fd の対象を列挙型で表す一つの表へ作り替え — パイプはその一種、ファイル・パイプの二表構造と `extra_free` 調整を撤去。os-wasi の `FdKind` が先例）、対象 syscall の一覧と ABI ごとの番号・構造体（sockaddr・msghdr・pollfd・epoll_event・itimerspec。socketcall 系の多重化を含む）の根拠表の確認、ホストの資源への待ちを作業用ホストスレッドへ渡す経路の設計（現状カーネルに作業スレッド機構はなく新設が要る — [ユーザーモード](user-mode.md)）、テスト入力は clang 静的リンクの自前プログラム（層 7 の種類 1）で BIN 登録は不要 | - | - |
 | NS2 | `kernel`: fd 表の多態化（対象の器: ホストのファイル・ディレクトリ、パイプ、端末に加え、ソケット・eventfd・timerfd・signalfd・epoll・memfd）と、対象の準備状態を集める機構。GAP-0025 解消 | NS1 | - |
 | NS3 | `host`: `std::net` と `std::os::unix` が直に足りない分の補助（socketpair・Unix domain ソケット、非阻止への設定、send/recv 系） | NS1 | - |
 | NS4 | `kernel`: ソケット（AF_UNIX/AF_INET。socketpair はカーネル内対象、ホスト socket は作業スレッド経由）・eventfd・timerfd（仮想時間）・signalfd・epoll・memfd の fd 対象 | NS2・NS3 | - |
