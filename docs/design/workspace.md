@@ -12,7 +12,7 @@ polyisa/
 │   ├── mem/  timing/
 │   ├── isadl/  isagen/  sem/  guest/
 │   ├── engine/  ir/  jit/
-│   ├── loader/  kernel/  os-linux/  os-v7/  os-bsd/  os-wasi/
+│   ├── loader/  kernel/  os-linux/  os-v7/  os-bsd/  os-semihost/  os-wasi/
 │   ├── host/  trace/  gdbstub/  cli/
 │   └── testkit/
 ├── guests/             ゲスト ISA ごとのクレート
@@ -52,6 +52,7 @@ polyisa/
 | `os-linux` | Linux パーソナリティ。システムコールの実装と、ゲスト ABI ごとの番号、構造体、定数、シグナルフレーム | 仮想カーネルの汎用機構 |
 | `os-v7` | Unix V7 パーソナリティ（PDP-11）。`trap` の syscall 規約、a.out の配置と初期スタック、分離 I/D のユーザ PAR/PDR と MMR3 | 同上 |
 | `os-bsd` | 4.3BSD パーソナリティ（VAX）。`chmk` の syscall 規約（コード語をスタックから取る）、ZMAGIC/OMAGIC の配置と初期スタック | 同上 |
+| `os-semihost` | Semihosting 2.0 パーソナリティ。`SYS_*` 演算をホスト入出力へ写す本体（`Semi::call`）と、aarch64/arm の `TrapHandler` 適合（`SemiA64`/`SemiA32`）。riscv の ebreak 入口は cli の `EcallHandler` 適合層が `Semi::call` を呼ぶ | 同上 |
 | `os-wasi` | WASI パーソナリティ | 同上 |
 | `host` | ホスト依存の機能。実行可能メモリ、端末の制御、ホストの CPU 機能の検出など | ゲストの概念 |
 | `trace` | 命令トレースとシステムコールトレースの記録形式と出力 | トレースの採取（エンジンの観測点が行う） |
@@ -89,6 +90,8 @@ OS 層        loader → bits
                      guests/pdp11
              os-bsd → kernel, loader, engine, host, mem,
                      guests/vax
+             os-semihost → engine, sem, mem,
+                     guests/aarch64, guests/arm（機能フラグで選択）
              os-wasi → kernel, engine, guest, host, guests/wasm
 ツール層     trace → engine, guest
              gdbstub → engine, guest
@@ -113,7 +116,7 @@ OS 層        loader → bits
 
 ## 機能フラグ
 
-`cli` と `os-linux` は、ゲスト ISA ごとに `guest-<isa>` という機能フラグを持ち、ビルドに含めるゲスト ISA を選べる。既定では、実装済みのゲスト ISA をすべて含める。ゲスト ISA クレートは機能フラグで命令や CPU モデルを削らない。CPU モデルの選択は実行時に行う（[CPU モデル](cpu-models.md)）。
+`cli`・`os-linux`・`os-semihost` は、ゲスト ISA ごとに `guest-<isa>` という機能フラグを持ち、ビルドに含めるゲスト ISA を選べる。既定では、実装済みのゲスト ISA をすべて含める。ゲスト ISA クレートは機能フラグで命令や CPU モデルを削らない。CPU モデルの選択は実行時に行う（[CPU モデル](cpu-models.md)）。
 
 ## 生成コード
 

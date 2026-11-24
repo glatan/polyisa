@@ -576,13 +576,31 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - 完全な保護/abort 回復（MMR1 による巻き戻し・赤ゾーンの CPU 停止）・割込み受理・バス/コンソール/診断系の付録 B 残項目は、段階 25 の Unix V7 パーソナリティが要る領域として残す（GAP-0085(f)・GAP-0086）
 - GAP-0081（TSTSET/WRTLCK のバスロック近似・RESET/HALT の畳み込み・11/04 の RTT 差分の未実装）・GAP-0082（DIV の予約域の決定的選択・FIS の KE11-F 照合なし）・GAP-0083（FP11 の FID 端境・FIUV 検査位置・MODF・指数ずらしの実機照合なし）・GAP-0084（CIS の反復近似・十進系の 1 ステップ完結・予約領域の決定化）・GAP-0085（MMR0<8>/MMR3<5>・イエローゾーンのみ・MMR1 は記録のみ）・GAP-0086（付録 B 棚卸しの残項目と確定した近似）・GAP-0087（汎用タイミングのみ・未較正）
 
+### 段階 25：OS パーソナリティの追加（Unix V7・4.3BSD・Semihosting）
+
+対応した内容：
+
+- `loader` の a.out 対応。PDP-11 の 0407/0410/0411（分離 I&D）と VAX の OMAGIC/ZMAGIC を解析・配置し、`probe_kind` で ELF と嗅ぎ分ける。`--cpu` のファミリで pdp11/vax に振り分ける
+- `os-v7`：PDP-11 の Unix V7 パーソナリティ。`trap` のコード語で番号と引数の個数を取る規約、SYSENT の引数表、`sys` 呼び出しの実装（open/read/write/close/seek/tell/stat/fstat/exec/exece/link/unlink/chdir/time/mknod/setuid/getuid/stime/ptrace/alarm/pause/utime/stty/gtty/access/nice/ftime/sync/kill/sbrk/signal/dup/pipe/times/profil/setgid/getgid/geteuid/getegid/acct/phys/lock/ioctl/mpx/wait/setpgrp/chroot/umask/chroot/chmod/chown/chgrp/getdents 相当のディレクトリ read）。単一プロセス・root 模型で、exec はアドレス空間の組み替え、fork は EAGAIN（V7 のエラー規約）。stdio fd（0-2）は最小空き番号からの再割当てを含む low_files/closed/alias 模型
+- `os-bsd`：VAX の 4.3BSD-Reno パーソナリティ。`chmk` のコード語をユーザスタックから取る規約、exec の `a_entry+2` エントリ（先頭の calls マスクを飛ばす setregs 規則）。syscall は open/close/read/write/readv/writev/lseek/dup/dup2/stat/lstat/fstat/chdir/fchdir/getdirentries/statfs/fstatfs/getfsstat/access/chmod/chown/utimes/mkdir/rmdir/unlink/link/rename/truncate/ftruncate/mknod/chroot/execve/execv/fork/vfork/wait4/kill/killpg/getpid/getpgrp/getuid/getgid/geteuid/getegid/gethostname/sethostname/gethostid/getrlimit/setrlimit/getrusage/gettimeofday/getitimer/setitimer/getgroups/setgroups/getpagesize/break/sbrk/pipe/fcntl/select/setsockopt 系の受理・記録、flock 受理、シグナル一族（ssig/sigvec/sigblock/sigsetmask/sigstack）の受理・記録、kill の SIG_IGN/mask 尊重。fd 0-2 は V7 と同じ模型
+- `os-semihost`：Semihosting 2.0 パーソナリティ。ISA 中立の `Semi::call` が SYS_* 演算をホスト入出力へ写し、aarch64（`hlt #0xf000`）・arm（`svc #0x123456`/T32 `#0xab`）は `TrapHandler` 適合の `SemiA64`/`SemiA32`、riscv は ebreak 標識列の確認のあと `EcallHandler` 適合の `SemiRv` が呼ぶ。`--os semihost` で選択（既定は linux）。ELF 入口のパーソナリティ初期化面は cli の `ElfSys` trait に抽象化し `run_elf_*_impl` を汎用化した
+- VAX ゲストの欠落を発見して修正：sub*3 のオペランド順（minuend−subtrahend が逆だったものを crt0 の実挙動で確定）と `movpsl`（0xdc、setjmp が PSL を jmp_buf に保存するのに使う）の追加
+- CLI の stdin 配線：パイプのホスト stdin を a.out ゲストの `sys.io.stdin` へ渡し、`ed` が対話動作する
+- `heavy_program_unixv7`（BIN-DISTRO-UNIXV7）・`heavy_program_bsdvax`（BIN-DISTRO-BSD43RENO）・`heavy_program_semihosting`（clang 静的リンクの自前プログラム、3 ISA・JIT 経路を含む）で S25-1/2/3 を判定
+
+残っている事項：
+
+- GAP-0088（os-v7 の意図的な簡略化）・GAP-0089（os-bsd の意図的な簡略化）・GAP-0090（os-semihost の意図的な簡略化）
+- `sh`（V7・BSD 共通）が fork 失敗を sigsuspend でリトライする経路は単一プロセス模型の外。マルチプロセスが要件の配布物テストが現れた時点で個別に実装する
+- `df -i`（4.3BSD）が浮動小数点の reserved-operand fault を起こす。ゲストの D-float 語彙の範囲の問題で、syscall 層の外
+
 ## 残っている事項（横断）
 
 ### 台帳の未登録項目
 
 版の方針は「新しい資料が古い資料の記載を内包する想定で新しい版を採り、古い版にしか存在しない記載が必要な場合のみ例外とする」。台帳に登録した項目は全て確認済みとするため、登録済みの項目に残る作業はない。残るのは未登録の項目のみ：
 
-- 段階 25 の V7/BSD バイナリ、段階 26・27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
+- 段階 26・27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
 
 ### 所有者の作業
 

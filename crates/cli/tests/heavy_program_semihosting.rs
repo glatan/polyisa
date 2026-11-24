@@ -8,7 +8,7 @@
 //! - aarch64: `hlt #0xf000`（x0=演算、x1=パラメータ、返りは x0）
 //! - arm A32: `svc #0x123456`（r0/r1、返りは r0）
 //! - riscv64: `slli x0,x0,0x1f; ebreak; srai x0,x0,7`（a0/a1、返りは a0）
-//!   出典は SPEC-SEMIHOST（Semihosting for AArch32 and AArch64, 2.0）。
+//!   出典は SPEC-ARM-SEMIHOST（演算の正本）と SPEC-RISCV-SEMIHOST（入口列）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

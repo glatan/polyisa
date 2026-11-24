@@ -1,16 +1,16 @@
 # ユーザーモード
 
-この文書は、ゲストのプログラムに OS のサービスを提供する仕組みを定める。対象は `kernel`、`os-linux`、`os-wasi`、`loader` の各クレートである。ゲストのシステムコールをホストの OS へそのまま渡さず、polyisa のプロセス内の仮想カーネルで実装する理由は [ADR-0004](../adr/0004-user-mode-virtual-kernel.md) にある。
+この文書は、ゲストのプログラムに OS のサービスを提供する仕組みを定める。対象は `kernel`、`os-linux`、`os-v7`、`os-bsd`、`os-semihost`、`os-wasi`、`loader` の各クレートである。ゲストのシステムコールをホストの OS へそのまま渡さず、polyisa のプロセス内の仮想カーネルで実装する理由は [ADR-0004](../adr/0004-user-mode-virtual-kernel.md) にある。
 
 ## 構成
 
 OS のサービスは三つの部分に分かれる。
 
 - 仮想カーネル（`kernel`）は、特定の OS に依存しない機構を持つ。ゲストプロセス、ゲストスレッド、スケジューラ、ファイル記述子、仮想ファイルシステム、パイプ、シグナルの保留と配送、futex、時計とタイマーがこれにあたる。
-- OS パーソナリティ（`os-linux`、`os-wasi` など）は、特定の OS のシステムコール規約を、仮想カーネルの機構を使って実装する。ゲスト ABI ごとの番号、構造体の配置、定数の値、シグナルフレームの形式もここに置く。
+- OS パーソナリティ（`os-linux`、`os-v7`、`os-bsd`、`os-wasi`）は、特定の OS のシステムコール規約を、仮想カーネルの機構を使って実装する。ゲスト ABI ごとの番号、構造体の配置、定数の値、シグナルフレームの形式もここに置く。
 - ローダ（`loader`）は、実行ファイルの形式を解析する。解析の結果をアドレス空間にどう配置するかは OS パーソナリティが決める。
 
-将来の OS パーソナリティとして、PDP-11 の Unix V7、VAX の BSD、ベアメタルのテスト用のセミホスティングを想定している。これらは仮想カーネルの機構を共有し、システムコールの規約だけを実装する。
+この他に `os-semihost` がある。Semihosting は OS を持たないベアメタルのデバッグ経路なので仮想カーネルを使わず、`SYS_*` 演算をホストの入出力へ直接写す。実行時のパーソナリティ選択は `polyisa run --os`（既定は `linux`）が行う。
 
 ## ゲスト ABI
 
@@ -35,8 +35,9 @@ OS のサービスは三つの部分に分かれる。
 | openrisc | Linux | or1k | |
 | ia64 | Linux | ia64 | Linux 6.7 で削除された。削除前のカーネルの ABI を対象にする |
 | hexagon | Linux | hexagon | |
-| pdp11 | Unix V7 | a.out | 将来の OS パーソナリティ |
-| vax | BSD | a.out | 対象の BSD の版は OS パーソナリティの実装時に決める |
+| pdp11 | Unix V7 | a.out（OMAGIC/ZMAGIC/分離 I&D） | os-v7。BIN-DISTRO-UNIXV7 のバイナリが対象 |
+| vax | 4.3BSD-Reno | a.out（OMAGIC/ZMAGIC） | os-bsd。BIN-DISTRO-BSD43RENO のバイナリが対象 |
+| aarch64・arm・riscv | Semihosting 2.0 | ELF | os-semihost。`--os semihost` で選択 |
 
 ### ABI 表
 
