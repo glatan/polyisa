@@ -353,7 +353,7 @@ impl V7 {
 
     /// fd が使用中か（0-2 は stdio の開閉・実体の有無も見る）。
     fn fd_used(&self, fd: u32) -> bool {
-        self.fds.get(fd).is_some()
+        self.fds.ent(fd).is_some()
             || self.dirs.contains_key(&fd)
             || self.pipes.contains_key(&fd)
             || self.io.alias.contains_key(&fd)
@@ -368,7 +368,7 @@ impl V7 {
     fn file_for(&mut self, fd: u32) -> Option<&mut std::fs::File> {
         match fd {
             0..=2 => self.low_files[fd as usize].as_mut(),
-            _ => self.fds.get_mut(fd),
+            _ => self.fds.file_mut(fd),
         }
     }
 
@@ -689,7 +689,7 @@ impl V7 {
                 if fd <= 2 {
                     self.low_files[fd as usize] = Some(f);
                 } else {
-                    self.fds.place(fd, Some(f));
+                    self.fds.place_close(fd, polyisa_kernel::FdTarget::File(f));
                 }
                 if creat && !existed {
                     let perm = u32::from(a[1]) & 0o777 & !u32::from(self.umask);
@@ -1321,7 +1321,7 @@ impl V7 {
                             if nf <= 2 {
                                 self.low_files[nf as usize] = Some(n);
                             } else {
-                                self.fds.place(nf, Some(n));
+                                self.fds.place_close(nf, polyisa_kernel::FdTarget::File(n));
                             }
                             Disp::Ret(nf as u16)
                         }

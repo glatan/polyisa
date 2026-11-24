@@ -2334,7 +2334,7 @@ pub fn sys_fstat(
             None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
         }
     } else {
-        match fds.get(fd) {
+        match fds.file(fd) {
             Some(f) => f.metadata(),
             None => {
                 set64(env, Gpr(0), cx.neg(EBADF));
@@ -2423,7 +2423,7 @@ pub fn sys_fallocate(
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     };
-    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let file = if fd < 3 { std } else { fds.file_mut(fd) };
     let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
@@ -2462,7 +2462,7 @@ pub fn sys_ftruncate(
     // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
     let fd = get64(env, cx.r_a) as u32;
     let len = get64(env, cx.r_b);
-    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let file = if fd < 3 { std } else { fds.file_mut(fd) };
     let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
@@ -2499,7 +2499,7 @@ pub fn sys_lseek(
     let fd = get64(env, cx.r_a) as u32;
     let offset = get64(env, cx.r_b) as i64;
     let whence = get64(env, cx.r_c) as u32;
-    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let file = if fd < 3 { std } else { fds.file_mut(fd) };
     let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
@@ -2532,7 +2532,7 @@ pub fn sys_llseek(
     let off = (get64(env, cx.r_b) << 32) | get64(env, cx.r_c);
     let res = get64(env, cx.r_d);
     let whence = get64(env, cx.r_e) as u32;
-    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let file = if fd < 3 { std } else { fds.file_mut(fd) };
     let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);

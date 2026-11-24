@@ -251,7 +251,7 @@ impl Linux {
 
     /// ゲスト fd をホストの File として取る。
     fn file_of(&mut self, fd: u32) -> Result<&mut std::fs::File, u32> {
-        self.fds.get_mut(fd).ok_or(errno::EBADF)
+        self.fds.file_mut(fd).ok_or(errno::EBADF)
     }
 
     /// 読み用に fd を開いているものを返す。
@@ -259,7 +259,7 @@ impl Linux {
         match fd {
             0 => Ok(ReadFd::Stdin),
             1 | 2 => Err(errno::EBADF),
-            _ => self.fds.get_mut(fd).map(ReadFd::File).ok_or(errno::EBADF),
+            _ => self.fds.file_mut(fd).map(ReadFd::File).ok_or(errno::EBADF),
         }
     }
 
@@ -268,7 +268,7 @@ impl Linux {
             0 => Err(errno::EBADF),
             1 => Ok(WriteFd::Stdout),
             2 => Ok(WriteFd::Stderr),
-            _ => self.fds.get_mut(fd).map(WriteFd::File).ok_or(errno::EBADF),
+            _ => self.fds.file_mut(fd).map(WriteFd::File).ok_or(errno::EBADF),
         }
     }
 
@@ -303,7 +303,7 @@ impl Linux {
         let oo = Self::open_flags(flags);
         match oo.open(&host) {
             Ok(f) => {
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, host);
                 u64::from(fd)
             }
@@ -413,7 +413,7 @@ impl Linux {
                         return Self::fail_host(e.raw_os_error().unwrap_or(errno::EIO as i32));
                     }
                 },
-                _ => match self.fds.get(fd) {
+                _ => match self.fds.file(fd) {
                     Some(f) => match polyisa_host::fstat(f) {
                         Ok(m) => m,
                         Err(e) => {
@@ -987,10 +987,10 @@ impl Linux {
     fn dup2_fd(&mut self, old: u32, new: u32) -> Result<(), u32> {
         let f = self
             .fds
-            .get(old)
+            .file(old)
             .and_then(|f| f.try_clone().ok())
             .ok_or(errno::EBADF)?;
-        self.fds.place(new, Some(f));
+        self.fds.place_close(new, polyisa_kernel::FdTarget::File(f));
         Ok(())
     }
 
@@ -1114,7 +1114,7 @@ impl Linux {
                 if fd < 3 {
                     return ret(0);
                 }
-                if self.fds.get(fd).is_some() || self.fds.path_of(fd).is_some() {
+                if self.fds.ent(fd).is_some() {
                     self.fds.clear(fd);
                     self.fds.forget_path(fd);
                     self.dir_pos.remove(&fd);
@@ -1216,7 +1216,7 @@ impl Linux {
             }
             "flock" | "fsync" | "fdatasync" | "sync" => {
                 if name != "sync"
-                    && let Some(f) = self.fds.get(args[0] as u32)
+                    && let Some(f) = self.fds.file(args[0] as u32)
                 {
                     let _ = f.sync_all();
                 }
@@ -1342,9 +1342,9 @@ impl Linux {
                 let fd = args[0] as u32;
                 match self
                     .fds
-                    .get(fd)
+                    .file(fd)
                     .and_then(|f| f.try_clone().ok())
-                    .map(|f| self.fds.alloc(Some(f)))
+                    .map(|f| self.fds.alloc(polyisa_kernel::FdTarget::File(f)))
                 {
                     Some(n) => ret(u64::from(n)),
                     None => Self::fail_ret(errno::EBADF),

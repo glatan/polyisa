@@ -198,7 +198,7 @@ impl Linux {
 
     /// ゲスト fd をホストの File として取る。
     fn file_of(&mut self, fd: u32) -> Result<&mut std::fs::File, u64> {
-        self.fds.get_mut(fd).ok_or(u64::from(superh::errno::EBADF))
+        self.fds.file_mut(fd).ok_or(u64::from(superh::errno::EBADF))
     }
 
     /// 読み用に fd を開いているものを返す。0/1/2 と FdTable の両方を見る。
@@ -208,7 +208,7 @@ impl Linux {
             1 | 2 => Err(u64::from(superh::errno::EBADF)),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(ReadFd::File)
                 .ok_or(u64::from(superh::errno::EBADF)),
         }
@@ -221,7 +221,7 @@ impl Linux {
             2 => Ok(WriteFd::Stderr),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(WriteFd::File)
                 .ok_or(u64::from(superh::errno::EBADF)),
         }
@@ -273,7 +273,7 @@ impl Linux {
         let _ = mode;
         match oo.open(&base) {
             Ok(f) => {
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, base);
                 Ok(u64::from(fd))
             }
@@ -436,7 +436,7 @@ impl Linux {
         if fd < 3 {
             return Ok(0);
         }
-        if self.fds.get(fd).is_some() {
+        if self.fds.ent(fd).is_some() {
             self.fds.clear(fd);
             self.dir_pos.remove(&fd);
             Ok(0)
@@ -562,7 +562,7 @@ impl Linux {
                     Ok(m) => m,
                     Err(e) => return Err(host_errno(e.raw_os_error())),
                 },
-                _ => match self.fds.get(fd) {
+                _ => match self.fds.file(fd) {
                     Some(f) => match polyisa_host::fstat(f) {
                         Ok(m) => m,
                         Err(e) => return Err(host_errno(e.raw_os_error())),
@@ -763,10 +763,14 @@ impl Linux {
     fn sys_fcntl(&mut self, fd: u32, cmd: u32, arg: u64) -> Result<u64, u64> {
         match cmd {
             // F_DUPFD(0)/F_DUPFD_CLOEXEC(1030)：fd の複製。
-            0 | 1030 => match self.fds.get(fd) {
+            0 | 1030 => match self.fds.file(fd) {
                 Some(f) => match f.try_clone() {
                     Ok(g) => {
-                        let nfd = self.fds.alloc_where(Some(g), |i| 3 + i >= arg as usize);
+                        let nfd = self
+                            .fds
+                            .alloc_where(polyisa_kernel::FdTarget::File(g), |i| {
+                                3 + i >= arg as usize
+                            });
                         let p = self.fds.path_of(fd).map(str::to_string);
                         if let Some(p) = p {
                             self.fds.remember_path(nfd, p);
@@ -867,7 +871,7 @@ impl Linux {
             while left > 0 {
                 let n = left.min(64 * 1024);
                 let mut buf = vec![0u8; n as usize];
-                let got = match self.fds.get_mut(fd as u32) {
+                let got = match self.fds.file_mut(fd as u32) {
                     Some(f) => match polyisa_host::pread(f, &mut buf, off) {
                         Ok(g) => g,
                         Err(_) => break,
@@ -1385,10 +1389,10 @@ impl Linux {
                 Ok(u64::from(old))
             }
             // ---- ディスクリプタ操作 ----
-            N::DUP => match self.fds.get(a[0] as u32) {
+            N::DUP => match self.fds.file(a[0] as u32) {
                 Some(f) => match f.try_clone() {
                     Ok(g) => {
-                        let nfd = self.fds.alloc(Some(g));
+                        let nfd = self.fds.alloc(polyisa_kernel::FdTarget::File(g));
                         let p = self.fds.path_of(a[0] as u32).map(str::to_string);
                         if let Some(p) = p {
                             self.fds.remember_path(nfd, p);
@@ -1405,11 +1409,11 @@ impl Linux {
                     return Ok(u64::from(new));
                 }
                 let p = self.fds.path_of(old).map(str::to_string);
-                let g = match self.fds.get(old).and_then(|f| f.try_clone().ok()) {
+                let g = match self.fds.file(old).and_then(|f| f.try_clone().ok()) {
                     Some(g) => g,
                     None => return Err(e(E::EBADF)),
                 };
-                self.fds.place(new, Some(g));
+                self.fds.place_close(new, polyisa_kernel::FdTarget::File(g));
                 if let Some(p) = p {
                     self.fds.remember_path(new, p);
                 }
@@ -1436,7 +1440,7 @@ impl Linux {
                 while sent < count {
                     let n = (count - sent).min(64 * 1024) as usize;
                     let mut buf = vec![0u8; n];
-                    let got = match self.fds.get_mut(in_fd) {
+                    let got = match self.fds.file_mut(in_fd) {
                         Some(f) => {
                             let r = if offp != 0 {
                                 polyisa_host::pread(f, &mut buf, pos)

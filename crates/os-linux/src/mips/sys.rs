@@ -315,7 +315,7 @@ impl Linux {
 
     /// ゲスト fd をホストの File として取る。
     fn file_of(&mut self, fd: u32) -> Result<&mut std::fs::File, u32> {
-        self.fds.get_mut(fd).ok_or(mips::errno::EBADF)
+        self.fds.file_mut(fd).ok_or(mips::errno::EBADF)
     }
 
     /// 読み用に fd を開いているものを返す。0/1/2 と FdTable の両方を見る。
@@ -325,7 +325,7 @@ impl Linux {
             1 | 2 => Err(mips::errno::EBADF),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(ReadFd::File)
                 .ok_or(mips::errno::EBADF),
         }
@@ -338,7 +338,7 @@ impl Linux {
             2 => Ok(WriteFd::Stderr),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(WriteFd::File)
                 .ok_or(mips::errno::EBADF),
         }
@@ -377,7 +377,7 @@ impl Linux {
         let _ = mode;
         match oo.open(&host) {
             Ok(f) => {
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, host);
                 Self::ret(env, u64::from(fd))
             }
@@ -528,7 +528,7 @@ impl Linux {
                             .fail_host(env, e.raw_os_error().unwrap_or(mips::errno::EIO as i32));
                     }
                 },
-                _ => match self.fds.get(fd) {
+                _ => match self.fds.file(fd) {
                     Some(f) => match polyisa_host::fstat(f) {
                         Ok(m) => m,
                         Err(e) => {
@@ -1308,7 +1308,7 @@ impl Linux {
                 if fd < 3 {
                     return ret(Self::ret(env, 0));
                 }
-                if self.fds.get(fd).is_some() {
+                if self.fds.ent(fd).is_some() {
                     self.fds.clear(fd);
                     self.dir_pos.remove(&fd);
                     ret(Self::ret(env, 0))
@@ -1444,7 +1444,7 @@ impl Linux {
             36 | 118 | 152 | 305 | 144 => {
                 let fd = if n != 36 { args[0] as u32 } else { 0 };
                 if n != 36
-                    && let Some(f) = self.fds.get(fd)
+                    && let Some(f) = self.fds.file(fd)
                 {
                     let _ = f.sync_all();
                 }
@@ -1969,7 +1969,7 @@ impl Linux {
                 if fd < 3 {
                     return ret(Self::ret(env, 0));
                 }
-                if self.fds.get(fd).is_some() {
+                if self.fds.ent(fd).is_some() {
                     self.fds.clear(fd);
                     self.dir_pos.remove(&fd);
                     ret(Self::ret(env, 0))
@@ -2096,7 +2096,7 @@ impl Linux {
             }
             "flock" | "fsync" | "fdatasync" | "sync" | "sync_file_range" => {
                 if name != "sync"
-                    && let Some(f) = self.fds.get(args[0] as u32)
+                    && let Some(f) = self.fds.file(args[0] as u32)
                 {
                     let _ = f.sync_all();
                 }
@@ -2487,20 +2487,20 @@ impl Linux {
     fn dup_fd(&mut self, old: u32, _min: u32) -> Result<u64, u32> {
         let f = self
             .fds
-            .get(old)
+            .file(old)
             .and_then(|f| f.try_clone().ok())
             .ok_or(mips::errno::EBADF)?;
-        let n = self.fds.alloc(Some(f));
+        let n = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
         Ok(u64::from(n))
     }
 
     fn dup2_fd(&mut self, old: u32, new: u32) -> Result<(), u32> {
         let f = self
             .fds
-            .get(old)
+            .file(old)
             .and_then(|f| f.try_clone().ok())
             .ok_or(mips::errno::EBADF)?;
-        self.fds.place(new, Some(f));
+        self.fds.place_close(new, polyisa_kernel::FdTarget::File(f));
         Ok(())
     }
 
@@ -2573,7 +2573,9 @@ mod tests {
         let p = tmpfile(b"0123456789abcdef");
         let mut sys = Linux::o32(Endian::Le);
         let mut env = env();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&p).unwrap(),
+        ));
         map(&mut env, 0x5000, 1); // buf
         map(&mut env, 0x9000, 1); // スタック
         set_reg(&mut env, 29, 0x9000);
@@ -2627,7 +2629,9 @@ mod tests {
         let p = tmpfile(b"0123456789abcdef");
         let mut sys = Linux::n64(Endian::Le);
         let mut env = env();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&p).unwrap(),
+        ));
         map(&mut env, 0x5000, 1);
         set_reg(&mut env, 2, 5016);
         set_reg(&mut env, 4, u64::from(fd));
@@ -2721,7 +2725,9 @@ mod tests {
         let p = tmpfile(b"0123456789abcdef");
         let mut sys = Linux::n64(Endian::Le);
         let mut env = env();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&p).unwrap(),
+        ));
         map(&mut env, 0x6000, 1); // iov
         map(&mut env, 0x7000, 1); // buf0
         map(&mut env, 0x8000, 1); // buf1

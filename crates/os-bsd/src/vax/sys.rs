@@ -272,7 +272,7 @@ impl Bsd {
     }
 
     fn fd_used(&self, fd: u32) -> bool {
-        self.fds.get(fd).is_some()
+        self.fds.ent(fd).is_some()
             || self.dirs.contains_key(&fd)
             || self.pipes.contains_key(&fd)
             || self.io.alias.contains_key(&fd)
@@ -287,7 +287,7 @@ impl Bsd {
     fn file_for(&mut self, fd: u32) -> Option<&mut std::fs::File> {
         match fd {
             0..=2 => self.low_files[fd as usize].as_mut(),
-            _ => self.fds.get_mut(fd),
+            _ => self.fds.file_mut(fd),
         }
     }
 
@@ -596,7 +596,7 @@ impl Bsd {
                     self.low_files[fd as usize] = Some(f);
                     self.io.closed[fd as usize] = false;
                 } else {
-                    self.fds.place(fd, Some(f));
+                    self.fds.place_close(fd, polyisa_kernel::FdTarget::File(f));
                 }
                 if (creat || flags & 0o1000 != 0) && !existed {
                     let perm = a[2] & 0o777 & !self.umask;
@@ -696,7 +696,7 @@ impl Bsd {
                         self.low_files[nf as usize] = Some(n);
                         self.io.closed[nf as usize] = false;
                     } else {
-                        self.fds.place(nf, Some(n));
+                        self.fds.place_close(nf, polyisa_kernel::FdTarget::File(n));
                     }
                     Disp::Ret(nf)
                 }

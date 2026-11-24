@@ -246,7 +246,7 @@ impl Linux {
         if fd < 3 {
             self.std_fds[fd as usize].as_ref()
         } else {
-            self.fds.get(fd)
+            self.fds.file(fd)
         }
     }
 
@@ -255,7 +255,7 @@ impl Linux {
         if fd < 3 {
             self.std_fds[fd as usize].as_mut()
         } else {
-            self.fds.get_mut(fd)
+            self.fds.file_mut(fd)
         }
     }
 
@@ -264,7 +264,7 @@ impl Linux {
         if fd < 3 {
             !self.std_closed[fd as usize]
         } else {
-            self.fds.get(fd).is_some()
+            self.fds.ent(fd).is_some()
         }
     }
 
@@ -299,7 +299,7 @@ impl Linux {
         if self.next_free_fd() >= Self::MAX_FD {
             return Err(errno::EMFILE);
         }
-        Ok(self.fds.alloc(Some(f)))
+        Ok(self.fds.alloc(polyisa_kernel::FdTarget::File(f)))
     }
 
     /// 標準入力バッファから `n` バイト取り出す。
@@ -348,7 +348,7 @@ impl Linux {
             }
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .ok_or(errno::EBADF)?
                 .write(data)
                 .map_err(host_errno),
@@ -637,7 +637,7 @@ impl Linux {
             self.std_closed[fd as usize] = true;
             return Ok(0);
         }
-        if self.fds.get(fd).is_none() {
+        if self.fds.file(fd).is_none() {
             return Err(errno::EBADF);
         }
         self.fds.clear(fd);
@@ -723,7 +723,7 @@ impl Linux {
             self.std_clone(fd)?
         } else {
             self.fds
-                .get(fd)
+                .file(fd)
                 .ok_or(errno::EBADF)?
                 .try_clone()
                 .map_err(|_| errno::EIO)?
@@ -743,7 +743,7 @@ impl Linux {
                     self.std_fds[n as usize] = Some(g);
                     self.std_closed[n as usize] = false;
                 } else {
-                    self.fds.place(n, Some(g));
+                    self.fds.place_close(n, polyisa_kernel::FdTarget::File(g));
                     self.dir_scans.remove(&n);
                 }
                 n
@@ -774,7 +774,7 @@ impl Linux {
                     self.std_clone(fd)?
                 } else {
                     self.fds
-                        .get(fd)
+                        .file(fd)
                         .ok_or(errno::EBADF)?
                         .try_clone()
                         .map_err(|_| errno::EIO)?
@@ -788,7 +788,7 @@ impl Linux {
                 if nfd >= Self::MAX_FD {
                     return Err(errno::EMFILE);
                 }
-                self.fds.place(nfd, Some(g));
+                self.fds.place_close(nfd, polyisa_kernel::FdTarget::File(g));
                 if let Some(p) = self.fds.path_of(fd).map(str::to_string) {
                     self.fds.remember_path(nfd, p);
                 }
@@ -1050,7 +1050,7 @@ impl Linux {
         count: u64,
     ) -> Result<u64, u32> {
         // fd の検査が先（kernel の順序: 不正 fd は EBADF）。
-        if self.fds.get(fd).is_none() {
+        if self.fds.file(fd).is_none() {
             return Err(errno::EBADF);
         }
         // 1 レコードすら入らない count は EINVAL（EOF ではない）。
@@ -1422,7 +1422,7 @@ impl Linux {
             if self.std_closed[target as usize] {
                 return Err(errno::EBADF);
             }
-        } else if self.fds.get(target as u32).is_none() {
+        } else if self.fds.file(target as u32).is_none() {
             return Err(errno::EBADF);
         }
         let mut img = [0u8; 128];
@@ -1544,7 +1544,7 @@ impl Linux {
             if dirfd < 0 {
                 return Err(errno::EBADF);
             }
-            let f = self.fds.get(dirfd as u32).ok_or(errno::EBADF)?;
+            let f = self.fds.file(dirfd as u32).ok_or(errno::EBADF)?;
             return f.set_times(ft).map(|_| 0).map_err(host_errno);
         }
         let host = self.host_path_at(dirfd, &path)?;

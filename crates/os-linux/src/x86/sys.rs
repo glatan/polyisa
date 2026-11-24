@@ -24,10 +24,10 @@ pub struct Linux {
     reported: Vec<u64>,
     /// 開いたファイルの表（ゲスト fd 3 以降）。仮想カーネルの fd 管理を使う.
     fds: polyisa_kernel::FdTable,
-    /// 標準 fd (0/1/2) の付け替え先。close 後に open したファイルが入る.
+    /// 標準 fd (0/1/2) の付け替え先。close 後に open した対象が入る.
     /// uniq のように stdin をファイルに付け替える applet のため.
-    /// 読取り用・書込み用いずれのファイルも入る.
-    std_files: [Option<std::fs::File>; 3],
+    /// ファイル・パイプ端・ソケットなどあらゆる対象を保持する.
+    std_targets: [Option<polyisa_kernel::FdTarget>; 3],
     /// dup2(0,n) 後。n からの read は stdin_buf、write は EBADF。
     /// 標準入力は開ファイルを持たないため、付け替え先として覚える.
     std_is_stdin: [bool; 3],
@@ -93,12 +93,6 @@ pub struct Linux {
     wait: Option<WaitSlot>,
     /// 自分以外のスレッド。スケジューラと環境を共有する。
     queue: SharedQueue,
-    /// プロセス間で共有するパイプ。
-    pipes: SharedPipes,
-    /// fd 3 以降のパイプ端。ホストのファイルと同時には持たない。
-    pipe_ends: Vec<Option<PipeEnd>>,
-    /// 標準 fd 0/1/2 に載せたパイプ端。
-    std_pipes: [Option<PipeEnd>; 3],
     /// 空のパイプを読もうとして待っているパイプ。
     pipe_wait: Option<u64>,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
@@ -144,24 +138,6 @@ impl Default for SharedQueue {
 
 /// この回数ごとに、ステップ数がより少ない実行可能なスレッドへ切り替える。
 pub const SCHED_SLICE: u64 = 64;
-
-/// パイプの端。バッファは `SharedPipes` が持つ。
-#[derive(Clone, Copy)]
-struct PipeEnd {
-    id: u64,
-    read: bool,
-}
-
-#[derive(Clone)]
-struct SharedPipes(std::rc::Rc<std::cell::RefCell<polyisa_kernel::PipeTable>>);
-
-impl Default for SharedPipes {
-    fn default() -> Self {
-        Self(std::rc::Rc::new(std::cell::RefCell::new(
-            polyisa_kernel::PipeTable::default(),
-        )))
-    }
-}
 
 impl Linux {
     /// x86-32 用ハンドラ。
@@ -210,92 +186,94 @@ impl Linux {
         resolve_guest_path(&self.guest_root, &self.cwd, path)
     }
 
-    /// fd に対応する開ファイルの参照。標準 fd の付け替え先も見る.
-    fn file_ref(&self, fd: u32) -> Option<&std::fs::File> {
+    /// fd の対象。標準 fd の付け替え先も見る。
+    fn fd_target(&self, fd: u32) -> Option<&polyisa_kernel::FdTarget> {
         if fd < 3 {
-            self.std_files[fd as usize].as_ref()
+            self.std_targets[fd as usize].as_ref()
         } else {
-            self.fds.get(fd)
+            self.fds.target(fd)
         }
     }
 
-    /// fd に対応する開ファイルの可変参照。標準 fd の付け替え先も見る.
+    /// fd に対応する開ファイルの参照。対象がホストファイルのときだけ。
+    fn file_ref(&self, fd: u32) -> Option<&std::fs::File> {
+        match self.fd_target(fd) {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// fd に対応する開ファイルの可変参照。対象がホストファイルのときだけ。
     fn file_mut(&mut self, fd: u32) -> Option<&mut std::fs::File> {
         if fd < 3 {
-            self.std_files[fd as usize].as_mut()
+            match self.std_targets[fd as usize].as_mut() {
+                Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+                _ => None,
+            }
         } else {
-            self.fds.get_mut(fd)
+            self.fds.file_mut(fd)
         }
     }
 
     /// 真の標準入出力に繋がっているか（閉じても付け替えてもいない）。
     fn std_attached(&self, fd: u32) -> bool {
-        fd < 3 && !self.std_closed[fd as usize] && self.std_files[fd as usize].is_none()
+        fd < 3 && !self.std_closed[fd as usize] && self.std_targets[fd as usize].is_none()
     }
 
     /// fcntl・dup2 の妥当性。接続中・付け替え中の標準 fd と opened fd が真.
     fn fd_valid(&self, fd: u32) -> bool {
-        self.pipe_end(fd).is_some()
-            || (fd < 3 && (!self.std_closed[fd as usize] || self.std_files[fd as usize].is_some()))
-            || self.fds.get(fd).is_some()
+        self.fd_target(fd).is_some() || (fd < 3 && !self.std_closed[fd as usize])
     }
 
-    fn pipe_end(&self, fd: u32) -> Option<PipeEnd> {
-        if fd < 3 {
-            return self.std_pipes[fd as usize];
+    /// パイプ端なら (id, read)。
+    fn pipe_end(&self, fd: u32) -> Option<(u64, bool)> {
+        match self.fd_target(fd) {
+            Some(polyisa_kernel::FdTarget::PipeEnd { id, read }) => Some((*id, *read)),
+            _ => None,
         }
-        self.pipe_ends
-            .get(fd.wrapping_sub(3) as usize)
-            .copied()
-            .flatten()
     }
 
-    fn alloc_pipe_fd(&mut self, end: PipeEnd) -> u32 {
-        let fd = self.fds.alloc_where(None, |idx| {
-            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
-        });
-        let idx = fd.wrapping_sub(3) as usize;
-        while self.pipe_ends.len() <= idx {
-            self.pipe_ends.push(None);
-        }
-        self.pipe_ends[idx] = Some(end);
-        fd
+    /// 対象を複製する（dup・fork 相当）。パスも返す。
+    /// 複製に失敗した対象は None。
+    fn dup_open(&self, fd: u32) -> Option<(polyisa_kernel::FdTarget, Option<String>)> {
+        let target = self.fd_target(fd)?;
+        let dup = self.fds.dup_of(target)?;
+        let path = self.path_of(fd).map(str::to_string);
+        Some((dup, path))
     }
 
-    fn close_pipe(&mut self, fd: u32) {
-        let end = if fd < 3 {
-            self.std_pipes[fd as usize].take()
+    /// fd の対象を外して閉じる。パイプ端なら待ちを解除する。
+    /// 対象がなければ偽。
+    fn remove_fd(&mut self, fd: u32) -> bool {
+        let target = if fd < 3 {
+            self.std_targets[fd as usize].take()
         } else {
-            let idx = fd.wrapping_sub(3) as usize;
-            self.pipe_ends.get_mut(idx).and_then(|slot| slot.take())
+            self.fds.take(fd).map(|ent| ent.target)
         };
-        let Some(end) = end else {
-            return;
+        let Some(target) = target else {
+            return false;
         };
-        self.pipes.0.borrow_mut().close(end.id, end.read);
-        if !end.read {
-            self.wake_pipe(end.id);
+        for (id, wake_r, wake_w) in self.fds.close_target(&target) {
+            if wake_r || wake_w {
+                self.wake_pipe(id);
+            }
         }
+        true
     }
 
-    /// パイプ端を `newfd` へ増やす。呼び出し側は先に旧 `newfd` を閉じる。
-    fn install_pipe(&mut self, end: PipeEnd, newfd: u32) {
-        self.pipes.0.borrow_mut().dup(end.id, end.read);
+    /// 対象を `newfd` へ置く。先に旧対象を閉じる（dup2 規約）。
+    /// 閉じた標準 fd への再配置もここで面倒を見る。
+    fn install_target(&mut self, t: polyisa_kernel::FdTarget, newfd: u32) {
+        self.close_fd(newfd);
         if newfd < 3 {
             let i = newfd as usize;
-            self.std_files[i] = None;
+            self.std_targets[i] = Some(t);
             self.std_paths[i] = None;
             self.std_closed[i] = false;
             self.std_is_stdin[i] = false;
-            self.std_pipes[i] = Some(end);
             return;
         }
-        let idx = newfd.wrapping_sub(3) as usize;
-        while self.pipe_ends.len() <= idx {
-            self.pipe_ends.push(None);
-        }
-        self.fds.place(newfd, None);
-        self.pipe_ends[idx] = Some(end);
+        self.fds.place(newfd, t);
     }
 
     /// そのパイプの読みを待っているスレッドを実行可能に戻す。
@@ -341,15 +319,12 @@ impl Linux {
             };
             borrowed.parked.remove(idx)
         };
-        let fds: Vec<u32> = task
-            .linux
-            .pipe_ends
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, end)| end.map(|_| (idx as u32) + 3))
-            .collect();
-        for fd in fds {
-            task.linux.close_pipe(fd);
+        let n = task.linux.fds.len();
+        for fd in 0..n as u32 {
+            task.linux.remove_fd(3 + fd);
+        }
+        for i in 0..3u32 {
+            task.linux.remove_fd(i);
         }
     }
 
@@ -382,17 +357,27 @@ impl Linux {
 
     /// 最下位の空き番号を割り当てる。閉じた標準 fd・空きスロットを再利用する.
     fn alloc_fd(&mut self, f: std::fs::File) -> u32 {
-        for (i, slot) in self.std_files.iter_mut().enumerate() {
-            if slot.is_none() && self.std_closed[i] {
-                *slot = Some(f);
+        self.alloc_target(polyisa_kernel::FdTarget::File(f))
+    }
+
+    /// 任意の対象を最下位の空き番号へ割り当てる。
+    fn alloc_target(&mut self, t: polyisa_kernel::FdTarget) -> u32 {
+        for i in 0..3usize {
+            if self.std_targets[i].is_none() && self.std_closed[i] {
+                self.std_targets[i] = Some(t);
                 self.std_closed[i] = false;
                 self.std_is_stdin[i] = false;
                 return i as u32;
             }
         }
-        self.fds.alloc_where(Some(f), |idx| {
-            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
-        })
+        self.fds.alloc(t)
+    }
+
+    /// FD_CLOEXEC を立てる/下ろす。標準 fd の付け替え先は記録しない。
+    fn set_cloexec(&mut self, fd: u32, on: bool) {
+        if fd >= 3 {
+            let _ = self.fds.set_cloexec(fd, on);
+        }
     }
 
     /// ゲスト fd に、openat が開いたホストパスを覚える。
@@ -454,25 +439,11 @@ impl Linux {
         }
     }
 
-    /// 開ファイルを複製し、覚えてあるパスも返す。
-    fn clone_open(&self, fd: u32) -> Option<(std::fs::File, Option<String>)> {
-        let file = self.file_ref(fd)?.try_clone().ok()?;
-        let path = self.path_of(fd).map(str::to_string);
-        Some((file, path))
-    }
-
     /// fd を閉じる。標準 fd の初回 close も成功させる。閉じたら真.
     fn close_fd(&mut self, fd: u32) -> bool {
         if fd < 3 {
             let i = fd as usize;
-            if self.std_pipes[i].is_some() {
-                self.close_pipe(fd);
-                self.std_closed[i] = true;
-                self.std_is_stdin[i] = false;
-                self.forget_path(fd);
-                true
-            } else if self.std_files[i].is_some() {
-                self.std_files[i] = None;
+            if self.remove_fd(fd) {
                 self.std_closed[i] = true;
                 self.std_is_stdin[i] = false;
                 self.forget_path(fd);
@@ -485,19 +456,11 @@ impl Linux {
                 false
             }
         } else {
-            if self.pipe_end(fd).is_some() {
-                self.close_pipe(fd);
-                self.fds.clear(fd);
+            if self.remove_fd(fd) {
                 self.forget_path(fd);
                 return true;
             }
-            if self.fds.get_mut(fd).is_some() {
-                self.fds.clear(fd);
-                self.forget_path(fd);
-                true
-            } else {
-                false
-            }
+            false
         }
     }
 
@@ -536,12 +499,14 @@ impl Linux {
 
     /// ファイル記述子を複製した子の状態。プロセス表は共有し、止めた子は持たない。
     fn duplicate(&self) -> Self {
-        let clone_file =
-            |f: &Option<std::fs::File>| f.as_ref().and_then(|file| file.try_clone().ok());
-        let child = Self {
+        Self {
             reported: self.reported.clone(),
             fds: self.fds.try_clone(),
-            std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
+            std_targets: std::array::from_fn(|i| {
+                self.std_targets[i]
+                    .as_ref()
+                    .and_then(|t| self.fds.dup_of(t))
+            }),
             std_is_stdin: self.std_is_stdin,
             std_closed: self.std_closed,
             umask: self.umask,
@@ -572,21 +537,11 @@ impl Linux {
             steps: 0,
             wait: None,
             queue: self.queue.clone(),
-            pipes: self.pipes.clone(),
-            pipe_ends: self.pipe_ends.clone(),
-            std_pipes: self.std_pipes,
             pipe_wait: None,
             cwd: self.cwd.clone(),
             guest_root: self.guest_root.clone(),
             mono_start: self.mono_start,
-        };
-        for end in child.pipe_ends.iter().flatten() {
-            child.pipes.0.borrow_mut().dup(end.id, end.read);
         }
-        for end in child.std_pipes.iter().flatten() {
-            child.pipes.0.borrow_mut().dup(end.id, end.read);
-        }
-        child
     }
 
     /// 止まっているスレッドの識別子。
@@ -1188,7 +1143,27 @@ fn open_at_cwd(
     path_addr: u64,
     flags: u32,
 ) -> Option<TrapOutcome> {
-    // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
+    const O_CLOEXEC: u32 = 0o2000000;
+    let out = open_at_cwd_run(sys, env, cx, path_addr, flags);
+    // O_CLOEXEC を割り当てた fd へ反映する。Handled で小さい返り値は
+    // 新しい fd（エラーは負の errno で格納域の上限を越える）。
+    if flags & O_CLOEXEC != 0 && matches!(out, Some(TrapOutcome::Handled)) {
+        let ret = get64(env, Gpr(0));
+        if ret < 1024 {
+            sys.set_cloexec(ret as u32, true);
+        }
+    }
+    out
+}
+
+fn open_at_cwd_run(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    path_addr: u64,
+    flags: u32,
+) -> Option<TrapOutcome> {
+    // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_DIRECTORY/O_NOFOLLOW 等は無視する。
     // truncate/cp/split が O_WRONLY|O_CREAT 等で開く。Ref: SRC-LINUX (7.3).
     const O_ACCMODE: u32 = 3;
     const O_CREAT: u32 = 0o100;
@@ -1406,11 +1381,11 @@ fn pipe_read(
     sys: &mut Linux,
     env: &mut BareEnv,
     cx: &SysCtx,
-    end: PipeEnd,
+    end: (u64, bool),
     buf: u64,
     left: u64,
 ) -> Option<TrapOutcome> {
-    if !end.read {
+    if !end.1 {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
@@ -1419,7 +1394,7 @@ fn pipe_read(
         return Some(TrapOutcome::Handled);
     }
     let max = usize::try_from(left.min(4096)).unwrap_or(0);
-    let got = sys.pipes.0.borrow_mut().read(end.id, max);
+    let got = sys.fds.pipes().borrow_mut().read(end.0, max);
     match got {
         polyisa_kernel::PipeRead::Bytes(bytes) => {
             if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
@@ -1434,10 +1409,10 @@ fn pipe_read(
         }
         polyisa_kernel::PipeRead::Empty => {
             let id = sys.ensure_self();
-            sys.pipe_wait = Some(end.id);
+            sys.pipe_wait = Some(end.0);
             sys.queue.0.borrow_mut().meta.block(
                 polyisa_kernel::ThreadId(id.0),
-                polyisa_kernel::ThreadWait::Pipe { id: end.id },
+                polyisa_kernel::ThreadWait::Pipe { id: end.0 },
             );
             Some(TrapOutcome::Blocked)
         }
@@ -1448,11 +1423,11 @@ fn pipe_write(
     sys: &mut Linux,
     env: &mut BareEnv,
     cx: &SysCtx,
-    end: PipeEnd,
+    end: (u64, bool),
     buf: u64,
     left: u64,
 ) -> Option<TrapOutcome> {
-    if end.read {
+    if end.1 {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
@@ -1470,14 +1445,14 @@ fn pipe_write(
     {
         return Some(TrapOutcome::Unimplemented);
     }
-    let wrote = sys.pipes.0.borrow_mut().write(end.id, &chunk);
+    let wrote = sys.fds.pipes().borrow_mut().write(end.0, &chunk);
     match wrote {
         None => {
             set64(env, Gpr(0), cx.neg(EPIPE));
             Some(TrapOutcome::Handled)
         }
         Some(n) => {
-            sys.wake_pipe(end.id);
+            sys.wake_pipe(end.0);
             set64(env, Gpr(0), n as u64);
             Some(TrapOutcome::Handled)
         }
@@ -1496,13 +1471,23 @@ fn sys_pipe2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 
 fn open_pipe(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx, flags: u64) -> Option<TrapOutcome> {
     let addr = get64(env, cx.r_a);
-    if flags != 0 {
+    const O_NONBLOCK: u64 = 0o4000;
+    const O_CLOEXEC: u64 = 0o2000000;
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let id = sys.pipes.0.borrow_mut().open();
-    let read_fd = sys.alloc_pipe_fd(PipeEnd { id, read: true });
-    let write_fd = sys.alloc_pipe_fd(PipeEnd { id, read: false });
+    let (rd, wr) = sys.fds.pipe_pair();
+    let read_fd = sys.alloc_target(rd);
+    let write_fd = sys.alloc_target(wr);
+    if flags & O_NONBLOCK != 0 {
+        let _ = sys.fds.set_nonblock(read_fd, true);
+        let _ = sys.fds.set_nonblock(write_fd, true);
+    }
+    if flags & O_CLOEXEC != 0 {
+        sys.set_cloexec(read_fd, true);
+        sys.set_cloexec(write_fd, true);
+    }
     let mut bytes = [0u8; 8];
     bytes[..4].copy_from_slice(&read_fd.to_le_bytes());
     bytes[4..].copy_from_slice(&write_fd.to_le_bytes());
@@ -1608,7 +1593,7 @@ fn sys_write(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_none() {
+    if (fd == 1 || fd == 2) && sys.std_targets[fd as usize].is_none() {
         let mut done = 0u64;
         let mut chunk = vec![0u8; IO_CHUNK];
         while left > 0 {
@@ -1791,7 +1776,7 @@ fn sys_writev(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     }
     // 付け替えた標準 fd への writev は開ファイルへ書く（sys_write と同じ）。
     // 読取り専用で開いた場合は writev_opened が EBADF を返す。
-    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_some() {
+    if (fd == 1 || fd == 2) && sys.std_targets[fd as usize].is_some() {
         return writev_opened(sys, env, cx, fd, iov, iovcnt);
     }
     if fd != 1 && fd != 2 {
@@ -2554,7 +2539,10 @@ fn sys_fstat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let fd = get64(env, cx.r_a) as u32;
     let std = if fd < 3 {
-        sys.std_files[fd as usize].as_ref()
+        match sys.std_targets[fd as usize].as_ref() {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
     } else {
         None
     };
@@ -2606,19 +2594,19 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         return Some(TrapOutcome::Handled);
     }
     // 付け替えた標準出力は読取り専用のため EBADF。
-    if sys.std_files[out_fd as usize].is_some() {
+    if sys.file_ref(out_fd).is_some() {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
     if let Some(end) = sys.pipe_end(in_fd) {
-        if !end.read {
+        if !end.1 {
             set64(env, Gpr(0), cx.neg(EBADF));
             return Some(TrapOutcome::Handled);
         }
         let mut done = 0u64;
         while left > 0 {
             let max = usize::try_from(left.min(4096)).unwrap_or(0);
-            let got = sys.pipes.0.borrow_mut().read(end.id, max);
+            let got = sys.fds.pipes().borrow_mut().read(end.0, max);
             match got {
                 polyisa_kernel::PipeRead::Bytes(bytes) => {
                     let n = bytes.len();
@@ -2638,10 +2626,10 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
                         break;
                     }
                     let id = sys.ensure_self();
-                    sys.pipe_wait = Some(end.id);
+                    sys.pipe_wait = Some(end.0);
                     sys.queue.0.borrow_mut().meta.block(
                         polyisa_kernel::ThreadId(id.0),
-                        polyisa_kernel::ThreadWait::Pipe { id: end.id },
+                        polyisa_kernel::ThreadWait::Pipe { id: end.0 },
                     );
                     return Some(TrapOutcome::Blocked);
                 }
@@ -2713,7 +2701,10 @@ fn sys_lseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     // 標準 fd かは cx.r_a（第1引数の fd）で判定する。実体側と同じ番号を使う.
     let fd = get64(env, cx.r_a) as u32;
     let std = if fd < 3 {
-        sys.std_files[fd as usize].as_mut()
+        match sys.std_targets[fd as usize].as_mut() {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
     } else {
         None
     };
@@ -2724,7 +2715,10 @@ fn sys_llseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     // _llseek。標準 fd かは cx.r_a（第1引数の fd）で判定する。実体側と同じ番号を使う.
     let fd = get64(env, cx.r_a) as u32;
     let std = if fd < 3 {
-        sys.std_files[fd as usize].as_mut()
+        match sys.std_targets[fd as usize].as_mut() {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
     } else {
         None
     };
@@ -2736,7 +2730,10 @@ fn sys_ftruncate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
     let fd = get64(env, cx.r_a) as u32;
     let std = if fd < 3 {
-        sys.std_files[fd as usize].as_mut()
+        match sys.std_targets[fd as usize].as_mut() {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
     } else {
         None
     };
@@ -2748,7 +2745,10 @@ fn sys_fallocate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
     let fd = get64(env, cx.r_a) as u32;
     let std = if fd < 3 {
-        sys.std_files[fd as usize].as_mut()
+        match sys.std_targets[fd as usize].as_mut() {
+            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+            _ => None,
+        }
     } else {
         None
     };
@@ -3075,30 +3075,8 @@ fn sys_dup(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcom
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    if let Some(end) = sys.pipe_end(oldfd) {
-        if let Some(i) = (0..3).find(|&i| {
-            sys.std_closed[i] && sys.std_files[i].is_none() && sys.std_pipes[i].is_none()
-        }) {
-            sys.install_pipe(end, i as u32);
-            set64(env, Gpr(0), i as u64);
-            return Some(TrapOutcome::Handled);
-        }
-        let fd = sys.alloc_pipe_fd(end);
-        sys.pipes.0.borrow_mut().dup(end.id, end.read);
-        set64(env, Gpr(0), fd as u64);
-        return Some(TrapOutcome::Handled);
-    }
-    if let Some((cloned, path)) = sys.clone_open(oldfd) {
-        if let Some(i) = (0..3).find(|&i| sys.std_files[i].is_none() && sys.std_closed[i]) {
-            sys.std_files[i] = Some(cloned);
-            sys.std_closed[i] = false;
-            if let Some(p) = path {
-                sys.remember_path(i as u32, p);
-            }
-            set64(env, Gpr(0), i as u64);
-            return Some(TrapOutcome::Handled);
-        }
-        let fd = sys.fds.alloc(Some(cloned));
+    if let Some((dup, path)) = sys.dup_open(oldfd) {
+        let fd = sys.alloc_target(dup);
         if let Some(p) = path {
             sys.remember_path(fd, p);
         }
@@ -3128,21 +3106,8 @@ fn sys_dup2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }
-    if let Some(end) = sys.pipe_end(oldfd) {
-        sys.close_fd(newfd);
-        sys.install_pipe(end, newfd);
-        set64(env, Gpr(0), newfd as u64);
-        return Some(TrapOutcome::Handled);
-    }
-    if let Some((cloned, path)) = sys.clone_open(oldfd) {
-        if newfd < 3 {
-            let i = newfd as usize;
-            sys.std_files[i] = Some(cloned);
-            sys.std_closed[i] = false;
-            sys.std_is_stdin[i] = false;
-        } else {
-            sys.fds.place(newfd, Some(cloned));
-        }
+    if let Some((dup, path)) = sys.dup_open(oldfd) {
+        sys.install_target(dup, newfd);
         if let Some(p) = path {
             sys.remember_path(newfd, p);
         }
@@ -3183,7 +3148,7 @@ fn sys_dup2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
 
 fn sys_dup3(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
-    // flags は O_CLOEXEC のみ無視して継続。oldfd==newfd は EINVAL.
+    // flags は O_CLOEXEC のみ。oldfd==newfd は EINVAL.
     let oldfd = get64(env, cx.r_a) as u32;
     let newfd = get64(env, cx.r_b) as u32;
     let flags = get64(env, cx.r_c) as u32;
@@ -3201,14 +3166,9 @@ fn sys_dup3(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    if let Some((cloned, path)) = sys.clone_open(oldfd) {
-        if newfd < 3 {
-            let i = newfd as usize;
-            sys.std_files[i] = Some(cloned);
-            sys.std_closed[i] = false;
-        } else {
-            sys.fds.place(newfd, Some(cloned));
-        }
+    if let Some((dup, path)) = sys.dup_open(oldfd) {
+        sys.install_target(dup, newfd);
+        sys.set_cloexec(newfd, flags & O_CLOEXEC != 0);
         if let Some(p) = path {
             sys.remember_path(newfd, p);
         }
@@ -3402,9 +3362,43 @@ fn sys_umask(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 }
 
 fn sys_fcntl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let cmd = get64(env, cx.r_b);
+    let arg = get64(env, cx.r_c);
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const FD_CLOEXEC: u64 = 1;
+    const O_NONBLOCK: u64 = 0o4000;
+    // 表に載る fd の旗は仮想カーネルが応える。
+    if fd >= 3 && sys.fds.ent(fd).is_some() {
+        match cmd {
+            F_GETFD => {
+                set64(env, Gpr(0), u64::from(sys.fds.cloexec(fd)));
+                return Some(TrapOutcome::Handled);
+            }
+            F_SETFD => {
+                let _ = sys.fds.set_cloexec(fd, arg & FD_CLOEXEC != 0);
+                set64(env, Gpr(0), 0);
+                return Some(TrapOutcome::Handled);
+            }
+            F_GETFL => {
+                // 記録しているのは O_NONBLOCK だけ。
+                let fl = if sys.fds.nonblock(fd) { O_NONBLOCK } else { 0 };
+                set64(env, Gpr(0), fl);
+                return Some(TrapOutcome::Handled);
+            }
+            F_SETFL => {
+                let _ = sys.fds.set_nonblock(fd, arg & O_NONBLOCK != 0);
+                set64(env, Gpr(0), 0);
+                return Some(TrapOutcome::Handled);
+            }
+            _ => {}
+        }
+    }
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
-    let fd = get64(env, cx.r_a) as u32;
     let valid = sys.fd_valid(fd);
     crate::x86::sys_fcntl(valid, env, cx)
 }
@@ -3710,6 +3704,18 @@ fn install_exec(
     for a in &mut sys.sigacts {
         if a.handler > 1 {
             *a = crate::x86::SigAct::default();
+        }
+    }
+    // FD_CLOEXEC の fd を掃討する。パイプ端を閉じた結果の
+    // 待ち解除はここで配る。
+    let taken = sys.fds.take_cloexec();
+    let mut wakes = Vec::new();
+    for t in &taken {
+        wakes.extend(sys.fds.close_target(t));
+    }
+    for (id, wake_r, wake_w) in wakes {
+        if wake_r || wake_w {
+            sys.wake_pipe(id);
         }
     }
     Ok(())
@@ -5364,7 +5370,7 @@ mod tests {
         let mut sys = Linux::x86_64();
         // /proc/self/exe を入力に積む（必ず存在する実行ファイル）。
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
         let mut env = bare();
         // sendfile(1, 3, NULL, 16) は 16 を返して stdout に書く。
         set64(&mut env, Gpr(0), abi::SENDFILE);
@@ -5405,7 +5411,7 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
         let mut env = bare();
         // lseek(3, 16, SEEK_SET) は 16 を返す。
         set64(&mut env, Gpr(0), abi::LSEEK);
@@ -6160,7 +6166,7 @@ mod tests {
         let path = format!("/tmp/polyisa_ftruncate_{}", std::process::id());
         std::fs::write(&path, b"abcdef").unwrap();
         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
         // ftruncate(3, 3) -> 0、大きさ 3.
         set64(&mut env, Gpr(0), abi::FTRUNCATE);
         set64(&mut env, Gpr(7), 3);
@@ -6186,7 +6192,7 @@ mod tests {
         let path = format!("/tmp/polyisa_fallocate_{}", std::process::id());
         let _ = std::fs::remove_file(&path);
         let f = std::fs::File::create(&path).unwrap();
-        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
         set64(&mut env, Gpr(0), abi::FALLOCATE);
         set64(&mut env, Gpr(7), 3);
         set64(&mut env, Gpr(6), 0);
@@ -6847,8 +6853,9 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare();
         assert_eq!(
-            sys.fds
-                .alloc(Some(std::fs::File::open("/dev/null").unwrap())),
+            sys.fds.alloc(polyisa_kernel::FdTarget::File(
+                std::fs::File::open("/dev/null").unwrap()
+            )),
             3
         );
         set64(&mut env, Gpr(0), abi::PIPE);

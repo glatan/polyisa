@@ -159,14 +159,16 @@ impl WasiCtx {
         fd
     }
 
-    /// `File` を持たないスロット（Dir/Preopen）の割当。`fds` の穴探しは
-    /// `Option<File>` しか見ないため、`kinds` 側も空きであることを
-    /// `extra_free` で併せて確認する（Dir/Preopen スロットの再利用防止）。
+    /// `File` を持たないスロット（Dir/Preopen）の割当。`fds` 側は
+    /// `FdTarget::Reserved` で番号だけを占有し、`kinds` 側も空きで
+    /// あることを併せて確認する（Dir/Preopen スロットの再利用防止）。
     fn alloc_kind_slot(&mut self) -> u32 {
         let kinds = &self.kinds;
         let fd = self
             .fds
-            .alloc_where(None, |i| kinds.get(i).is_none_or(|k| k.is_none()));
+            .alloc_where(polyisa_kernel::FdTarget::Reserved, |i| {
+                kinds.get(i).is_none_or(|k| k.is_none())
+            });
         self.grow_kinds();
         fd
     }
@@ -436,7 +438,7 @@ impl WasiCtx {
                 Some(FdKind::File { append }) => {
                     self.require_right(fd, abi::rights::FD_WRITE)?;
                     let append = *append;
-                    let f = self.fds.get_mut(fd).ok_or(errno::BADF)?;
+                    let f = self.fds.file_mut(fd).ok_or(errno::BADF)?;
                     if append {
                         let _ = f.seek(SeekFrom::End(0));
                     }
@@ -494,7 +496,7 @@ impl WasiCtx {
                 Some(FdKind::Dir { .. } | FdKind::Preopen { .. }) => Err(errno::BADF),
                 Some(FdKind::File { .. }) => {
                     self.require_right(fd, abi::rights::FD_READ)?;
-                    let f = self.fds.get_mut(fd).ok_or(errno::BADF)?;
+                    let f = self.fds.file_mut(fd).ok_or(errno::BADF)?;
                     let mut buf = vec![0u8; len];
                     match f.read(&mut buf) {
                         Ok(n) => {
@@ -524,7 +526,7 @@ impl WasiCtx {
             return errno::SUCCESS;
         }
         let i = fd as usize - 3;
-        if self.kinds.get(i).is_none_or(|k| k.is_none()) && self.fds.get(fd).is_none() {
+        if self.kinds.get(i).is_none_or(|k| k.is_none()) && self.fds.file(fd).is_none() {
             return errno::BADF;
         }
         self.fds.clear(fd);
@@ -565,7 +567,7 @@ impl WasiCtx {
             w if w == u32::from(abi::whence::END) => SeekFrom::End(off),
             _ => return errno::INVAL,
         };
-        let f = match self.fds.get_mut(fd) {
+        let f = match self.fds.file_mut(fd) {
             Some(f) => f,
             None => return errno::BADF,
         };
@@ -596,7 +598,7 @@ impl WasiCtx {
                 };
             }
         }
-        let f = match self.fds.get_mut(fd) {
+        let f = match self.fds.file_mut(fd) {
             Some(f) => f,
             None => return errno::BADF,
         };
@@ -704,7 +706,7 @@ impl WasiCtx {
         }
         // メタデータが取れるなら size/ino を入れる。取れなければ 0。
         let md = match self.kind(fd) {
-            Some(FdKind::File { .. }) => self.fds.get(fd).and_then(|f| f.metadata().ok()),
+            Some(FdKind::File { .. }) => self.fds.file(fd).and_then(|f| f.metadata().ok()),
             Some(FdKind::Dir { host } | FdKind::Preopen { host, .. }) => {
                 std::fs::metadata(host).ok()
             }
@@ -870,7 +872,9 @@ impl WasiCtx {
         let kinds = &self.kinds;
         let fd = self
             .fds
-            .alloc_where(Some(f), |i| kinds.get(i).is_none_or(|k| k.is_none()));
+            .alloc_where(polyisa_kernel::FdTarget::File(f), |i| {
+                kinds.get(i).is_none_or(|k| k.is_none())
+            });
         self.grow_kinds();
         self.kinds[fd as usize - 3] = Some(FdEnt {
             kind: FdKind::File { append },

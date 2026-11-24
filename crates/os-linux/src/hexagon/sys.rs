@@ -330,7 +330,7 @@ impl Linux {
         match fd {
             1 => Ok(WriteFd::Stdout),
             2 => Ok(WriteFd::Stderr),
-            _ if self.fds.get(fd).is_some() => Ok(WriteFd::File),
+            _ if self.fds.file(fd).is_some() => Ok(WriteFd::File),
             _ => Err(errno::EBADF),
         }
     }
@@ -348,7 +348,7 @@ impl Linux {
                 let _ = std::io::stderr().write_all(&data);
                 Ok(data.len() as u64)
             }
-            WriteFd::File => match self.fds.get_mut(fd).unwrap().write(&data) {
+            WriteFd::File => match self.fds.file_mut(fd).unwrap().write(&data) {
                 Ok(n) => Ok(n as u64),
                 Err(e) => Err(host_errno(e.raw_os_error())),
             },
@@ -380,7 +380,7 @@ impl Linux {
                 self.stdin_pos += n;
                 n
             }
-            _ => match self.fds.get_mut(fd) {
+            _ => match self.fds.file_mut(fd) {
                 Some(f) => match f.read(&mut tmp) {
                     Ok(n) => n,
                     Err(e) => return Err(host_errno(e.raw_os_error())),
@@ -449,7 +449,7 @@ impl Linux {
                 if flags & 0o200000 != 0 && !std::path::Path::new(&full).is_dir() {
                     return Err(errno::ENOTDIR);
                 }
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, full);
                 Ok(u64::from(fd))
             }
@@ -497,7 +497,7 @@ impl Linux {
                     std::fs::File::open("/dev/null").map_err(|e| host_errno(e.raw_os_error()))?;
                 polyisa_host::fstat(&f).map_err(|e| host_errno(e.raw_os_error()))?
             }
-            _ => match self.fds.get(fd) {
+            _ => match self.fds.file(fd) {
                 Some(f) => polyisa_host::fstat(f).map_err(|e| host_errno(e.raw_os_error()))?,
                 None => return Err(errno::EBADF),
             },
@@ -687,7 +687,7 @@ impl Linux {
         let pages = len / PAGE_SIZE;
         // PROT_* の下位 3 ビットは Perms の R/W/X と同じ配列。
         let want = Perms((prot & 7) as u8);
-        let file_backed = flags & MAP_ANONYMOUS == 0 && self.fds.get(fd as u32).is_some();
+        let file_backed = flags & MAP_ANONYMOUS == 0 && self.fds.file(fd as u32).is_some();
         // ファイル裏付けは中身の事前読みを伴うので、書き込み
         // 不可の要求でも RW で割り付けて埋めてから protect で
         // 要求の許可へ戻す。
@@ -708,7 +708,7 @@ impl Linux {
             while left > 0 {
                 let n = left.min(64 * 1024) as usize;
                 let mut buf = vec![0u8; n];
-                let got = match self.fds.get_mut(fd as u32) {
+                let got = match self.fds.file_mut(fd as u32) {
                     Some(f) => match polyisa_host::pread(f, &mut buf, off) {
                         Ok(g) => g,
                         Err(_) => break,
@@ -780,7 +780,7 @@ impl Linux {
         whence: u64,
     ) -> Result<u64, u64> {
         let off = ((hi & 0xffff_ffff) << 32) | (lo & 0xffff_ffff);
-        let Some(f) = self.fds.get_mut(fd) else {
+        let Some(f) = self.fds.file_mut(fd) else {
             return Err(errno::EBADF);
         };
         let w = match whence {
@@ -814,7 +814,7 @@ impl Linux {
         off: u64,
     ) -> Result<u64, u64> {
         let len = (len as usize).min(1 << 20);
-        let Some(f) = self.fds.get_mut(fd) else {
+        let Some(f) = self.fds.file_mut(fd) else {
             return Err(errno::EBADF);
         };
         let mut tmp = vec![0u8; len];
@@ -838,7 +838,7 @@ impl Linux {
     ) -> Result<u64, u64> {
         let len = (len as usize).min(1 << 20);
         let data = self.get_bytes(env, buf, len)?;
-        let Some(f) = self.fds.get_mut(fd) else {
+        let Some(f) = self.fds.file_mut(fd) else {
             return Err(errno::EBADF);
         };
         match polyisa_host::pwrite(f, &data, off) {
@@ -863,7 +863,7 @@ impl Linux {
             pos = Some(self.mem_u64(env, off));
         }
         let data = {
-            let Some(f) = self.fds.get_mut(in_fd) else {
+            let Some(f) = self.fds.file_mut(in_fd) else {
                 return Err(errno::EBADF);
             };
             if let Some(p) = pos
@@ -891,7 +891,7 @@ impl Linux {
                 let _ = std::io::stderr().write_all(&data);
                 data.len()
             }
-            WriteFd::File => match self.fds.get_mut(out_fd).unwrap().write(&data) {
+            WriteFd::File => match self.fds.file_mut(out_fd).unwrap().write(&data) {
                 Ok(n) => n,
                 Err(e) => return Err(host_errno(e.raw_os_error())),
             },
@@ -1170,7 +1170,7 @@ impl Linux {
         len: u64,
     ) -> Result<u64, u64> {
         if is_fd {
-            let Some(f) = self.fds.get_mut(fd_or_path as u32) else {
+            let Some(f) = self.fds.file_mut(fd_or_path as u32) else {
                 return Err(errno::EBADF);
             };
             f.set_len(len).map_err(|e| host_errno(e.raw_os_error()))?;
@@ -1561,11 +1561,11 @@ impl Linux {
         match cmd {
             // F_DUPFD=0, F_DUPFD_CLOEXEC=1030
             0 | 1030 => {
-                let Some(f) = self.fds.get(fd) else {
+                let Some(f) = self.fds.file(fd) else {
                     return Err(errno::EBADF);
                 };
                 let nf = f.try_clone().map_err(|e| host_errno(e.raw_os_error()))?;
-                let nfd = self.fds.alloc(Some(nf));
+                let nfd = self.fds.alloc(polyisa_kernel::FdTarget::File(nf));
                 if u64::from(nfd) < arg {
                     self.fds.clear(nfd);
                     return Err(errno::EINVAL);
@@ -1583,11 +1583,13 @@ impl Linux {
 
     /// `dup`。
     fn sys_dup(&mut self, fd: u32) -> Result<u64, u64> {
-        let Some(f) = self.fds.get(fd) else {
+        let Some(f) = self.fds.file(fd) else {
             return Err(errno::EBADF);
         };
         let nf = f.try_clone().map_err(|e| host_errno(e.raw_os_error()))?;
-        Ok(u64::from(self.fds.alloc(Some(nf))))
+        Ok(u64::from(
+            self.fds.alloc(polyisa_kernel::FdTarget::File(nf)),
+        ))
     }
 
     /// `dup3(oldfd, newfd, flags)`。newfd を指定位置へ複製する。
@@ -1595,12 +1597,13 @@ impl Linux {
         if old == new {
             return Err(errno::EINVAL);
         }
-        let Some(f) = self.fds.get(old) else {
+        let Some(f) = self.fds.file(old) else {
             return Err(errno::EBADF);
         };
         let nf = f.try_clone().map_err(|e| host_errno(e.raw_os_error()))?;
         let path = self.fds.path_of(old).map(str::to_string);
-        self.fds.place(new, Some(nf));
+        self.fds
+            .place_close(new, polyisa_kernel::FdTarget::File(nf));
         if let Some(p) = path {
             self.fds.remember_path(new, p);
         }
@@ -1631,7 +1634,7 @@ impl Linux {
             None
         };
         let data = {
-            let Some(f) = self.fds.get_mut(in_fd) else {
+            let Some(f) = self.fds.file_mut(in_fd) else {
                 return Err(errno::EBADF);
             };
             if let Some(p) = ipos
@@ -1649,7 +1652,7 @@ impl Linux {
             }
         };
         let n = {
-            let Some(f) = self.fds.get_mut(out_fd) else {
+            let Some(f) = self.fds.file_mut(out_fd) else {
                 return Err(errno::EBADF);
             };
             if let Some(p) = opos
@@ -1684,7 +1687,7 @@ impl Linux {
         const AT_EMPTY_PATH: u64 = 0x1000;
         let gpath = self.cstr(env, path)?;
         if gpath.is_empty() && flags & AT_EMPTY_PATH != 0 {
-            return if dirfd as u32 <= 2 || self.fds.get(dirfd as u32).is_some() {
+            return if dirfd as u32 <= 2 || self.fds.file(dirfd as u32).is_some() {
                 Ok(0)
             } else {
                 Err(errno::EBADF)
@@ -1725,7 +1728,7 @@ impl Linux {
             nr::CLOSE => {
                 if a[0] < 3 {
                     Ok(0)
-                } else if self.fds.get(a[0] as u32).is_some() {
+                } else if self.fds.ent(a[0] as u32).is_some() {
                     self.fds.clear(a[0] as u32);
                     Ok(0)
                 } else {
@@ -1808,7 +1811,7 @@ impl Linux {
             nr::TRUNCATE64 => self.sys_truncate(env, a[0], false, (-100i64) as u64, a[1]),
             nr::FTRUNCATE64 => self.sys_truncate(env, a[0], true, 0, a[1]),
             nr::FCHMOD => {
-                let Some(f) = self.fds.get(a[0] as u32) else {
+                let Some(f) = self.fds.file(a[0] as u32) else {
                     return Err(errno::EBADF);
                 };
                 polyisa_host::fchmod(f, (a[1] & 0o7777) as u32)
@@ -1818,7 +1821,7 @@ impl Linux {
             nr::FCHMODAT => self.sys_fchmodat(env, a[0], a[1], a[2]),
             nr::STATFS64 => self.sys_statfs(env, a[0], a[1], a[2]),
             nr::FSTATFS64 => {
-                if a[0] < 3 && self.fds.get(a[0] as u32).is_none() {
+                if a[0] < 3 && self.fds.file(a[0] as u32).is_none() {
                     return Err(errno::EBADF);
                 }
                 self.put_statfs(env, a[2]).map(|()| 0)
@@ -1992,11 +1995,13 @@ mod tests {
         let mut sys = Linux::new();
         let mut env = env();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&f).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&f).unwrap(),
+        ));
         // SEEK_SET で off=0x1_0000_0006（hi=1, lo=6）。
         let r = sys.sys_llseek(&mut env, fd, 1, 6, 0x2000, 0);
         assert_eq!(r, Ok(0));
-        let pos = sys.fds.get_mut(fd).unwrap().stream_position().unwrap();
+        let pos = sys.fds.file_mut(fd).unwrap().stream_position().unwrap();
         let b = sys.get_bytes(&mut env, 0x2000, 8).unwrap();
         assert_eq!(u64::from_le_bytes(b.try_into().unwrap()), pos);
         assert_eq!(pos, 0x1_0000_0006);
@@ -2026,7 +2031,9 @@ mod tests {
         std::fs::write(&f, &data).unwrap();
         let mut sys = Linux::new();
         let mut env = env();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&f).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&f).unwrap(),
+        ));
         // MAP_PRIVATE|MAP_FIXED, prot=R, pgoff=2 → 0x8000 に
         // data[0x2000..] を載せる。
         let a = [0x8000, 0x1000, 1, 0x12, u64::from(fd), 2];
@@ -2054,7 +2061,9 @@ mod tests {
         let mut sys = Linux::new();
         let mut env = env();
         env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&f).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&f).unwrap(),
+        ));
         let r = sys.sys_fstat(&mut env, fd, 0x4000);
         assert_eq!(r, Ok(0));
         let b = sys.get_bytes(&mut env, 0x4000, 104).unwrap();
@@ -2084,7 +2093,9 @@ mod tests {
         let mut sys = Linux::new();
         let mut env = env();
         env.backend.mem.map(VirtAddr(0x5000), 1, Perms::RW).unwrap();
-        let fd = sys.fds.alloc(Some(std::fs::File::open(&f).unwrap()));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            std::fs::File::open(&f).unwrap(),
+        ));
         // pos = 0x0000_0001_0000_0004 → a[3]=4（下位）, a[4]=1（上位）。
         let a = [u64::from(fd), 0x5000, 4, 4, 1, 0];
         let off = Linux::pos64(&a);
@@ -2092,7 +2103,7 @@ mod tests {
         let r = sys.sys_pread(&mut env, fd, 0x5000, 4, 4);
         assert_eq!(r, Ok(4));
         assert_eq!(sys.get_bytes(&mut env, 0x5000, 4).unwrap(), b"4567");
-        assert_eq!(sys.fds.get_mut(fd).unwrap().stream_position().unwrap(), 0);
+        assert_eq!(sys.fds.file_mut(fd).unwrap().stream_position().unwrap(), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

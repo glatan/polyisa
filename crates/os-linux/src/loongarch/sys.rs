@@ -273,7 +273,7 @@ impl Linux {
         match fd {
             1 => Ok(WriteFd::Stdout),
             2 => Ok(WriteFd::Stderr),
-            _ if self.fds.get(fd).is_some() => Ok(WriteFd::File),
+            _ if self.fds.file(fd).is_some() => Ok(WriteFd::File),
             _ => Err(errno::EBADF),
         }
     }
@@ -291,7 +291,7 @@ impl Linux {
                 let _ = std::io::stderr().write_all(&data);
                 Ok(data.len() as u64)
             }
-            WriteFd::File => match self.fds.get_mut(fd).unwrap().write(&data) {
+            WriteFd::File => match self.fds.file_mut(fd).unwrap().write(&data) {
                 Ok(n) => Ok(n as u64),
                 Err(e) => Err(host_errno(e.raw_os_error())),
             },
@@ -326,7 +326,7 @@ impl Linux {
                 self.stdin_pos += n;
                 n
             }
-            _ => match self.fds.get_mut(fd) {
+            _ => match self.fds.file_mut(fd) {
                 Some(f) => match f.read(&mut tmp) {
                     Ok(n) => n,
                     Err(e) => return Err(host_errno(e.raw_os_error())),
@@ -364,7 +364,7 @@ impl Linux {
         if whence > 2 {
             return Err(errno::EINVAL);
         }
-        let Some(f) = self.fds.get_mut(fd) else {
+        let Some(f) = self.fds.file_mut(fd) else {
             return Err(errno::EBADF);
         };
         let w = match whence {
@@ -383,7 +383,7 @@ impl Linux {
         if fd < 3 {
             return Ok(0);
         }
-        if self.fds.get(fd).is_some() {
+        if self.fds.ent(fd).is_some() {
             self.fds.clear(fd);
             Ok(0)
         } else {
@@ -426,7 +426,7 @@ impl Linux {
         // Gap: GAP-0062（O_* 全集と *at フラグの整備は後の段階）。
         match opt.open(&full) {
             Ok(f) => {
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, full.clone());
                 Ok(u64::from(fd))
             }
@@ -472,7 +472,7 @@ impl Linux {
                     std::fs::File::open("/dev/null").map_err(|e| host_errno(e.raw_os_error()))?;
                 polyisa_host::fstat(&f).map_err(|e| host_errno(e.raw_os_error()))?
             }
-            _ => match self.fds.get(fd) {
+            _ => match self.fds.file(fd) {
                 Some(f) => polyisa_host::fstat(f).map_err(|e| host_errno(e.raw_os_error()))?,
                 None => return Err(errno::EBADF),
             },
@@ -821,7 +821,7 @@ impl Linux {
         len: u64,
     ) -> Result<u64, u64> {
         if is_fd {
-            let Some(f) = self.fds.get_mut(fd_or_path as u32) else {
+            let Some(f) = self.fds.file_mut(fd_or_path as u32) else {
                 return Err(errno::EBADF);
             };
             f.set_len(len).map_err(|e| host_errno(e.raw_os_error()))?;
@@ -841,7 +841,7 @@ impl Linux {
 
     /// `fchmod`（host chmod 相当）。
     fn sys_fchmod(&mut self, fd: u32, mode: u64) -> Result<u64, u64> {
-        let Some(f) = self.fds.get(fd) else {
+        let Some(f) = self.fds.file(fd) else {
             return Err(errno::EBADF);
         };
         polyisa_host::fchmod(f, (mode & 0o7777) as u32)
@@ -919,7 +919,7 @@ impl Linux {
             pos = Some(self.mem_u64(env, off));
         }
         let data = {
-            let Some(f) = self.fds.get_mut(in_fd) else {
+            let Some(f) = self.fds.file_mut(in_fd) else {
                 return Err(errno::EBADF);
             };
             if let Some(p) = pos
@@ -947,7 +947,7 @@ impl Linux {
                 let _ = std::io::stderr().write_all(&data);
                 data.len()
             }
-            WriteFd::File => match self.fds.get_mut(out_fd).unwrap().write(&data) {
+            WriteFd::File => match self.fds.file_mut(out_fd).unwrap().write(&data) {
                 Ok(n) => n,
                 Err(e) => return Err(host_errno(e.raw_os_error())),
             },
@@ -969,7 +969,7 @@ impl Linux {
     ) -> Result<u64, u64> {
         let len = (len as usize).min(1 << 20);
         let mut tmp = vec![0u8; len];
-        let n = match self.fds.get_mut(fd) {
+        let n = match self.fds.file_mut(fd) {
             Some(f) => {
                 if f.seek(SeekFrom::Start(off)).is_err() {
                     return Err(errno::EINVAL);
@@ -1129,7 +1129,7 @@ impl Linux {
             .map_err(|_| errno::ENOMEM)?;
         if flags & MAP_ANON == 0 {
             // ファイル写像: 読み込んで内容だけ写す（書き戻しはしない）。
-            let Some(f) = self.fds.get_mut(fd as u32) else {
+            let Some(f) = self.fds.file_mut(fd as u32) else {
                 return Err(errno::EBADF);
             };
             let mut buf = vec![0u8; len as usize];
@@ -1368,11 +1368,11 @@ impl Linux {
         match cmd {
             // F_DUPFD=0, F_DUPFD_CLOEXEC=1030
             0 | 1030 => {
-                let Some(f) = self.fds.get(fd) else {
+                let Some(f) = self.fds.file(fd) else {
                     return Err(errno::EBADF);
                 };
                 let nf = f.try_clone().map_err(|e| host_errno(e.raw_os_error()))?;
-                let nfd = self.fds.alloc(Some(nf));
+                let nfd = self.fds.alloc(polyisa_kernel::FdTarget::File(nf));
                 if (nfd as u64) < arg {
                     self.fds.clear(nfd);
                     return Err(errno::EINVAL);
@@ -1388,11 +1388,13 @@ impl Linux {
 
     /// `dup`。
     fn sys_dup(&mut self, fd: u32) -> Result<u64, u64> {
-        let Some(f) = self.fds.get(fd) else {
+        let Some(f) = self.fds.file(fd) else {
             return Err(errno::EBADF);
         };
         let nf = f.try_clone().map_err(|e| host_errno(e.raw_os_error()))?;
-        Ok(u64::from(self.fds.alloc(Some(nf))))
+        Ok(u64::from(
+            self.fds.alloc(polyisa_kernel::FdTarget::File(nf)),
+        ))
     }
 }
 
@@ -1550,7 +1552,7 @@ mod tests {
             .map(VirtAddr(0x10000), 1, Perms::RW)
             .unwrap();
         let file = std::fs::File::open(&f).unwrap();
-        let fd = sys.fds.alloc(Some(file));
+        let fd = sys.fds.alloc(polyisa_kernel::FdTarget::File(file));
         sys.fds.remember_path(fd, f.to_string_lossy().into_owned());
         // AT_EMPTY_PATH(0x1000) + 空 path → fd の記憶パスを stat。
         let r = sys.sys_statx(&mut env, u64::from(fd), 0x10000, 0x1000, 0, 0x10400);

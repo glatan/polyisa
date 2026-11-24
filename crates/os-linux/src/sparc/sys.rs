@@ -260,7 +260,7 @@ impl Linux {
 
     /// ゲスト fd をホストの File として取る。
     fn file_of(&mut self, fd: u32) -> Result<&mut std::fs::File, u32> {
-        self.fds.get_mut(fd).ok_or(sparc::errno::EBADF)
+        self.fds.file_mut(fd).ok_or(sparc::errno::EBADF)
     }
 
     /// 読み用に fd を開いているものを返す。0/1/2 と FdTable の両方を見る。
@@ -270,7 +270,7 @@ impl Linux {
             1 | 2 => Err(sparc::errno::EBADF),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(ReadFd::File)
                 .ok_or(sparc::errno::EBADF),
         }
@@ -283,7 +283,7 @@ impl Linux {
             2 => Ok(WriteFd::Stderr),
             _ => self
                 .fds
-                .get_mut(fd)
+                .file_mut(fd)
                 .map(WriteFd::File)
                 .ok_or(sparc::errno::EBADF),
         }
@@ -322,7 +322,7 @@ impl Linux {
         let _ = mode;
         match oo.open(&host) {
             Ok(f) => {
-                let fd = self.fds.alloc(Some(f));
+                let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
                 self.fds.remember_path(fd, host);
                 ret(u64::from(fd))
             }
@@ -486,7 +486,7 @@ impl Linux {
                     Ok(m) => m,
                     Err(e) => return fail_host(e.raw_os_error().unwrap_or(5)),
                 },
-                _ => match self.fds.get(fd) {
+                _ => match self.fds.file(fd) {
                     Some(f) => match polyisa_host::fstat(f) {
                         Ok(m) => m,
                         Err(e) => {
@@ -1035,10 +1035,14 @@ impl Linux {
     fn do_fcntl(&mut self, _env: &mut BareEnv, fd: u32, cmd: u32, arg: u64) -> u64 {
         match cmd {
             // F_DUPFD(0)/F_DUPFD_CLOEXEC(1030)：fd の複製。
-            0 | 1030 => match self.fds.get(fd) {
+            0 | 1030 => match self.fds.file(fd) {
                 Some(f) => match f.try_clone() {
                     Ok(g) => {
-                        let nfd = self.fds.alloc_where(Some(g), |i| 3 + i >= arg as usize);
+                        let nfd = self
+                            .fds
+                            .alloc_where(polyisa_kernel::FdTarget::File(g), |i| {
+                                3 + i >= arg as usize
+                            });
                         let p = self.fds.path_of(fd).map(str::to_string);
                         if let Some(p) = p {
                             self.fds.remember_path(nfd, p);
@@ -1730,7 +1734,7 @@ impl Linux {
                 if fd < 3 {
                     return ok_ret(0);
                 }
-                if self.fds.get(fd).is_some() {
+                if self.fds.ent(fd).is_some() {
                     self.fds.clear(fd);
                     self.dir_pos.remove(&fd);
                     ok_ret(0)
@@ -2074,10 +2078,10 @@ impl Linux {
                 ok_ret(u64::from(old))
             }
             // ---- ディスクリプタ操作 ----
-            N::DUP => match self.fds.get(args[0] as u32) {
+            N::DUP => match self.fds.file(args[0] as u32) {
                 Some(f) => match f.try_clone() {
                     Ok(g) => {
-                        let nfd = self.fds.alloc(Some(g));
+                        let nfd = self.fds.alloc(polyisa_kernel::FdTarget::File(g));
                         let p = self.fds.path_of(args[0] as u32).map(str::to_string);
                         if let Some(p) = p {
                             self.fds.remember_path(nfd, p);
@@ -2094,11 +2098,11 @@ impl Linux {
                     return ok_ret(u64::from(new));
                 }
                 let p = self.fds.path_of(old).map(str::to_string);
-                let g = match self.fds.get(old).and_then(|f| f.try_clone().ok()) {
+                let g = match self.fds.file(old).and_then(|f| f.try_clone().ok()) {
                     Some(g) => g,
                     None => return fail_ret(E::EBADF),
                 };
-                self.fds.place(new, Some(g));
+                self.fds.place_close(new, polyisa_kernel::FdTarget::File(g));
                 if let Some(p) = p {
                     self.fds.remember_path(new, p);
                 }

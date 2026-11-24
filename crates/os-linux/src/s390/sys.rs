@@ -223,7 +223,7 @@ impl Linux {
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), tmp);
             }
             _ => {
-                let Some(f) = self.fds.get_mut(fd as u32) else {
+                let Some(f) = self.fds.file_mut(fd as u32) else {
                     return Err(Self::fail_ret(errno::EBADF));
                 };
                 if let Err(e) = f.write_all(tmp) {
@@ -297,7 +297,7 @@ impl Linux {
                         take
                     }
                 } else {
-                    let Some(f) = self.fds.get_mut(fd as u32) else {
+                    let Some(f) = self.fds.file_mut(fd as u32) else {
                         return Self::fail_ret(errno::EBADF);
                     };
                     match f.read(&mut tmp) {
@@ -331,7 +331,7 @@ impl Linux {
                         self.stdin_pos += take;
                         take
                     } else {
-                        let Some(f) = self.fds.get_mut(fd as u32) else {
+                        let Some(f) = self.fds.file_mut(fd as u32) else {
                             return Self::fail_ret(errno::EBADF);
                         };
                         match f.read(&mut tmp) {
@@ -418,7 +418,7 @@ impl Linux {
                     .truncate(flags & 0x200 != 0)
                     .create(flags & 0x40 != 0);
                 match o.open(&hp) {
-                    Ok(f) => ret(u64::from(self.fds.alloc(Some(f)))),
+                    Ok(f) => ret(u64::from(self.fds.alloc(polyisa_kernel::FdTarget::File(f)))),
                     Err(e) => Self::fail_ret_host(e),
                 }
             }
@@ -426,7 +426,7 @@ impl Linux {
                 let fd = arg(env, 0);
                 if fd < 3 {
                     ret(0)
-                } else if self.fds.get(fd as u32).is_some() {
+                } else if self.fds.ent(fd as u32).is_some() {
                     self.fds.clear(fd as u32);
                     ret(0)
                 } else {
@@ -435,7 +435,7 @@ impl Linux {
             }
             s390::LSEEK => {
                 let (fd, off, wh) = (arg(env, 0), arg(env, 1) as i64, arg(env, 2));
-                let Some(f) = self.fds.get_mut(fd as u32) else {
+                let Some(f) = self.fds.file_mut(fd as u32) else {
                     return Self::fail_ret(errno::EBADF);
                 };
                 let pos = match wh {
@@ -587,7 +587,7 @@ impl Linux {
                     }
                     return Self::fail_ret(errno::EBADF);
                 }
-                let Some(f) = self.fds.get_mut(fd as u32) else {
+                let Some(f) = self.fds.file_mut(fd as u32) else {
                     return Self::fail_ret(errno::EBADF);
                 };
                 match polyisa_host::fstat(f) {
