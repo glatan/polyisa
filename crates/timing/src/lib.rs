@@ -6,6 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod branch;
+pub mod cache;
+pub mod inorder;
+pub mod ooo;
+
 /// CPU モデルが宣言する正確さの水準。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fidelity {
@@ -21,6 +26,20 @@ pub enum Fidelity {
     ApproxUncalibrated,
 }
 
+/// 分岐の種別。`InstrEvent::branch_taken` が `Some` のときに参照する。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BranchKind {
+    /// 直接分岐・直接ジャンプ。
+    #[default]
+    Direct,
+    /// 呼出し。
+    Call,
+    /// リターン。
+    Ret,
+    /// 間接ジャンプ。
+    Indirect,
+}
+
 /// 退役した命令の記録。
 #[derive(Clone, Debug)]
 pub struct InstrEvent {
@@ -32,6 +51,10 @@ pub struct InstrEvent {
     pub mem_addrs: Vec<(u64, u32)>,
     /// 分岐の成否。
     pub branch_taken: Option<bool>,
+    /// 分岐の飛び先。予測器の照合に使う。
+    pub branch_target: u64,
+    /// 分岐の種別。
+    pub branch_kind: BranchKind,
     /// 意味論が渡した手がかり（例：乗数の 1 の数）。
     pub hint: u64,
     /// 読むレジスタ。ビットの割り当ては送り手が決める。
@@ -48,10 +71,20 @@ impl InstrEvent {
             class,
             mem_addrs: Vec::new(),
             branch_taken: None,
+            branch_target: 0,
+            branch_kind: BranchKind::Direct,
             hint: 0,
             reads: 0,
             writes: 0,
         }
+    }
+
+    #[must_use]
+    pub fn branch(mut self, taken: bool, target: u64, kind: BranchKind) -> Self {
+        self.branch_taken = Some(taken);
+        self.branch_target = target;
+        self.branch_kind = kind;
+        self
     }
 
     #[must_use]

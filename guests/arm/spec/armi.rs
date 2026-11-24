@@ -35,7 +35,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         conflicts: vec![],
     });
     m.models.push(ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
         name: "armv5".to_string(),
         parent: String::new(),
         add_features: vec![],
@@ -43,7 +44,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ident: vec![],
     });
     m.models.push(ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
         name: "armv7".to_string(),
         parent: String::new(),
         add_features: vec!["v7".to_string()],

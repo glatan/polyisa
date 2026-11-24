@@ -60,7 +60,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("21364", "21264a", &["ev7"][..]),
     ] {
         m.models.push(ModelDef {
-            params: Default::default(),
+        timing: None,
+        params: Default::default(),
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),

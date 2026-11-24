@@ -2435,6 +2435,21 @@ fn gen_metadata(model: &Model) -> String {
         ));
     }
     s.push_str("];\n");
+    // `timing` 句を持つモデルの表。`cpus` が忠実度の表示に使う。
+    s.push_str(
+        "/// `MODEL_DEFS` の `timing` 句の表（model 名、忠実度、エンジン、表名）。\n\
+         /// `timing` 宣言のないモデルは含まれない。\n\
+         pub const MODEL_TIMING: &[(&str, &str, &str, &str)] = &[\n",
+    );
+    for m in &model.models {
+        if let Some(t) = &m.timing {
+            s.push_str(&format!(
+                "    ({:?}, {:?}, {:?}, {:?}),\n",
+                m.name, t.fidelity, t.engine, t.table
+            ));
+        }
+    }
+    s.push_str("];\n");
     // 機能→識別情報ビットの対応表（cpu-models.md の `cpuid_bit`）。
     // `--cpu` の機能集合からリーフごとの値を導出する実行側が読む。
     s.push_str("pub const IDENT_BITS: &[(&str, u32, u32, &str, u8)] = &[\n");
@@ -2862,6 +2877,7 @@ mod tests {
             "d",
         );
         let row = |name: &str, parent: &str, params: &[(&str, &str)]| ModelDef {
+            timing: None,
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: vec![],
@@ -2903,6 +2919,51 @@ mod tests {
             g.metadata
                 .contains("fn default() -> Self { Params { bsf_zero_input: 0 } }")
         );
+    }
+
+    #[test]
+    fn model_timing_is_emitted() {
+        let mut m = model();
+        // `timing` 宣言のあるモデルは MODEL_TIMING に行が出る。
+        m.models.push(ModelDef {
+            timing: Some(ModelTiming {
+                fidelity: "approx_uncalibrated".to_string(),
+                engine: "inorder".to_string(),
+                table: "slow_core".to_string(),
+            }),
+            name: "slow_core".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            params: vec![],
+            ident: vec![],
+        });
+        // `timing` 宣言のないモデルは MODEL_TIMING に出ない。
+        m.models.push(ModelDef {
+            timing: None,
+            name: "plain".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            params: vec![],
+            ident: vec![],
+        });
+        let g = generate(&m).unwrap();
+        assert!(
+            g.metadata
+                .contains("(\"slow_core\", \"approx_uncalibrated\", \"inorder\", \"slow_core\")"),
+            "{}",
+            g.metadata
+        );
+        // MODEL_TIMING の表本体に "plain" の行が無いことを確かめる
+        //（MODELS や MODEL_DEFS には出るので表の範囲で切る）。
+        let table = g
+            .metadata
+            .split("MODEL_TIMING")
+            .nth(1)
+            .and_then(|s| s.split("];").next())
+            .unwrap_or("");
+        assert!(!table.contains("plain"), "{table}");
     }
 
     #[test]

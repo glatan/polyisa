@@ -224,6 +224,7 @@ fn model(
     ident: Vec<(&str, &str)>,
 ) {
     m.models.push(ModelDef {
+        timing: None,
         params: params
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

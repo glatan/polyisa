@@ -135,7 +135,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("nvax", "vax11_780", &[][..], &["compat"][..], &[][..]),
     ] {
         m.models.push(ModelDef {
-            params: params
+        timing: None,
+        params: params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),

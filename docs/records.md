@@ -615,13 +615,34 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - ホストソケットは AF_UNIX・AF_INET の stream/datagram で、AF_INET6 や netlink 等の他 family は EAFNOSUPPORT。AF_UNIX のパスはゲストルート+cwd で写像する近似
 - 作業スレッド経由の待ち（HostIo）は x86 のみ。単一スレッド ABI の待ちは主スレッドで poll を消化する
 
+### 段階 27：タイミングの残りの汎用モデルと較正
+
+対応した内容：
+
+- `timing::cache`（CacheHierarchy/CacheLevel/AccessReport）。L1+L2 の階層、セット・ウェイ・ライン・置換（RR/PLRU）・ライトスルー/バックの近似、`access` の応答時間。置換は PLRU・invalid 優先充填などの近似を GAP-0091 に記録
+- `timing::branch`（Predictor）。方向予測器（相関型の gshare 近似）・BTB・IJTP・RAS の合成で `PredOutcome`（正命中・方向誤・BTB ミス・不一致バブル）を返す。BTB/IJTP は在否のみでターゲットを持たない近似
+- `timing::ooo`（OooModel）。dispatch/issue/complete/retire を再帰式で求める近似シミュレータ。ROB・RS・LQ/SQ・retire 幅・ポート占有・排他グループ・メモリ依存予測・d$/i$ 階層・分岐予測を合成。`DECLARED_ERR = 0.25` を宣言
+- `timing::inorder`（InOrderModel）。U7 型のインオーダー・デュアルイシュー。発行幅・排他グループ・ペア内ハザード・load-use のアドレス生成遅延（uses_ag）・フラッシュ・hint 可変レイテンシを持つ
+- `isadl::ModelDef.timing` と isagen の `MODEL_TIMING`（model→忠実度・エンジン・表名）の生成。`polyisa cpus` は timing 宣言のあるモデルに `approx_uncalibrated inorder sifive_u74 （未較正）` のように忠実度・エンジン・表名を添える
+- `guests/riscv` の `sifive_u74` モデル（親 rv64gc、zba/zbb 機能ビット）と `src/timing.rs` の U74 クラス表・`sifive_u74()`・`div_latency()`（SPEC-SIFIVE-U74 の式）。FP 分類の細分化（falu_s/falu_d/fsj/fcmp/fminmax/fcvt/fdiv_s/fdiv_d/fsqrt_s/fsqrt_d/fload/fstore）
+- 較正ベンチマーク集 `guests/riscv/bench`（depchain/istream/branch/stride。`bench_mark` 区間印）と実機計測記録の雛形 `docs/meas/u74.md`
+- `heavy_timing_ooo`（S27-1）。Skylake 級 `OooParams` の合成イベント列を MEAS-UOPS-INFO/MEAS-AGNER の SKL 実測 15 測点（レイテンシ・スループット・分岐誤予測）と比較し、全点が宣言誤差 ±25% 内
+
+残っている事項：
+
+- U74 の `approx` は未較正（`approx_uncalibrated`）。実機での較正手順は `docs/meas/u74.md` の雛形どおりで、S27-2 は所有者の実機計測が条件
+- L2/メモリレイテンシは未較正の仮値（GAP-0093）。D$ の小さい単位の 3 サイクル・ストアパイプ衝突・未完了フィル 1 本は近似の範囲外（GAP-0094・0096）
+- zba/zbb は機能ビットのみで命令網羅なし（GAP-0095）。CSR 単独発行・読み専用 CSR の flush は近似（GAP-0097）
+- 整数除算の可変レイテンシは `hint` 規約を決めたが、意味論側が hint を出す結線はない（GAP-0097。engine→timing の結線自体は GAP-0027 の継続）
+- 誤予測経路の実行効果はどのモデルにもない（GAP-0092・0098 の近似として確定）
+
 ## 残っている事項（横断）
 
 ### 台帳の未登録項目
 
 版の方針は「新しい資料が古い資料の記載を内包する想定で新しい版を採り、古い版にしか存在しない記載が必要な場合のみ例外とする」。台帳に登録した項目は全て確認済みとするため、登録済みの項目に残る作業はない。残るのは未登録の項目のみ：
 
-- 段階 27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
+- 段階 28 のホスト OS 文書（実装時に追加登録する）
 
 ### 所有者の作業
 

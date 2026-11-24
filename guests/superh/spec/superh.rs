@@ -75,7 +75,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("j2", "jcore", &[][..], &[][..]),
     ] as [(&str, &str, &[&str], &[&str]); 11] {
         m.models.push(ModelDef {
-            params: Default::default(),
+        timing: None,
+        params: Default::default(),
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),

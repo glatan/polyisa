@@ -42,7 +42,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         conflicts: vec![],
     });
     m.models.push(polyisa_isadl::model::ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
         name: "generic".to_string(),
         parent: String::new(),
         add_features: ["fp", "asimd"].iter().map(|s| s.to_string()).collect(),
@@ -50,7 +51,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ident: vec![],
     });
     m.models.push(polyisa_isadl::model::ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
         name: "generic_v81".to_string(),
         parent: "generic".to_string(),
         add_features: ["lse"].iter().map(|s| s.to_string()).collect(),

@@ -161,6 +161,18 @@ pub struct Param {
     pub doc: String,
 }
 
+/// CPU モデルのタイミング宣言（cpu-models.md の `timing` 句）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ModelTiming {
+    /// 忠実度。`polyisa_timing::Fidelity` のバリアント名をそのまま使う
+    ///（"none" "cpi" "exact" "approx" "approx_uncalibrated"）。
+    pub fidelity: String,
+    /// エンジン名。汎用モデルの種別（"inorder" "ooo" "cpi" "exact"）のいずれか。
+    pub engine: String,
+    /// タイミング表の名前（`using sifive_u74` の表名）。
+    pub table: String,
+}
+
 /// CPU モデルの定義（機能の足し引きと親の指定）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModelDef {
@@ -174,6 +186,9 @@ pub struct ModelDef {
     /// 等のキーと文字列値の対）。機能の有無に対応するビットは
     /// `IdentBit` が導出するのでここには書かない。
     pub ident: Vec<(String, String)>,
+    /// タイミング宣言（`timing approx inorder using sifive_u74`）。
+    /// `None` はタイミングを宣言しないモデル（忠実度 `none` 相当）。
+    pub timing: Option<ModelTiming>,
 }
 
 /// 機能から識別情報のビットへの対応。機能が有効なら識別情報の

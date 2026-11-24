@@ -105,7 +105,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("i68060", "i68040", &["m68060"][..], &[][..]),
     ] {
         m.models.push(ModelDef {
-            params: params
+        timing: None,
+        params: params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),

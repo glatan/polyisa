@@ -248,6 +248,30 @@ pub fn validate(model: &Model) -> Report {
                 });
             }
         }
+        // `timing` 句の値。忠実度は `Fidelity` のバリアント名、
+        // エンジンは汎用タイミングモデルの種別に限る。
+        if let Some(t) = &d.timing {
+            const FIDELITIES: &[&str] = &["none", "cpi", "exact", "approx", "approx_uncalibrated"];
+            const ENGINES: &[&str] = &["inorder", "ooo", "cpi", "exact"];
+            if !FIDELITIES.contains(&t.fidelity.as_str()) {
+                errors.push(ValidationError::BadField {
+                    format: "model-timing".to_string(),
+                    field: format!("{}: fidelity {:?}", d.name, t.fidelity),
+                });
+            }
+            if !ENGINES.contains(&t.engine.as_str()) {
+                errors.push(ValidationError::BadField {
+                    format: "model-timing".to_string(),
+                    field: format!("{}: engine {:?}", d.name, t.engine),
+                });
+            }
+            if t.table.is_empty() {
+                errors.push(ValidationError::BadField {
+                    format: "model-timing".to_string(),
+                    field: format!("{}: table が空", d.name),
+                });
+            }
+        }
         // 親連鎖の循環は解決不能なので、ここで止める（生成側・実行側は
         // 打ち切りやエラーで挙動が分かれるため）。
         let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -1075,6 +1099,7 @@ mod tests {
     fn unknown_model_parent_is_rejected() {
         let mut m = test_model();
         m.models.push(crate::model::ModelDef {
+            timing: None,
             params: vec![],
             name: "child".to_string(),
             parent: "nosuchparent".to_string(),
@@ -1097,6 +1122,7 @@ mod tests {
         let mut m = test_model();
         for (name, parent) in [("a", "b"), ("b", "a")] {
             m.models.push(crate::model::ModelDef {
+                timing: None,
                 params: vec![],
                 name: name.to_string(),
                 parent: parent.to_string(),
@@ -1136,6 +1162,7 @@ mod tests {
         });
         // 宣言の無いパラメータをモデルが上書きするのは拒否する。
         m.models.push(crate::model::ModelDef {
+            timing: None,
             params: vec![("nosuch".to_string(), "a".to_string())],
             name: "mdl".to_string(),
             parent: String::new(),
@@ -1151,6 +1178,7 @@ mod tests {
             doc: String::new(),
         });
         m.models.push(crate::model::ModelDef {
+            timing: None,
             params: vec![("p1".to_string(), "99".to_string())],
             name: "mdl2".to_string(),
             parent: String::new(),
@@ -1193,6 +1221,51 @@ mod tests {
     }
 
     #[test]
+    fn model_timing_values_are_checked() {
+        let mut m = test_model();
+        m.models.push(crate::model::ModelDef {
+            timing: Some(crate::model::ModelTiming {
+                fidelity: "half".to_string(),
+                engine: "magic".to_string(),
+                table: String::new(),
+            }),
+            params: vec![],
+            name: "mdl".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        let r = validate(&m);
+        for key in ["fidelity", "engine", "table"] {
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::BadField { format, field }
+                        if format == "model-timing" && field.contains(key))),
+                "{key}: {:?}",
+                r.errors
+            );
+        }
+        // 正しい値の組は通る。
+        let mut ok = test_model();
+        ok.models.push(crate::model::ModelDef {
+            timing: Some(crate::model::ModelTiming {
+                fidelity: "approx_uncalibrated".to_string(),
+                engine: "inorder".to_string(),
+                table: "tbl".to_string(),
+            }),
+            params: vec![],
+            name: "mdl".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        assert!(validate(&ok).errors.is_empty());
+    }
+
+    #[test]
     fn unknown_model_feature_is_rejected() {
         let mut m = test_model();
         m.features.push(Feature {
@@ -1201,6 +1274,7 @@ mod tests {
             conflicts: vec![],
         });
         m.models.push(crate::model::ModelDef {
+            timing: None,
             params: vec![],
             name: "parent".to_string(),
             parent: String::new(),
@@ -1209,6 +1283,7 @@ mod tests {
             ident: vec![],
         });
         m.models.push(crate::model::ModelDef {
+            timing: None,
             params: vec![],
             name: "child".to_string(),
             parent: "parent".to_string(),

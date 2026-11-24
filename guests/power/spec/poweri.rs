@@ -32,7 +32,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         });
     }
     m.models.push(ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
         name: "generic".to_string(),
         parent: String::new(),
         add_features: ["fp", "altivec", "vsx"]

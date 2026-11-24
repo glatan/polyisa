@@ -82,7 +82,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("itanium2", "generic", &["itanium2", "poulson"][..]),
     ] {
         m.models.push(ModelDef {
-            params: vec![],
+        timing: None,
+        params: vec![],
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),
@@ -917,7 +918,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             when,
             wheres: vec![],
             syntax: syntax.to_string(),
-            timing: timing.to_string(),
+        timing: timing.to_string(),
         }
     };
     let ua = || Pred::Flag("unit_a".to_string());
