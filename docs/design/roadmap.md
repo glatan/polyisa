@@ -46,8 +46,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| OS1 | 着手条件: 台帳の版確定（SPEC-UNIX-V7・SPEC-BSD-43・SPEC-ARM-SEMIHOST は登録済み。BSD の対象は 4.3BSD-Reno で確定 — 4.4BSD-Lite は VAX 対応を除いた）、SPEC-RISCV-SEMIHOST の新規登録（RISC-V Semihosting v1.0 ratified。入口列は同仕様、SYS_* 演算は SPEC-ARM-SEMIHOST が正本）、テスト入力の台帳登録（V7 は TUHS の `Henry_Spencer_v7/v7.tar.gz` から bin/* の a.out（0410 が主体・0411 と 0407 も含む）。BSD は `4.3BSD-Reno/usr.tar.gz` の /usr/bin と `rootdump.gz` から復元した /bin・/sbin（ほぼ全数 ZMAGIC。dump 形式の復元は自前パーサで検証済み）— いずれも BIN 系・用途 T・リポジトリに含めない。精密な syscall 検査は手組み a.out で補う）、パーソナリティのクレート構成（`os-v7`・`os-bsd` の新規クレート — `os-wasi` の先例に倣い kernel・engine・guest・host・mem・sem・loader と対象ゲストへ依存）、段階 24 の残件の取り込み判断（GAP-0085(f) の MMR1 巻き戻しは再試行可能な fault（スタック成長）に要るので対象。GAP-0086 の割込み受理・RESET・コンソール/診断系はユーザーモードでは不可観測なので残す） | 段階 23・24 | - |
-| OS2 | `loader`: a.out 変種の解析（V7 の 0407/0410/0411、VAX・BSD の ZMAGIC 系）と `FileKind` の拡張。アドレス空間への配置の方針はパーソナリティ側 | OS1 | - |
 | OS3 | Unix V7 パーソナリティ骨格: `trap` の syscall 機械（番号は `handle_trap` の code に乗らない — pc-2 の命令語の下位バイト。引数規約・キャリーフラグによるエラー）、ファイル系・`brk`/`sbrk`・`exit`、a.out の配置と初期スタック、`cli` の `run_pdp11` への接続 | OS2 | - |
 | OS4 | V7 の残りの syscall（signal・time・dup・pipe 等の範囲の確定を含む）と `heavy_program_unixv7`（層 7） | OS3 | S25-1 |
 | OS5 | BSD パーソナリティ骨格: `chmk` の syscall 機械、BSD の a.out の配置と初期スタック、`cli` の `run_vax` への接続 | OS2 | - |
