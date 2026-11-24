@@ -65,7 +65,6 @@
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
 
-| NS4 | `kernel`: ソケット（AF_UNIX/AF_INET。socketpair はカーネル内対象、ホスト socket は作業スレッド経由）・eventfd・timerfd（仮想時間）・signalfd・epoll・memfd の fd 対象 | NS2・NS3 | - |
 | NS5 | `os-linux`: ソケット関連 syscall（socket・bind・listen・accept・connect・send/recv 系・shutdown・sockopt・get*name・socketpair）の正準実装と各 ABI への接続 | NS4 | - |
 | NS6 | `os-linux`: 待ち合わせ syscall（select/pselect6・poll・ppoll・epoll_create1/epoll_ctl/epoll_wait/epoll_pwait・eventfd2・timerfd_*）と、暫定スタブ（x86 の EPERM 系と、x86・alpha・parisc の 0 返しの待ち合わせ系）の置き換え | NS4 | - |
 | NS7 | `heavy_program_net`（ソケットと待ち合わせを使うプログラム。カーネル内対象とループバックで決定的に） | NS5・NS6 | S26-1 |
