@@ -22,6 +22,7 @@ use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 pub mod errno {
     pub const EPERM: u32 = 1;
     pub const ENOENT: u32 = 2;
+    pub const EINTR: u32 = 4;
     pub const EIO: u32 = 5;
     pub const EBADF: u32 = 9;
     pub const EAGAIN: u32 = 11;
@@ -277,7 +278,7 @@ fn host_errno(e: &std::io::Error) -> u32 {
     use std::io::ErrorKind as K;
     match e.kind() {
         K::WouldBlock => errno::EAGAIN,
-        K::Interrupted => errno::EAGAIN,
+        K::Interrupted => errno::EINTR,
         K::AddrInUse => errno::EADDRINUSE,
         K::AddrNotAvailable => errno::EADDRNOTAVAIL,
         K::ConnectionRefused => errno::ECONNREFUSED,
@@ -472,6 +473,11 @@ pub fn sys_connect(
             if raw == 115 {
                 // EINPROGRESS（ホスト errno 値と仮定。unix では asm-generic と同値）。
                 s.connecting.set(true);
+                // 非阻止なら EINPROGRESS をゲストへ返す。阻止なら
+                // POLLOUT まで待ってから SO_ERROR で完了を見る。
+                if guest_nonblock(fds, fd) {
+                    return Err((abi.errno)(errno::EINPROGRESS));
+                }
                 return Ok(Out::Wait(Wait {
                     fds: vec![(fd, WANT_WRITE)],
                     deadline: None,
@@ -496,6 +502,9 @@ pub fn sys_accept(
 ) -> Result<Out, u32> {
     let fd = fd as u32;
     want_sock(fds, fd)?;
+    if flags & !(abi.sock_nonblock | abi.sock_cloexec) != 0 {
+        return Err(errno::EINVAL);
+    }
     let Some(s) = fds.host_sock_of(fd) else {
         // ソケット対の端は受付対象ではない。
         return Err(errno::EOPNOTSUPP);
@@ -516,10 +525,16 @@ pub fn sys_accept(
             });
             Ok(Out::Done(nfd as u64))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Out::Wait(Wait {
-            fds: vec![(fd, WANT_READ)],
-            deadline: None,
-        })),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            if guest_nonblock(fds, fd) {
+                Err(errno::EAGAIN)
+            } else {
+                Ok(Out::Wait(Wait {
+                    fds: vec![(fd, WANT_READ)],
+                    deadline: None,
+                }))
+            }
+        }
         Err(e) => Err(host_errno(&e)),
     }
 }
@@ -917,9 +932,22 @@ pub fn sys_recvmsg(
     // 構造は p*4 以降に control・p*5 に controllen・p*6 に flags（64bit）。
     // 32bit では u32 並びで同じ配置になる（name,namelen,iov,iovlen,control,controllen,flags の
     // ptr 幅の列）。msg_flags は末尾 u32。
-    let iovs = read_iov(env, abi, iov, iovlen)?;
     let fd32 = fd as u32;
     want_sock(fds, fd32)?;
+    // msg_flags を末尾に書き戻す（MSG_TRUNC 等の詳細は近似で 0）。
+    let flags_addr = msg + p * 6;
+    let wr_flags = |env: &mut BareEnv| -> Result<(), u32> {
+        if wr_u(env, abi.endian, flags_addr, 0, 4) {
+            Ok(())
+        } else {
+            Err(errno::EFAULT)
+        }
+    };
+    if iovlen == 0 {
+        wr_flags(env)?;
+        return Ok(Out::Done(0));
+    }
+    let iovs = read_iov(env, abi, iov, iovlen)?;
     let total: u64 = iovs.iter().map(|&(_, l)| l).sum();
     let max = usize::try_from(total.min(65536)).unwrap_or(0);
     let again = flags & abi.msg_dontwait != 0;
@@ -928,7 +956,7 @@ pub fn sys_recvmsg(
     let scatter = |env: &mut BareEnv, b: &[u8]| -> bool {
         let mut off = 0usize;
         for (base, len) in &iovs {
-            let take = ((*len as usize).min(b.len() - off)).min(b.len() - off);
+            let take = (*len as usize).min(b.len() - off);
             if take > 0 && !wr(env, *base, &b[off..off + take]) {
                 return false;
             }
@@ -947,9 +975,13 @@ pub fn sys_recvmsg(
                 if !scatter(env, &b) {
                     return Err(errno::EFAULT);
                 }
+                wr_flags(env)?;
                 Ok(Out::Done(b.len() as u64))
             }
-            PipeRead::Eof => Ok(Out::Done(0)),
+            PipeRead::Eof => {
+                wr_flags(env)?;
+                Ok(Out::Done(0))
+            }
             PipeRead::Empty => {
                 if again || guest_nonblock(fds, fd32) {
                     Err(errno::EAGAIN)
@@ -974,6 +1006,7 @@ pub fn sys_recvmsg(
                 {
                     sockaddr_out(env, abi, sa, name, namelen_addr)?;
                 }
+                wr_flags(env)?;
                 Ok(Out::Done(b.len() as u64))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

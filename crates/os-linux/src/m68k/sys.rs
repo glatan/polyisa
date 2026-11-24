@@ -52,6 +52,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
     dir_pos: std::collections::HashMap<u32, usize>,
     /// set_thread_area が置くスレッドポインタ（m68k Linux は
@@ -82,6 +84,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
             dir_pos: std::collections::HashMap::new(),
             tp: 0,
         }
@@ -599,7 +602,7 @@ impl Linux {
                 // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
                 if e == m68k::errno::EBADF && self.fds.target(fd).is_some() {
                     let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::read_other(
                         &mut self.fds,
@@ -677,7 +680,7 @@ impl Linux {
                 // ファイル以外の対象（eventfd 等）は fd 表経由。
                 if e == m68k::errno::EBADF && self.fds.target(fd).is_some() {
                     let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::write_other(
                         &mut self.fds,
@@ -1110,7 +1113,7 @@ impl Linux {
         let abi = crate::sock::SockAbi::generic(4, Endian::Be);
         let map = crate::sock::unix_path_map("", &self.cwd);
         let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, a6, &map, 0, &mono) {
             Some(Ok(v)) => ok_ret(v),
@@ -1126,11 +1129,17 @@ impl Linux {
 
     /// 待ち合わせ系 syscall の正準層呼び出し。m68k の
     /// select(82) は 5 語ブロックの旧形式。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 8]) -> Disp {
         let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
         abi.old_select = true;
         let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, a6, 0, &mono) {
             Some(Ok(v)) => ok_ret(v),
@@ -1798,9 +1807,7 @@ impl Linux {
             | m68k::RT_SIGTIMEDWAIT
             | m68k::RT_SIGQUEUEINFO
             | m68k::SIGALTSTACK
-            | m68k::RT_TGSIGQUEUEINFO
-            | m68k::SIGNALFD
-            | m68k::SIGNALFD4 => ok_ret(0),
+            | m68k::RT_TGSIGQUEUEINFO => ok_ret(0),
             m68k::RT_SIGRETURN => ok_ret(0),
             m68k::KILL | m68k::TKILL | m68k::TGKILL => {
                 if args[0] == 0 || args[0] == self.pid {
@@ -1903,7 +1910,6 @@ impl Linux {
             | m68k::PKEY_MPROTECT
             | m68k::PKEY_ALLOC
             | m68k::PKEY_FREE
-            | m68k::MEMFD_CREATE
             | m68k::FINIT_MODULE
             | m68k::SCHED_SETATTR
             | m68k::SCHED_GETATTR

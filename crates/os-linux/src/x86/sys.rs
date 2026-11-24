@@ -482,8 +482,11 @@ impl Linux {
         }
         w.fds.iter().any(|&(fd, ev)| {
             let r = fds.ready(fd, now, pending);
-            (ev & crate::sock::WANT_READ != 0 && (r.read || r.hup || r.err))
-                || (ev & crate::sock::WANT_WRITE != 0 && (r.write || r.err))
+            // ERR/HUP は興味ビットに関係なく常に起床条件。
+            r.err
+                || r.hup
+                || (ev & crate::sock::WANT_READ != 0 && r.read)
+                || (ev & crate::sock::WANT_WRITE != 0 && r.write)
         })
     }
 
@@ -717,6 +720,8 @@ impl Linux {
         for i in 0..3u32 {
             task.linux.remove_fd(i);
         }
+        // 閉じた fd を観ていた他スレッドの待ちを解消する。
+        self.sweep_fd_waits();
     }
 
     /// この子を待っているスレッドを、再び実行できるようにする。
@@ -1072,6 +1077,8 @@ impl Linux {
             .borrow_mut()
             .meta
             .mark_exited(polyisa_kernel::ThreadId(me.0));
+        // 閉じた fd を観ていた他スレッドの待ちを解消する。
+        self.sweep_fd_waits();
         if root {
             return false;
         }

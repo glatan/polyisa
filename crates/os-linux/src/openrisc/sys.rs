@@ -5,7 +5,7 @@
 //! 規約: 番号は r11、引数は r3-r8、戻り値は r11、失敗は -errno。
 //! `l.sys` は例外ベクタ 0xc00 の Trap として届く。
 //!
-//! 単一プロセス・単一スレッド模型: clone/execve/パイプ/ソケット/
+//! 単一プロセス・単一スレッド模型: clone/execve/パイプ/
 //! シグナル配送は未実装（ENOSYS または登録のみ受理）。or1k_atomic
 //! （番号 244）は未実装として止める（Gap: GAP-0064）。ゲストは
 //! ビッグエンディアンなのでポインタ・iovec・stat の語は BE で
@@ -79,6 +79,8 @@ pub struct Linux {
     /// rt_sigprocmask が保持する blocked マスク（配送しない近似 —
     /// Gap: GAP-0064）。
     sig_mask: u64,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
 }
 
 impl Default for Linux {
@@ -111,6 +113,7 @@ impl Linux {
             stack_hi: 0,
             dir_off: std::collections::BTreeMap::new(),
             sig_mask: 0,
+            wait_start: None,
         }
     }
 
@@ -267,8 +270,8 @@ impl Linux {
     fn sys_write(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64) -> Result<u64, u64> {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
-            let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
-            let t0 = std::time::Instant::now();
+            let abi = crate::wait::WaitAbi::generic(4, 8, Endian::Be);
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -313,8 +316,8 @@ impl Linux {
         let len = (len as usize).min(1 << 20);
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
-            let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
-            let t0 = std::time::Instant::now();
+            let abi = crate::wait::WaitAbi::generic(4, 8, Endian::Be);
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(
                 &mut self.fds,
@@ -830,7 +833,7 @@ impl Linux {
     fn sock_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64; 6]) -> Result<u64, u64> {
         let abi = crate::sock::SockAbi::generic(4, Endian::Be);
         let map = crate::sock::unix_path_map(&self.guest_root, "");
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, a, &map, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -845,9 +848,17 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64; 6]) -> Result<u64, u64> {
-        let abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
-        let t0 = std::time::Instant::now();
+        // or1k は asm-generic：32 ビットでも timespec は 64 ビット幅。
+        let mut abi = crate::wait::WaitAbi::generic(4, 8, Endian::Be);
+        abi.epoll_ev_size = 16;
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, a, 0, &mono) {
             Some(Ok(v)) => Ok(v),

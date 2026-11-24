@@ -170,8 +170,7 @@ pub fn serve(fds: &FdTable, wait: &Wait, pending: u64, mono_ns: &dyn Fn() -> u64
     let check = |now: u64| -> bool {
         wait.fds.iter().any(|&(fd, ev)| {
             let r = fds.ready(fd, now, pending);
-            (ev & WANT_READ != 0 && (r.read || r.hup || r.err))
-                || (ev & WANT_WRITE != 0 && (r.write || r.err))
+            r.err || r.hup || (ev & WANT_READ != 0 && r.read) || (ev & WANT_WRITE != 0 && r.write)
         })
     };
     if check(mono_ns()) {
@@ -222,8 +221,9 @@ fn remaining_ns(prev: Option<&Wait>, now: u64, full: u64) -> u64 {
 }
 
 /// timeval/timespec の 2 語を読みナノ秒へ。addr=0 は None。
-/// 負の秒/ナノ秒や範囲外は EINVAL。
-fn rd_ts(env: &mut BareEnv, abi: &WaitAbi, addr: u64) -> Result<Option<u64>, u32> {
+/// `usec` が真なら 2 語目はマイクロ秒（select）。負の秒や
+/// 範囲外の細部は EINVAL。
+fn rd_ts(env: &mut BareEnv, abi: &WaitAbi, addr: u64, usec: bool) -> Result<Option<u64>, u32> {
     if addr == 0 {
         return Ok(None);
     }
@@ -242,21 +242,32 @@ fn rd_ts(env: &mut BareEnv, abi: &WaitAbi, addr: u64) -> Result<Option<u64>, u32
             v as i64
         }
     };
-    let (s, ns) = (sign(s), sign(ns));
-    if s < 0 || !(0..1_000_000_000).contains(&ns) {
+    let (s, f) = (sign(s), sign(ns));
+    let (flimit, fmul) = if usec {
+        (1_000_000_i64, 1_000_u64)
+    } else {
+        (1_000_000_000, 1)
+    };
+    if s < 0 || !(0..flimit).contains(&f) {
         return Err(errno::EINVAL);
     }
-    Ok(Some(s as u64 * 1_000_000_000 + ns as u64))
+    Ok(Some(
+        (s as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(f as u64 * fmul),
+    ))
 }
 
 /// timeval/timespec に残りナノ秒を書き戻す。addr=0 では何もしない。
-fn wr_ts(env: &mut BareEnv, abi: &WaitAbi, addr: u64, ns: u64) -> Result<(), u32> {
+/// `usec` が真なら 2 語目はマイクロ秒（select）。
+fn wr_ts(env: &mut BareEnv, abi: &WaitAbi, addr: u64, ns: u64, usec: bool) -> Result<(), u32> {
     if addr == 0 {
         return Ok(());
     }
     let w = abi.time_size as usize;
-    let (s, n) = (ns / 1_000_000_000, ns % 1_000_000_000);
-    if !wr_u(env, abi.endian, addr, s, w) || !wr_u(env, abi.endian, addr + w as u64, n, w) {
+    let (s, f) = (ns / 1_000_000_000, ns % 1_000_000_000);
+    let f = if usec { f / 1_000 } else { f };
+    if !wr_u(env, abi.endian, addr, s, w) || !wr_u(env, abi.endian, addr + w as u64, f, w) {
         return Err(errno::EFAULT);
     }
     Ok(())
@@ -267,15 +278,9 @@ fn revents_of(r: polyisa_kernel::Ready, events: u32) -> u16 {
     let mut v = 0u16;
     if r.read {
         v |= (events & (1 | 2 | 0x40 | 0x80)) as u16; // IN PRI RDNORM RDBAND
-        if v == 0 {
-            v = 1;
-        }
     }
     if r.write {
         v |= (events & (4 | 0x100 | 0x200)) as u16; // OUT WRNORM WRBAND
-        if v == 0 {
-            v = 4;
-        }
     }
     if r.err {
         v |= 8; // POLLERR
@@ -327,8 +332,17 @@ fn do_poll(
             if rev != 0 {
                 nready += 1;
             }
-            // events=0 でも HUP/ERR を拾えるよう両方向で監視する。
-            watches.push((fd as u32, WANT_READ | WANT_WRITE));
+            // ゲストの興味に応じた方向だけ監視する。ERR/HUP/NVAL は
+            // 興味に関係なく起床条件と revents の両方に載る。
+            let ev = u32::from(events);
+            let mut w = 0u32;
+            if ev & 0xC3 != 0 {
+                w |= WANT_READ;
+            }
+            if ev & 0x304 != 0 {
+                w |= WANT_WRITE;
+            }
+            watches.push((fd as u32, w));
         }
         if !wr_u(env, abi.endian, base + 6, u64::from(rev), 2) {
             return Err(errno::EFAULT);
@@ -398,6 +412,7 @@ fn do_select(
     tv_addr: u64,
     timeout: Option<u64>,
     tv_null: bool,
+    tv_usec: bool,
     prev: Option<&Wait>,
     now: u64,
     pending: u64,
@@ -447,12 +462,13 @@ fn do_select(
                 abi,
                 tv_addr,
                 remaining_ns(prev, now, timeout.unwrap_or(0)),
+                tv_usec,
             )?;
         }
         return Ok(Out::Done(nready));
     }
     if expired(prev, now) || timeout == Some(0) {
-        wr_ts(env, abi, tv_addr, 0)?;
+        wr_ts(env, abi, tv_addr, 0, tv_usec)?;
         return Ok(Out::Done(0));
     }
     Ok(Out::Wait(Wait {
@@ -460,7 +476,7 @@ fn do_select(
         deadline: if tv_null {
             None
         } else {
-            timeout.map(|ns| now + ns)
+            timeout.map(|ns| now.saturating_add(ns))
         },
     }))
 }
@@ -473,11 +489,13 @@ fn sys_select(
     abi: &WaitAbi,
     env: &mut BareEnv,
     args: &[u64; 6],
+    tv_usec: bool,
+    old_block: bool,
     prev: Option<&Wait>,
     now: u64,
     pending: u64,
 ) -> Result<Out, u32> {
-    let (nfds, rd, wr, ex, tv) = if abi.old_select {
+    let (nfds, rd, wr, ex, tv) = if old_block {
         let w = abi.ptr_size as u64;
         let mut a = [0u64; 5];
         for (i, slot) in a.iter_mut().enumerate() {
@@ -488,7 +506,7 @@ fn sys_select(
     } else {
         (args[0], args[1], args[2], args[3], args[4])
     };
-    let timeout = rd_ts(env, abi, tv)?;
+    let timeout = rd_ts(env, abi, tv, tv_usec)?;
     do_select(
         fds,
         abi,
@@ -500,6 +518,7 @@ fn sys_select(
         tv,
         timeout,
         tv == 0,
+        tv_usec,
         prev,
         now,
         pending,
@@ -693,9 +712,11 @@ fn sys_memfd_create(
     _name_addr: u64,
     flags: u64,
 ) -> Result<u64, u32> {
-    // MFD_CLOEXEC=1・MFD_ALLOW_SEALING=2・MFD_HUGETLB=4 を既知とする。
+    // MFD_CLOEXEC=1・MFD_ALLOW_SEALING=2・MFD_HUGETLB=4・
+    // MFD_NOEXEC_SEAL=8・MFD_EXEC=16 を既知とする（HUGETLB 系と
+    // exec 制御は近似として受理のみ）。
     // 名前の正当性は検査しない（読めればよい。読めなくても受理）。
-    if flags & !7 != 0 {
+    if flags & !0x1F != 0 {
         return Err(errno::EINVAL);
     }
     let _ = (env, abi); // 名前の読み取りは記録しないので省略。
@@ -746,8 +767,8 @@ fn sys_signalfd(
 /// itimerspec（it_interval・it_value の timespec 2 個）を読む。
 fn rd_itimer(env: &mut BareEnv, abi: &WaitAbi, addr: u64) -> Result<(u64, u64), u32> {
     let w = u64::from(abi.time_size);
-    let iv = rd_ts(env, abi, addr)?.unwrap_or(0);
-    let v = rd_ts(env, abi, addr + w * 2)?.unwrap_or(0);
+    let iv = rd_ts(env, abi, addr, false)?.unwrap_or(0);
+    let v = rd_ts(env, abi, addr + w * 2, false)?.unwrap_or(0);
     Ok((iv, v))
 }
 
@@ -760,8 +781,8 @@ fn wr_itimer(
     value: u64,
 ) -> Result<(), u32> {
     let w = u64::from(abi.time_size);
-    wr_ts(env, abi, addr, interval)?;
-    wr_ts(env, abi, addr + w * 2, value)?;
+    wr_ts(env, abi, addr, interval, false)?;
+    wr_ts(env, abi, addr + w * 2, value, false)?;
     Ok(())
 }
 
@@ -809,7 +830,7 @@ fn sys_timerfd_settime(
     } else if flags & 1 != 0 {
         Some(value) // 絶対時刻
     } else {
-        Some(now + value)
+        Some(now.saturating_add(value))
     };
     st.expirations = 0;
     Ok(0)
@@ -854,20 +875,30 @@ pub fn dispatch(
             let dl = if ms < 0 {
                 None
             } else {
-                Some(now + ms as u64 * 1_000_000)
+                Some(now.saturating_add((ms as u64).saturating_mul(1_000_000)))
             };
             do_poll(fds, abi, env, args[0], args[1], dl, prev, now, pending)
         }
         "ppoll" | "ppoll_time64" => {
-            let dl = match rd_ts(env, abi, args[2]) {
-                Ok(t) => t.map(|ns| now + ns),
+            let dl = match rd_ts(env, abi, args[2], false) {
+                Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
             do_poll(fds, abi, env, args[0], args[1], dl, prev, now, pending)
         }
-        "select" | "_newselect" | "pselect6" | "pselect6_time64" => {
-            sys_select(fds, abi, env, args, prev, now, pending)
-        }
+        "select" | "_newselect" | "pselect6" | "pselect6_time64" => sys_select(
+            fds,
+            abi,
+            env,
+            args,
+            // select/_newselect は timeval、pselect6 系は timespec。
+            matches!(name, "select" | "_newselect"),
+            // 旧形式の引数ブロックは select 番号のときだけ。
+            abi.old_select && name == "select",
+            prev,
+            now,
+            pending,
+        ),
         "epoll_create" => sys_epoll_create(fds, abi, args[0], 0).map(Out::Done),
         "epoll_create1" => sys_epoll_create(fds, abi, 1, args[0]).map(Out::Done),
         "epoll_ctl" => {
@@ -878,7 +909,7 @@ pub fn dispatch(
             let dl = if ms < 0 {
                 None
             } else {
-                Some(now + ms as u64 * 1_000_000)
+                Some(now.saturating_add((ms as u64).saturating_mul(1_000_000)))
             };
             sys_epoll_wait(
                 fds, abi, env, args[0], args[1], args[2], dl, prev, now, pending,
@@ -886,8 +917,8 @@ pub fn dispatch(
         }
         "epoll_pwait2" => {
             // (epfd, events, maxevents, ts, sigmask, sigsetsize)。
-            let dl = match rd_ts(env, abi, args[3]) {
-                Ok(t) => t.map(|ns| now + ns),
+            let dl = match rd_ts(env, abi, args[3], false) {
+                Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
             sys_epoll_wait(

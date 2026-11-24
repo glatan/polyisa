@@ -534,13 +534,16 @@ mod imp {
                 revents: 0,
             })
             .collect();
-        // SAFETY: p は nfds 要素のバッファ。
-        let r = unsafe { c::poll(p.as_mut_ptr(), p.len() as u64, timeout_ms) };
-        if r < 0 {
-            if last().kind() == io::ErrorKind::Interrupted {
-                // EINTR はやり直し（呼び出し側へは成功で返す）。
-                return poll(fds, timeout_ms);
+        // SAFETY: p は nfds 要素のバッファ。EINTR はやり直し
+        // （呼び出し側へは成功で返す）。
+        let r = loop {
+            let r = unsafe { c::poll(p.as_mut_ptr(), p.len() as u64, timeout_ms) };
+            if r < 0 && last().kind() == io::ErrorKind::Interrupted {
+                continue;
             }
+            break r;
+        };
+        if r < 0 {
             return Err(last());
         }
         for (dst, src) in fds.iter_mut().zip(p.iter()) {

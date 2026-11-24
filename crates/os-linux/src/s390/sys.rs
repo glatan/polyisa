@@ -43,6 +43,8 @@ pub struct Linux {
     pub stdin_buf: Vec<u8>,
     stdin_pos: usize,
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
 }
 
 impl Default for Linux {
@@ -95,6 +97,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
         }
     }
 
@@ -289,7 +292,7 @@ impl Linux {
         let abi = crate::sock::SockAbi::generic(8, Endian::Be);
         let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
         let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, &args, &map, 0, &mono) {
             Some(Ok(v)) => ret(v),
@@ -304,13 +307,19 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, nr: u64) -> Disp {
         let Some(name) = s390::name(nr) else {
             return Self::fail_ret(errno::ENOSYS);
         };
         let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
         let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, &args, 0, &mono) {
             Some(Ok(v)) => ret(v),
@@ -352,7 +361,7 @@ impl Linux {
                         return Self::fail_ret(errno::EBADF);
                     }
                     let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::read_other(
                         &mut self.fds,
@@ -428,7 +437,7 @@ impl Linux {
                 {
                     // ファイル以外の対象（eventfd 等）は fd 表経由。
                     let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Be);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::write_other(
                         &mut self.fds,

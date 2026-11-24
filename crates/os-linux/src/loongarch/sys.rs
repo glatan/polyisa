@@ -8,8 +8,8 @@
 //!   戻り値は $a0（$r4）。失敗は $a0 = -errno。
 //! - errno は asm-generic の値そのまま。
 //!
-//! 単一プロセス・単一スレッド模型: clone/execve/パイプ/ソケット/
-//! epoll/タイマ系は ENOSYS。シグナル枠組みは登録を受理するだけで
+//! 単一プロセス・単一スレッド模型: clone/execve/パイプ系は
+//! ENOSYS。シグナル枠組みは登録を受理するだけで
 //! 配送しない。LoongArch はリトルエンディアンのみ。
 //! 信頼できないゲストバイナリには使わないこと。
 // Ref: SRC-LINUX — arch/loongarch/kernel/entry.S,
@@ -89,6 +89,8 @@ pub struct Linux {
     dir_pos: std::collections::BTreeMap<u32, u64>,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// LA32 モデルか（ポインタ引数を 32 ビットに折り返す）。
     pub la64: bool,
     /// umask の保持値。
@@ -133,6 +135,7 @@ impl Linux {
             stdin_pos: 0,
             dir_pos: std::collections::BTreeMap::new(),
             mono_start: None,
+            wait_start: None,
             la64: true,
             umask: 0o22,
             reported: Vec::new(),
@@ -282,7 +285,7 @@ impl Linux {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -331,7 +334,7 @@ impl Linux {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(
                 &mut self.fds,
@@ -1438,7 +1441,7 @@ impl Linux {
         let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
         let mut a6 = [0u64; 6];
         a6[..a.len().min(6)].copy_from_slice(&a[..a.len().min(6)]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, &a6, &map, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -1453,11 +1456,17 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64]) -> Result<u64, u64> {
         let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
         let mut a6 = [0u64; 6];
         a6[..a.len().min(6)].copy_from_slice(&a[..a.len().min(6)]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, &a6, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -1585,8 +1594,8 @@ impl Linux {
             loongarch::nr::GETPRIORITY => Ok(0),
             // clock_nanosleep は相对時刻のみ nanosleep に委ねる。
             loongarch::nr::CLOCK_NANOSLEEP => self.sys_nanosleep(env, a[2], a[3]),
-            // 単一プロセス・単一スレッド模型: fork/exec/待機/パイプ/
-            // ソケット系は ENOSYS。GAP-0062。
+            // 単一プロセス・単一スレッド模型: fork/exec/待機/パイプ
+            // 系は ENOSYS。GAP-0062。
             // futex は単一スレッド模型で常に即座に返す。
             loongarch::nr::FUTEX => Ok(0),
             _ => {

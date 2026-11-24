@@ -598,8 +598,8 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 対応した内容：
 
-- `kernel::FdTable` の多態化（GAP-0025 の解消）。fd の対象を `FdTarget`（File/MemFd/EventFd/TimerFd/SignalFd/Epoll/PipeEnd/HostSock/Terminal/Reserved）の一つの表に作り替え、パイプ表は `Rc<RefCell>` で fd 表が持ち fork/dup で共有する。x86 の `pipe_ends`/`std_pipes` 二表構造を撤去し、os-v7・os-bsd・os-wasi を含む全呼び出し側を移行した
-- `host::sock` の FFI（unix 限定）。socket/bind/connect/listen/accept4/send/recv/sendmsg/recvmsg/shutdown/getsockname/getpeername/getsockopt/setsockopt/fcntl 非阻止/poll/socketpair を `SockFd` で包む
+- `kernel::FdTable` の多態化（GAP-0025 の解消）。fd の対象を `FdTarget`（File/MemFd/EventFd/TimerFd/SignalFd/Epoll/PipeEnd/PairSock/HostSock/Terminal/Reserved）の一つの表に作り替え、パイプ表は `Rc<RefCell>` で fd 表が持ち fork/dup で共有する。x86 の `pipe_ends`/`std_pipes` 二表構造を撤去し、os-v7・os-bsd・os-wasi を含む全呼び出し側を移行した
+- `host::sock` の FFI（unix 限定）。socket/bind/connect/listen/accept4/send/recv/shutdown/getsockname/getpeername/getsockopt/setsockopt/fcntl 非阻止/poll/socketpair を `SockFd` で包む（sendmsg/recvmsg は正準層の sendto/recvfrom で畳む）
 - `kernel::HostIo` 作業スレッド（user-mode.md「ホストの資源に対する待ち」の初実装）。監視集合を世代つきで受け、準備イベントを mpsc で返す。`ThreadWait::{Fd,HostFd,Timer}` の駐車種別を追加
 - fd 対象の操作 API。PairSock（カーネル内 socketpair）・HostSock（`Rc<HostSockEnt>` で nonblock/connecting を dup 間共有）・EventFd・TimerFd・SignalFd・Epoll（再帰上限・登録比較）・MemFd と、ready/host_watches/wait_deadline/epoll_collect/write_eventfd/seek の各問い合わせ
 - `os-linux::sock` 正準層。`SockAbi` で ABI 差分（ポインタ幅・エンディアン・errno 写像・SO_*/O_* 定数差）を畳み、`socketcall` 副番号の展開・AF_UNIX パスのゲストルート写像・ホストソケットの待ち要求（`Wait`/`Out`/`serve`）を共有する
@@ -612,7 +612,7 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 - rv64 には sock/wait 系を接続していない（対象 ABI の選定で外したまま。ソケット・待ち合わせ syscall は従来どおり未対応）
 - signalfd・pwait 系の保留集合は x86 のシグナル機構が供給し、他 ABI は空の保留集合として受理する（GAP-0026 の継続）
-- ホストソケットは AF_UNIX・AF_INET の stream/datagram で、netlink 等の他 family は ENOSYS。AF_UNIX のパスはゲストルート+cwd で写像する近似
+- ホストソケットは AF_UNIX・AF_INET の stream/datagram で、AF_INET6 や netlink 等の他 family は EAFNOSUPPORT。AF_UNIX のパスはゲストルート+cwd で写像する近似
 - 作業スレッド経由の待ち（HostIo）は x86 のみ。単一スレッド ABI の待ちは主スレッドで poll を消化する
 
 ## 残っている事項（横断）

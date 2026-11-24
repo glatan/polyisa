@@ -59,6 +59,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
     dir_pos: std::collections::HashMap<u32, usize>,
     /// ユーザスタックの上端。窓退避・復帰でのフォルトを
@@ -92,6 +94,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
             dir_pos: std::collections::HashMap::new(),
             stack_top: 0,
             stack_limit: 0,
@@ -770,7 +773,7 @@ impl Linux {
                     let w = if is_v9(env) { 8 } else { 4 };
                     let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
                     abi.errno = |e| host_errno(e as i32);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::read_other(
                         &mut self.fds,
@@ -850,7 +853,7 @@ impl Linux {
                     let w = if is_v9(env) { 8 } else { 4 };
                     let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
                     abi.errno = |e| host_errno(e as i32);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::write_other(
                         &mut self.fds,
@@ -1548,8 +1551,12 @@ fn host_errno(e: i32) -> u32 {
         106 => E::EISCONN,
         107 => E::ENOTCONN,
         108 => E::ESHUTDOWN,
+        109 => E::ETOOMANYREFS,
         110 => E::ETIMEDOUT,
         111 => E::ECONNREFUSED,
+        112 => E::EHOSTDOWN,
+        113 => E::EHOSTUNREACH,
+        114 => E::EALREADY,
         115 => E::EINPROGRESS,
         116 => E::ESTALE,
         122 => E::EDQUOT,
@@ -1706,8 +1713,10 @@ impl Linux {
         let mut abi = crate::sock::SockAbi::generic(if is_v9(env) { 8 } else { 4 }, Endian::Be);
         abi.errno = |e| host_errno(e as i32);
         abi.so_to_host = crate::sock::so_odd_to_host;
+        abi.sock_nonblock = u64::from(sparc::oflag::NONBLOCK);
+        abi.sock_cloexec = u64::from(sparc::oflag::CLOEXEC);
         let map = crate::sock::unix_path_map("", &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
             Some(Ok(v)) => ok_ret(v),
@@ -1723,13 +1732,20 @@ impl Linux {
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno は
     /// SunOS 系の独自値へ写し、ポインタ/時刻幅は v8=4・v9=8。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
         let w = if is_v9(env) { 8 } else { 4 };
         let mut abi = crate::wait::WaitAbi::generic(w, w, Endian::Be);
         abi.errno = |e| host_errno(e as i32);
         abi.nonblock = u64::from(sparc::oflag::NONBLOCK);
         abi.cloexec = u64::from(sparc::oflag::CLOEXEC);
-        let t0 = std::time::Instant::now();
+        abi.epoll_ev_size = 16; // sparc は u64 を 8 バイト整列（EPOLL_PACKED なし）
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
             Some(Ok(v)) => ok_ret(v),
@@ -2410,9 +2426,7 @@ impl Linux {
             | N::RT_TGSIGQUEUEINFO
             | N::SIGNAL
             | N::SGETMASK
-            | N::SSETMASK
-            | N::SIGNALFD
-            | N::SIGNALFD4 => ok_ret(0),
+            | N::SSETMASK => ok_ret(0),
             N::RT_SIGRETURN | N::SIGRETURN => ok_ret(0),
             N::KILL | N::TKILL | N::TGKILL => {
                 if args[0] == 0 || args[0] == self.pid {
@@ -2521,7 +2535,6 @@ impl Linux {
             | N::PKEY_MPROTECT
             | N::PKEY_ALLOC
             | N::PKEY_FREE
-            | N::MEMFD_CREATE
             | N::FINIT_MODULE
             | N::SCHED_SETATTR
             | N::SCHED_GETATTR

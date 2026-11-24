@@ -7,8 +7,8 @@
 //! - 番号は R3、引数は R4–R7・R0・R1、戻り値は R0。失敗は R0 = -errno。
 //! - SH には SYSCALL 命令はなく、全て trapa 経由。
 //!
-//! 単一プロセス・単一スレッド模型: fork/clone/execve/パイプ/ソケット/
-//! epoll/タイマ系は ENOSYS。シグナル枠組みは登録を受理するだけで
+//! 単一プロセス・単一スレッド模型: fork/clone/execve/パイプ系は
+//! ENOSYS。シグナル枠組みは登録を受理するだけで
 //! 配送しない。統計・時刻の一部は合成値。直列化はゲストエンディアンに
 //! 従う（LE/BE 両対応）。
 //! 信頼できないゲストバイナリには使わないこと。
@@ -61,6 +61,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
     dir_pos: std::collections::HashMap<u32, usize>,
     /// 報告済みの未実装番号（一度だけ出す）。
@@ -91,6 +93,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
             dir_pos: std::collections::HashMap::new(),
             reported: Vec::new(),
         }
@@ -287,7 +290,7 @@ impl Linux {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(
                 &mut self.fds,
@@ -358,7 +361,7 @@ impl Linux {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -1089,7 +1092,7 @@ impl Linux {
         };
         let abi = crate::sock::SockAbi::generic(4, self.endian);
         let map = crate::sock::unix_path_map("", &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, a, &map, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -1104,12 +1107,18 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, nr: u64, a: &[u64; 6]) -> Result<u64, u64> {
         let Some(name) = superh::name(nr) else {
             return Err(u64::from(superh::errno::ENOSYS));
         };
         let abi = crate::wait::WaitAbi::generic(4, 4, self.endian);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, a, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -1746,9 +1755,7 @@ impl Linux {
             | N::RT_SIGTIMEDWAIT_TIME64
             | N::RT_SIGQUEUEINFO
             | N::SIGALTSTACK
-            | N::RT_TGSIGQUEUEINFO
-            | N::SIGNALFD
-            | N::SIGNALFD4 => Ok(0),
+            | N::RT_TGSIGQUEUEINFO => Ok(0),
             N::SIGRETURN | N::RT_SIGRETURN => Ok(0),
             N::KILL | N::TKILL | N::TGKILL => {
                 if a[0] == 0 || a[0] == self.pid {
@@ -1790,7 +1797,10 @@ impl Linux {
             | N::TIMERFD_SETTIME64
             | N::TIMERFD_GETTIME64
             | N::EVENTFD
-            | N::EVENTFD2 => self.wait_call(env, nr, a),
+            | N::EVENTFD2
+            | N::SIGNALFD
+            | N::SIGNALFD4
+            | N::MEMFD_CREATE => self.wait_call(env, nr, a),
             N::PAUSE => Ok(0),
             // ---- ファイルシステム情報 ----
             N::STATFS | N::FSTATFS => self.sys_statfs(env, a[1], false),
@@ -1889,8 +1899,7 @@ impl Linux {
             | N::COPY_FILE_RANGE
             | N::SPLICE
             | N::TEE
-            | N::VMSPLICE
-            | N::MEMFD_CREATE => Err(e(E::ENOSYS)),
+            | N::VMSPLICE => Err(e(E::ENOSYS)),
             N::INOTIFY_INIT
             | N::INOTIFY_ADD_WATCH
             | N::INOTIFY_RM_WATCH

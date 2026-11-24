@@ -69,7 +69,7 @@ struct FdMeta {
 
 /// PA-RISC Linux の syscall 状態機械。`r20`=番号、`r26`–`r21`=引数。
 // Gap: GAP-0058 — 単一プロセス模型の意図的な簡略化（fork/exec なし、
-// select/poll/nanosleep はスタブ、statfs は合成値、シグナル配送なし）。
+// nanosleep はスタブ、statfs は合成値、シグナル配送なし）。
 pub struct Linux {
     /// 標準入出力の capture。テストが読む。
     pub io: PariscIo,
@@ -97,6 +97,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// getrandom の決定的乱数状態。
     rand_state: u64,
     /// rt_sigprocmask 系で覚える仮のシグナルマスク。
@@ -168,6 +170,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
             rand_state: 0x9e37_79b9_7f4a_7c15,
             sig_mask: 0,
             proc_name: [0; 16],
@@ -497,7 +500,7 @@ impl Linux {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
             let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
             abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -526,7 +529,7 @@ impl Linux {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
             let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
             abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
                 Ok(v) => Ok(v),
@@ -2409,7 +2412,7 @@ impl Linux {
         abi.sock_nonblock = oflag::NONBLOCK;
         abi.sock_cloexec = oflag::CLOEXEC;
         let map = crate::sock::unix_path_map("", &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
             Some(Ok(v)) => Disp::Ret(v),
@@ -2426,13 +2429,19 @@ impl Linux {
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno は
     /// HP-UX 系の独自値・O_* も独自系。hppa32 は u64 が 8B 整列
     /// なので epoll_event は 16B。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
         let mut abi = crate::wait::WaitAbi::generic(4, 4, Endian::Be);
         abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
         abi.epoll_ev_size = 16;
         abi.nonblock = oflag::NONBLOCK;
         abi.cloexec = oflag::CLOEXEC;
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
             Some(Ok(v)) => Disp::Ret(v),
@@ -3084,11 +3093,9 @@ impl Linux {
             | nr::PTRACE
             | nr::RT_SIGRETURN
             | nr::RESTART_SYSCALL
-            // pipe 系・socket/IPC 系・eventfd/epoll 系など単一
-            // プロセスモデルでは実装できないもの。
+            // pipe 系など単一プロセスモデルでは実装できないもの。
             | nr::PIPE
-            | nr::PIPE2
-            | nr::EPOLL_CREATE => Disp::Unimpl,
+            | nr::PIPE2 => Disp::Unimpl,
             // 旧型 getdents。正規は getdents64。
             nr::GETDENTS => Disp::Unimpl,
             nr::RSEQ => Disp::Unimpl, // glibc は ENOSYS でフォールバック

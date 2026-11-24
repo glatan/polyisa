@@ -56,6 +56,8 @@ pub struct Linux {
     dir_pos: std::collections::BTreeMap<u32, u64>,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
 }
 
 impl Default for Linux {
@@ -118,6 +120,7 @@ impl Linux {
             stdin_pos: 0,
             dir_pos: std::collections::BTreeMap::new(),
             mono_start: None,
+            wait_start: None,
         }
     }
 
@@ -770,7 +773,7 @@ impl Linux {
                 // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
                 if e == errno::EBADF && self.fds.target(fd).is_some() {
                     let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::read_other(
                         &mut self.fds,
@@ -831,7 +834,7 @@ impl Linux {
                 // ファイル以外の対象（eventfd 等）は fd 表経由。
                 if e == errno::EBADF && self.fds.target(fd).is_some() {
                     let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::write_other(
                         &mut self.fds,
@@ -926,6 +929,7 @@ impl Linux {
                     return match self.fds.seek(fd, off, whence) {
                         polyisa_kernel::FdSeek::Pos(p) => p,
                         polyisa_kernel::FdSeek::Pipe => Self::fail(errno::ESPIPE),
+                        polyisa_kernel::FdSeek::Inval => Self::fail(errno::EINVAL),
                         polyisa_kernel::FdSeek::Host(_) => Self::fail_host(errno::EIO as i32),
                     };
                 }
@@ -1142,7 +1146,7 @@ impl Linux {
         }
         let abi = crate::sock::SockAbi::generic(8, self.endian);
         let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         let r = crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono)?;
         Some(match r {
@@ -1157,12 +1161,18 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall の正準層呼び出し。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Option<Disp> {
         if !crate::wait::NAMES.contains(&name) {
             return None;
         }
         let abi = crate::wait::WaitAbi::generic(8, 8, self.endian);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         let r = crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono)?;
         Some(match r {

@@ -90,6 +90,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
     dir_pos: std::collections::HashMap<u32, usize>,
 }
@@ -131,6 +133,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            wait_start: None,
             dir_pos: std::collections::HashMap::new(),
         }
     }
@@ -781,7 +784,7 @@ impl Linux {
                     let w = (self.abi.ptr_bits() / 8) as u8;
                     let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
                     abi.errno = mips::host_to_mips_errno;
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::read_other(
                         &mut self.fds,
@@ -846,7 +849,7 @@ impl Linux {
                     let w = (self.abi.ptr_bits() / 8) as u8;
                     let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
                     abi.errno = mips::host_to_mips_errno;
-                    let t0 = std::time::Instant::now();
+                    let t0 = self.wait_epoch();
                     let mono = move || t0.elapsed().as_nanos() as u64;
                     return match crate::wait::write_other(
                         &mut self.fds,
@@ -1329,7 +1332,7 @@ impl Linux {
         abi.sock_cloexec = 0x80000; // mips O_CLOEXEC
         let map = crate::sock::unix_path_map("", &self.cwd);
         let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, a6, &map, 0, &mono) {
             Some(Ok(v)) => ret(Self::ok(env, v)),
@@ -1345,14 +1348,21 @@ impl Linux {
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
     /// errno・O_* は MIPS 独自系。時刻幅は o32/n32=4・n64=8。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 8]) -> Disp {
         let w = (self.abi.ptr_bits() / 8) as u8;
         let mut abi = crate::wait::WaitAbi::generic(w, w, self.endian);
         abi.errno = mips::host_to_mips_errno;
         abi.nonblock = 0x80; // mips O_NONBLOCK
         abi.cloexec = 0x80000; // mips O_CLOEXEC
+        abi.epoll_ev_size = 16; // mips は u64 を 8 バイト整列（EPOLL_PACKED なし）
         let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, a6, 0, &mono) {
             Some(Ok(v)) => ret(Self::ok(env, v)),
@@ -1831,8 +1841,7 @@ impl Linux {
             // lookup_dcookie=247
             // getdents=141（旧 getdents。d_reclen の形式が違う。getdents64 に回す）
             141 => self.fail_ret(env, mips::errno::ENOSYS),
-            // _newselect=142, poll=188, ppoll=302
-            142 | 188 | 302 => ret(Self::ret(env, 0)),
+            // _newselect=142, poll=188, ppoll=302 は wait 正準層へ。
             // flock=143
             143 => ret(Self::ret(env, 0)),
             // readv=145, writev=146
@@ -2026,8 +2035,7 @@ impl Linux {
             358 => ret(Self::ret(env, 0)),
             // getrandom=353
             353 => ret(self.do_getrandom(env, args[0], args[1])),
-            // memfd_create=354? secret=, fchmodat2=452
-            354 => self.fail_ret(env, mips::errno::ENOSYS),
+            // memfd_create=354 は wait 正準層へ。
             // sched_getaffinity=240, sched_setaffinity=239
             240 => {
                 let set = args[2];
@@ -2109,7 +2117,7 @@ impl Linux {
                 }
                 ret(self.do_statx(env, args[1], args[4]))
             }
-            "poll" | "ppoll" | "_newselect" | "pselect6" => ret(Self::ret(env, 0)),
+            // poll/select 系は `wait` 正準層が名前ゲートで引き受ける。
             "lseek" => {
                 let fd = args[0] as u32;
                 let off = args[1] as i64;

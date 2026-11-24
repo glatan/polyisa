@@ -13,7 +13,7 @@
 //! （`sem::out_get`。epc 呼出では br.call で sol=0 になった新
 //! フレームの先頭に呼出側の引数が写るので、両経路で同じ
 //! 読み方が成立する）。結果は r8・r10。単一プロセス・単一
-//! スレッド模型（fork/clone/execve/socket/pipe 系は ENOSYS
+//! スレッド模型（fork/clone/execve/pipe 系は ENOSYS
 //! — Gap: GAP-0068）。
 //! Ref: SRC-LINUX-66 — kernel/entry.S, kernel/gate.S, syscall.tbl.
 
@@ -47,7 +47,7 @@ pub struct Ia64Io {
 /// IA-64 Linux の syscall 状態機械。r15−NR_BASE=表番号、
 /// out0–out5=引数、r8/r10=戻り値。
 // Gap: GAP-0068 — 単一プロセス模型の意図的な簡略化（fork/execve
-// なし、signal はスタブ、statfs は合成値、pipe/socket は ENOSYS）。
+// なし、signal はスタブ、statfs は合成値、pipe は ENOSYS）。
 pub struct Linux {
     /// 標準出力・標準エラーの捕獲。
     pub io: Ia64Io,
@@ -72,6 +72,8 @@ pub struct Linux {
     pid: u64,
     /// gettimeofday/clock_gettime の単調時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// rt_sigprocmask が見せる仮想のシグナルマスク。
     sig_mask: u64,
     /// getdents64 の fd ごとの走査位置（entries, pos）。
@@ -111,6 +113,7 @@ impl Linux {
             reported: Vec::new(),
             pid: 0,
             mono_start: None,
+            wait_start: None,
             sig_mask: 0,
             dir_scans: std::collections::HashMap::new(),
             umask: 0o22,
@@ -391,7 +394,7 @@ impl Linux {
         if fd >= 3 && self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -419,7 +422,7 @@ impl Linux {
         } else if self.fds.target(fd).is_some() && self.fds.file(fd).is_none() {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
             let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
                 Ok(v) => Ok(v),
@@ -1582,7 +1585,7 @@ impl Linux {
     fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Result<u64, u64> {
         let abi = crate::sock::SockAbi::generic(8, Endian::Le);
         let map = crate::sock::unix_path_map("", &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -1597,9 +1600,15 @@ impl Linux {
     }
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Result<u64, u64> {
         let abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
             Some(Ok(v)) => Ok(v),
@@ -2045,32 +2054,7 @@ impl Linux {
                     _ => Ia64Result::Value(0),
                 }
             }
-            // poll/select 系のスタブ: タイムアウト扱いで 0 を返すが、
-            // 出力集合・revents もクリアして呼び出し側の判定を守る。
-            nr::POLL | nr::PPOLL => {
-                // pollfd = {fd i32, events i16, revents i16}（8B）。
-                let (fds, nfds) = (args[0], args[1]);
-                for i in 0..nfds.min(1024) {
-                    let a = fds.wrapping_add(i * 8);
-                    if !self.write_bytes(env, a + 6, &[0, 0]) {
-                        return Ia64Result::Fail(errno::EFAULT);
-                    }
-                }
-                Ia64Result::Value(0)
-            }
-            nr::SELECT | nr::PSELECT6 => {
-                let n = args[0];
-                let words = n.min(1024).div_ceil(64) * 8;
-                for &a in args.iter().take(4).skip(1) {
-                    if a != 0 {
-                        let z = vec![0u8; words as usize];
-                        if !self.write_bytes(env, a, &z) {
-                            return Ia64Result::Fail(errno::EFAULT);
-                        }
-                    }
-                }
-                Ia64Result::Value(0)
-            }
+            // poll/select/epoll 系は `wait` 正準層が名前ゲートで引き受ける。
             nr::GETITIMER => {
                 if self.write_bytes(env, args[1], &[0u8; 32]) {
                     Ia64Result::Value(0)

@@ -61,7 +61,7 @@ pub struct AlphaIo {
 
 /// Alpha Linux の syscall 状態機械。v0=番号、a0–a5=引数。
 // Gap: GAP-0046 — 単一プロセス模型の意図的な簡略化（fork なし、
-// select/poll/nanosleep はスタブ、statfs は合成値）。
+// osf_select は ENOSYS、nanosleep はスタブ、statfs は合成値）。
 pub struct Linux {
     /// 標準入出力の capture。
     pub io: AlphaIo,
@@ -86,6 +86,8 @@ pub struct Linux {
     pid: u64,
     /// gettimeofday/clock_gettime の単調時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
+    wait_start: Option<std::time::Instant>,
     /// rt_sigprocmask が見せる仮想のシグナルマスク。
     sig_mask: u64,
     /// getdents64 の fd ごとの走査位置（entries, pos）。
@@ -126,6 +128,7 @@ impl Linux {
             reported: Vec::new(),
             pid: 0,
             mono_start: None,
+            wait_start: None,
             sig_mask: 0,
             dir_scans: std::collections::HashMap::new(),
             umask: 0o22,
@@ -412,7 +415,7 @@ impl Linux {
             // ファイル以外の対象（eventfd 等）は fd 表経由。
             let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
             abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::write_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono)
             {
@@ -441,7 +444,7 @@ impl Linux {
             // ファイル以外の対象（eventfd・timerfd 等）は fd 表経由。
             let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
             abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
-            let t0 = std::time::Instant::now();
+            let t0 = self.wait_epoch();
             let mono = move || t0.elapsed().as_nanos() as u64;
             return match crate::wait::read_other(&mut self.fds, &abi, env, fd, buf, len, 0, &mono) {
                 Ok(v) => Ok(v),
@@ -1693,7 +1696,7 @@ impl Linux {
         abi.sock_nonblock = 0x4; // O_NONBLOCK (OSF)
         abi.sock_cloexec = 1 << 21; // O_CLOEXEC
         let map = crate::sock::unix_path_map("", &self.cwd);
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
             Some(Ok(v)) => AlphaResult::Value(v),
@@ -1709,12 +1712,18 @@ impl Linux {
 
     /// 待ち合わせ系 syscall を `wait` 正準層へ委譲する。errno
     /// ・O_* は OSF 系の独自値。
+    /// fd 待ち用の時計起点。初回の待ちで立ち上げ、呼び出し間で
+    /// 共有する（timerfd の期限を跨呼び出しで揃える）。
+    fn wait_epoch(&mut self) -> std::time::Instant {
+        *self.wait_start.get_or_insert_with(std::time::Instant::now)
+    }
+
     fn wait_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> AlphaResult {
         let mut abi = crate::wait::WaitAbi::generic(8, 8, Endian::Le);
         abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
         abi.nonblock = 0x4; // O_NONBLOCK (OSF)
         abi.cloexec = 1 << 21; // O_CLOEXEC
-        let t0 = std::time::Instant::now();
+        let t0 = self.wait_epoch();
         let mono = move || t0.elapsed().as_nanos() as u64;
         match crate::wait::drive(&mut self.fds, &abi, env, name, args, 0, &mono) {
             Some(Ok(v)) => AlphaResult::Value(v),
@@ -2197,34 +2206,7 @@ impl Linux {
                 }
                 AlphaResult::Value(0)
             }
-            // poll/select 系のスタブ: タイムアウト扱いで 0 を返すが、
-            // 出力集合・revents もクリアして呼び出し側の判定を守る。
-            nr::POLL | nr::PPOLL => {
-                // pollfd = {fd i32, events i16, revents i16}（8B）。
-                let (fds, nfds) = (args[0], args[1]);
-                for i in 0..nfds.min(1024) {
-                    let a = fds.wrapping_add(i * 8);
-                    if !self.write_bytes(env, a + 6, &[0, 0]) {
-                        return AlphaResult::Fail(errno::EFAULT);
-                    }
-                }
-                AlphaResult::Value(0)
-            }
-            nr::SELECT | nr::PSELECT6 => {
-                // 各 fd_set を 0 クリア（kernel は maxfd で切るが
-                // スタブなので全幅クリアでよい）。sigmask は触らない。
-                let n = args[0];
-                let words = n.min(1024).div_ceil(64) * 8;
-                for &a in args.iter().take(4).skip(1) {
-                    if a != 0 {
-                        let z = vec![0u8; words as usize];
-                        if !self.write_bytes(env, a, &z) {
-                            return AlphaResult::Fail(errno::EFAULT);
-                        }
-                    }
-                }
-                AlphaResult::Value(0)
-            }
+            // poll/select/epoll 系は `wait` 正準層が名前ゲートで引き受ける。
             nr::GETITIMER => {
                 if self.write_bytes(env, args[1], &[0u8; 32]) {
                     AlphaResult::Value(0)

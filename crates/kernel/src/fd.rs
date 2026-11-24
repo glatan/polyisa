@@ -331,6 +331,11 @@ impl PairSock {
     /// SHUT_RD 済みでも既に届いた分は読める。
     #[must_use]
     pub fn recv(&mut self, end: PairEnd, max: usize) -> PipeRead {
+        // Linux は len=0 の recv を即 0 で返す。Empty にすると
+        // 呼び出し側が阻止待ちにする。
+        if max == 0 {
+            return PipeRead::Bytes(Vec::new());
+        }
         let rd_shut = match end {
             PairEnd::A => self.a_rd_shut,
             PairEnd::B => self.b_rd_shut,
@@ -572,7 +577,8 @@ pub enum FdTarget {
     /// 端末（/dev/tty）。中身は O_NONBLOCK。
     Terminal(Rc<Cell<bool>>),
     /// 番号だけを占有する場所取り。対象の実体は呼び出し側が別に
-    /// 持つ（os-wasi の Dir/Preopen スロット）。dup はできない。
+    /// 持つ（os-wasi の Dir/Preopen スロット）。dup は Reserved
+    /// のまま番号を増やすだけで実体は複製しない。
     Reserved,
 }
 
@@ -613,25 +619,33 @@ impl FdTarget {
     }
 
     /// epoll 登録の識別鍵。同一の対象は同じ鍵を持つ
-    /// （dup しても変わらない。File はホストの dev:ino 相当が
-    /// 望ましいが、ここではポインタ相当の安定した値を使う）。
+    /// （dup しても変わらない。File はホストの dev:ino）。
     #[must_use]
     pub fn epoll_key(&self) -> u64 {
+        // 型ごとにキーの名前空間を分ける（パイプ id・ホスト fd・
+        // inode・ポインタが同じ数域で衝突しないように上位ビットで
+        // タグを付ける）。
+        const TAG_PIPE: u64 = 1 << 60;
+        const TAG_HOST: u64 = 2 << 60;
+        const TAG_PTR: u64 = 3 << 60;
+        const PTR_MASK: u64 = !(0xF << 60);
         match self {
-            Self::File(f) => polyisa_host::fstat(f).map(|s| s.ino).unwrap_or(0),
-            Self::PipeEnd { id, read } => (*id << 1) | u64::from(!read),
+            Self::File(f) => polyisa_host::fstat(f)
+                .map(|s| (s.dev << 32) | s.ino)
+                .unwrap_or(0),
+            Self::PipeEnd { id, read } => TAG_PIPE | ((*id << 1) | u64::from(!read)),
             Self::PairSock { pair, end } => {
-                let base = Rc::as_ptr(pair) as usize as u64;
-                (base << 1) | u64::from(*end == PairEnd::B)
+                let base = Rc::as_ptr(pair) as usize as u64 & PTR_MASK;
+                TAG_PTR | (base << 1) | u64::from(*end == PairEnd::B)
             }
             #[cfg(unix)]
-            Self::HostSock(s) => s.sock.raw() as u64,
-            Self::EventFd(s) => Rc::as_ptr(s) as usize as u64,
-            Self::TimerFd(s) => Rc::as_ptr(s) as usize as u64,
-            Self::SignalFd(s) => Rc::as_ptr(s) as usize as u64,
-            Self::Epoll(s) => Rc::as_ptr(s) as usize as u64,
-            Self::MemFd(s) => Rc::as_ptr(s) as usize as u64,
-            Self::Terminal(n) => Rc::as_ptr(n) as usize as u64,
+            Self::HostSock(s) => TAG_HOST | s.sock.raw() as u64,
+            Self::EventFd(s) => TAG_PTR | Rc::as_ptr(s) as usize as u64 & PTR_MASK,
+            Self::TimerFd(s) => TAG_PTR | Rc::as_ptr(s) as usize as u64 & PTR_MASK,
+            Self::SignalFd(s) => TAG_PTR | Rc::as_ptr(s) as usize as u64 & PTR_MASK,
+            Self::Epoll(s) => TAG_PTR | Rc::as_ptr(s) as usize as u64 & PTR_MASK,
+            Self::MemFd(s) => TAG_PTR | Rc::as_ptr(s) as usize as u64 & PTR_MASK,
+            Self::Terminal(n) => TAG_PTR | Rc::as_ptr(n) as usize as u64 & PTR_MASK,
             Self::Reserved => 0,
         }
     }
@@ -707,6 +721,8 @@ pub enum FdSeek {
     Pos(u64),
     /// シークできない対象（ESPIPE）。
     Pipe,
+    /// whence や結果位置の不正（EINVAL）。
+    Inval,
     /// ホスト側のエラー。
     Host(std::io::Error),
 }
@@ -1000,7 +1016,9 @@ impl FdTable {
             FdTarget::PairSock { pair, end } => {
                 pair.borrow_mut().close(*end);
             }
-            FdTarget::Epoll(set) if depth < Self::EPOLL_MAX_DEPTH => {
+            FdTarget::Epoll(set) if depth < Self::EPOLL_MAX_DEPTH && Rc::strong_count(set) == 1 => {
+                // 集合の解体は最後の参照が閉じるときだけ行う。dup・
+                // fork・他 epoll への登録で生きている間は保持する。
                 let regs = std::mem::take(&mut set.borrow_mut().regs);
                 for reg in regs {
                     self.close_target_at(&reg.target, depth + 1, wakes);
@@ -1255,12 +1273,25 @@ impl FdTable {
         }
     }
 
-    /// fd 待ちに使う最速の期限（ナノ秒）。今のところ TimerFd の
-    /// deadline だけを返す。他の対象・無い fd では None。
+    /// fd 待ちに使う最速の期限（ナノ秒）。TimerFd の deadline を
+    /// 返し、epoll 集合は登録対象の期限の最小値を返す。
+    /// 他の対象・無い fd では None。
     #[must_use]
     pub fn wait_deadline(&self, fd: u32) -> Option<u64> {
-        match self.target(fd) {
-            Some(FdTarget::TimerFd(s)) => s.borrow().deadline,
+        self.deadline_of(self.target(fd)?, 0)
+    }
+
+    /// 対象の期限。epoll 集合は登録対象の期限を深さ制限つきで
+    /// 再帰的にたどり、最小値を返す。
+    fn deadline_of(&self, target: &FdTarget, depth: u8) -> Option<u64> {
+        match target {
+            FdTarget::TimerFd(s) => s.borrow().deadline,
+            FdTarget::Epoll(set) if depth < Self::EPOLL_MAX_DEPTH => set
+                .borrow()
+                .regs
+                .iter()
+                .filter_map(|r| self.deadline_of(&r.target, depth + 1))
+                .min(),
             _ => None,
         }
     }
@@ -1593,7 +1624,12 @@ impl FdTable {
         match self.target(fd) {
             Some(FdTarget::EventFd(s)) => {
                 let cur = s.count.get();
-                if v == u64::MAX || cur.saturating_add(v) == u64::MAX {
+                // 0xFFFF_FFFF_FFFF_FFFF の書き込み自体は EINVAL。
+                // 合計が MAX に達する書き込みは EAGAIN/待ち。
+                if v == u64::MAX {
+                    return FdWrite::Inval;
+                }
+                if cur.saturating_add(v) == u64::MAX {
                     return FdWrite::Full;
                 }
                 s.count.set(cur + v);
@@ -1624,7 +1660,7 @@ impl FdTable {
                 0 => SeekFrom::Start(off as u64),
                 1 => SeekFrom::Current(off),
                 2 => SeekFrom::End(off),
-                _ => return FdSeek::Pipe,
+                _ => return FdSeek::Inval,
             };
             let Some(file) = self.file_mut(fd) else {
                 return FdSeek::Pipe;
@@ -1641,11 +1677,11 @@ impl FdTable {
                     0 => 0,
                     1 => m.pos as i128,
                     2 => m.data.len() as i128,
-                    _ => return FdSeek::Pipe,
+                    _ => return FdSeek::Inval,
                 };
                 let pos = base + off as i128;
                 if pos < 0 {
-                    return FdSeek::Pipe;
+                    return FdSeek::Inval;
                 }
                 m.pos = pos as u64;
                 FdSeek::Pos(m.pos)
@@ -1765,7 +1801,7 @@ fn target_host_watches(
                 // EPOLLIN/PRI/RDNORM/RDBAND/RDHUP → POLLIN、
                 // EPOLLOUT/WRNORM/WRBAND → POLLOUT。ERR/HUP は
                 // ホストの poll が興味無しでも報告する。
-                let ev = (u32::from(reg.events & 0x2043 != 0))
+                let ev = (u32::from(reg.events & 0x20C3 != 0))
                     | (u32::from(reg.events & 0x304 != 0) << 2);
                 target_host_watches(&reg.target, ev, depth + 1, out);
             }
@@ -1789,10 +1825,11 @@ fn epoll_holds(hay: &Rc<RefCell<EpollSet>>, needle: &Rc<RefCell<EpollSet>>, dept
 }
 
 /// epoll の興味イベントと準備状態の照合。ERR・HUP は興味に
-/// 無くても常に起こす。POLLIN=1・POLLOUT=4・POLLERR=8・POLLHUP=16
-/// （asm-generic の値）。
+/// 無くても常に起こす。読み系は
+/// IN/PRI/RDNORM/RDBAND/RDHUP=0x20C3、書き系は
+/// OUT/WRNORM/WRBAND=0x304（asm-generic の値）。
 fn reg_events_match(events: u32, r: Ready) -> bool {
-    r.err || r.hup || (r.read && events & 1 != 0) || (r.write && events & 4 != 0)
+    r.err || r.hup || (r.read && events & 0x20C3 != 0) || (r.write && events & 0x304 != 0)
 }
 
 /// ホストの準備状態をこちらの型に写す。
