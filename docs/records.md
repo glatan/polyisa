@@ -594,13 +594,34 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - `sh`（V7・BSD 共通）が fork 失敗を sigsuspend でリトライする経路は単一プロセス模型の外。マルチプロセスが要件の配布物テストが現れた時点で個別に実装する
 - `df -i`（4.3BSD）が浮動小数点の reserved-operand fault を起こす。ゲストの D-float 語彙の範囲の問題で、syscall 層の外
 
+### 段階 26：システムコールの段階 5（ネットワークと待ち合わせ）
+
+対応した内容：
+
+- `kernel::FdTable` の多態化（GAP-0025 の解消）。fd の対象を `FdTarget`（File/MemFd/EventFd/TimerFd/SignalFd/Epoll/PipeEnd/HostSock/Terminal/Reserved）の一つの表に作り替え、パイプ表は `Rc<RefCell>` で fd 表が持ち fork/dup で共有する。x86 の `pipe_ends`/`std_pipes` 二表構造を撤去し、os-v7・os-bsd・os-wasi を含む全呼び出し側を移行した
+- `host::sock` の FFI（unix 限定）。socket/bind/connect/listen/accept4/send/recv/sendmsg/recvmsg/shutdown/getsockname/getpeername/getsockopt/setsockopt/fcntl 非阻止/poll/socketpair を `SockFd` で包む
+- `kernel::HostIo` 作業スレッド（user-mode.md「ホストの資源に対する待ち」の初実装）。監視集合を世代つきで受け、準備イベントを mpsc で返す。`ThreadWait::{Fd,HostFd,Timer}` の駐車種別を追加
+- fd 対象の操作 API。PairSock（カーネル内 socketpair）・HostSock（`Rc<HostSockEnt>` で nonblock/connecting を dup 間共有）・EventFd・TimerFd・SignalFd・Epoll（再帰上限・登録比較）・MemFd と、ready/host_watches/wait_deadline/epoll_collect/write_eventfd/seek の各問い合わせ
+- `os-linux::sock` 正準層。`SockAbi` で ABI 差分（ポインタ幅・エンディアン・errno 写像・SO_*/O_* 定数差）を畳み、`socketcall` 副番号の展開・AF_UNIX パスのゲストルート写像・ホストソケットの待ち要求（`Wait`/`Out`/`serve`）を共有する
+- `os-linux::wait` 正準層。`WaitAbi` で時刻幅・epoll_event 配置・old_select/`_newselect` の差分を畳み、select/pselect6・poll/ppoll（`*_time64` を含む）・epoll_create/create1/ctl/wait/pwait/pwait2・eventfd/eventfd2・timerfd_*（旧形式 timerfd を含む）・memfd_create・signalfd/signalfd4 を実装。ファイルを持たない fd 対象向けに `read_other`/`write_other` の読み書き経路も持つ
+- 全 ABI への接続。x86-64/i386/x32（マルチスレッド・駐車/掃討経路）と、aarch64・arm（oabi select(82) を含む）・m68k・sparc・mips o32/n32/n64・parisc・alpha（OSF errno・定数差）・power・s390・ia64・superh・loongarch・hexagon・openrisc（単一スレッド・主スレッド消化経路）。ソケット・待ち合わせの暫定スタブ（EPERM・0 返し・ENOSYS）は正準層への経路に置き換えた
+- `heavy_program_net`（S26-1）。clang 静的リンクの自前 C プログラムを x86-64（直接番号）・i386（socketcall）・aarch64（asm-generic）で動かし、socketpair エコー・eventfd・poll・timerfd・memfd・epoll・signalfd・TCP ループバックを順に試す
+- テストで露見した修正: x86 の自分待ち復帰判定（`fd_wait_prev` で駐車解除を拾う）、fd 待ち専用の時計起点（`wait_start` — `mono_start` と分離して clock_gettime の決定性を保つ）、起床時刻への timerfd 期限の畳み込み（`wait_deadline`）、eventfd write のエンディアン復元、memfd の lseek 経路、mips o32 の名前検索の加算オーバーフロー
+
+残っている事項：
+
+- rv64 には sock/wait 系を接続していない（対象 ABI の選定で外したまま。ソケット・待ち合わせ syscall は従来どおり未対応）
+- signalfd・pwait 系の保留集合は x86 のシグナル機構が供給し、他 ABI は空の保留集合として受理する（GAP-0026 の継続）
+- ホストソケットは AF_UNIX・AF_INET の stream/datagram で、netlink 等の他 family は ENOSYS。AF_UNIX のパスはゲストルート+cwd で写像する近似
+- 作業スレッド経由の待ち（HostIo）は x86 のみ。単一スレッド ABI の待ちは主スレッドで poll を消化する
+
 ## 残っている事項（横断）
 
 ### 台帳の未登録項目
 
 版の方針は「新しい資料が古い資料の記載を内包する想定で新しい版を採り、古い版にしか存在しない記載が必要な場合のみ例外とする」。台帳に登録した項目は全て確認済みとするため、登録済みの項目に残る作業はない。残るのは未登録の項目のみ：
 
-- 段階 26・27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
+- 段階 27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
 
 ### 所有者の作業
 
