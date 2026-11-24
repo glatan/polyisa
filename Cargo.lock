@@ -39,6 +39,7 @@ dependencies = [
  "polyisa-loader",
  "polyisa-mem",
  "polyisa-os-linux",
+ "polyisa-os-v7",
  "polyisa-os-wasi",
  "polyisa-sem",
  "polyisa-softfloat",
@@ -465,6 +466,18 @@ dependencies = [
  "polyisa-loader",
  "polyisa-mem",
  "polyisa-sem",
+]
+
+[[package]]
+name = "polyisa-os-v7"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest-pdp11",
+ "polyisa-host",
+ "polyisa-kernel",
+ "polyisa-loader",
+ "polyisa-mem",
 ]
 
 [[package]]

@@ -46,7 +46,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| OS3 | Unix V7 パーソナリティ骨格: `trap` の syscall 機械（番号は `handle_trap` の code に乗らない — pc-2 の命令語の下位バイト。引数規約・キャリーフラグによるエラー）、ファイル系・`brk`/`sbrk`・`exit`、a.out の配置と初期スタック、`cli` の `run_pdp11` への接続 | OS2 | - |
 | OS4 | V7 の残りの syscall（signal・time・dup・pipe 等の範囲の確定を含む）と `heavy_program_unixv7`（層 7） | OS3 | S25-1 |
 | OS5 | BSD パーソナリティ骨格: `chmk` の syscall 機械、BSD の a.out の配置と初期スタック、`cli` の `run_vax` への接続 | OS2 | - |
 | OS6 | BSD の残りの syscall と `heavy_program_bsdvax`（層 7） | OS5 | S25-2 |

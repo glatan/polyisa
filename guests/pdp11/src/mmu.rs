@@ -292,7 +292,7 @@ fn mmr1_rec(b: &mut InterpBackend, n: u8, delta: u16) {
     }
     let rec = (((delta & 0o37) << 3) | u16::from(n & 7)) & 0xff;
     let m1 = mmr_val(b, 1);
-    sem::set16(b, mmr_ref(1), (rec << 8) | (m1 & 0xff));
+    sem::set16(b, mmr_ref(1), (rec << 8) | (m1 >> 8));
 }
 
 /// 8 ビットの MMR1 記録を直接積む（MFPI/MFPD の SP 変化 0o366・
@@ -303,7 +303,52 @@ fn mmr1_rec_raw(b: &mut InterpBackend, rec: u16) {
         return;
     }
     let m1 = mmr_val(b, 1);
-    sem::set16(b, mmr_ref(1), ((rec & 0xff) << 8) | (m1 & 0xff));
+    sem::set16(b, mmr_ref(1), ((rec & 0xff) << 8) | (m1 >> 8));
+}
+
+/// MMR1 の記録を 1 件だけ除く。最新（上位バイト）を捨てて
+/// 残りを上位へ繰り上げる。`ea_fault_reg`=keep モデルの
+/// `wb_rollback` が書き戻しを戻したあとの帳合わせに使う
+/// （戻した分の記録を除かないと `reg_unwind` が二重に戻す）。
+/// ゲート条件は `mmr1_rec` と同じ —— 記録されない系では
+/// 除く分も無い。
+fn mmr1_pop(b: &mut InterpBackend) {
+    let pa = b.param::<MmuPaParam>();
+    if pa == MMU_PA_OFF || mmr_val(b, 0) & mmr0::FREEZE != 0 {
+        return;
+    }
+    let m1 = mmr_val(b, 1);
+    sem::set16(b, mmr_ref(1), (m1 & 0xff) << 8);
+}
+
+/// `wb_rollback`（`ea_fault_reg`=keep）が書き戻しを戻したことを
+/// MMR1 に反映する。sem 側から呼ぶ。
+pub fn wb_rolled_back(b: &mut InterpBackend) {
+    mmr1_pop(b);
+}
+
+/// MMR1 に記録されたレジスタ書き戻しを巻き戻す。再試行可能な
+/// fault（スタック成長のための再配置など）で命令をやり直す前に
+/// OS パーソナリティが呼ぶ —— 実機で OS が abort 処理で行う、
+/// MMR1 の記録に従った復元に相当する（ARCH83 第9章・KDJ11-E UG
+/// 6.5.2）。記録は上位バイトが最新なので適用の逆順に消す。
+/// r7 への書き戻しは記録対象外（`mmr1_rec` と同じ除外）。返した
+/// あとの MMR1 は 0 に戻す。
+// Ref: SPEC-PDP11-ARCH83（第9章の MMR1）.
+pub fn reg_unwind(b: &mut InterpBackend) {
+    let m1 = mmr_val(b, 1);
+    for rec in [m1 >> 8, m1 & 0xff] {
+        if rec == 0 {
+            continue;
+        }
+        let n = (rec & 7) as u8;
+        // 記録の増分は 7:3 の 5 ビット二の補数（new-old）。
+        // 逆操作なので引く。
+        let d = ((rec << 8) as i16) >> 11;
+        let v = sem::r_get(b, n);
+        sem::r_set(b, n, v.wrapping_sub(d as u16));
+    }
+    sem::set16(b, mmr_ref(1), 0);
 }
 
 /// 命令の先頭で行う MMU 簿記。MMR2 は命令の仮想 PC、MMR1 は 0、
@@ -898,5 +943,58 @@ mod tests {
         assert_eq!(apr_io(0o17676), Some((47, false)));
         // user I PDR0 = 177600 → idx 2*16 = 32・PDR。
         assert_eq!(apr_io(0o17600), Some((32, true)));
+    }
+
+    /// MMR1 を使う backend（11/70 のパラメータで MMU ありにする）。
+    fn b70() -> InterpBackend {
+        let mut b = InterpBackend::new(core::mem::size_of::<crate::CpuState>());
+        crate::install_params(&mut b, &crate::model_params("pdp11_70"));
+        mmr_put(&mut b, 0, mmr0::ENABLE);
+        b
+    }
+
+    /// reg_unwind は MMR1 の記録を適用の逆順に消す（正負両方）。
+    #[test]
+    fn reg_unwind_restores_regs() {
+        let mut b = b70();
+        sem::r_set(&mut b, 3, 0o1000);
+        sem::r_set(&mut b, 4, 0o2000);
+        // r3 += 2・r4 -= 2 が起きたとする（記録は new-old）。
+        mmr1_rec(&mut b, 3, 2);
+        mmr1_rec(&mut b, 4, 0o177776); // -2
+        sem::r_set(&mut b, 3, 0o1002);
+        sem::r_set(&mut b, 4, 0o1776);
+        reg_unwind(&mut b);
+        assert_eq!(sem::r_get(&b, 3), 0o1000);
+        assert_eq!(sem::r_get(&b, 4), 0o2000);
+        assert_eq!(mmr_val(&b, 1), 0);
+    }
+
+    /// wb_rolled_back で除いた記録は reg_unwind が再び戻さない
+    /// （keep モデルの二重巻き戻し抑止）。
+    #[test]
+    fn rolled_back_record_not_unwound_again() {
+        let mut b = b70();
+        sem::r_set(&mut b, 3, 0o1000);
+        sem::r_set(&mut b, 4, 0o2000);
+        mmr1_rec(&mut b, 3, 2);
+        mmr1_rec(&mut b, 4, 0o177776);
+        sem::r_set(&mut b, 3, 0o1002);
+        // wb_rollback が r4 を戻したとする（レジスタだけ戻す）。
+        sem::r_set(&mut b, 4, 0o2000);
+        wb_rolled_back(&mut b);
+        // 残った記録（r3 分）だけが戻される。
+        reg_unwind(&mut b);
+        assert_eq!(sem::r_get(&b, 3), 0o1000);
+        assert_eq!(sem::r_get(&b, 4), 0o2000);
+        assert_eq!(mmr_val(&b, 1), 0);
+    }
+
+    /// r7 の書き戻しは記録されない（mmr1_rec と同じ除外）。
+    #[test]
+    fn r7_not_recorded() {
+        let mut b = b70();
+        mmr1_rec(&mut b, 7, 2);
+        assert_eq!(mmr_val(&b, 1), 0);
     }
 }

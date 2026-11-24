@@ -12,7 +12,7 @@ polyisa/
 │   ├── mem/  timing/
 │   ├── isadl/  isagen/  sem/  guest/
 │   ├── engine/  ir/  jit/
-│   ├── loader/  kernel/  os-linux/  os-wasi/
+│   ├── loader/  kernel/  os-linux/  os-v7/  os-wasi/
 │   ├── host/  trace/  gdbstub/  cli/
 │   └── testkit/
 ├── guests/             ゲスト ISA ごとのクレート
@@ -50,6 +50,7 @@ polyisa/
 | `loader` | 実行ファイル形式の解析（ELF、a.out、ECOFF など） | アドレス空間への配置の方針（OS パーソナリティが決める） |
 | `kernel` | 仮想カーネル。ゲストプロセス、ゲストスレッド、スケジューラ、ファイル記述子、仮想ファイルシステム、パイプ、シグナルの配送機構、futex、時計 | 特定の OS のシステムコール規約 |
 | `os-linux` | Linux パーソナリティ。システムコールの実装と、ゲスト ABI ごとの番号、構造体、定数、シグナルフレーム | 仮想カーネルの汎用機構 |
+| `os-v7` | Unix V7 パーソナリティ（PDP-11）。`trap` の syscall 規約、a.out の配置と初期スタック、分離 I/D のユーザ PAR/PDR と MMR3 | 同上 |
 | `os-wasi` | WASI パーソナリティ | 同上 |
 | `host` | ホスト依存の機能。実行可能メモリ、端末の制御、ホストの CPU 機能の検出など | ゲストの概念 |
 | `trace` | 命令トレースとシステムコールトレースの記録形式と出力 | トレースの採取（エンジンの観測点が行う） |
@@ -83,6 +84,8 @@ OS 層        loader → bits
              kernel → mem, engine, guest, timing, host
              os-linux → kernel, loader, engine, guest, host, mem, sem,
                         guests/*（機能フラグで選択）
+             os-v7 → kernel, loader, engine, host, mem,
+                     guests/pdp11
              os-wasi → kernel, engine, guest, host, guests/wasm
 ツール層     trace → engine, guest
              gdbstub → engine, guest

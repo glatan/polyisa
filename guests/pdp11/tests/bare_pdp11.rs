@@ -4196,7 +4196,7 @@ fn mmu_user_mode_uses_own_apr_set() {
     st_put(&mut env, USP, 0o7000); // ユーザー SP（VA。UD0 経由で PA 0o1007000）
     // ユーザーコード（VA 0o2000 = PA 0o402000）: mov @#4, r1; emt 0
     pload(&mut env, 0o402000, &[0o013701, 0o000004, 0o104000]);
-    pput16(&mut env, 0o1000004, 0o111111);
+    pput16(&mut env, 0o1000004, 0o11111);
     // カーネル: -(sp) に PSW=0o140000 と PC=0o2000 を積んで rti。
     pload(
         &mut env,
@@ -4211,15 +4211,105 @@ fn mmu_user_mode_uses_own_apr_set() {
         step_m(&mut env, "pdp11_70").unwrap(); // push ×2, rti, mov@#4
     }
     // mov @#4 後 —— r1 にユーザー D 空間の値。
-    assert_eq!(sem::r_get(&env.backend, 1), 0o111111);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o11111);
     assert_eq!(sem::psw_get(&env.backend) >> 14 & 3, psw::USER);
     step_m(&mut env, "pdp11_70").unwrap(); // emt → カーネルハンドラへ
     assert_eq!(env.pc, 0o2400);
     // 新 PSW の prev<13:12> は旧モード（user=3）が挿入される。
     assert_eq!(sem::psw_get(&env.backend), 0o30000);
     step_m(&mut env, "pdp11_70").unwrap(); // mov r1,@#0o50000
-    assert_eq!(pget16(&env, 0o50000), 0o111111); // カーネル D（恒等）へ書けた
+    assert_eq!(pget16(&env, 0o50000), 0o11111); // カーネル D（恒等）へ書けた
     assert!(step_m(&mut env, "pdp11_70").is_err()); // halt で終端
+}
+
+/// 分離 I/D の間接アドレス規則（simh GeteaW）—— 変位間接
+/// `@x(PC)` の指し先語は r=PC でも D 空間から読む（Unix の
+/// `tst @disp(PC)` 型の大域ポインタ参照がこれに依存する）。
+#[test]
+fn mmu_indexdef_pointer_reads_d_space() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    // ユーザー I page0 → PA 0o400000・ユーザー D page0 →
+    // PA 0o50000（PAR は PA>>6 単位）。
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::I, 0),
+        0o04000,
+        0o177406,
+    );
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::D, 0),
+        0o00500,
+        0o177406,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS | mmu::mmr3::UDS);
+    mmu::mmr_put(&mut env.backend, 0, 1);
+    st_put(&mut env, USP, 0o7000);
+    // ユーザーコード（I-VA 0o1000 = PA 0o401000）:
+    //   mov @0o100(PC), r0   ; 指し先語は VA 0o1104
+    //   halt
+    pload(&mut env, 0o401000, &[0o017700, 0o000100, 0o000000]);
+    // I 空側の同じ VA 0o1104 には別の値 —— I 空間から読む間違い
+    // をした場合にオペランドアドレス 0o4000 になる。
+    pput16(&mut env, 0o401104, 0o004000);
+    // D 空側 VA 0o1104 = 正しい指し先語 0o2000。
+    pput16(&mut env, 0o51104, 0o002000);
+    // オペランド: D-VA 0o2000 = 正解、D-VA 0o4000 = 誤読み側。
+    pput16(&mut env, 0o52000, 0o11111);
+    pput16(&mut env, 0o54000, 0o22222);
+    // カーネル: PSW=0o140000・PC=0o1000 を積んで rti。
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012746, 0o140000, 0o012746, 0o001000, 0o000002],
+    );
+    for _ in 0..4 {
+        step_m(&mut env, "pdp11_70").unwrap(); // push ×2, rti, mov
+    }
+    // 指し先語が D 空間から読まれたなら r0 = *(D 0o2000)。
+    assert_eq!(sem::r_get(&env.backend, 0), 0o11111);
+}
+
+/// 増減間接 `@(PC)+` は逆に指し先語（拡張語）を I 空間から読む
+/// —— `jsr pc,@(r7)+` 型の命令列中のリテラルポインタ。
+#[test]
+fn mmu_autoincdef_pc_pointer_reads_i_space() {
+    let mut env = env_mmu70();
+    kernel_identity(&mut env, 0o177600);
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::I, 0),
+        0o04000,
+        0o177406,
+    );
+    mmu::apr_put(
+        &mut env.backend,
+        mmu::apr_idx(2, Space::D, 0),
+        0o00500,
+        0o177406,
+    );
+    mmu::mmr_put(&mut env.backend, 3, mmu::mmr3::KDS | mmu::mmr3::UDS);
+    mmu::mmr_put(&mut env.backend, 0, 1);
+    st_put(&mut env, USP, 0o7000);
+    // ユーザーコード（I-VA 0o2000 = PA 0o402000）:
+    //   mov @(PC)+, r0   ; 拡張語 0o3000 が指し先語 → *(D 0o3000)
+    //   halt
+    pload(&mut env, 0o402000, &[0o013700, 0o003000, 0o000000]);
+    // D 空側の同じ VA 0o2002 に別の値 —— 拡張語を D 空間から
+    // 読む間違いをするとオペランドアドレスがこちらになる。
+    pput16(&mut env, 0o52002, 0o005000);
+    pput16(&mut env, 0o53000, 0o33333);
+    pput16(&mut env, 0o55000, 0o44444);
+    pload(
+        &mut env,
+        0o1000,
+        &[0o012746, 0o140000, 0o012746, 0o002000, 0o000002],
+    );
+    for _ in 0..4 {
+        step_m(&mut env, "pdp11_70").unwrap(); // push ×2, rti, mov
+    }
+    assert_eq!(sem::r_get(&env.backend, 0), 0o33333);
 }
 
 /// nonresident abort —— ACF=0 のページへの参照は vector 250 の

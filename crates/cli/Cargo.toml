@@ -35,6 +35,7 @@ polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
 polyisa-os-linux = { path = "../os-linux" }
+polyisa-os-v7 = { path = "../os-v7", optional = true }
 polyisa-os-wasi = { path = "../os-wasi", optional = true }
 polyisa-sem = { path = "../sem" }
 polyisa-softfloat = { path = "../softfloat" }
@@ -72,7 +73,7 @@ guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-openrisc = ["dep:polyisa-guest-openrisc", "polyisa-os-linux/guest-openrisc"]
 guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
 # 裸実行の実行経路のみ（PD4）。OS パーソナリティは段階25 で足す。
-guest-pdp11 = ["dep:polyisa-guest-pdp11"]
+guest-pdp11 = ["dep:polyisa-guest-pdp11", "dep:polyisa-os-v7"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]

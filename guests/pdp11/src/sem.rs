@@ -435,13 +435,32 @@ fn eval_op_w(
     Ok(match (ea_v, spec) {
         (Ea::Reg(n), _) => Loc::Reg(n),
         (Ea::Imm(v), _) => Loc::Imm { v, addr: ea },
-        // 間接形の EA は指し先語のアドレス — その語（ワード）は
-        // 現モードの I 空間から読んでオペランドアドレスにする
-        // （ARCH83 第9章の deferred アクセス規則 —— simh の
-        // GeteaW は isenable で読む）。
-        (Ea::Addr(a), Spec::AutoIncDef(_) | Spec::AutoDecDef(_) | Spec::IndexDef { .. }) => {
+        // 間接形の EA は指し先語のアドレス — その語（ワード）を
+        // 読んでオペランドアドレスにする。空間選択は simh の
+        // GeteaW の規則（ARCH83 第9章の deferred アクセス規則）:
+        // 増減間接（@(R)+/@-(R)）は r=PC のときだけ I 空間
+        // （拡張語に相当）・他は D 空間、変位間接（@x(R)）は r に
+        // 関わらず D 空間。分離 I/D の Unix はこの区別に依存する
+        // —— `tst @disp(PC)` 型の大域ポインタ参照は @x(PC) で
+        // D 空間側の変数語を辿る。
+        (Ea::Addr(a), Spec::AutoIncDef(n) | Spec::AutoDecDef(n)) => {
             let mode = mmu::cur_mode(b);
-            match load_w_as(b, a, mode, mmu::Space::I) {
+            let sp = if *n == reg::PC as u8 {
+                mmu::Space::I
+            } else {
+                mmu::Space::D
+            };
+            match load_w_as(b, a, mode, sp) {
+                Ok(v) => Loc::Mem(v),
+                Err(e) => {
+                    wb_rollback(b);
+                    return Err(e);
+                }
+            }
+        }
+        (Ea::Addr(a), Spec::IndexDef { .. }) => {
+            let mode = mmu::cur_mode(b);
+            match load_w_as(b, a, mode, mmu::Space::D) {
                 Ok(v) => Loc::Mem(v),
                 Err(e) => {
                     wb_rollback(b);
@@ -461,6 +480,7 @@ fn wb_rollback(b: &mut InterpBackend) {
     if n != 0o177777 {
         r_set(b, n as u8, get16(b, wb_old_ref()));
         set16(b, wb_reg_ref(), 0o177777);
+        mmu::wb_rolled_back(b);
     }
 }
 

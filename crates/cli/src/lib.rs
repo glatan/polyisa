@@ -608,6 +608,41 @@ fn run_wasm_mod(
     Err("この polyisa は wasm ゲストなしでビルドされた".to_string())
 }
 
+/// PDP-11 の a.out を Unix V7 パーソナリティで実行する。
+/// V7 の実機が MMU（分離 I/D 可）を持つ 11/70 級なので、
+/// `--cpu` のモデル省略時は `pdp11_70`。
+#[cfg(feature = "guest-pdp11")]
+fn run_pdp11_aout(
+    bytes: &[u8],
+    path: &str,
+    argv: &[String],
+    spec: &CpuSpec,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let model = if spec.model.is_empty() {
+        "pdp11_70"
+    } else {
+        spec.model.as_str()
+    };
+    let mut sys = polyisa_os_v7::pdp11::sys::V7::new(root.unwrap_or(""));
+    let mut env =
+        polyisa_engine::bare::BareEnv::new(core::mem::size_of::<polyisa_guest_pdp11::CpuState>());
+    // argv[0] はプログラムのパス（ELF の各実行経路と同じ規則）。
+    let mut gargv = Vec::with_capacity(argv.len() + 1);
+    gargv.push(path.to_string());
+    gargv.extend(argv.iter().cloned());
+    let entry = sys.load_exec(&mut env, bytes, &gargv)?;
+    let m = run_pdp11::Pdp11Model::named(model);
+    match run_pdp11::run(&mut env, u64::from(entry), m, &mut sys) {
+        polyisa_engine::run::Outcome::Exit(code) => Ok(code),
+        polyisa_engine::run::Outcome::Unimplemented { pc, word } => {
+            Err(format!("unimplemented at {pc:#x}: {word:#x}"))
+        }
+        polyisa_engine::run::Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
+        polyisa_engine::run::Outcome::Deadlock => Err("deadlock".to_string()),
+    }
+}
+
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
 /// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
 pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
@@ -652,7 +687,26 @@ pub fn run_path_opts(
     };
     let bytes = std::fs::read(&host_path).map_err(|e| format!("read {path}: {e}"))?;
     if bytes.len() < 6 || bytes[0..4] != MAGIC {
-        return Err(format!("{path} は ELF ではない"));
+        // a.out の magic は機種を同定しない —— `--cpu` の
+        // ファミリで振り分ける。
+        if polyisa_loader::probe_kind(&bytes) == polyisa_loader::FileKind::Aout {
+            match spec.as_ref().map(|s| s.family.as_str()) {
+                #[cfg(feature = "guest-pdp11")]
+                Some("pdp11") => {
+                    return run_pdp11_aout(&bytes, path, argv, spec.as_ref().unwrap(), root);
+                }
+                Some("vax") => {
+                    return Err("vax の a.out は段階25 の BSD 側で足す".to_string());
+                }
+                Some(f) => {
+                    return Err(format!("--cpu {f} では a.out を実行できない"));
+                }
+                None => {
+                    return Err("a.out の実行には --cpu（pdp11 など）が要る".to_string());
+                }
+            }
+        }
+        return Err(format!("{path} は ELF でも a.out でもない"));
     }
     let check = |want: &str| match &spec {
         Some(s) if s.family != want => Err(format!(
