@@ -112,7 +112,7 @@ pub const SYSENT: [SysEnt; 64] = [
     SysEnt { name: "setuid", args: 0 }, // 23
     SysEnt { name: "getuid", args: 0 }, // 24
     SysEnt { name: "stime",  args: 0 }, // 25
-    SysEnt { name: "ptrace", args: 4 }, // 26
+    SysEnt { name: "ptrace", args: 3 }, // 26 — sy_narg 4 のうち 1 は r0
     SysEnt { name: "alarm",  args: 0 }, // 27
     SysEnt { name: "fstat",  args: 1 }, // 28
     SysEnt { name: "pause",  args: 0 }, // 29
@@ -124,8 +124,8 @@ pub const SYSENT: [SysEnt; 64] = [
     SysEnt { name: "ftime",  args: 1 }, // 35
     SysEnt { name: "sync",   args: 0 }, // 36
     SysEnt { name: "kill",   args: 1 }, // 37
-    SysEnt { name: "nosys",  args: 0 }, // 38
-    SysEnt { name: "nosys",  args: 0 }, // 39
+    SysEnt { name: "nullsys",args: 0 }, // 38 — switch（実表は nullsys で成功）
+    SysEnt { name: "nullsys",args: 0 }, // 39 — setpgrp 欠番（同上）
     SysEnt { name: "tell",   args: 0 }, // 40
     SysEnt { name: "dup",    args: 0 }, // 41
     SysEnt { name: "pipe",   args: 0 }, // 42

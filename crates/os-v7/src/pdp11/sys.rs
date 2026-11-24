@@ -104,7 +104,7 @@ pub struct V7 {
     /// 写像済みのスタック下端の PAR 番号（7 から下へ育つ）。
     stack_lo: u16,
     /// `signal` が記録した処置（番号→関数。0=DFL・1=IGN・他=関数）。
-    sigact: [u16; 16],
+    sigact: [u16; 17],
     /// getpid が返す識別子。
     pid: u16,
     /// `umask` の現値。
@@ -153,7 +153,7 @@ impl V7 {
             sep_id: false,
             d_base_par: 0,
             stack_lo: 8,
-            sigact: [0; 16],
+            sigact: [0; 17],
             pid: 42,
             umask: 0o22,
             reported: Vec::new(),
@@ -445,12 +445,17 @@ impl V7 {
     // ---- syscall 実体 ----
 
     fn sys_read(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
-        // fd は r0、buf・count は u.u_arg。
+        // fd は r0、buf・count は u.u_arg。カーネルの getf は
+        // fd を 077 で切り詰める。
         let (fd, buf, n) = (
-            u32::from(sem::r_get(&env.backend, 0)),
+            u32::from(sem::r_get(&env.backend, 0)) & 0o77,
             u64::from(a[0]),
             usize::from(a[1]),
         );
+        // 無効 fd はバッファ検査より先（rdwr は getf → EBADF）。
+        if !self.fd_used(fd) {
+            return Disp::Fail(errno::EBADF);
+        }
         // 実体（dir・パイプ・ファイル）を先に解決する —— close
         // 済みの stdio 番号にも open/dup で実体が乗りうる。
         if let Some(d) = self.dirs.get_mut(&fd) {
@@ -495,7 +500,7 @@ impl V7 {
                         Disp::Ret(got as u16)
                     }
                 }
-                Err(_) => Disp::Fail(errno::EIO),
+                Err(e) => Disp::Fail(host_err(e.raw_os_error())),
             };
         }
         // stdio（または stdio を写した fd）だけが残る。
@@ -514,10 +519,14 @@ impl V7 {
 
     fn sys_write(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
         let (fd, buf, n) = (
-            u32::from(sem::r_get(&env.backend, 0)),
+            u32::from(sem::r_get(&env.backend, 0)) & 0o77,
             u64::from(a[0]),
             usize::from(a[1]),
         );
+        // 無効 fd はバッファ検査より先（rdwr は getf → EBADF）。
+        if !self.fd_used(fd) {
+            return Disp::Fail(errno::EBADF);
+        }
         let data = match self.read_bytes(env, buf, n) {
             Ok(d) => d,
             Err(e) => return Disp::Fail(e),
@@ -537,7 +546,7 @@ impl V7 {
         if let Some(f) = self.file_for(fd) {
             return match f.write_all(&data) {
                 Ok(()) => Disp::Ret(n as u16),
-                Err(_) => Disp::Fail(errno::EIO),
+                Err(e) => Disp::Fail(host_err(e.raw_os_error())),
             };
         }
         match self.stdio_of(fd) {
@@ -564,9 +573,10 @@ impl V7 {
             Ok(p) => p,
             Err(e) => return Disp::Fail(e),
         };
-        // argp が指す char *argv[]（NULL 終端）を読む。
+        // argp が指す char *argv[]（NULL 終端）を読む。上限は
+        // 暴走防止だけ —— カーネルは NULL まで読み切る。
         let mut argv: Vec<String> = Vec::new();
-        for i in 0..64u64 {
+        for i in 0..2048u64 {
             let Some(p) = self.r16(env, u64::from(a[1]) + 2 * i) else {
                 return Disp::Fail(errno::EFAULT);
             };
@@ -642,9 +652,10 @@ impl V7 {
         // creat の mode は新規作成時だけ効く（既存の truncate
         // では許可ビットを変えない）。
         let existed = polyisa_host::stat(&path).is_ok();
-        // V7: 0=read・1=write・2=read+write。
+        // V7: 0=read・1=write・2=read+write。カーネルの open1 は
+        // fmode & 3 に切り詰める —— 3 以上は EINVAL ではなく 2。
         let mut o = std::fs::OpenOptions::new();
-        match mode {
+        match mode & 3 {
             0 => {
                 o.read(true);
             }
@@ -654,7 +665,7 @@ impl V7 {
             2 => {
                 o.read(true).write(true);
             }
-            _ => return Disp::Fail(errno::EINVAL),
+            _ => unreachable!(),
         }
         if creat {
             o.create(true).truncate(true);
@@ -710,7 +721,7 @@ impl V7 {
     }
 
     fn sys_seek(&mut self, env: &mut BareEnv, a: &[u16]) -> Disp {
-        let fd = u32::from(sem::r_get(&env.backend, 0));
+        let fd = u32::from(sem::r_get(&env.backend, 0)) & 0o77;
         // PDP-11 の long は上位語が先。下位語は符号拡張しない
         // （0x8000 超の正の変位を負にしない）。
         let off = (i32::from(a[0] as i16) << 16) | i32::from(a[1]);
@@ -796,7 +807,7 @@ impl V7 {
         // stat: uarg=[name,buf]。fstat: fd は r0 で uarg=[buf]。
         let buf = u64::from(a[usize::from(!fstat)]);
         let md = if fstat {
-            let fd = u32::from(sem::r_get(&env.backend, 0));
+            let fd = u32::from(sem::r_get(&env.backend, 0)) & 0o77;
             if let Some(d) = self.dirs.get(&fd) {
                 match polyisa_host::stat(&d.path) {
                     Ok(m) => m,
@@ -1031,7 +1042,7 @@ impl V7 {
         }
         let disp = match n {
             // exit: {1,1} —— 状態は r0。
-            1 => Disp::Exit(u32::from(sem::r_get(&env.backend, 0))),
+            1 => Disp::Exit(u32::from(sem::r_get(&env.backend, 0)) & 0o377),
             // fork: 単一プロセス模型 —— V7 の「プロセスが作れない」
             // 側の errno（EAGAIN = no more processes）。
             2 => Disp::Fail(errno::EAGAIN),
@@ -1146,6 +1157,8 @@ impl V7 {
             // mount/umount/ptrace/profil/acct/phys/lock/mpx —— 特権
             // または模型の外。V7 は非特権に EPERM を返す。
             21 | 22 | 26 | 44 | 51 | 52 | 53 | 56 => Disp::Fail(errno::EPERM),
+            // 実表は nullsys（静かに成功）—— nosys ではない。
+            38 | 39 => Disp::Ret(0),
             // pause: シグナル配送経路がないためシグナルは来ない ——
             // 唯一の定義済み戻りである EINTR を返す。
             29 => Disp::Fail(errno::EINTR),
@@ -1166,12 +1179,20 @@ impl V7 {
                 }
             }
             33 => {
+                // access(path, mode): R_OK=4・W_OK=2・X_OK=1。V7 は
+                // ルートでも X_OK に実行ビットを要求する。
                 let path = match self.host_path(env, u64::from(args[0])) {
                     Ok(p) => p,
                     Err(e) => return Disp::Fail(e),
                 };
-                match std::fs::metadata(&path) {
-                    Ok(_) => Disp::Ret(0),
+                match polyisa_host::stat(&path) {
+                    Ok(md) => {
+                        if args[1] & 1 != 0 && md.mode & 0o111 == 0 {
+                            Disp::Fail(errno::EACCES)
+                        } else {
+                            Disp::Ret(0)
+                        }
+                    }
                     Err(e) => Disp::Fail(host_err(e.raw_os_error())),
                 }
             }
@@ -1198,13 +1219,15 @@ impl V7 {
             37 => {
                 // kill(pid, sig): {2,1} —— pid は r0、sig は
                 // u.u_arg[1]（args[0]）。自プロセスへの配送のみ。
-                let s = args[0];
-                if s >= 16 {
-                    return Disp::Fail(errno::EINVAL);
-                }
+                // V7 は sig の範囲を対象プロセスの照合の中で見る
+                // —— 対象なしは sig に関係なく ESRCH が先。
                 let pid = u32::from(sem::r_get(&env.backend, 0));
                 if pid != u32::from(self.pid) && pid != 0 {
                     return Disp::Fail(errno::ESRCH);
+                }
+                let s = args[0];
+                if s >= 17 {
+                    return Disp::Fail(errno::EINVAL);
                 }
                 if s == 0 {
                     // sig=0 は存在確認 —— 対象があれば成功。
@@ -1219,8 +1242,8 @@ impl V7 {
                 }
             }
             40 => {
-                // tell: fd は r0。
-                let fd = u32::from(sem::r_get(&env.backend, 0));
+                // tell: fd は r0（getf どおり 077 で切り詰める）。
+                let fd = u32::from(sem::r_get(&env.backend, 0)) & 0o77;
                 if let Some(d) = self.dirs.get(&fd) {
                     let p = d.pos;
                     return Disp::Ret2((p >> 16) as u16, (p & 0xffff) as u16);
