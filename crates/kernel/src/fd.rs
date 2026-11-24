@@ -626,6 +626,7 @@ impl FdTarget {
         // inode・ポインタが同じ数域で衝突しないように上位ビットで
         // タグを付ける）。
         const TAG_PIPE: u64 = 1 << 60;
+        #[cfg(unix)]
         const TAG_HOST: u64 = 2 << 60;
         const TAG_PTR: u64 = 3 << 60;
         const PTR_MASK: u64 = !(0xF << 60);

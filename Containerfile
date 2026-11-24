@@ -62,12 +62,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && rustup target add \
         powerpc64-unknown-linux-gnu \
         i686-unknown-linux-gnu \
-        wasm32-unknown-unknown
+        wasm32-unknown-unknown \
+        wasm32-wasip1 \
+        wasm32-wasip2 \
+        wasm32-wasip3
 
 # バイナリ配布のツール（台帳 TOOL-NEXTEST / TOOL-TASK / TOOL-WASMTIME に対応）。
 ARG NEXTEST_VERSION=0.9.151
 ARG TASK_VERSION=3.54.0
-ARG WASMTIME_VERSION=50.0.1
+ARG WASMTIME_VERSION=51.0.0
 RUN curl -fsSL "https://get.nexte.st/${NEXTEST_VERSION}/linux" \
         | tar -xz -C /usr/local/bin \
     && curl -fsSL "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_amd64.tar.gz" \

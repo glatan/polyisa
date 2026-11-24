@@ -19,8 +19,43 @@
 #![allow(unsafe_code)]
 
 pub mod ctx;
+// ホストのバックエンドはホストの ISA ごとのモジュールに閉じる
+// （docs/design/host.md）。生成コードは sysv64 呼出し規約で `rt`
+// の関数を呼ぶので、x86-64 の Unix 系ホストだけが機械語を持てる。
+#[cfg(all(unix, target_arch = "x86_64"))]
 mod rt;
+#[cfg(all(unix, target_arch = "x86_64"))]
 mod x64;
+
+/// ホストのバックエンド。対応ホストでは `x64`、それ以外では
+/// コンパイルが常に失敗するスタブになり、ブロックは IR 解釈で走る。
+#[cfg(all(unix, target_arch = "x86_64"))]
+use x64 as backend;
+
+/// バックエンドのないホスト向けのスタブ。`Compiled` は決して
+/// 作られないので `Jit` の機械語の経路には入らない。
+#[cfg(not(all(unix, target_arch = "x86_64")))]
+mod backend {
+    use polyisa_ir::Recorded;
+
+    use crate::ctx::RtCtx;
+
+    /// 対応ホストのバックエンドがないため作られないブロック。
+    pub struct Compiled;
+
+    impl Compiled {
+        /// 実体がないため呼ばれない。
+        ///
+        /// # 安全性
+        /// `Compiled` を得る経路がない。
+        pub unsafe fn call(&self, _ctx: *mut RtCtx) {}
+    }
+
+    /// 対応ホストのバックエンドがないため常に `None`。
+    pub fn compile(_rec: &Recorded) -> Option<Compiled> {
+        None
+    }
+}
 
 use std::collections::{HashMap, HashSet};
 
@@ -68,7 +103,7 @@ pub trait Translate {
 
 /// JIT 実行器。ブロックのキャッシュと呼び出し回数を持つ。
 pub struct Jit {
-    blocks: HashMap<u64, x64::Compiled>,
+    blocks: HashMap<u64, backend::Compiled>,
     /// まだコンパイルしていない入口の呼び出し数。
     hot: HashMap<u64, u32>,
     /// 記録できない入口（機械語にしないまま IR 解釈で走る）。
@@ -165,7 +200,7 @@ impl Jit {
                 return None;
             }
         };
-        match x64::compile(&r) {
+        match backend::compile(&r) {
             Some(c) => {
                 self.blocks.insert(key, c);
                 let c = self.blocks.get(&key).expect("直前に挿入");
@@ -189,7 +224,7 @@ impl Jit {
 
 /// コンパイル済みブロックを実行し、`RtCtx` の出口を `BlockExit` にする。
 /// 2 番目の返り値はブロックの破棄要求（コードのページへの書き込み）。
-fn call_block(b: &mut InterpBackend, c: &x64::Compiled) -> (BlockExit, bool) {
+fn call_block(b: &mut InterpBackend, c: &backend::Compiled) -> (BlockExit, bool) {
     let mut ctx = RtCtx {
         backend: core::ptr::from_mut(b) as usize,
         state: b.state.as_mut_ptr() as usize,
@@ -217,7 +252,8 @@ fn call_block(b: &mut InterpBackend, c: &x64::Compiled) -> (BlockExit, bool) {
     (x, ctx.invalidate != 0)
 }
 
-#[cfg(test)]
+// 生成コードを試すので、バックエンドを持つホストだけで走らせる。
+#[cfg(all(test, unix, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use polyisa_ir::IrBackend;
@@ -258,7 +294,7 @@ mod tests {
         want.set(StateRef::<W64>::from_offset(0), 3);
         let out = polyisa_ir::exec(&rec.ir, &mut want, rec.fall);
         // 生成コード側。
-        let c = x64::compile(&rec).expect("コンパイルできる");
+        let c = backend::compile(&rec).expect("コンパイルできる");
         let mut got = InterpBackend::new(64);
         got.set(StateRef::<W64>::from_offset(0), 3);
         let (x, _inv) = call_block(&mut got, &c);
@@ -291,7 +327,7 @@ mod tests {
             fall: 0x104,
             ir: irb.ir,
         };
-        let c = x64::compile(&rec).expect("コンパイルできる");
+        let c = backend::compile(&rec).expect("コンパイルできる");
         let mut b = InterpBackend::new(64);
         let (x, _inv) = call_block(&mut b, &c);
         match x {

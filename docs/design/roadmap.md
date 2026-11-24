@@ -52,16 +52,6 @@ ISA 固有のタイミング（68000、80486、Pentium、VAX）は各 ISA の段
 |---|---|---|
 | S28-4 | wasm32 のホスト（wasip1・wasip2・wasip3）でインタプリタによる実行が動く（ホストの環境が条件）。 | 所有者 |
 
-作業計画：
-
-| # | 内容 | 前提 | 判定 |
-|---|---|---|---|
-| HP1 | 着手条件: ターゲットの確定（wasm32-wasip1・wasip2・wasip3 + wasmtime — std の入出力に wasi 系が要る。p2・p3 はコンポーネントモデルで `wasi:sockets` 系の API がある（実行時に wasmtime の許可旗が要る）。実行器は TOOL-WASMTIME 登録済み、用途 X の範囲確認のみ。wasip2・wasip3 のターゲットの導入を含む）、仕様の台帳登録（WebAssembly/WASI repo の `snapshot-01` タグ＝SPEC-WASI-P1、`v0.2.x` タグ＝SPEC-WASI-P2、`v0.3.x` タグ＝SPEC-WASI-P3）、`check:targets` の現状確認（現在は wasm32-unknown-unknown。wasip1 では polyisa-jit が `sysv64` ABI 未対応でビルドに落ちる）、kernel の直接入出力経路の設計（作業スレッド機構は未実装。`std::thread::spawn` は wasi 系では実行時に失敗するので直接入出力が既定の形） | - | - |
-| HP2 | `host`: wasi 系ターゲットでビルドするための構成（exec_mem は wasm では Unsupported。`std::os::unix` の直接使用箇所の cfg 整理 — wasi 系は `cfg(unix)` が偽で `target_family="wasm"`。`target_os="wasi"` と `target_env="p1"/"p2"/"p3"` で切り分ける）と、`jit` のホストバックエンドの cfg 分割（`sysv64` 系は対応ホストのみ、wasm では Unsupported — host.md の JIT 例外に従う） | HP1 | - |
-| HP3 | `kernel`: ホストのスレッドがない環境では作業スレッドへ渡さず、ホストの入出力を直接行う経路 | HP1 | - |
-| HP4 | wasip1・wasip2・wasip3 の各ターゲットでインタプリタによる実行の検証（実行器上の `polyisa run` で、ゲストのプログラムの実行と出力を確認） | HP2・HP3 | S28-4 |
-| HP5 | 残件整理・判定列更新 | HP4 | - |
-
 ### 段階 29：GDB 接続
 
 - `gdbstub` による GDB との接続。レジスタの転送、シングルステップ、ブレークポイントを、実行エンジンの観測点を通して提供する

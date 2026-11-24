@@ -980,6 +980,18 @@ pub fn drive(
     }
 }
 
+/// `FdTarget::HostSock` か。ホストソケットは Unix 系ホストにしかない。
+#[cfg(unix)]
+fn is_host_sock(t: Option<&FdTarget>) -> bool {
+    matches!(t, Some(FdTarget::HostSock(_)))
+}
+
+/// ホストソケットを持てない OS では常に偽。
+#[cfg(not(unix))]
+fn is_host_sock(_t: Option<&FdTarget>) -> bool {
+    false
+}
+
 /// read が `FdRead::Empty` だった対象の待ちを組み立てる
 /// （阻止 read を ABI の待ち機構へ写すため）。TimerFd は期限も
 /// 持つ。待ちを張る意味のない対象・無い fd では None。
@@ -990,12 +1002,11 @@ pub fn read_wait(fds: &FdTable, fd: u32) -> Option<Wait> {
         Some(
             FdTarget::PipeEnd { read: true, .. }
                 | FdTarget::PairSock { .. }
-                | FdTarget::HostSock(_)
                 | FdTarget::EventFd(_)
                 | FdTarget::TimerFd(_)
                 | FdTarget::Epoll(_)
         )
-    );
+    ) || is_host_sock(fds.target(fd));
     if !ok {
         return None;
     }
@@ -1013,10 +1024,9 @@ pub fn write_wait(fds: &FdTable, fd: u32) -> Option<Wait> {
         Some(
             FdTarget::PipeEnd { read: false, .. }
                 | FdTarget::PairSock { .. }
-                | FdTarget::HostSock(_)
                 | FdTarget::EventFd(_)
         )
-    );
+    ) || is_host_sock(fds.target(fd));
     if !ok {
         return None;
     }

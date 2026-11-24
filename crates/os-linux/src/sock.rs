@@ -198,6 +198,7 @@ fn rd_ptr(env: &mut BareEnv, endian: Endian, ptr_size: u8, addr: u64) -> Option<
 /// ゲストの sockaddr をホスト形（先頭 family 2 バイト＋本体）へ写す。
 /// family フィールドはゲストのエンディアンで読み、ホスト（LE）形に
 /// 置き直す。AF_UNIX のパスは `path_map` 経由。
+#[cfg(unix)]
 fn sockaddr_in(
     env: &mut BareEnv,
     abi: &SockAbi,
@@ -244,6 +245,7 @@ fn sockaddr_in(
 
 /// ホストの SockAddr をゲストの sockaddr へ書く。`*addrlen` は
 /// 値結果（呼び出し時にバッファ幅、返りに実長）。
+#[cfg(unix)]
 fn sockaddr_out(
     env: &mut BareEnv,
     abi: &SockAbi,
@@ -274,6 +276,7 @@ fn sockaddr_out(
 }
 
 /// ホストエラーを generic errno に粗く写す。
+#[cfg(unix)]
 fn host_errno(e: &std::io::Error) -> u32 {
     use std::io::ErrorKind as K;
     match e.kind() {
@@ -302,6 +305,8 @@ pub const ESOCKTNOSUPPORT: u32 = 94;
 
 /// socket(domain, type, protocol)。
 /// SOCK_NONBLOCK/SOCK_CLOEXEC を type から剥がす。
+// ホストソケットを持てない OS ではホスト側だけの引数を使わない。
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn sys_socket(
     fds: &mut FdTable,
     abi: &SockAbi,
@@ -611,6 +616,8 @@ fn guest_nonblock(fds: &FdTable, fd: u32) -> bool {
 
 /// send(fd, buf, len, flags) と sendto（宛先つき）。PairSock/HostSock
 /// の両方を扱う。`Wait` は POLLOUT。
+// HostSock の経路は Unix 系ホストだけにある。
+#[cfg_attr(not(unix), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub fn sys_sendto(
     fds: &mut FdTable,
@@ -635,7 +642,7 @@ pub fn sys_sendto(
         b
     };
     let again = flags & abi.msg_dontwait != 0;
-    let wait = |fd: u32| {
+    let wait = |fd: u32| -> Result<Out, u32> {
         Ok(Out::Wait(Wait {
             fds: vec![(fd, WANT_WRITE)],
             deadline: None,
@@ -672,6 +679,8 @@ pub fn sys_sendto(
 
 /// recv(fd, buf, len, flags) と recvfrom（出所の返しつき）。
 /// `Wait` は POLLIN。msg_peek は未対応（受理して EOPNOTSUPP）。
+// HostSock の経路は Unix 系ホストだけにある。
+#[cfg_attr(not(unix), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub fn sys_recvfrom(
     fds: &mut FdTable,
@@ -851,6 +860,8 @@ fn read_iov(env: &mut BareEnv, abi: &SockAbi, iov: u64, cnt: u64) -> Result<Vec<
 
 /// sendmsg(fd, msg, flags)。msghdr: {name, namelen(u64/u32), iov, iovlen, control, controllen, flags}。
 /// 制御メッセージ（SCM_RIGHTS 等）は読み捨てる近似。
+// HostSock の経路は Unix 系ホストだけにある。
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn sys_sendmsg(
     fds: &mut FdTable,
     abi: &SockAbi,
@@ -915,6 +926,8 @@ pub fn sys_sendmsg(
 }
 
 /// recvmsg(fd, msg, flags)。出所と受け取った旗を msg へ書き戻す。
+// HostSock の経路は Unix 系ホストだけにある。
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn sys_recvmsg(
     fds: &mut FdTable,
     abi: &SockAbi,
@@ -1067,11 +1080,17 @@ pub fn sys_socketcall(
     }
     match call {
         call::SOCKET => sys_socket(fds, abi, a[0], a[1], a[2]).map(Out::Done),
+        #[cfg(unix)]
         call::BIND => sys_bind(fds, abi, env, a[0], a[1], a[2], path_map).map(Out::Done),
+        #[cfg(unix)]
         call::CONNECT => sys_connect(fds, abi, env, a[0], a[1], a[2], path_map),
+        #[cfg(unix)]
         call::LISTEN => sys_listen(fds, abi, a[0], a[1]).map(Out::Done),
+        #[cfg(unix)]
         call::ACCEPT => sys_accept(fds, abi, env, a[0], a[1], a[2], 0),
+        #[cfg(unix)]
         call::GETSOCKNAME => sys_getname(fds, abi, env, a[0], a[1], a[2], false).map(Out::Done),
+        #[cfg(unix)]
         call::GETPEERNAME => sys_getname(fds, abi, env, a[0], a[1], a[2], true).map(Out::Done),
         call::SOCKETPAIR => sys_socketpair(fds, abi, env, a[0], a[1], a[2], a[3]).map(Out::Done),
         call::SEND => sys_sendto(fds, abi, env, a[0], a[1], a[2], a[3], 0, 0, path_map),
@@ -1079,14 +1098,17 @@ pub fn sys_socketcall(
         call::SENDTO => sys_sendto(fds, abi, env, a[0], a[1], a[2], a[3], a[4], a[5], path_map),
         call::RECVFROM => sys_recvfrom(fds, abi, env, a[0], a[1], a[2], a[3], a[4], a[5]),
         call::SHUTDOWN => sys_shutdown(fds, abi, a[0], a[1]).map(Out::Done),
+        #[cfg(unix)]
         call::SETSOCKOPT => {
             sys_setsockopt(fds, abi, env, a[0], a[1], a[2], a[3], a[4]).map(Out::Done)
         }
+        #[cfg(unix)]
         call::GETSOCKOPT => {
             sys_getsockopt(fds, abi, env, a[0], a[1], a[2], a[3], a[4]).map(Out::Done)
         }
         call::SENDMSG => sys_sendmsg(fds, abi, env, a[0], a[1], a[2], path_map),
         call::RECVMSG => sys_recvmsg(fds, abi, env, a[0], a[1], a[2]),
+        #[cfg(unix)]
         call::ACCEPT4 => sys_accept(fds, abi, env, a[0], a[1], a[2], a[3]),
         _ => Err(errno::EINVAL),
     }

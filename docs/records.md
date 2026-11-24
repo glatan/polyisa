@@ -636,6 +636,22 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - 整数除算の可変レイテンシは `hint` 規約を決めたが、意味論側が hint を出す結線はない（GAP-0097。engine→timing の結線自体は GAP-0027 の継続）
 - 誤予測経路の実行効果はどのモデルにもない（GAP-0092・0098 の近似として確定）
 
+### 段階 28：wasm32 のホスト
+
+対応した内容：
+
+- `jit` のホストバックエンドの cfg 分割（D1）。`x64`/`rt` モジュールを `cfg(all(unix, target_arch = "x86_64"))` に閉じ、それ以外のホストでは `compile` が `None` を返すスタブ `backend` で IR 解釈に畳む。`Jit` の API は全ターゲットで不変で、cli の変更は不要
+- `os-linux` の cfg 整理。`sys_socketcall`・sockaddr・host_errno 等の unix 専用経路を `#[cfg(unix)]` に閉じ、非 unix では `EINVAL`/`Unimplemented` に落ちる形に揃えた
+- `cargo check --workspace --target wasm32-wasip1`（および wasip2・wasip3）が通る。`check:targets` に wasip1 を追加して回帰を防ぐ
+- kernel の直接入出力経路は段階 26 の設計（`HostIo::spawn` の `Option` → 呼び出し側の直接 poll/sleep フォールバック）で既に揃っており、追加実装なしに wasm で効くことを確認
+- 実行検証: `cargo build -p polyisa-cli --target wasm32-wasip1/wasip2/wasip3` した `polyisa-cli.wasm` を wasmtime 51.0.0（TOOL-WASMTIME。台帳を 50.0.1 から更新）で走らせ、手組み RV64 ELF（write("hi\n") + exit_group）を `polyisa run` で実行して `hi` の出力と exit 0 を 3 ターゲットすべてで確認。`cpus` も動作
+
+残っている事項：
+
+- S28-4 の判定は所有者（実環境での動作確認）。wasmtime 上での検証は済
+- wasm ホストではソケット系のホスト経路がなく、ホストソケットを要る syscall はエラーに落ちる（GAP-0099）。p2・p3 の `wasi:sockets` 接続は未着手
+- JIT は wasm ホストではスタブで常に IR 解釈（段階表どおりインタプリタのみ）。`heavy_jit_diff` が `jit.compiled() > 0` を無条件に期待するため、段階 2（aarch64 ホスト）でテストを動かすときにアサートのゲートが要る
+
 ## 残っている事項（横断）
 
 ### 台帳の未登録項目

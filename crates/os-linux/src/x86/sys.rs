@@ -528,6 +528,8 @@ impl Linux {
     /// 駐車中と自分の待ちから、ホスト fd の監視集合と最速の期限を集める。
     /// 戻り値は（ホスト監視列, 最速期限 ns）。
     fn collect_host_watches(&self) -> (Vec<(polyisa_host::RawFd, i16)>, Option<u64>) {
+        // ホスト fd の監視は Unix 系ホストだけが足す。
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut list = Vec::new();
         let mut earliest: Option<u64> = None;
         let mut take = |w: &crate::sock::Wait, fds: &polyisa_kernel::FdTable| {
@@ -558,6 +560,8 @@ impl Linux {
 
     /// ホスト fd イベントに対応する待ちを解除する。
     /// `events` は（生 fd, revents）の列。戻るのは誰か解除したか。
+    // ホスト監視の照合は Unix 系ホストだけにある。
+    #[cfg_attr(not(unix), allow(unused_variables))]
     fn wake_host_waits(&mut self, events: &[(polyisa_host::RawFd, i16)]) -> bool {
         let queue = self.queue.clone();
         let mut borrowed = queue.0.borrow_mut();
@@ -622,6 +626,8 @@ impl Linux {
     /// イベントや期限で待ちを解除する。誰か実行可能になったら真、
     /// 処理できる待ちが残らなければ偽（デッドロック）。
     fn drive_io_waits(&mut self) -> bool {
+        // ホスト fd の poll は Unix 系ホストだけが行う。
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let (mut watches, deadline) = self.collect_host_watches();
         // 待ちが一つも無ければ処理できない。
         let any_wait = self.fd_wait.is_some()

@@ -276,7 +276,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | TOOL-CURL | curl | curl プロジェクト | 8.23.0 | テストデータの取得 | curl license（COPYING） | X | 別プロセスで実行する。複製・再配布しない |
 | TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | 23.1.6（`Containerfile` のイメージ内。ホスト手元検証は 23.1.5） | 検証 | Apache-2.0 WITH LLVM-exception（LICENSE.TXT） | X | 別プロセスで実行する。複製・再配布・組み込みをしない。オラクルとしての実行に限る（規則9） |
 | TOOL-GDB | GDB | GNU プロジェクト | 18.1（手元検証） | 検証 | GNU GPL version 3（COPYING） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
-| TOOL-WASMTIME | wasmtime | Bytecode Alliance | 50.0.1（手元検証） | wasm の検証 | Apache-2.0 with LLVM exception（LICENSE） | X | 別プロセスで実行する。複製・再配布・組み込みをしない。オラクルとしての実行に限る（規則9） |
+| TOOL-WASMTIME | wasmtime | Bytecode Alliance | 51.0.0（手元検証） | wasm の検証 | Apache-2.0 with LLVM exception（LICENSE） | X | 別プロセスで実行する。複製・再配布・組み込みをしない。オラクルとしての実行に限る（規則9） |
 | TOOL-QEMU | QEMU | QEMU プロジェクト | 10.0.13（`Containerfile` のイメージ内に導入） | 検証（用意できた環境だけ） | GNU GPL version 2（LICENSE。全体。手元未検証） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-BINUTILS | GNU binutils | GNU プロジェクト | 2.47（手元検証） | 検証（用意できた環境だけ） | GNU GPL version 3（COPYING） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-XED | Intel XED（x86 エンコーダ・デコーダ。コマンドラインのデコーダを別プロセスで使う） | Intel（intelxed/xed） | v2026.08.23 | x86 のデコードの検証 | Apache License 2.0（LICENSE 原文で確認） | X | llvm-objdump より新しい拡張への追従が速い第2のデコードオラクル（v2026.08.23 で ACE-V1・APX に対応）。版を変えるときは確認をやり直す。ルートの `Containerfile` でソースビルドして `/opt/xed` に導入済み |
