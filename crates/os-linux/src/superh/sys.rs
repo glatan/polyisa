@@ -1050,6 +1050,29 @@ impl Linux {
         }
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。待ち要求は単一スレッド消化で進め、
+    /// 進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, nr: u64, a: &[u64; 6]) -> Result<u64, u64> {
+        let Some(name) = superh::name(nr) else {
+            return Err(u64::from(superh::errno::ENOSYS));
+        };
+        let abi = crate::sock::SockAbi::generic(4, self.endian);
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, a, &map, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("superh: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(u64::from(superh::errno::ENOSYS)),
+        }
+    }
+
     /// 番号で振り分ける。`Err(e)` は errno（正の値）で返す。
     #[allow(clippy::too_many_lines)]
     fn syscall(&mut self, env: &mut BareEnv, nr: u64, a: &[u64; 6]) -> Result<u64, u64> {
@@ -1725,8 +1748,28 @@ impl Linux {
             N::PRCTL | N::SECCOMP => Ok(0),
             N::SYNC | N::FSYNC | N::FDATASYNC | N::SYNCFS | N::FLOCK => Ok(0),
             N::GETRANDOM => self.sys_getrandom(env, a[0], a[1]),
+            // ---- ソケット（socketcall 副番号 + 直番号）----
+            N::SOCKETCALL
+            | N::SOCKET
+            | N::BIND
+            | N::CONNECT
+            | N::LISTEN
+            | N::ACCEPT
+            | N::GETSOCKNAME
+            | N::GETPEERNAME
+            | N::SOCKETPAIR
+            | N::SEND
+            | N::SENDTO
+            | N::RECV
+            | N::RECVFROM
+            | N::SHUTDOWN
+            | N::SETSOCKOPT
+            | N::GETSOCKOPT
+            | N::SENDMSG
+            | N::RECVMSG
+            | N::ACCEPT4 => self.sock_call(env, nr, a),
             // ---- 未対応群（ENOSYS）----
-            N::SOCKETCALL | N::IPC => Err(e(E::ENOSYS)),
+            N::IPC => Err(e(E::ENOSYS)),
             N::SYSLOG
             | N::QUOTACTL
             | N::QUOTACTL_FD

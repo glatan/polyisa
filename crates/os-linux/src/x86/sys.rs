@@ -95,6 +95,10 @@ pub struct Linux {
     queue: SharedQueue,
     /// 空のパイプを読もうとして待っているパイプ。
     pipe_wait: Option<u64>,
+    /// fd 準備待ち（ソケット・待ち合わせ系）の中身。
+    fd_wait: Option<crate::sock::Wait>,
+    /// HostIo 作業スレッド。プロセス系で共有し、初使用で起動する。
+    host_io: SharedHostIo,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
     /// 当面ホスト表記のまま持つ。guest_root 設定時はゲスト表記への見直しが要る (follow-up)。
     pub cwd: String,
@@ -127,6 +131,16 @@ struct SchedQueue {
 
 #[derive(Clone)]
 struct SharedQueue(std::rc::Rc<std::cell::RefCell<SchedQueue>>);
+
+/// HostIo をプロセス系で共有する器。初使用で起動する。
+#[derive(Clone)]
+struct SharedHostIo(std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<polyisa_kernel::HostIo>>>>);
+
+impl Default for SharedHostIo {
+    fn default() -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(None)))
+    }
+}
 
 impl Default for SharedQueue {
     fn default() -> Self {
@@ -288,6 +302,317 @@ impl Linux {
         if self.pipe_wait == Some(id) {
             self.pipe_wait = None;
         }
+    }
+
+    /// 単調時計の今（ナノ秒。`mono_start` 起点）。
+    fn mono_ns(&self) -> u64 {
+        self.mono_start
+            .map(|t| t.elapsed().as_nanos() as u64)
+            .unwrap_or(0)
+    }
+
+    /// ソケット正準層への ABI 差分。
+    fn sock_abi(&self) -> crate::sock::SockAbi {
+        let ptr = if self.is64 && !self.x32 { 8 } else { 4 };
+        crate::sock::SockAbi::generic(ptr, Endian::Le)
+    }
+
+    /// AF_UNIX のパス写像器を作る（guest_root・cwd を束縛した
+    /// closure。`sock` 正準層へ渡す）。
+    fn unix_path_map(&self) -> impl Fn(&[u8]) -> Option<Vec<u8>> + use<> {
+        crate::sock::unix_path_map(&self.guest_root, &self.cwd)
+    }
+
+    /// accept/accept4 の共通処理。`flags` は SOCK_NONBLOCK/CLOEXEC。
+    fn accept_impl(&mut self, env: &mut BareEnv, cx: &SysCtx, flags: u64) -> Option<TrapOutcome> {
+        let abi = self.sock_abi();
+        #[cfg(unix)]
+        {
+            let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+            let r = crate::sock::sys_accept(&mut self.fds, &abi, env, a, b, c, flags);
+            self.sock_finish(env, r)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (abi, env, cx, flags);
+            Some(TrapOutcome::Unimplemented)
+        }
+    }
+
+    /// getsockname/getpeername の共通処理。
+    fn getname_impl(&mut self, env: &mut BareEnv, cx: &SysCtx, peer: bool) -> Option<TrapOutcome> {
+        let abi = self.sock_abi();
+        #[cfg(unix)]
+        {
+            let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+            let r = crate::sock::sys_getname(&mut self.fds, &abi, env, a, b, c, peer)
+                .map(crate::sock::Out::Done);
+            self.sock_finish(env, r)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (abi, env, cx, peer);
+            Some(TrapOutcome::Unimplemented)
+        }
+    }
+
+    /// HostIo の共有器（初使用で起動）。
+    fn host_io(&self) -> Option<std::rc::Rc<polyisa_kernel::HostIo>> {
+        let mut slot = self.host_io.0.borrow_mut();
+        if slot.is_none() {
+            *slot = polyisa_kernel::HostIo::spawn().map(std::rc::Rc::new);
+        }
+        slot.clone()
+    }
+
+    /// 自分が fd 待ち系で blocked に記録されているか。
+    fn self_fd_blocked(&self) -> bool {
+        self.queue.0.borrow().meta.blocked().iter().any(|(id, w)| {
+            id.0 == self.pid
+                && matches!(
+                    w,
+                    polyisa_kernel::ThreadWait::Fd
+                        | polyisa_kernel::ThreadWait::HostFd
+                        | polyisa_kernel::ThreadWait::Timer
+                )
+        })
+    }
+
+    /// fd 待ちの駐車種別。ホスト fd を含むなら HostFd、期限だけ
+    /// なら Timer、それ以外は Fd。
+    fn wait_kind(&self, w: &crate::sock::Wait) -> polyisa_kernel::ThreadWait {
+        #[cfg(unix)]
+        if w.fds
+            .iter()
+            .any(|&(fd, _)| self.fds.host_sock_of(fd).is_some())
+        {
+            return polyisa_kernel::ThreadWait::HostFd;
+        }
+        if w.fds.is_empty() && w.deadline.is_some() {
+            return polyisa_kernel::ThreadWait::Timer;
+        }
+        polyisa_kernel::ThreadWait::Fd
+    }
+
+    /// ソケット正準層の戻りをゲスト状態へ写す。
+    fn sock_finish(
+        &mut self,
+        env: &mut BareEnv,
+        r: Result<crate::sock::Out, u32>,
+    ) -> Option<TrapOutcome> {
+        match r {
+            Ok(crate::sock::Out::Done(v)) => {
+                self.fd_wait = None;
+                set64(env, Gpr(0), v);
+                self.advance_past_syscall(env);
+                Some(TrapOutcome::Handled)
+            }
+            Ok(crate::sock::Out::Wait(w)) => {
+                let id = self.ensure_self();
+                let kind = self.wait_kind(&w);
+                self.fd_wait = Some(w);
+                self.queue
+                    .0
+                    .borrow_mut()
+                    .meta
+                    .block(polyisa_kernel::ThreadId(id.0), kind);
+                Some(TrapOutcome::Blocked)
+            }
+            Err(e) => {
+                self.fd_wait = None;
+                self.set_errno(env, e);
+                self.advance_past_syscall(env);
+                Some(TrapOutcome::Handled)
+            }
+        }
+    }
+
+    /// 一つの待ちの準備評価。期限切れも真。
+    fn wait_ready(
+        fds: &polyisa_kernel::FdTable,
+        w: &crate::sock::Wait,
+        now: u64,
+        pending: u64,
+    ) -> bool {
+        if w.deadline.is_some_and(|dl| now >= dl) {
+            return true;
+        }
+        w.fds.iter().any(|&(fd, ev)| {
+            let r = fds.ready(fd, now, pending);
+            (ev & crate::sock::WANT_READ != 0 && (r.read || r.hup || r.err))
+                || (ev & crate::sock::WANT_WRITE != 0 && (r.write || r.err))
+        })
+    }
+
+    /// 駐車中と自分の fd 待ちを再評価し、準備の立ったものを
+    /// 実行可能へ戻す。
+    fn sweep_fd_waits(&mut self) {
+        let now = self.mono_ns();
+        let queue = self.queue.clone();
+        let mut borrowed = queue.0.borrow_mut();
+        let mut ready = Vec::new();
+        for task in &mut borrowed.parked {
+            let Some(w) = &task.linux.fd_wait else {
+                continue;
+            };
+            if Self::wait_ready(&task.linux.fds, w, now, task.linux.sig_pending) {
+                task.linux.fd_wait = None;
+                ready.push(polyisa_kernel::ThreadId(task.linux.pid));
+            }
+        }
+        for id in ready {
+            borrowed.meta.unblock(id);
+        }
+        drop(borrowed);
+        let self_ready = self
+            .fd_wait
+            .as_ref()
+            .is_some_and(|w| Self::wait_ready(&self.fds, w, now, self.sig_pending));
+        if self_ready {
+            self.fd_wait = None;
+            let pid = self.pid;
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock(polyisa_kernel::ThreadId(pid));
+        }
+    }
+
+    /// 駐車中と自分の待ちから、ホスト fd の監視集合と最速の期限を集める。
+    /// 戻り値は（ホスト監視列, 最速期限 ns）。
+    fn collect_host_watches(&self) -> (Vec<(polyisa_host::RawFd, i16)>, Option<u64>) {
+        let mut list = Vec::new();
+        let mut earliest: Option<u64> = None;
+        let mut take = |w: &crate::sock::Wait, fds: &polyisa_kernel::FdTable| {
+            #[cfg(unix)]
+            for &(fd, ev) in &w.fds {
+                if let Some(s) = fds.host_sock_of(fd) {
+                    list.push((s.sock.raw(), ev as i16));
+                }
+            }
+            if let Some(dl) = w.deadline {
+                earliest = Some(earliest.map_or(dl, |e| e.min(dl)));
+            }
+            let _ = fds;
+        };
+        for task in &self.queue.0.borrow().parked {
+            if let Some(w) = &task.linux.fd_wait {
+                take(w, &task.linux.fds);
+            }
+        }
+        if let Some(w) = &self.fd_wait {
+            take(w, &self.fds);
+        }
+        (list, earliest)
+    }
+
+    /// ホスト fd イベントに対応する待ちを解除する。
+    /// `events` は（生 fd, revents）の列。戻るのは誰か解除したか。
+    fn wake_host_waits(&mut self, events: &[(polyisa_host::RawFd, i16)]) -> bool {
+        let queue = self.queue.clone();
+        let mut borrowed = queue.0.borrow_mut();
+        let mut woke = Vec::new();
+        for task in &mut borrowed.parked {
+            let Some(w) = &task.linux.fd_wait else {
+                continue;
+            };
+            let hit = w.fds.iter().any(|&(fd, _)| {
+                #[cfg(unix)]
+                if let Some(s) = task.linux.fds.host_sock_of(fd) {
+                    return events.iter().any(|&(raw, _)| raw == s.sock.raw());
+                }
+                let _ = fd;
+                false
+            });
+            if hit {
+                task.linux.fd_wait = None;
+                woke.push(polyisa_kernel::ThreadId(task.linux.pid));
+            }
+        }
+        for id in &woke {
+            borrowed.meta.unblock(*id);
+        }
+        let mut woke = !woke.is_empty();
+        drop(borrowed);
+        let self_hit = self.fd_wait.as_ref().is_some_and(|w| {
+            w.fds.iter().any(|&(fd, _)| {
+                #[cfg(unix)]
+                if let Some(s) = self.fds.host_sock_of(fd) {
+                    return events.iter().any(|&(raw, _)| raw == s.sock.raw());
+                }
+                let _ = fd;
+                false
+            })
+        });
+        if self_hit {
+            self.fd_wait = None;
+            let pid = self.pid;
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock(polyisa_kernel::ThreadId(pid));
+            woke = true;
+        }
+        woke
+    }
+
+    /// HostFd/Timer 待ちの処理。ホスト fd を poll か HostIo で待ち、
+    /// イベントや期限で待ちを解除する。誰か実行可能になったら真、
+    /// 処理できる待ちが残らなければ偽（デッドロック）。
+    fn drive_io_waits(&mut self) -> bool {
+        let (mut watches, deadline) = self.collect_host_watches();
+        // 待ちが一つも無ければ処理できない。
+        let any_wait = self.fd_wait.is_some()
+            || self
+                .queue
+                .0
+                .borrow()
+                .parked
+                .iter()
+                .any(|t| t.linux.fd_wait.is_some());
+        if !any_wait {
+            return false;
+        }
+        // ホスト監視も期限も無い fd 待ちだけなら、ほかに実行可能な
+        // スレッドがいない限り進まない（カーネル対象の変化は他
+        // スレッドの実行が要る）— ここに来た時点でいないので不成立。
+        if watches.is_empty() && deadline.is_none() {
+            return false;
+        }
+        let now = self.mono_ns();
+        let timeout_ms = deadline.map(|dl| {
+            let remain = dl.saturating_sub(now);
+            i32::try_from(remain / 1_000_000).unwrap_or(i32::MAX)
+        });
+        // HostIo が使えれば作業スレッド経由、なければ直接 poll。
+        let events: Vec<(polyisa_host::RawFd, i16)> = if let Some(io) = self.host_io() {
+            io.set_watches(&watches);
+            let ms = timeout_ms.map(|t| std::time::Duration::from_millis(t.max(0) as u64));
+            io.wait_done(ms).unwrap_or_default()
+        } else {
+            #[cfg(unix)]
+            {
+                let t = timeout_ms.unwrap_or(50).min(50);
+                let _ = polyisa_host::sock::poll(&mut watches, t);
+                watches
+                    .iter()
+                    .filter(|&&(_, rev)| rev != 0)
+                    .copied()
+                    .collect()
+            }
+            #[cfg(not(unix))]
+            {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    timeout_ms.unwrap_or(50).min(50) as u64,
+                ));
+                Vec::new()
+            }
+        };
+        self.wake_host_waits(&events);
+        // イベントが無くても期限切れ・カーネル側の変化を掃討で拾う。
+        true
     }
 
     /// 実行できない理由を一度報告する。
@@ -547,6 +872,8 @@ impl Linux {
             wait: None,
             queue: self.queue.clone(),
             pipe_wait: None,
+            fd_wait: None,
+            host_io: self.host_io.clone(),
             cwd: self.cwd.clone(),
             guest_root: self.guest_root.clone(),
             mono_start: self.mono_start,
@@ -863,8 +1190,17 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("socketpair", sys_socketpair),
     ("bind", sys_bind),
     ("connect", sys_connect),
+    ("listen", sys_listen),
+    ("accept", sys_accept),
+    ("accept4", sys_accept4),
+    ("getpeername", sys_getpeername),
+    ("shutdown", sys_shutdown),
+    ("setsockopt", sys_setsockopt),
+    ("getsockopt", sys_getsockopt),
     ("sendto", sys_sendto),
     ("recvfrom", sys_recvfrom),
+    ("sendmsg", sys_sendmsg),
+    ("recvmsg", sys_recvmsg),
     ("getsockname", sys_getsockname),
     ("setxattr", sys_setxattr),
     ("lsetxattr", sys_lsetxattr),
@@ -954,6 +1290,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
 ];
 
 const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
+    ("socketcall", sys_socketcall),
     ("openat", sys_openat),
     ("open", sys_open),
     ("read", sys_read),
@@ -2113,39 +2450,200 @@ fn sys_setitimer(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     crate::x86::sys_setitimer(env, cx)
 }
 
-fn sys_socket(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_socket(env, cx)
+fn sys_socket(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 正準層は os-linux::sock。引数は rbx/rcx/rdx（i386 は socketcall 経由）。
+    let abi = sys.sock_abi();
+    let r = crate::sock::sys_socket(
+        &mut sys.fds,
+        &abi,
+        get64(env, cx.r_a),
+        get64(env, cx.r_b),
+        get64(env, cx.r_c),
+    )
+    .map(crate::sock::Out::Done);
+    sys.sock_finish(env, r)
 }
 
-fn sys_socketpair(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_socketpair(env, cx)
+fn sys_socketpair(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let (a, b, c, d) = (
+        get64(env, cx.r_a),
+        get64(env, cx.r_b),
+        get64(env, cx.r_c),
+        get64(env, cx.r_d),
+    );
+    let r = crate::sock::sys_socketpair(&mut sys.fds, &abi, env, a, b, c, d)
+        .map(crate::sock::Out::Done);
+    sys.sock_finish(env, r)
 }
 
-fn sys_bind(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_bind(env, cx)
+fn sys_bind(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let map = sys.unix_path_map();
+    #[cfg(unix)]
+    {
+        let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+        let r = crate::sock::sys_bind(&mut sys.fds, &abi, env, a, b, c, &map)
+            .map(crate::sock::Out::Done);
+        sys.sock_finish(env, r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (abi, map, env, cx);
+        Some(TrapOutcome::Unimplemented)
+    }
 }
 
-fn sys_connect(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_connect(env, cx)
+fn sys_connect(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let map = sys.unix_path_map();
+    #[cfg(unix)]
+    {
+        let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+        let r = crate::sock::sys_connect(&mut sys.fds, &abi, env, a, b, c, &map);
+        sys.sock_finish(env, r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (abi, map, env, cx);
+        Some(TrapOutcome::Unimplemented)
+    }
 }
 
-fn sys_sendto(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_sendto(env, cx)
+fn sys_listen(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    #[cfg(unix)]
+    {
+        let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
+        let r = crate::sock::sys_listen(&mut sys.fds, &abi, a, b).map(crate::sock::Out::Done);
+        sys.sock_finish(env, r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (abi, env, cx);
+        Some(TrapOutcome::Unimplemented)
+    }
 }
 
-fn sys_recvfrom(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_recvfrom(env, cx)
+fn sys_accept(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys.accept_impl(env, cx, 0)
 }
 
-fn sys_getsockname(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_getsockname(env, cx)
+fn sys_accept4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let flags = get64(env, cx.r_d);
+    sys.accept_impl(env, cx, flags)
+}
+
+fn sys_getpeername(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys.getname_impl(env, cx, true)
+}
+
+fn sys_shutdown(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
+    let r = crate::sock::sys_shutdown(&mut sys.fds, &abi, a, b).map(crate::sock::Out::Done);
+    sys.sock_finish(env, r)
+}
+
+fn sys_setsockopt(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    #[cfg(unix)]
+    {
+        let (a, b, c, d, e) = (
+            get64(env, cx.r_a),
+            get64(env, cx.r_b),
+            get64(env, cx.r_c),
+            get64(env, cx.r_d),
+            get64(env, cx.r_e),
+        );
+        let r = crate::sock::sys_setsockopt(&mut sys.fds, &abi, env, a, b, c, d, e)
+            .map(crate::sock::Out::Done);
+        sys.sock_finish(env, r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (abi, env, cx);
+        Some(TrapOutcome::Unimplemented)
+    }
+}
+
+fn sys_getsockopt(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    #[cfg(unix)]
+    {
+        let (a, b, c, d, e) = (
+            get64(env, cx.r_a),
+            get64(env, cx.r_b),
+            get64(env, cx.r_c),
+            get64(env, cx.r_d),
+            get64(env, cx.r_e),
+        );
+        let r = crate::sock::sys_getsockopt(&mut sys.fds, &abi, env, a, b, c, d, e)
+            .map(crate::sock::Out::Done);
+        sys.sock_finish(env, r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (abi, env, cx);
+        Some(TrapOutcome::Unimplemented)
+    }
+}
+
+fn sys_sendto(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let map = sys.unix_path_map();
+    let (a, b, c, d, e, f) = (
+        get64(env, cx.r_a),
+        get64(env, cx.r_b),
+        get64(env, cx.r_c),
+        get64(env, cx.r_d),
+        get64(env, cx.r_e),
+        get64(env, cx.r_f),
+    );
+    let r = crate::sock::sys_sendto(&mut sys.fds, &abi, env, a, b, c, d, e, f, &map);
+    sys.sock_finish(env, r)
+}
+
+fn sys_recvfrom(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let (a, b, c, d, e, f) = (
+        get64(env, cx.r_a),
+        get64(env, cx.r_b),
+        get64(env, cx.r_c),
+        get64(env, cx.r_d),
+        get64(env, cx.r_e),
+        get64(env, cx.r_f),
+    );
+    let r = crate::sock::sys_recvfrom(&mut sys.fds, &abi, env, a, b, c, d, e, f);
+    sys.sock_finish(env, r)
+}
+
+fn sys_sendmsg(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let map = sys.unix_path_map();
+    let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+    let r = crate::sock::sys_sendmsg(&mut sys.fds, &abi, env, a, b, c, &map);
+    sys.sock_finish(env, r)
+}
+
+fn sys_recvmsg(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
+    let r = crate::sock::sys_recvmsg(&mut sys.fds, &abi, env, a, b, c);
+    sys.sock_finish(env, r)
+}
+
+fn sys_getsockname(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys.getname_impl(env, cx, false)
+}
+
+/// i386 系の socketcall(call, args)。副番号は sock::call。
+fn sys_socketcall(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let abi = sys.sock_abi();
+    let map = sys.unix_path_map();
+    let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
+    let r = crate::sock::sys_socketcall(&mut sys.fds, &abi, env, a, b, &map);
+    sys.sock_finish(env, r)
 }
 
 fn sys_setxattr(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3741,14 +4239,34 @@ impl TrapHandler for Linux {
     }
 
     fn on_block(&mut self, env: &mut BareEnv) -> bool {
-        let blocked = self.wait.is_some() || self.pipe_wait.is_some();
+        let blocked = self.wait.is_some() || self.pipe_wait.is_some() || self.fd_wait.is_some();
         if self.preempt(env) {
             return true;
         }
-        if blocked {
-            self.note_deadlock();
+        loop {
+            self.sweep_fd_waits();
+            if self.preempt(env) {
+                return true;
+            }
+            // 自分の待ちが解けて実行可能に戻った。
+            if self.fd_wait.is_none() && self.self_fd_blocked() {
+                let pid = self.pid;
+                self.queue
+                    .0
+                    .borrow_mut()
+                    .meta
+                    .unblock(polyisa_kernel::ThreadId(pid));
+                return true;
+            }
+            if !self.drive_io_waits() {
+                if blocked {
+                    self.note_deadlock();
+                }
+                return false;
+            }
+            // HostIo 待ちの間に自分が parked へ移ることはない
+            // （swap_in は preempt 経由でのみ起きる）。
         }
-        false
     }
 
     fn take_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {

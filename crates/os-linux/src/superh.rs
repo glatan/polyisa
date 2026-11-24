@@ -359,7 +359,26 @@ pub mod nr {
     pub const FANOTIFY_INIT: u64 = 337;
     pub const FANOTIFY_MARK: u64 = 338;
     pub const PRLIMIT64: u64 = 339;
+    // ソケットの直番号（socketcall と同じ意味を持つ個別系）。
+    pub const SOCKET: u64 = 340;
+    pub const BIND: u64 = 341;
+    pub const CONNECT: u64 = 342;
+    pub const LISTEN: u64 = 343;
+    pub const ACCEPT: u64 = 344;
+    pub const GETSOCKNAME: u64 = 345;
+    pub const GETPEERNAME: u64 = 346;
+    pub const SOCKETPAIR: u64 = 347;
+    pub const SEND: u64 = 348;
+    pub const SENDTO: u64 = 349;
+    pub const RECV: u64 = 350;
+    pub const RECVFROM: u64 = 351;
+    pub const SHUTDOWN: u64 = 352;
+    pub const SETSOCKOPT: u64 = 353;
+    pub const GETSOCKOPT: u64 = 354;
+    pub const SENDMSG: u64 = 355;
+    pub const RECVMSG: u64 = 356;
     pub const RECVMMSG: u64 = 357;
+    pub const ACCEPT4: u64 = 358;
     pub const CLOCK_ADJTIME: u64 = 361;
     pub const SYNCFS: u64 = 362;
     pub const SENDMMSG: u64 = 363;

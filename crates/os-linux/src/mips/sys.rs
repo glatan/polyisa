@@ -1271,6 +1271,32 @@ fn ret(v: u64) -> Disp {
 }
 
 impl Linux {
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。errno・SO_*・O_* は MIPS 独自系。
+    /// 待ち要求は単一スレッド消化で進め、進行不能はデッドロック
+    /// として報告する。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 8]) -> Disp {
+        let mut abi = crate::sock::SockAbi::generic((self.abi.ptr_bits() / 8) as u8, self.endian);
+        abi.errno = mips::host_to_mips_errno;
+        abi.so_to_host = crate::sock::so_odd_to_host;
+        abi.sock_nonblock = 0x80; // mips O_NONBLOCK
+        abi.sock_cloexec = 0x80000; // mips O_CLOEXEC
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, a6, &map, 0, &mono) {
+            Some(Ok(v)) => ret(Self::ok(env, v)),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("mips: deadlock in fd wait");
+                }
+                self.fail_ret(env, (abi.errno)(e))
+            }
+            None => self.fail_ret(env, mips::errno::ENOSYS),
+        }
+    }
+
     /// o32 の番号（4000 からの通し番号）で振り分ける。
     fn dispatch_o32(&mut self, env: &mut BareEnv, n: u64) -> Disp {
         let args: [u64; 8] = std::array::from_fn(|i| self.arg(env, i));
@@ -1692,8 +1718,13 @@ impl Linux {
             // statfs=99, fstatfs=100（68B）、statfs64=255, fstatfs64=256（92B）
             99 | 100 => ret(self.do_statfs(env, args[1], FsLayout::Short)),
             255 | 256 => ret(self.do_statfs(env, args[1], FsLayout::W64)),
-            // socketcall=102 — MIPS o32 には個別 socket 番号がない。ソケットは ENOSYS
-            102 => self.fail_ret(env, mips::errno::ENOSYS),
+            // socketcall=102 と o32 の直番号（4168–4184=168–184、accept4=4334=334）。
+            102 | 168..=184 | 334 => {
+                let Some(name) = mips_o32::name(4000 + n) else {
+                    return self.fail_ret(env, mips::errno::ENOSYS);
+                };
+                self.sock_call(env, name, &args)
+            }
             // stat=106, lstat=107, fstat=108
             106 | 107 => {
                 let path = args[0];
@@ -1946,6 +1977,9 @@ impl Linux {
         let Some(name) = name else {
             return Disp::Unimpl;
         };
+        if crate::sock::NAMES.contains(&name) {
+            return self.sock_call(env, name, &args);
+        }
         match name {
             "exit" | "exit_group" => Disp::Exit((args[0] & 0xff) as u32),
             "read" => {

@@ -279,6 +279,30 @@ impl Linux {
         }
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。待ち要求は単一スレッド消化で進め、
+    /// 進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, nr: u64) -> Disp {
+        let Some(name) = s390::name(nr) else {
+            return Self::fail_ret(errno::ENOSYS);
+        };
+        let abi = crate::sock::SockAbi::generic(8, Endian::Be);
+        let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
+        let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, &args, &map, 0, &mono) {
+            Some(Ok(v)) => ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("s390: deadlock in fd wait");
+                }
+                Self::fail_ret((abi.errno)(e))
+            }
+            None => Self::fail_ret(errno::ENOSYS),
+        }
+    }
+
     fn dispatch(&mut self, env: &mut BareEnv, nr: u64) -> Disp {
         match nr {
             s390::EXIT | s390::EXIT_GROUP => Disp::Exit(arg(env, 0) as u32),
@@ -643,6 +667,23 @@ impl Linux {
                 self.umask = arg(env, 0) as u32 & 0o777;
                 ret(old as u64)
             }
+            // ---- ソケット ----
+            s390::SOCKETCALL
+            | s390::SOCKET
+            | s390::SOCKETPAIR
+            | s390::BIND
+            | s390::CONNECT
+            | s390::LISTEN
+            | s390::ACCEPT4
+            | s390::GETSOCKOPT
+            | s390::SETSOCKOPT
+            | s390::GETSOCKNAME
+            | s390::GETPEERNAME
+            | s390::SENDTO
+            | s390::SENDMSG
+            | s390::RECVFROM
+            | s390::RECVMSG
+            | s390::SHUTDOWN => self.sock_call(env, nr),
             _ => Disp::Unimpl,
         }
     }

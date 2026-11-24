@@ -1556,8 +1556,33 @@ impl Linux {
         Ok(0)
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。待ち要求は
+    /// 単一スレッド消化で進め、進行不能はデッドロックとして報告。
+    /// 戻り値 Err はゲスト errno（asm-generic と同値）。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Result<u64, u64> {
+        let abi = crate::sock::SockAbi::generic(8, Endian::Le);
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("ia64: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     /// 表番号 `n`（r15 − NR_BASE）の実装本体。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64, args: [u64; 6]) -> Ia64Result {
+        if let Some(name) = crate::ia64::name(n)
+            && crate::sock::NAMES.contains(&name)
+        {
+            return self.sock_call(env, name, &args).into();
+        }
         match n {
             nr::EXIT | nr::EXIT_GROUP => Ia64Result::Exit((args[0] & 0xff) as u32),
             nr::READ => self.sys_read(env, args[0] as u32, args[1], args[2]).into(),

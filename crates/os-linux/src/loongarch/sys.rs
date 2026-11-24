@@ -1400,6 +1400,28 @@ impl Linux {
 
 /// `handle_trap` 内の syscall ディスパッチ。
 impl Linux {
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。待ち要求は
+    /// 単一スレッド消化で進め、進行不能はデッドロックとして報告。
+    /// 戻り値 Err はゲスト errno（asm-generic と同値）。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64]) -> Result<u64, u64> {
+        let abi = crate::sock::SockAbi::generic(8, Endian::Le);
+        let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
+        let mut a6 = [0u64; 6];
+        a6[..a.len().min(6)].copy_from_slice(&a[..a.len().min(6)]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, &a6, &map, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("loongarch: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     fn syscall(&mut self, env: &mut BareEnv) -> TrapOutcome {
         let nr = self.rget(env, 11);
         let a: Vec<u64> = (0..6).map(|i| self.rget(env, 4 + i)).collect();
@@ -1410,6 +1432,16 @@ impl Linux {
                 nr,
                 a
             );
+        }
+        // ソケット系は `sock` 正準層へ委譲する。
+        if let Some(name) = loongarch::name(nr)
+            && crate::sock::NAMES.contains(&name)
+        {
+            match self.sock_call(env, name, &a) {
+                Ok(v) => self.rset(env, 4, v),
+                Err(e) => self.rset(env, 4, e.wrapping_neg()),
+            }
+            return TrapOutcome::Handled;
         }
         let ret: Result<u64, u64> = match nr {
             loongarch::nr::WRITE => self.sys_write(env, a[0] as u32, a[1], a[2]),

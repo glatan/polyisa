@@ -115,3 +115,4 @@ pub const SETUID32: u64 = 213;
 pub const SETGID32: u64 = 214;
 pub const FCNTL64: u64 = 221;
 pub const CLOCK_GETTIME64: u64 = 403;
+pub const SOCKETCALL: u64 = 102;

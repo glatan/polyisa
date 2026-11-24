@@ -1023,6 +1023,29 @@ impl TrapHandler for Linux {
 }
 
 impl Linux {
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。待ち要求は
+    /// 単一スレッド消化で進め、進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, n: u64, args: &[u64; 8]) -> Disp {
+        let Some(name) = arm::name(n) else {
+            return fail_ret(arm::errno::ENOSYS);
+        };
+        let abi = crate::sock::SockAbi::generic(4, Endian::Le);
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, a6, &map, 0, &mono) {
+            Some(Ok(v)) => ok_ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("arm: deadlock in fd wait");
+                }
+                fail_ret((abi.errno)(e))
+            }
+            None => fail_ret(arm::errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は Disp で返し、r0 は handle_trap が書く。
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> Disp {
@@ -1791,7 +1814,7 @@ impl Linux {
             | arm::GETSOCKOPT
             | arm::SENDMSG
             | arm::RECVMSG
-            | arm::ACCEPT4 => fail_ret(E::ENOSYS),
+            | arm::ACCEPT4 => self.sock_call(env, n, &args),
             arm::SEMOP
             | arm::SEMGET
             | arm::SEMCTL

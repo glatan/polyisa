@@ -112,6 +112,10 @@ pub mod x86_x32;
 /// ゲストパスをホストパスへ写す補助（cwd 連結とルート閉じ込め）。
 pub mod guest_path;
 
+/// ソケット関連 syscall の正準実装（段階26・NS5）。
+// Ref: SRC-LINUX (7.3).
+pub mod sock;
+
 /// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
 /// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
 pub const ENOSYS: u32 = 38;
@@ -297,6 +301,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::SETUID32 => Some("setuid"),
             x86_32::SETGID32 => Some("setgid"),
             x86_32::FCNTL64 => Some("fcntl"),
+            x86_32::SOCKETCALL => Some("socketcall"),
             x86_32::CLOCK_GETTIME64 => Some("clock_gettime"),
             _ => None,
         },
@@ -484,6 +489,15 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SENDTO => Some("sendto"),
             x86_64::RECVFROM => Some("recvfrom"),
             x86_64::GETSOCKNAME => Some("getsockname"),
+            x86_64::GETPEERNAME => Some("getpeername"),
+            x86_64::LISTEN => Some("listen"),
+            x86_64::ACCEPT => Some("accept"),
+            x86_64::ACCEPT4 => Some("accept4"),
+            x86_64::SHUTDOWN => Some("shutdown"),
+            x86_64::SETSOCKOPT => Some("setsockopt"),
+            x86_64::GETSOCKOPT => Some("getsockopt"),
+            x86_64::SENDMSG => Some("sendmsg"),
+            x86_64::RECVMSG => Some("recvmsg"),
             x86_64::SETXATTR => Some("setxattr"),
             x86_64::LSETXATTR => Some("lsetxattr"),
             x86_64::FSETXATTR => Some("fsetxattr"),

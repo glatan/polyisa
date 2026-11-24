@@ -46,6 +46,23 @@ pub const DUP2: u64 = 63;
 pub const GETPPID: u64 = 64;
 pub const GETRUSAGE: u64 = 77;
 pub const GETTIMEOFDAY: u64 = 78;
+// ソケット系。旧 ABI の socketcall と s390x の直番号の両方。
+pub const SOCKETCALL: u64 = 102;
+pub const SOCKET: u64 = 359;
+pub const SOCKETPAIR: u64 = 360;
+pub const BIND: u64 = 361;
+pub const CONNECT: u64 = 362;
+pub const LISTEN: u64 = 363;
+pub const ACCEPT4: u64 = 364;
+pub const GETSOCKOPT: u64 = 365;
+pub const SETSOCKOPT: u64 = 366;
+pub const GETSOCKNAME: u64 = 367;
+pub const GETPEERNAME: u64 = 368;
+pub const SENDTO: u64 = 369;
+pub const SENDMSG: u64 = 370;
+pub const RECVFROM: u64 = 371;
+pub const RECVMSG: u64 = 372;
+pub const SHUTDOWN: u64 = 373;
 pub const MMAP: u64 = 90;
 pub const MUNMAP: u64 = 91;
 pub const FTRUNCATE: u64 = 93;
@@ -174,6 +191,22 @@ pub fn name(nr: u64) -> Option<&'static str> {
         MEMFD_CREATE => "memfd_create",
         STATX => "statx",
         RSEQ => "rseq",
+        SOCKETCALL => "socketcall",
+        SOCKET => "socket",
+        SOCKETPAIR => "socketpair",
+        BIND => "bind",
+        CONNECT => "connect",
+        LISTEN => "listen",
+        ACCEPT4 => "accept4",
+        GETSOCKOPT => "getsockopt",
+        SETSOCKOPT => "setsockopt",
+        GETSOCKNAME => "getsockname",
+        GETPEERNAME => "getpeername",
+        SENDTO => "sendto",
+        SENDMSG => "sendmsg",
+        RECVFROM => "recvfrom",
+        RECVMSG => "recvmsg",
+        SHUTDOWN => "shutdown",
         _ => return None,
     })
 }

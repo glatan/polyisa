@@ -1081,12 +1081,38 @@ impl Linux {
         }
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。`name` が
+    /// ソケット系でないとき None。待ち要求は単一スレッド消化で
+    /// 進め、進行不能はデッドロックとして報告する。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Option<Disp> {
+        if !crate::sock::NAMES.contains(&name) {
+            return None;
+        }
+        let abi = crate::sock::SockAbi::generic(8, self.endian);
+        let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        let r = crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono)?;
+        Some(match r {
+            Ok(v) => ret(v),
+            Err(e) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("aarch64: deadlock in fd wait");
+                }
+                Self::fail_ret((abi.errno)(e))
+            }
+        })
+    }
+
     /// メインの振り分け。戻りは `Disp`。
     fn dispatch(&mut self, env: &mut BareEnv, name: Option<&'static str>) -> Disp {
         let args: [u64; 6] = std::array::from_fn(|i| reg(env, i as u8));
         let Some(name) = name else {
             return Disp::Unimpl;
         };
+        if let Some(d) = self.sock_call(env, name, &args) {
+            return d;
+        }
         match name {
             "exit" | "exit_group" => Disp::Exit((args[0] & 0xff) as u32),
             "read" => {

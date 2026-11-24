@@ -1718,8 +1718,33 @@ impl Linux {
         Ok(0)
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。待ち要求は
+    /// 単一スレッド消化で進め、進行不能はデッドロックとして報告。
+    /// 戻り値 Err はゲスト errno（asm-generic と同値）。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, a: &[u64; 6]) -> Result<u64, u64> {
+        let abi = crate::sock::SockAbi::generic(4, Endian::Le);
+        let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, a, &map, 0, &mono) {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("hexagon: deadlock in fd wait");
+                }
+                Err(u64::from((abi.errno)(e)))
+            }
+            None => Err(errno::ENOSYS),
+        }
+    }
+
     /// dispatch。nr は r6、引数は r0-r5（32 ビットに折り返し済み）。
     fn dispatch(&mut self, env: &mut BareEnv, nr_: u64, a: [u64; 6]) -> Result<u64, u64> {
+        if let Some(name) = hexagon::name(nr_)
+            && crate::sock::NAMES.contains(&name)
+        {
+            return self.sock_call(env, name, &a);
+        }
         match nr_ {
             nr::IOCTL => self.sys_ioctl(a[0] as u32, a[1], a[2]),
             nr::FCNTL64 => self.sys_fcntl(a[0] as u32, a[1], a[2]),

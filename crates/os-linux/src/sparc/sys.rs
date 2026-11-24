@@ -1649,6 +1649,32 @@ impl Linux {
         }
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。errno は SunOS 系の独自値へ写し、
+    /// SO_* も独自系。ポインタ幅は v8=4・v9=8。待ち要求は
+    /// 単一スレッド消化で進め、進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, n: u64, args: &[u64; 6]) -> Disp {
+        let Some(name) = sparc::name(n) else {
+            return fail_ret(sparc::errno::ENOSYS);
+        };
+        let mut abi = crate::sock::SockAbi::generic(if is_v9(env) { 8 } else { 4 }, Endian::Be);
+        abi.errno = |e| host_errno(e as i32);
+        abi.so_to_host = crate::sock::so_odd_to_host;
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
+            Some(Ok(v)) => ok_ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("sparc: deadlock in fd wait");
+                }
+                fail_ret((abi.errno)(e))
+            }
+            None => fail_ret(sparc::errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は Disp で返し、%o0 は syscall が書く。
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> Disp {
@@ -2440,7 +2466,6 @@ impl Linux {
             | N::SEMTIMEDOP
             | N::SEMTIMEDOP_TIME64
             | N::IPC
-            | N::SOCKETCALL
             | N::QUERY_MODULE
             | N::CREATE_MODULE
             | N::GET_KERNEL_SYMS
@@ -2483,7 +2508,8 @@ impl Linux {
             | N::FCHROOT
             | N::RESTART_SYSCALL => fail_ret(E::ENOSYS),
             // ---- ソケット・イベント ----
-            N::SOCKET
+            N::SOCKETCALL
+            | N::SOCKET
             | N::BIND
             | N::CONNECT
             | N::LISTEN
@@ -2498,7 +2524,7 @@ impl Linux {
             | N::SENDMSG
             | N::RECVMSG
             | N::ACCEPT
-            | N::ACCEPT4 => fail_ret(E::ENOSYS),
+            | N::ACCEPT4 => self.sock_call(env, n, &args),
             N::SEMGET
             | N::SEMCTL
             | N::MSGSND

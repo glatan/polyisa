@@ -129,6 +129,23 @@ pub const MEMBARRIER: u64 = 283;
 pub const STATX: u64 = 291;
 pub const RSEQ: u64 = 293;
 pub const FACCESSAT2: u64 = 439;
+// ソケット系（asm-generic の連番）。
+pub const SOCKET: u64 = 198;
+pub const SOCKETPAIR: u64 = 199;
+pub const BIND: u64 = 200;
+pub const LISTEN: u64 = 201;
+pub const ACCEPT: u64 = 202;
+pub const CONNECT: u64 = 203;
+pub const GETSOCKNAME: u64 = 204;
+pub const GETPEERNAME: u64 = 205;
+pub const SENDTO: u64 = 206;
+pub const RECVFROM: u64 = 207;
+pub const SETSOCKOPT: u64 = 208;
+pub const GETSOCKOPT: u64 = 209;
+pub const SHUTDOWN: u64 = 210;
+pub const SENDMSG: u64 = 211;
+pub const RECVMSG: u64 = 212;
+pub const ACCEPT4: u64 = 242;
 
 /// 汎用 errno（asm-generic はホストと同じ値）。負で返す。
 // Ref: SRC-LINUX (7.3) `include/uapi/asm-generic/errno*.h`。
@@ -309,6 +326,21 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (177, "getegid"),
     (178, "gettid"),
     (179, "sysinfo"),
+    (198, "socket"),
+    (199, "socketpair"),
+    (200, "bind"),
+    (201, "listen"),
+    (202, "accept"),
+    (203, "connect"),
+    (204, "getsockname"),
+    (205, "getpeername"),
+    (206, "sendto"),
+    (207, "recvfrom"),
+    (208, "setsockopt"),
+    (209, "getsockopt"),
+    (210, "shutdown"),
+    (211, "sendmsg"),
+    (212, "recvmsg"),
     (214, "brk"),
     (215, "munmap"),
     (216, "mremap"),
@@ -321,6 +353,7 @@ pub const SYSCALLS: &[(u64, &str)] = &[
     (227, "msync"),
     (232, "mincore"),
     (233, "madvise"),
+    (242, "accept4"),
     (260, "wait4"),
     (261, "prlimit64"),
     (276, "renameat2"),

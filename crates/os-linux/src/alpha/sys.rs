@@ -1661,9 +1661,38 @@ impl Linux {
         0x2000
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。errno ・
+    /// SO_*・O_* は OSF 系の独自値。待ち要求は単一スレッド消化で
+    /// 進め、進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> AlphaResult {
+        let mut abi = crate::sock::SockAbi::generic(8, Endian::Le);
+        abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+        abi.so_to_host = crate::sock::so_odd_to_host;
+        abi.sock_nonblock = 0x4; // O_NONBLOCK (OSF)
+        abi.sock_cloexec = 1 << 21; // O_CLOEXEC
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
+            Some(Ok(v)) => AlphaResult::Value(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("alpha: deadlock in fd wait");
+                }
+                AlphaResult::Fail((abi.errno)(e))
+            }
+            None => AlphaResult::Fail(errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は (v0, a3) の組または終了。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> AlphaResult {
         let args: [u64; 6] = std::array::from_fn(|i| self.arg(env, i));
+        if let Some(name) = crate::alpha::name(n)
+            && crate::sock::NAMES.contains(&name)
+        {
+            return self.sock_call(env, name, &args);
+        }
         match n {
             nr::EXIT | nr::EXIT_GROUP => AlphaResult::Exit((args[0] & 0xff) as u32),
             nr::READ => self.sys_read(env, args[0] as u32, args[1], args[2]).into(),
@@ -2217,6 +2246,47 @@ fn host_errno(e: std::io::Error) -> u32 {
         Some(40) => errno::ELOOP,
         Some(75) => errno::EOVERFLOW,
         Some(116) => errno::ESTALE,
+        // ソケット系（OSF 独自番号。sock 正準層から到達する）。
+        Some(35) => errno::EDEADLK,
+        Some(37) => errno::ENOLCK,
+        Some(38) => errno::ENOSYS,
+        Some(88) => errno::ENOTSOCK,
+        Some(89) => 39, // EDESTADDRREQ
+        Some(90) => errno::EMSGSIZE,
+        Some(91) => 41, // EPROTOTYPE
+        Some(92) => 42, // ENOPROTOOPT
+        Some(93) => 43, // EPROTONOSUPPORT
+        Some(94) => 44, // ESOCKTNOSUPPORT
+        Some(95) => errno::EOPNOTSUPP,
+        Some(96) => 46, // EPFNOSUPPORT
+        Some(97) => errno::EAFNOSUPPORT,
+        Some(98) => errno::EADDRINUSE,
+        Some(99) => 49,  // EADDRNOTAVAIL
+        Some(100) => 50, // ENETDOWN
+        Some(101) => 51, // ENETUNREACH
+        Some(102) => 52, // ENETRESET
+        Some(103) => 53, // ECONNABORTED
+        Some(104) => errno::ECONNRESET,
+        Some(105) => 55, // ENOBUFS
+        Some(106) => 56, // EISCONN
+        Some(107) => 57, // ENOTCONN
+        Some(108) => 58, // ESHUTDOWN
+        Some(109) => 59, // ETOOMANYREFS
+        Some(110) => errno::ETIMEDOUT,
+        Some(111) => 61, // ECONNREFUSED
+        Some(112) => 64, // EHOSTDOWN
+        Some(113) => 65, // EHOSTUNREACH
+        Some(114) => 37, // EALREADY
+        Some(115) => errno::EINPROGRESS,
+        Some(61) => 86, // ENODATA
+        Some(62) => 83, // ETIME
+        Some(63) => 82, // ENOSR
+        Some(60) => 87, // ENOSTR
+        Some(67) => 89, // ENOLINK
+        Some(71) => 85, // EPROTO
+        Some(42) => 80, // ENOMSG
+        Some(43) => 81, // EIDRM
+        Some(84) => errno::EILSEQ,
         _ => errno::EIO,
     }
 }

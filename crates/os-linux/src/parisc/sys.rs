@@ -2407,9 +2407,38 @@ impl Linux {
         Ok(0)
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する。errno は
+    /// HP-UX 系の独自値・SO_* と O_* も独自系。待ち要求は単一
+    /// スレッド消化で進め、進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
+        let mut abi = crate::sock::SockAbi::generic(4, Endian::Be);
+        abi.errno = |e| host_errno(std::io::Error::from_raw_os_error(e as i32));
+        abi.so_to_host = crate::sock::so_odd_to_host;
+        abi.sock_nonblock = oflag::NONBLOCK;
+        abi.sock_cloexec = oflag::CLOEXEC;
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
+            Some(Ok(v)) => Disp::Ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("parisc: deadlock in fd wait");
+                }
+                bad((abi.errno)(e))
+            }
+            None => bad(errno::ENOSYS),
+        }
+    }
+
     /// 通常 syscall（code=0x100）のディスパッチ。
     // Ref: SRC-LINUX (7.3) — syscall 規約（r20=nr, r26..r21=args, r28=ret）。
     fn dispatch(&mut self, env: &mut BareEnv, n: u64, args: &[u64; 6]) -> Disp {
+        if let Some(name) = crate::parisc::name(n)
+            && crate::sock::NAMES.contains(&name)
+        {
+            return self.sock_call(env, name, args);
+        }
         match n {
             nr::EXIT | nr::EXIT_GROUP => Disp::Exit((args[0] & 0xff) as u32),
             nr::READ => res(self.sys_read(env, args[0] as u32, args[1], args[2])),

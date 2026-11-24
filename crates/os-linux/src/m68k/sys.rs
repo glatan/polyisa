@@ -1058,6 +1058,30 @@ impl TrapHandler for Linux {
 }
 
 impl Linux {
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。待ち要求は単一スレッド消化で進め、
+    /// 進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, n: u64, args: &[u64; 8]) -> Disp {
+        let Some(name) = m68k::name(n) else {
+            return fail_ret(m68k::errno::ENOSYS);
+        };
+        let abi = crate::sock::SockAbi::generic(4, Endian::Be);
+        let map = crate::sock::unix_path_map("", &self.cwd);
+        let a6: &[u64; 6] = args[..6].try_into().unwrap_or(&[0; 6]);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, a6, &map, 0, &mono) {
+            Some(Ok(v)) => ok_ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("m68k: deadlock in fd wait");
+                }
+                fail_ret((abi.errno)(e))
+            }
+            None => fail_ret(m68k::errno::ENOSYS),
+        }
+    }
+
     /// 番号で振り分ける。戻り値は Disp で返し、r0 は handle_trap が書く。
     #[allow(clippy::too_many_lines)]
     fn dispatch(&mut self, env: &mut BareEnv, n: u64) -> Disp {
@@ -1833,7 +1857,8 @@ impl Linux {
             | m68k::RECVMMSG_TIME64
             | m68k::SEMTIMEDOP_TIME64 => fail_ret(E::ENOSYS),
             // ---- ソケット・イベント ----
-            m68k::SOCKET
+            m68k::SOCKETCALL
+            | m68k::SOCKET
             | m68k::BIND
             | m68k::CONNECT
             | m68k::LISTEN
@@ -1847,7 +1872,7 @@ impl Linux {
             | m68k::GETSOCKOPT
             | m68k::SENDMSG
             | m68k::RECVMSG
-            | m68k::ACCEPT4 => fail_ret(E::ENOSYS),
+            | m68k::ACCEPT4 => self.sock_call(env, n, &args),
             m68k::SEMGET
             | m68k::SEMCTL
             | m68k::MSGSND

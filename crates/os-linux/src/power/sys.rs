@@ -1084,12 +1084,35 @@ impl Linux {
         }
     }
 
+    /// ソケット系 syscall を `sock` 正準層へ委譲する（socketcall
+    /// 副番号の展開を含む）。待ち要求は単一スレッド消化で進め、
+    /// 進行不能はデッドロックとして報告。
+    fn sock_call(&mut self, env: &mut BareEnv, name: &str, args: &[u64; 6]) -> Disp {
+        let abi = crate::sock::SockAbi::generic(8, self.endian);
+        let map = crate::sock::unix_path_map(&self.guest_root, &self.cwd);
+        let t0 = std::time::Instant::now();
+        let mono = move || t0.elapsed().as_nanos() as u64;
+        match crate::sock::drive(&mut self.fds, &abi, env, name, args, &map, 0, &mono) {
+            Some(Ok(v)) => ret(v),
+            Some(Err(e)) => {
+                if e == crate::sock::errno::EDEADLK {
+                    eprintln!("power: deadlock in fd wait");
+                }
+                Self::fail_ret((abi.errno)(e))
+            }
+            None => Self::fail_ret(errno::ENOSYS),
+        }
+    }
+
     /// メインの振り分け。戻りは `Disp`。
     fn dispatch(&mut self, env: &mut BareEnv, name: Option<&'static str>) -> Disp {
         let args: [u64; 6] = std::array::from_fn(|i| arg(env, i as u8));
         let Some(name) = name else {
             return Disp::Unimpl;
         };
+        if crate::sock::NAMES.contains(&name) {
+            return self.sock_call(env, name, &args);
+        }
         match name {
             "exit" | "exit_group" => Disp::Exit((args[0] & 0xff) as u32),
             "read" => {
@@ -1461,13 +1484,11 @@ impl Linux {
             "set_robust_list" | "membarrier" => ret(0),
             "statfs" | "fstatfs" => ret(self.do_statfs(env, args[1])),
             "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[2])),
-            "socketcall" | "ipc" | "sysctl" | "llseek" | "io_setup" | "io_destroy"
-            | "io_getevents" | "io_submit" | "io_cancel" | "splice" | "tee" | "vmsplice"
-            | "copy_file_range" | "perf_event_open" | "seccomp" | "memfd_create" | "signalfd"
-            | "signalfd4" | "eventfd" | "eventfd2" | "timerfd_create" | "timerfd_settime"
-            | "timerfd_gettime" | "init_module" | "delete_module" | "statfs0" => {
-                Self::fail_ret(errno::ENOSYS)
-            }
+            "ipc" | "sysctl" | "llseek" | "io_setup" | "io_destroy" | "io_getevents"
+            | "io_submit" | "io_cancel" | "splice" | "tee" | "vmsplice" | "copy_file_range"
+            | "perf_event_open" | "seccomp" | "memfd_create" | "signalfd" | "signalfd4"
+            | "eventfd" | "eventfd2" | "timerfd_create" | "timerfd_settime" | "timerfd_gettime"
+            | "init_module" | "delete_module" | "statfs0" => Self::fail_ret(errno::ENOSYS),
             _ => Disp::Unimpl,
         }
     }

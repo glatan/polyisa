@@ -521,6 +521,22 @@ pub struct MemFile {
     pub nonblock: bool,
 }
 
+/// ホストのソケット記述子とゲスト側の共有状態。ホストの fd は
+/// 常に非阻止に保ち（ABI が阻止動作を待ちへ写す）、ゲストが
+/// 見る O_NONBLOCK は `nonblock` に写す。dup では `Rc` を共有
+/// するので非阻止旗も記述の規約どおり共有される。
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct HostSockEnt {
+    /// ホストのソケット。
+    pub sock: polyisa_host::SockFd,
+    /// ゲストが見る O_NONBLOCK。
+    pub nonblock: Cell<bool>,
+    /// 非阻止 connect が進行中。再入は connect を呼ばず
+    /// SO_ERROR で完了を読む（Linux の EALREADY 規約）。
+    pub connecting: Cell<bool>,
+}
+
 /// fd が指す対象。一つの表が全種類を保持する。
 ///
 /// `FdTarget` 自体は `Drop` で端数を減らさない。表の外に置いた
@@ -538,8 +554,10 @@ pub enum FdTarget {
         end: PairEnd,
     },
     /// ホストのソケット。AF_UNIX パス・AF_INET/INET6 はこちら。
+    /// `Rc` の中の `HostSockEnt` が dup で共有される（ファイル
+    /// 記述の規約）。
     #[cfg(unix)]
-    HostSock(polyisa_host::SockFd),
+    HostSock(Rc<HostSockEnt>),
     /// eventfd の共有カウンタ。
     EventFd(Rc<EventState>),
     /// timerfd の共有状態。
@@ -607,7 +625,7 @@ impl FdTarget {
                 (base << 1) | u64::from(*end == PairEnd::B)
             }
             #[cfg(unix)]
-            Self::HostSock(s) => s.raw() as u64,
+            Self::HostSock(s) => s.sock.raw() as u64,
             Self::EventFd(s) => Rc::as_ptr(s) as usize as u64,
             Self::TimerFd(s) => Rc::as_ptr(s) as usize as u64,
             Self::SignalFd(s) => Rc::as_ptr(s) as usize as u64,
@@ -1106,6 +1124,39 @@ impl FdTable {
         }
     }
 
+    /// ホストソケットの対象。`sock` は `host::sock::socket` 等で
+    /// 非阻止化済みのもの。`nonblock` はゲストが見る初期の
+    /// O_NONBLOCK（SOCK_NONBLOCK 指定など）。
+    #[cfg(unix)]
+    pub fn host_sock(&self, sock: polyisa_host::SockFd, nonblock: bool) -> FdTarget {
+        FdTarget::HostSock(Rc::new(HostSockEnt {
+            sock,
+            nonblock: Cell::new(nonblock),
+            connecting: Cell::new(false),
+        }))
+    }
+
+    /// fd が指すホストソケットの共有記述子。socket 系 syscall の
+    /// 正準層が bind/connect/send 等を呼ぶために使う。
+    #[cfg(unix)]
+    #[must_use]
+    pub fn host_sock_of(&self, fd: u32) -> Option<Rc<HostSockEnt>> {
+        match self.target(fd) {
+            Some(FdTarget::HostSock(s)) => Some(Rc::clone(s)),
+            _ => None,
+        }
+    }
+
+    /// fd が指すカーネル内ソケット対の端（pair と端の向き）。
+    /// socketpair の送受・shutdown の正準層が使う。
+    #[must_use]
+    pub fn pair_of(&self, fd: u32) -> Option<(Rc<RefCell<PairSock>>, PairEnd)> {
+        match self.target(fd) {
+            Some(FdTarget::PairSock { pair, end }) => Some((Rc::clone(pair), *end)),
+            _ => None,
+        }
+    }
+
     /// epoll_create。
     pub fn epoll(&self) -> FdTarget {
         FdTarget::Epoll(Rc::new(RefCell::new(EpollSet::default())))
@@ -1221,7 +1272,7 @@ impl FdTable {
             Some(FdTarget::PipeEnd { id, read }) => self.pipes.borrow().nonblock(*id, *read),
             Some(FdTarget::PairSock { pair, end }) => pair.borrow().is_nonblock(*end),
             #[cfg(unix)]
-            Some(FdTarget::HostSock(s)) => s.is_nonblock(),
+            Some(FdTarget::HostSock(s)) => s.nonblock.get(),
             Some(FdTarget::EventFd(s)) => s.nonblock.get(),
             Some(FdTarget::TimerFd(s)) => s.borrow().nonblock,
             Some(FdTarget::SignalFd(s)) => s.nonblock.get(),
@@ -1244,7 +1295,10 @@ impl FdTable {
                 true
             }
             #[cfg(unix)]
-            Some(FdTarget::HostSock(s)) => s.set_nonblock(on).is_ok(),
+            Some(FdTarget::HostSock(s)) => {
+                s.nonblock.set(on);
+                true
+            }
             Some(FdTarget::EventFd(s)) => {
                 s.nonblock.set(on);
                 true
@@ -1290,7 +1344,7 @@ impl FdTable {
             Some(FdTarget::PipeEnd { id, read }) => self.pipes.borrow().ready(*id, *read),
             Some(FdTarget::PairSock { pair, end }) => pair.borrow().ready(*end),
             #[cfg(unix)]
-            Some(FdTarget::HostSock(s)) => sock_ready(s.ready()),
+            Some(FdTarget::HostSock(s)) => sock_ready(s.sock.ready()),
             Some(FdTarget::EventFd(s)) => {
                 let count = s.count.get();
                 Ready {
@@ -1351,7 +1405,7 @@ impl FdTable {
                 }
             }
             #[cfg(unix)]
-            FdTarget::HostSock(s) => match s.recv(max.min(65536)) {
+            FdTarget::HostSock(s) => match s.sock.recv(max.min(65536)) {
                 Ok(b) if b.is_empty() => FdRead::Eof,
                 Ok(b) => FdRead::Bytes(b),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => FdRead::Empty,
@@ -1464,7 +1518,7 @@ impl FdTable {
                 }
             }
             #[cfg(unix)]
-            FdTarget::HostSock(s) => match s.send(bytes) {
+            FdTarget::HostSock(s) => match s.sock.send(bytes) {
                 Ok(n) => FdWrite::Done(n),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => FdWrite::Full,
                 Err(e) => FdWrite::Host(e),
@@ -1590,7 +1644,7 @@ fn dup_target(target: &FdTarget, pipes: &Rc<RefCell<PipeTable>>) -> Option<FdTar
             })
         }
         #[cfg(unix)]
-        FdTarget::HostSock(s) => s.try_clone().ok().map(FdTarget::HostSock),
+        FdTarget::HostSock(s) => Some(FdTarget::HostSock(Rc::clone(s))),
         FdTarget::EventFd(s) => Some(FdTarget::EventFd(Rc::clone(s))),
         FdTarget::TimerFd(s) => Some(FdTarget::TimerFd(Rc::clone(s))),
         FdTarget::SignalFd(s) => Some(FdTarget::SignalFd(Rc::clone(s))),
@@ -1624,7 +1678,7 @@ fn target_ready(
         FdTarget::PipeEnd { id, read } => pipes.borrow().ready(*id, *read),
         FdTarget::PairSock { pair, end } => pair.borrow().ready(*end),
         #[cfg(unix)]
-        FdTarget::HostSock(s) => sock_ready(s.ready()),
+        FdTarget::HostSock(s) => sock_ready(s.sock.ready()),
         FdTarget::EventFd(s) => {
             let count = s.count.get();
             Ready {
