@@ -388,8 +388,9 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zbc/")
         || test_rel.contains("/Zbs/")
         || test_rel.contains("/Zimop/")
+        || test_rel.contains("/Zcmop/")
     {
-        for ext in ["Zcb", "Zba", "Zbb", "Zbc", "Zbs", "Zimop"] {
+        for ext in ["Zcb", "Zba", "Zbb", "Zbc", "Zbs", "Zimop", "Zcmop"] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
                 sail_json = sail_json.replace(
                     "    \"Zicond\": {",
@@ -440,8 +441,9 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zbc/")
         || test_rel.contains("/Zbs/")
         || test_rel.contains("/Zimop/")
+        || test_rel.contains("/Zcmop/")
     {
-        &["zcb", "zba", "zbb", "zbc", "zbs", "zimop"]
+        &["zcb", "zba", "zbb", "zbc", "zbs", "zimop", "zcmop"]
     } else {
         &[]
     };
@@ -599,6 +601,11 @@ fn act4_rv64zbs_suite() {
 #[test]
 fn act4_rv64zimop_suite() {
     suite("rv64i/Zimop");
+}
+
+#[test]
+fn act4_rv64zcmop_suite() {
+    suite("rv64i/Zcmop");
 }
 
 #[test]

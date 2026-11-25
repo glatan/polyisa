@@ -54,7 +54,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zvbb", &["v"][..], &[][..]),
         ("zicond", &[][..], &[][..]),
         ("zimop", &[][..], &[][..]),
-        ("zcmop", &["zimop"][..], &[][..]),
+        ("zcmop", &["zimop", "c"][..], &[][..]),
         ("zcb", &["c"][..], &[][..]),
         ("zfa", &[][..], &[][..]),
         ("zawrs", &[][..], &[][..]),
@@ -208,6 +208,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         },
     });
 
+    // C.LUI/C.MOP の下位即値位置。bit12 側は符号化パターンで分ける。
+    m.fields.push(Field {
+        name: "c_lui_imm".to_string(),
+        kind: FieldKind::Parts {
+            parts: vec![(12, 12), (6, 2)],
+            zfill: 0,
+        },
+    });
+
     let gpr = |name: &str, access: Access| Operand {
         name: name.to_string(),
         field: None,
@@ -294,6 +303,11 @@ pub fn build_model() -> polyisa_isadl::Model {
             gpr("cr_rs1", Access::ReadWrite),
             gpr("cr_rs2", Access::Read),
         ],
+    });
+    m.formats.push(Format {
+        name: "CLUI".to_string(),
+        fields: vec!["rd".to_string(), "c_lui_imm".to_string()],
+        operands: vec![gpr("rd", Access::Write), imm("imm", "c_lui_imm")],
     });
     // R4（積和融合形式。第4オペランド rs3 を持つ）。
     m.formats.push(Format {
@@ -605,7 +619,16 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("c_addi", "R", "000 ........ ... 01", "c.addi {rd}, {imm}", "alu"),
         ("c_addiw", "R", "001 ........ ... 01", "c.addiw {rd}, {imm}", "alu"),
         ("c_li", "R", "010 ........ ... 01", "c.li {rd}, {imm}", "alu"),
-        ("c_lui_addi16sp", "R", "011 ........ ... 01", "c.lui/addi16sp {rd}, {imm}", "alu"),
+        // Zcmop（圧縮 MOP。既定では状態を変えない）
+        ("c_mop1", "CLUI", "0110000010000001", "c.mop.1", "alu"),
+        ("c_mop3", "CLUI", "0110000110000001", "c.mop.3", "alu"),
+        ("c_mop5", "CLUI", "0110001010000001", "c.mop.5", "alu"),
+        ("c_mop7", "CLUI", "0110001110000001", "c.mop.7", "alu"),
+        ("c_mop9", "CLUI", "0110010010000001", "c.mop.9", "alu"),
+        ("c_mop11", "CLUI", "0110010110000001", "c.mop.11", "alu"),
+        ("c_mop13", "CLUI", "0110011010000001", "c.mop.13", "alu"),
+        ("c_mop15", "CLUI", "0110011110000001", "c.mop.15", "alu"),
+        ("c_lui_addi16sp", "CLUI", "011 ........ ... 01", "c.lui/addi16sp {rd}, {imm}", "alu"),
         ("c_srli", "R", "100 . 00 ... ..... 01", "c.srli {rd}, {imm}", "alu"),
         ("c_srai", "R", "100 . 01 ... ..... 01", "c.srai {rd}, {imm}", "alu"),
         ("c_andi", "R", "100 . 10 ... ..... 01", "c.andi {rd}, {imm}", "alu"),
@@ -667,6 +690,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         if name.starts_with("mop_") {
             reqs.push("zimop");
         }
+        if name.starts_with("c_mop") {
+            reqs.push("zcmop");
+        }
         if name.starts_with("czero_") {
             reqs.push("zicond");
         }
@@ -719,6 +745,21 @@ pub fn build_model() -> polyisa_isadl::Model {
             syntax: syntax.to_string(),
             timing: timing.to_string(),
         });
+    }
+    // C.LUI と C.MOP は即値零で重なる。C.LUI 側を非零即値、
+    // C.MOP 側を零即値として排他にする。
+    let clui_where = |op: WhereOp, value: u128| WhereClause {
+        field: "c_lui_imm".to_string(),
+        op,
+        rhs: WhereRhs::Lit(value),
+    };
+    for insn in m.insns.iter_mut() {
+        if insn.name == "c_lui_addi16sp" {
+            insn.format = "CLUI".to_string();
+            insn.wheres = vec![clui_where(WhereOp::Ne, 0)];
+        } else if insn.name.starts_with("c_mop") {
+            insn.wheres = vec![clui_where(WhereOp::Eq, 0)];
+        }
     }
     // RV32のC.JALはRV64のC.ADDIWと同じ符号化。whenで区別し、
     // 生成デコーダ（decode_model）がモデルで解決する（ADR-0006）。

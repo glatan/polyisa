@@ -66,7 +66,8 @@ pub fn validate(model: &Model) -> Report {
         for w in &insn.wheres {
             let check = |name: &str, errors: &mut Vec<ValidationError>| match fields.get(name) {
                 Some(f) => match f.kind {
-                    crate::model::FieldKind::Bits { .. } => {}
+                    crate::model::FieldKind::Bits { .. }
+                    | crate::model::FieldKind::Parts { .. } => {}
                     _ => errors.push(ValidationError::Unresolved {
                         kind: "where-hook".to_string(),
                         name: name.to_string(),

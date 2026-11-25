@@ -508,26 +508,37 @@ fn where_decls_conds(
 ) -> (Vec<String>, Vec<String>) {
     let mut decls = Vec::new();
     let mut conds = Vec::new();
-    let bits_of = |name: &str| match model.fields.iter().find(|f| f.name == name) {
-        Some(f) => match f.kind {
-            polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
-            _ => (0, 0),
-        },
-        None => (0, 0),
+    let extract = |name: &str, out: &str, tag: &str, k: usize, len: u32| match model
+        .fields
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| &f.kind)
+    {
+        Some(polyisa_isadl::model::FieldKind::Bits { hi, lo }) => {
+            let width = hi - lo + 1;
+            let mask: u128 = if width >= 128 {
+                u128::MAX
+            } else {
+                (1u128 << width) - 1
+            };
+            if *lo == 0 {
+                format!("let {out}_{tag}_{k} = word & {mask:#x};")
+            } else {
+                format!("let {out}_{tag}_{k} = (word >> {lo}) & {mask:#x};")
+            }
+        }
+        Some(polyisa_isadl::model::FieldKind::Parts { parts, zfill }) => {
+            let gather = parts_gather(parts, "word", "u128", len);
+            if *zfill == 0 {
+                format!("let {out}_{tag}_{k} = {gather};")
+            } else {
+                format!("let {out}_{tag}_{k} = ({gather}) << {zfill};")
+            }
+        }
+        _ => format!("let {out}_{tag}_{k} = 0;"),
     };
     for (k, w) in insn.wheres.iter().enumerate() {
-        let (hi, lo) = bits_of(&w.field);
-        let width = hi - lo + 1;
-        let mask: u128 = if width >= 128 {
-            u128::MAX
-        } else {
-            (1u128 << width) - 1
-        };
-        if lo == 0 {
-            decls.push(format!("let w_{tag}_{k} = word & {mask:#x};"));
-        } else {
-            decls.push(format!("let w_{tag}_{k} = (word >> {lo}) & {mask:#x};"));
-        }
+        decls.push(extract(&w.field, "w", tag, k, insn.pattern.len()));
         let op = match w.op {
             polyisa_isadl::model::WhereOp::Eq => "==",
             polyisa_isadl::model::WhereOp::Ne => "!=",
@@ -541,18 +552,7 @@ fn where_decls_conds(
                 conds.push(format!("w_{tag}_{k} {op} {value:#x}"));
             }
             polyisa_isadl::model::WhereRhs::Field(name) => {
-                let (hi2, lo2) = bits_of(name);
-                let width2 = hi2 - lo2 + 1;
-                let mask2: u128 = if width2 >= 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width2) - 1
-                };
-                if lo2 == 0 {
-                    decls.push(format!("let w2_{tag}_{k} = word & {mask2:#x};"));
-                } else {
-                    decls.push(format!("let w2_{tag}_{k} = (word >> {lo2}) & {mask2:#x};"));
-                }
+                decls.push(extract(name, "w2", tag, k, insn.pattern.len()));
                 conds.push(format!("w_{tag}_{k} {op} w2_{tag}_{k}"));
             }
         }
@@ -621,10 +621,15 @@ fn parts_gather(parts: &[(u32, u32)], word: &str, dst_ty: &str, len: u32) -> Str
             expr.push_str(" | ");
         }
         first = false;
-        if shift == 0 {
-            expr.push_str(&format!("({get} as {dst_ty})"));
+        let typed = if dst_ty == "u128" {
+            get.clone()
         } else {
-            expr.push_str(&format!("(({get} as {dst_ty}) << {shift})"));
+            format!("({get} as {dst_ty})")
+        };
+        if shift == 0 {
+            expr.push_str(&typed);
+        } else {
+            expr.push_str(&format!("({typed} << {shift})"));
         }
     }
     if expr.is_empty() {
@@ -932,7 +937,7 @@ fn encode_sim(
     }
     let get = |name: &str| -> u128 {
         match fields.get(name) {
-            Some(f) => match f.kind {
+            Some(f) => match &f.kind {
                 FieldKind::Bits { hi, lo } => {
                     let w = hi - lo + 1;
                     let mask: u128 = if w >= 128 {
@@ -942,7 +947,26 @@ fn encode_sim(
                     };
                     (word >> lo) & mask
                 }
-                _ => 0,
+                FieldKind::Parts { parts, zfill } => {
+                    let mut x = 0u128;
+                    let mut shift: u32 = parts.iter().map(|(h, l)| h - l + 1).sum();
+                    for (hi, lo) in parts {
+                        let w = hi - lo + 1;
+                        shift -= w;
+                        let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                        if inw == 0 {
+                            continue;
+                        }
+                        let mask: u128 = if inw >= 128 {
+                            u128::MAX
+                        } else {
+                            (1u128 << inw) - 1
+                        };
+                        x |= ((word >> lo) & mask) << shift;
+                    }
+                    x << zfill
+                }
+                FieldKind::Hook { .. } => 0,
             },
             None => 0,
         }

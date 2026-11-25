@@ -1909,6 +1909,14 @@ fn run_c(env: &mut BareEnv, insn: Insn, word: u32, rv32: bool) -> Result<(), Out
                 env.step(|b| sem::c_lw(b, rd, rs1, off))
             }
         }
+        Insn::CMop1 => env.step(sem::c_mop),
+        Insn::CMop3 => env.step(sem::c_mop),
+        Insn::CMop5 => env.step(sem::c_mop),
+        Insn::CMop7 => env.step(sem::c_mop),
+        Insn::CMop9 => env.step(sem::c_mop),
+        Insn::CMop11 => env.step(sem::c_mop),
+        Insn::CMop13 => env.step(sem::c_mop),
+        Insn::CMop15 => env.step(sem::c_mop),
         Insn::CLbu => {
             let rd = Gpr(crd3(w));
             let rs1 = Gpr(crs1(w));
