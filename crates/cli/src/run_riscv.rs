@@ -1623,6 +1623,83 @@ fn step_rv_inner(
         Insn::Fence => env.step(sem::fence),
         Insn::FenceI => env.step(sem::fence_i),
         // F 単精度。
+        Insn::FaddH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fadd_h(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsubH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsub_h(b, fd, fs1, fs2, rm))
+        }
+        Insn::FmulH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmul_h(b, fd, fs1, fs2, rm))
+        }
+        Insn::FdivH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fdiv_h(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsqrtH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsqrt_h(b, fd, fs1, rm))
+        }
+        Insn::FmaddH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmadd_h(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FmsubH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmsub_h(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmsubH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmsub_h(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmaddH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmadd_h(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FsgnjH => env.step(|b| sem::fsgnj_h(b, fd, fs1, fs2)),
+        Insn::FsgnjnH => env.step(|b| sem::fsgnjn_h(b, fd, fs1, fs2)),
+        Insn::FsgnjxH => env.step(|b| sem::fsgnjx_h(b, fd, fs1, fs2)),
+        Insn::FminH => env.step(|b| sem::fmin_h(b, fd, fs1, fs2)),
+        Insn::FmaxH => env.step(|b| sem::fmax_h(b, fd, fs1, fs2)),
+        Insn::FeqH => env.step(|b| sem::feq_h(b, rd, fs1, fs2)),
+        Insn::FltH => env.step(|b| sem::flt_h(b, rd, fs1, fs2)),
+        Insn::FleH => env.step(|b| sem::fle_h(b, rd, fs1, fs2)),
+        Insn::FclassH => env.step(|b| sem::fclass_h(b, rd, fs1)),
+        Insn::FcvtWH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_w_h(b, rd, fs1, rm))
+        }
+        Insn::FcvtWuH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_wu_h(b, rd, fs1, rm))
+        }
+        Insn::FcvtLH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_l_h(b, rd, fs1, rm))
+        }
+        Insn::FcvtLuH => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_lu_h(b, rd, fs1, rm))
+        }
+        Insn::FcvtHW => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_h_w(b, fd, rs1, rm))
+        }
+        Insn::FcvtHWu => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_h_wu(b, fd, rs1, rm))
+        }
+        Insn::FcvtHL => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_h_l(b, fd, rs1, rm))
+        }
+        Insn::FcvtHLu => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_h_lu(b, fd, rs1, rm))
+        }
         Insn::Flh => env.step(|b| sem::flh(b, fd, rs1, imm_i(word))),
         Insn::Fsh => env.step(|b| sem::fsh(b, rs1, fs2, imm_s(word))),
         Insn::FcvtSBf16 => {

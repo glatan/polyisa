@@ -3294,6 +3294,243 @@ pub fn fcvt_h_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// FADD.H。
+pub fn fadd_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fadd_r(x, y, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FSUB.H。
+pub fn fsub_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fsub_r(x, y, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FMUL.H。
+pub fn fmul_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fmul_r(x, y, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FDIV.H。
+pub fn fdiv_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fdiv_r(x, y, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FSQRT.H。
+pub fn fsqrt_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let s = b.fsqrt_r(x, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FSGNJ.H。
+pub fn fsgnj_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fsgnj(x, y);
+    write_h(b, rd, s);
+    Ok(())
+}
+/// FSGNJN.H。
+pub fn fsgnjn_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fsgnjn(x, y);
+    write_h(b, rd, s);
+    Ok(())
+}
+/// FSGNJX.H。
+pub fn fsgnjx_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fsgnjx(x, y);
+    write_h(b, rd, s);
+    Ok(())
+}
+/// FMIN.H。
+pub fn fmin_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fmin(x, y);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FMAX.H。
+pub fn fmax_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let s = b.fmax(x, y);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+/// FEQ.H。
+pub fn feq_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let c = b.feq(x, y);
+    write_cmp(b, rd, c);
+    accrue_fp(b);
+    Ok(())
+}
+/// FLT.H。
+pub fn flt_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let c = b.flt(x, y);
+    write_cmp(b, rd, c);
+    accrue_fp(b);
+    Ok(())
+}
+/// FLE.H。
+pub fn fle_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let c = b.fle(x, y);
+    write_cmp(b, rd, c);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCLASS.H。
+pub fn fclass_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let v = b.fclass(x);
+    let w = b.zext::<W32, W64>(v);
+    write(b, rd, w);
+    Ok(())
+}
+/// FCVT.W.H。
+pub fn fcvt_w_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let v = b.fcvt_s32(x, rm);
+    let w = b.sext::<W32, W64>(v);
+    write(b, rd, w);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.WU.H。
+pub fn fcvt_wu_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let v = b.fcvt_u32(x, rm);
+    let w = b.sext::<W32, W64>(v);
+    write(b, rd, w);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.L.H。
+pub fn fcvt_l_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let v = b.fcvt_s64(x, rm);
+    write(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.LU.H。
+pub fn fcvt_lu_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let v = b.fcvt_u64(x, rm);
+    write(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.H.W。
+pub fn fcvt_h_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, W32>(raw);
+    let v = b.fcvt_from_s32(x, rm);
+    write_h(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.H.WU。
+pub fn fcvt_h_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, W32>(raw);
+    let v = b.fcvt_from_u32(x, rm);
+    write_h(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.H.L。
+pub fn fcvt_h_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
+    let x = read(b, rs1);
+    let v = b.fcvt_from_s64(x, rm);
+    write_h(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FCVT.H.LU。
+pub fn fcvt_h_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
+    let x = read(b, rs1);
+    let v = b.fcvt_from_u64(x, rm);
+    write_h(b, rd, v);
+    accrue_fp(b);
+    Ok(())
+}
+/// FMADD.H。
+pub fn fmadd_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let z = read_h_checked(b, rs3);
+    let s = b.fmadd_r(x, y, z, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FMSUB.H。
+pub fn fmsub_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let z = read_h_checked(b, rs3);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd_r(x, y, nz, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMSUB.H。
+pub fn fnmsub_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let z = read_h_checked(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let s = b.fmadd_r(nx, y, z, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMADD.H。
+pub fn fnmadd_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let y = read_h_checked(b, rs2);
+    let z = read_h_checked(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd_r(nx, y, nz, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
 // F（単精度浮動小数点）。丸めモードは引数 rm で受ける（rm=7/DYN は
 // 呼び出し側が frm CSR で解決する）。RNE 固定の記述は残さない。
 

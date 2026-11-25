@@ -63,6 +63,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zicbop", &[][..], &[][..]),
         ("zicboz", &[][..], &[][..]),
         ("zfhmin", &[][..], &[][..]),
+        ("zfh", &["zfhmin"][..], &[][..]),
         ("zfbfmin", &[][..], &[][..]),
         ("v", &[][..], &[][..]),
         ("zvfhmin", &["v"][..], &[][..]),
@@ -620,6 +621,33 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fcvt_h_s", "R", "0100010 00000 ..... ... ..... 1010011", "fcvt.h.s {rd}, {rs1}", "fcvt"),
         ("fcvt_d_h", "R", "0100001 00010 ..... ... ..... 1010011", "fcvt.d.h {rd}, {rs1}", "fcvt"),
         ("fcvt_h_d", "R", "0100010 00001 ..... ... ..... 1010011", "fcvt.h.d {rd}, {rs1}", "fcvt"),
+        // Zfh（半精度浮動小数点。fmt=10）
+        ("fadd_h", "R", "0000010 ..... ..... ... ..... 1010011", "fadd.h {rd}, {rs1}, {rs2}", "falu_s"),
+        ("fsub_h", "R", "0000110 ..... ..... ... ..... 1010011", "fsub.h {rd}, {rs1}, {rs2}", "falu_s"),
+        ("fmul_h", "R", "0001010 ..... ..... ... ..... 1010011", "fmul.h {rd}, {rs1}, {rs2}", "falu_s"),
+        ("fdiv_h", "R", "0001110 ..... ..... ... ..... 1010011", "fdiv.h {rd}, {rs1}, {rs2}", "fdiv_s"),
+        ("fsqrt_h", "R", "0101110 00000 ..... ... ..... 1010011", "fsqrt.h {rd}, {rs1}", "fsqrt_s"),
+        ("fmadd_h", "R4", "..... 10 ..... ..... ... ..... 1000011", "fmadd.h {rd}, {rs1}, {rs2}, {rs3}", "falu_s"),
+        ("fmsub_h", "R4", "..... 10 ..... ..... ... ..... 1000111", "fmsub.h {rd}, {rs1}, {rs2}, {rs3}", "falu_s"),
+        ("fnmsub_h", "R4", "..... 10 ..... ..... ... ..... 1001011", "fnmsub.h {rd}, {rs1}, {rs2}, {rs3}", "falu_s"),
+        ("fnmadd_h", "R4", "..... 10 ..... ..... ... ..... 1001111", "fnmadd.h {rd}, {rs1}, {rs2}, {rs3}", "falu_s"),
+        ("fsgnj_h", "R", "0010010 ..... ..... 000 ..... 1010011", "fsgnj.h {rd}, {rs1}, {rs2}", "fsj"),
+        ("fsgnjn_h", "R", "0010010 ..... ..... 001 ..... 1010011", "fsgnjn.h {rd}, {rs1}, {rs2}", "fsj"),
+        ("fsgnjx_h", "R", "0010010 ..... ..... 010 ..... 1010011", "fsgnjx.h {rd}, {rs1}, {rs2}", "fsj"),
+        ("fmin_h", "R", "0010110 ..... ..... 000 ..... 1010011", "fmin.h {rd}, {rs1}, {rs2}", "fminmax"),
+        ("fmax_h", "R", "0010110 ..... ..... 001 ..... 1010011", "fmax.h {rd}, {rs1}, {rs2}", "fminmax"),
+        ("feq_h", "R", "1010010 ..... ..... 010 ..... 1010011", "feq.h {rd}, {rs1}, {rs2}", "fcmp"),
+        ("flt_h", "R", "1010010 ..... ..... 001 ..... 1010011", "flt.h {rd}, {rs1}, {rs2}", "fcmp"),
+        ("fle_h", "R", "1010010 ..... ..... 000 ..... 1010011", "fle.h {rd}, {rs1}, {rs2}", "fcmp"),
+        ("fclass_h", "R", "1110010 00000 ..... 001 ..... 1010011", "fclass.h {rd}, {rs1}", "fcmp"),
+        ("fcvt_w_h", "R", "1100010 00000 ..... ... ..... 1010011", "fcvt.w.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_wu_h", "R", "1100010 00001 ..... ... ..... 1010011", "fcvt.wu.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_l_h", "R", "1100010 00010 ..... ... ..... 1010011", "fcvt.l.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_lu_h", "R", "1100010 00011 ..... ... ..... 1010011", "fcvt.lu.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_w", "R", "1101010 00000 ..... ... ..... 1010011", "fcvt.h.w {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_wu", "R", "1101010 00001 ..... ... ..... 1010011", "fcvt.h.wu {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_l", "R", "1101010 00010 ..... ... ..... 1010011", "fcvt.h.l {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_lu", "R", "1101010 00011 ..... ... ..... 1010011", "fcvt.h.lu {rd}, {rs1}", "fcvt"),
         ("fcvt_s_bf16", "R", "0100000 00110 ..... ... ..... 1010011", "fcvt.s.bf16 {rd}, {rs1}", "fcvt"),
         ("fcvt_bf16_s", "R", "0100010 01000 ..... ... ..... 1010011", "fcvt.bf16.s {rd}, {rs1}", "fcvt"),
         ("fmv_x_h", "R", "1110010 00000 ..... 000 ..... 1010011", "fmv.x.h {rd}, {rs1}", "fsj"),
@@ -784,6 +812,17 @@ pub fn build_model() -> polyisa_isadl::Model {
             "flh" | "fsh" | "fcvt_s_h" | "fcvt_h_s" | "fcvt_d_h" | "fcvt_h_d" | "fmv_x_h" | "fmv_h_x"
         ) {
             reqs.push("zfhmin");
+        }
+        if matches!(
+            *name,
+            "fadd_h" | "fsub_h" | "fmul_h" | "fdiv_h" | "fsqrt_h"
+                | "fmadd_h" | "fmsub_h" | "fnmsub_h" | "fnmadd_h"
+                | "fsgnj_h" | "fsgnjn_h" | "fsgnjx_h" | "fmin_h" | "fmax_h"
+                | "feq_h" | "flt_h" | "fle_h" | "fclass_h"
+                | "fcvt_w_h" | "fcvt_wu_h" | "fcvt_l_h" | "fcvt_lu_h"
+                | "fcvt_h_w" | "fcvt_h_wu" | "fcvt_h_l" | "fcvt_h_lu"
+        ) {
+            reqs.push("zfh");
         }
         if matches!(*name, "fcvt_s_bf16" | "fcvt_bf16_s") {
             reqs.push("zfbfmin");
@@ -1081,6 +1120,8 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "bseti"
                 | "c_sdsp"
                 | "fcvt_l_s" | "fcvt_lu_s"
+                | "fcvt_l_h" | "fcvt_lu_h"
+                | "fcvt_h_l" | "fcvt_h_lu"
                 | "fcvt_s_l" | "fcvt_s_lu"
                 | "fcvt_l_d" | "fcvt_lu_d"
                 | "fcvt_d_l" | "fcvt_d_lu"

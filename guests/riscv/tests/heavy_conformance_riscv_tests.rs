@@ -416,6 +416,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zkne/")
         || test_rel.contains("/Zknd/")
         || test_rel.contains("/Zfhmin/")
+        || test_rel.contains("/Zfh/")
         || test_rel.contains("/Zfbfmin/")
     {
         for ext in [
@@ -445,6 +446,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zkne",
             "Zknd",
             "Zfhmin",
+            "Zfh",
             "Zfbfmin",
             "Zaamo",
         ] {
@@ -520,6 +522,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zksed/")
         || test_rel.contains("/Zkne/")
         || test_rel.contains("/Zknd/")
+        || test_rel.contains("/Zfh/")
         || test_rel.contains("/Zfhmin/")
         || test_rel.contains("/Zfbfmin/")
     {
@@ -536,6 +539,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zkne",
             "zknd",
             "zfhmin",
+            "zfh",
             "zfbfmin",
             "zbs",
             "zimop",
@@ -808,6 +812,11 @@ fn act4_rv64zknd_suite() {
 #[test]
 fn act4_rv64zfhmin_suite() {
     suite("rv64i/Zfhmin");
+}
+
+#[test]
+fn act4_rv64zfh_suite() {
+    suite("rv64i/Zfh");
 }
 
 #[test]
