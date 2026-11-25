@@ -38,7 +38,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zifencei", &[][..], &[][..]),
         ("zba", &[][..], &[][..]),
         ("zbb", &[][..], &[][..]),
-        ("zbc", &[][..], &[][..]),
+        ("zbc", &["zbkc"][..], &[][..]),
+        ("zbkc", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -718,7 +719,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ) {
             reqs.push("zbb");
         }
-        if matches!(*name, "clmul" | "clmulh" | "clmulr") {
+        if matches!(*name, "clmul" | "clmulh") {
+            reqs.push("zbkc");
+        }
+        if *name == "clmulr" {
             reqs.push("zbc");
         }
         if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
