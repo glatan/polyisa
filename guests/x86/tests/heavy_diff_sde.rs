@@ -8,7 +8,7 @@
 //! heavy_diff_host（E2）がホスト CPU を直接叩くのに対し、こちらは
 //! `sde64 -future` の下で生成 ELF を走らせるため、REX2 の拡張 GPR
 //! （R16-R31）までカバーできる。EVEX map4 の NDD/NF 昇格形は
-//! reg-direct 形と絶対アドレス/base+disp8 のメモリ形をコーパスへ入れ、CFCMOV の
+//! reg-direct 形と絶対アドレス/base+disp8/SIB index のメモリ形をコーパスへ入れ、CFCMOV の
 //! 条件付きストアと PUSH2/POP2 のメモリ出力も比較する。
 //!
 //! 仕組み:
@@ -302,16 +302,19 @@ mod imp {
         }
     }
 
-    /// 被演算子レジスタ。rsp(4)、メモリベースの r14、ctx 予約の r15 を除く。
+    /// 被演算子レジスタ。rsp(4)、メモリベースの r14、ctx 予約の r15、
+    /// メモリインデックスの r29 を除く。
     fn reg(rng: &mut Rng) -> u8 {
-        // 29 候補を 0-3・5-13・16-31 へ割り当てる。
-        let r = (rng.next() % 29) as u8;
+        // 28 候補を 0-3・5-13・16-28・30-31 へ割り当てる。
+        let r = (rng.next() % 28) as u8;
         if r < 4 {
             r
         } else if r < 13 {
             r + 1
-        } else {
+        } else if r < 26 {
             r + 3
+        } else {
+            r + 4
         }
     }
 
@@ -455,16 +458,84 @@ mod imp {
         v
     }
 
+    /// SIB index つき EVEX map4 接頭辞。base=r14、index=r29。
+    /// X4=1 のため P1.2（U）は 0 にする。
+    fn evex4_idx(rxreg: u8, idx: u8, ndd: u8, w: bool, nf: bool, nd: bool) -> [u8; 4] {
+        let base = 14u8;
+        let p0 = 0x04
+            | if idx & 8 == 0 { 0x40 } else { 0 }
+            | if rxreg & 8 == 0 { 0x80 } else { 0 }
+            | if base & 8 == 0 { 0x20 } else { 0 }
+            | if rxreg & 16 == 0 { 0x10 } else { 0 }
+            | if base & 16 != 0 { 0x08 } else { 0 };
+        let p1 = ((w as u8) << 7) | ((!ndd & 0x0F) << 3) | if idx & 16 == 0 { 0x04 } else { 0 };
+        let p2 = if nd { 0x10 } else { 0 }
+            | if nf { 0x04 } else { 0 }
+            | if ndd & 16 == 0 { 0x08 } else { 0 };
+        [0x62, p0, p1, p2]
+    }
+
+    /// base=r14、index=r29、scale 可変、disp8 のメモリ形。
+    #[allow(clippy::too_many_arguments)]
+    fn apx_mem_sib_nd(
+        op: u8,
+        ndd: u8,
+        reg: u8,
+        scale: u8,
+        disp: u8,
+        w: bool,
+        nf: bool,
+        nd: bool,
+    ) -> Vec<u8> {
+        let idx = 29u8;
+        let base = 14u8;
+        let mut v = evex4_idx(reg, idx, ndd, w, nf, nd).to_vec();
+        v.push(op);
+        v.push(0x40 | ((reg & 7) << 3) | 4);
+        v.push((scale << 6) | ((idx & 7) << 3) | (base & 7));
+        v.push(disp);
+        v
+    }
+
+    fn apx_mem_sib(op: u8, ndd: u8, reg: u8, scale: u8, disp: u8, w: bool, nf: bool) -> Vec<u8> {
+        apx_mem_sib_nd(op, ndd, reg, scale, disp, w, nf, true)
+    }
+
+    fn apx_group_mem_sib(
+        op: u8,
+        grp: u8,
+        ndd: u8,
+        scale: u8,
+        disp: u8,
+        w: bool,
+        nf: bool,
+    ) -> Vec<u8> {
+        let idx = 29u8;
+        let base = 14u8;
+        let mut v = evex4_idx(0, idx, ndd, w, nf, true).to_vec();
+        v.push(op);
+        v.push(0x40 | ((grp & 7) << 3) | 4);
+        v.push((scale << 6) | ((idx & 7) << 3) | (base & 7));
+        v.push(disp);
+        v
+    }
+
     fn mem_disp(rng: &mut Rng) -> u8 {
         ((rng.next() % 16) * 8) as u8
     }
 
     fn apx_mem_any(rng: &mut Rng, op: u8, ndd: u8, reg: u8, w: bool, nf: bool) -> Vec<u8> {
-        if rng.next().is_multiple_of(2) {
-            apx_mem(op, ndd, reg, mem_addr(rng), w, nf)
-        } else {
-            let disp = mem_disp(rng);
-            apx_mem_base(op, ndd, reg, disp, w, nf)
+        match rng.next() % 3 {
+            0 => apx_mem(op, ndd, reg, mem_addr(rng), w, nf),
+            1 => {
+                let disp = mem_disp(rng);
+                apx_mem_base(op, ndd, reg, disp, w, nf)
+            }
+            _ => {
+                let disp = mem_disp(rng);
+                let scale = (rng.next() % 4) as u8;
+                apx_mem_sib(op, ndd, reg, scale, disp, w, nf)
+            }
         }
     }
 
@@ -478,20 +549,32 @@ mod imp {
         nf: bool,
         nd: bool,
     ) -> Vec<u8> {
-        if rng.next().is_multiple_of(2) {
-            apx_mem_nd(op, ndd, reg, mem_addr(rng), w, nf, nd)
-        } else {
-            let disp = mem_disp(rng);
-            apx_mem_base_nd(op, ndd, reg, disp, w, nf, nd)
+        match rng.next() % 3 {
+            0 => apx_mem_nd(op, ndd, reg, mem_addr(rng), w, nf, nd),
+            1 => {
+                let disp = mem_disp(rng);
+                apx_mem_base_nd(op, ndd, reg, disp, w, nf, nd)
+            }
+            _ => {
+                let disp = mem_disp(rng);
+                let scale = (rng.next() % 4) as u8;
+                apx_mem_sib_nd(op, ndd, reg, scale, disp, w, nf, nd)
+            }
         }
     }
 
     fn apx_group_mem_any(rng: &mut Rng, op: u8, grp: u8, ndd: u8, w: bool, nf: bool) -> Vec<u8> {
-        if rng.next().is_multiple_of(2) {
-            apx_group_mem(op, grp, ndd, mem_addr(rng), w, nf)
-        } else {
-            let disp = mem_disp(rng);
-            apx_group_mem_base(op, grp, ndd, disp, w, nf)
+        match rng.next() % 3 {
+            0 => apx_group_mem(op, grp, ndd, mem_addr(rng), w, nf),
+            1 => {
+                let disp = mem_disp(rng);
+                apx_group_mem_base(op, grp, ndd, disp, w, nf)
+            }
+            _ => {
+                let disp = mem_disp(rng);
+                let scale = (rng.next() % 4) as u8;
+                apx_group_mem_sib(op, grp, ndd, scale, disp, w, nf)
+            }
         }
     }
 
@@ -786,6 +869,7 @@ mod imp {
             }
         }
         init.set_gpr(14, mem_va_of());
+        init.set_gpr(29, 4);
         // init.rsp をスタック中程の 16 バイト境界へ向ける
         // （popfq 復元の push が生きられるよう有効なスタックが要る）。
         init.rsp = (stack_va_of() + 2048) & !0xf;
@@ -970,6 +1054,7 @@ mod imp {
             env.backend.set(sem::xcr0_ref(), 0x8_0003);
             sem::write64(&mut env.backend, Gpr(4), (stack_va_of() + 2048) & !0xf);
             sem::write64(&mut env.backend, Gpr(14), mem_va_of());
+            sem::write64(&mut env.backend, Gpr(29), 4);
             env.backend.mem.write(VirtAddr(CODE_VA), &insn).unwrap();
             let out = run_x86::run_mode_ex(
                 &mut env,
