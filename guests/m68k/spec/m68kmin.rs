@@ -28,8 +28,23 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 除けない（閉包で再付与される）ので、粒状の独立機能か
     // `when` の `!m68040` 形で表す。モデル確定時に決める。
     // Ref: SPEC-M68K-PRM (Rev 1).
+    // ColdFire が持たない 68000 群を粒状の独立旗として宣言する
+    // （CFPRM Rev 3 —— 命令一覧表と本文でこれらの命令は ColdFire
+    // の全 ISA 版に一度も現れない）: BCD 算術（abcd/sbcd/nbcd）、
+    // rotate（rol/ror/roxl/roxr とメモリ形）、メモリ形シフト
+    // （CF のシフトはレジスタ形のみ）、dbcc（ループ命令 ——
+    // ColdFire では subq+bcc に分解する）、exg、chk、rtr、cmpm、
+    // movep。m68000 の implies に載せるので 68010 以降の系譜と
+    // cpu32（68020 系）は継承し、cfv 系（m68000 系譜を持たない
+    // 別系統）には入らない。
+    // Ref: SPEC-M68K-CFPRM.
     for (name, implies) in [
-        ("m68000", &[][..]),
+        (
+            "m68000",
+            &[
+                "bcd", "rotate", "memshift", "dbcc", "exg", "chk", "rtr", "cmpm", "movep",
+            ][..],
+        ),
         ("m68010", &["m68000"][..]),
         // CPU32 と ColdFire。命令差（CPU32 固有命令・ISA_A/B/C の
         // 縮減集合）は未実装で、旗は宣言のみ。カバレッジ表で
@@ -43,6 +58,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         // 効かなくなるため、i68020 モデルの add で直接持たせる。
         ("bitfield", &[][..]),
         ("cas", &[][..]),
+        ("bcd", &[][..]),
+        ("rotate", &[][..]),
+        ("memshift", &[][..]),
+        ("dbcc", &[][..]),
+        ("exg", &[][..]),
+        ("chk", &[][..]),
+        ("rtr", &[][..]),
+        ("cmpm", &[][..]),
+        ("movep", &[][..]),
         ("m68020", &["m68010"][..]),
         ("m68030", &["m68020"][..]),
         ("m68040", &["m68030"][..]),
@@ -1055,5 +1079,54 @@ pub fn build_model() -> polyisa_isadl::Model {
         syntax: "moveq".to_string(),
         timing: "misc".to_string(),
     });
+    // ColdFire が持たない 68000 群の命令を粒状の旗でゲートする
+    // （SPEC-M68K-CFPRM —— これらは CFPRM の命令一覧・本文に
+    // 一度も現れず、ISA_A/B/C のいずれにも存在しない）。旗は
+    // m68000 の implies に載るので 68000 系譜・cpu32 のモデルは
+    // 従来どおり全て解け、cfv 系では解けない。
+    let cf_absent: &[(&str, &str)] = &[
+        ("abcd_r", "bcd"),
+        ("abcd_m", "bcd"),
+        ("sbcd_r", "bcd"),
+        ("sbcd_m", "bcd"),
+        ("nbcd", "bcd"),
+        ("rol", "rotate"),
+        ("ror", "rotate"),
+        ("roxl", "rotate"),
+        ("roxr", "rotate"),
+        ("rol_m", "rotate"),
+        ("ror_m", "rotate"),
+        ("roxl_m", "rotate"),
+        ("roxr_m", "rotate"),
+        ("asl_m", "memshift"),
+        ("asr_m", "memshift"),
+        ("lsl_m", "memshift"),
+        ("lsr_m", "memshift"),
+        ("dbcc", "dbcc"),
+        ("exg_aa", "exg"),
+        ("exg_da", "exg"),
+        ("exg_dd", "exg"),
+        ("chk", "chk"),
+        ("rtr", "rtr"),
+        ("cmpm", "cmpm"),
+        ("movep_lm", "movep"),
+        ("movep_lr", "movep"),
+        ("movep_wm", "movep"),
+        ("movep_wr", "movep"),
+    ];
+    for (iname, feat) in cf_absent {
+        let mut hit = false;
+        for insn in m.insns.iter_mut() {
+            if insn.name == *iname {
+                // 現行はいずれも無条件（Pred::True）なので置き換える。
+                // 世代旗が既に付く命令へ適用するときは All で合成する
+                // 形に直すこと。
+                assert_eq!(insn.when, Pred::True, "{iname} already gated");
+                insn.when = Pred::Flag(feat.to_string());
+                hit = true;
+            }
+        }
+        assert!(hit, "cf_absent: {iname} not found");
+    }
     m
 }

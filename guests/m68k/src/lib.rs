@@ -118,6 +118,16 @@ mod tests {
             assert!(MODELS.contains(&n), "{n}");
         }
         // 親チェーンで世代機能が累積する。
+        // ColdFire が持たない群は m68000 の implies に載る。
+        let cf_absent = FEAT_BCD
+            | FEAT_ROTATE
+            | FEAT_MEMSHIFT
+            | FEAT_DBCC
+            | FEAT_EXG
+            | FEAT_CHK
+            | FEAT_RTR
+            | FEAT_CMPM
+            | FEAT_MOVEP;
         assert_eq!(
             model_feats("i68060"),
             FEAT_M68000
@@ -128,11 +138,23 @@ mod tests {
                 | FEAT_M68060
                 | FEAT_BITFIELD
                 | FEAT_CAS
+                | cf_absent
         );
-        // cpu32 は 68020 系から bitfield と cas を削る。
+        // cpu32 は 68020 系から bitfield と cas を削る。BCD・rotate
+        // 等の 68000 群は cpu32 にもある（CFPRM で削られるのは
+        // ColdFire 系のみ）。
         assert_eq!(model_feats("cpu32") & FEAT_BITFIELD, 0);
         assert_eq!(model_feats("cpu32") & FEAT_CAS, 0);
         assert_ne!(model_feats("cpu32") & FEAT_M68020, 0);
+        assert_eq!(model_feats("cpu32") & cf_absent, cf_absent);
+        // cfv 系は m68000 系譜を持たないので世代旗も 68000 由来の
+        // 群も入らず、ISA 版の旗だけを持つ。
+        assert_eq!(model_feats("cfv2"), FEAT_CF_ISA_A);
+        assert_eq!(model_feats("cfv3"), FEAT_CF_ISA_A | FEAT_CF_ISA_B);
+        assert_eq!(
+            model_feats("cfv4"),
+            FEAT_CF_ISA_A | FEAT_CF_ISA_B | FEAT_CF_ISA_C
+        );
         // 挙動パラメータは世代ごとに上書きされる。
         let p000 = model_params("i68000");
         assert_eq!(p000.odd_access, 0);
@@ -146,5 +168,30 @@ mod tests {
         assert_eq!(p020.movem_base, 1);
         // パラメータも親チェーンで継承される。
         assert_eq!(model_params("i68060"), p020);
+    }
+
+    #[test]
+    fn cf_decode_matrix() {
+        // ColdFire が持たない命令（CFPRM で確認）: dbcc（0x51c8
+        // 系）・nbcd（0x4800）・rol レジスタ形（0xe1b8 系）・chk
+        // （0x4180 系）は cfv2 では解けず、i68000 では解ける。
+        // add・move・bcc は共通で解ける。
+        let cf = model_feats("cfv2");
+        let full = model_feats("i68000");
+        for (word, name) in [
+            (0x51c8u128, "dbcc"),
+            (0x4800u128, "nbcd"),
+            (0xe1b8u128, "rol"),
+            (0x4180u128, "chk"),
+        ] {
+            assert!(
+                crate::decode_model_ex(word, 16, false, full).is_some(),
+                "i68000: {name}"
+            );
+            assert!(
+                crate::decode_model_ex(word, 16, false, cf).is_none(),
+                "cfv2: {name}"
+            );
+        }
     }
 }
