@@ -874,6 +874,30 @@ fn ror64_const<B: Backend>(b: &mut B, x: B::V<W64>, n: u64) -> B::V<W64> {
     ror64(b, x, k)
 }
 
+fn rol32_const<B: Backend>(b: &mut B, x: B::V<W32>, n: u32) -> B::V<W32> {
+    let k = b.konst::<W32>(n);
+    rol32(b, x, k)
+}
+
+fn sm3p<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, a: u32, c: u32) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let l = rol32_const(b, x, a);
+    let r = rol32_const(b, x, c);
+    let t = b.xor(x, l);
+    let out = b.xor(t, r);
+    write_w(b, rd, out);
+    Ok(())
+}
+
+pub fn sm3p0<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sm3p(b, rd, rs1, 9, 17)
+}
+
+pub fn sm3p1<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sm3p(b, rd, rs1, 15, 23)
+}
+
 fn sha256_op<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u8) -> Flow<B> {
     let x64 = read(b, rs1);
     let x = b.trunc::<W64, W32>(x64);

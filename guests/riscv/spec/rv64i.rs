@@ -42,6 +42,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zbkc", &[][..], &[][..]),
         ("zbkx", &[][..], &[][..]),
         ("zknh", &[][..], &[][..]),
+        ("zksh", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -467,6 +468,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
         ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
         // Zbc（キャリーレス乗算）
+        ("sm3p0", "I", "000100001000 ..... 001 ..... 0010011", "sm3p0 {rd}, {rs1}", "alu"),
+        ("sm3p1", "I", "000100001001 ..... 001 ..... 0010011", "sm3p1 {rd}, {rs1}", "alu"),
         ("sha256sum0", "I", "000100000000 ..... 001 ..... 0010011", "sha256sum0 {rd}, {rs1}", "alu"),
         ("sha256sum1", "I", "000100000001 ..... 001 ..... 0010011", "sha256sum1 {rd}, {rs1}", "alu"),
         ("sha256sig0", "I", "000100000010 ..... 001 ..... 0010011", "sha256sig0 {rd}, {rs1}", "alu"),
@@ -730,6 +733,9 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "orc_b" | "rev8" | "sext_b" | "sext_h" | "zext_h"
         ) {
             reqs.push("zbb");
+        }
+        if name.starts_with("sm3p") {
+            reqs.push("zksh");
         }
         if name.starts_with("sha256") || name.starts_with("sha512") {
             reqs.push("zknh");

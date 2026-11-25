@@ -510,6 +510,8 @@ fn step_rv_inner(
             }
             env.step(|b| sem::rorw(b, rd, rs1, rs2))
         }
+        Insn::Sm3p0 => env.step(|b| sem::sm3p0(b, rd, rs1)),
+        Insn::Sm3p1 => env.step(|b| sem::sm3p1(b, rd, rs1)),
         Insn::Sha256sig0 => env.step(|b| sem::sha256sig0(b, rd, rs1)),
         Insn::Sha256sig1 => env.step(|b| sem::sha256sig1(b, rd, rs1)),
         Insn::Sha256sum0 => env.step(|b| sem::sha256sum0(b, rd, rs1)),
