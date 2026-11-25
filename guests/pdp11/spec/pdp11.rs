@@ -437,6 +437,68 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("halt_vec", "vec010"),
             ][..],
         ),
+        // 11/20 系。EIS・MMU・MTPS/MFPS を持たず SOB/MARK/SXT も
+        // ない（付録 B 項目 8）。jmp_reginc=inc と t_direct は
+        // 全車種共通、opr_same_reg=inc・pc_stored=pc4・swab_v=keep
+        // は 11/15・11/20 だけ（付録 B 項目 1-3・6）。11/10・11/15
+        // は包装違いで命令面の差が見えないため空の派生とする。
+        // ea_fault_reg は奇数値バスエラーで keep（項目 30）。
+        (
+            "pdp11_05",
+            "",
+            &[][..],
+            &[
+                ("jmp_reginc", "inc"),
+                ("t_direct", "true"),
+                ("ea_fault_reg", "keep"),
+            ][..],
+        ),
+        ("pdp11_10", "pdp11_05", &[][..], &[][..]),
+        (
+            "pdp11_20",
+            "pdp11_05",
+            &[][..],
+            &[
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
+                ("swab_v", "keep"),
+            ][..],
+        ),
+        ("pdp11_15", "pdp11_20", &[][..], &[][..]),
+        // 11/40 系。EIS（KE11-E）・MMU（KT11-D）はオプションなので
+        // 標準機能に含めない。fetch_nxm=same（項目 28）が固有の差。
+        (
+            "pdp11_40",
+            "",
+            &["sob_mark", "sxt"][..],
+            &[
+                ("opr_same_reg", "inc"),
+                ("pc_stored", "pc4"),
+                ("fetch_nxm", "same"),
+            ][..],
+        ),
+        ("pdp11_35", "pdp11_40", &[][..], &[][..]),
+        // 11/45 系。EIS・KT11-C MMU（18 ビット）・スーパーバイザ・
+        // 第 2 レジスタセット標準。MM トラップとスタック制限
+        // レジスタを持つ（mm_trap・stack_limit の項）。FP11 は
+        // オプション。分離 I/D は KT11-C にない。11/50・11/55 は
+        // メモリ速度違いで命令面の差が見えないため空の派生。
+        (
+            "pdp11_45",
+            "",
+            &[
+                "eis", "mmu", "sm", "dual_regset", "sob_mark", "sxt",
+            ][..],
+            &[
+                ("mmu_pa", "p18"),
+                ("mode_enc", "ksu"),
+                ("mm_trap", "true"),
+                ("dual_regset", "true"),
+                ("stack_limit", "reg"),
+            ][..],
+        ),
+        ("pdp11_50", "pdp11_45", &[][..], &[][..]),
+        ("pdp11_55", "pdp11_45", &[][..], &[][..]),
         (
             "pdp11_34",
             "",

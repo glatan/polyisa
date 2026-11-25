@@ -8,25 +8,25 @@
 
 | ISA | モデル数 | 機能数 | CLI 実行 | 対応 OS | JIT | タイミング | GDB | テスト層 | 詳細 |
 |---|---|---|---|---|---|---|---|---|---|
-| aarch64 | 8 | 6 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [aarch64.md](guests/aarch64.md) |
-| alpha | 7 | 7 | ELF | Linux | — | — | — | bare・abi・program | [alpha.md](guests/alpha.md) |
+| aarch64 | 11 | 6 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [aarch64.md](guests/aarch64.md) |
+| alpha | 13 | 7 | ELF | Linux | — | — | — | bare・abi・program | [alpha.md](guests/alpha.md) |
 | arm | 4 | 3 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [arm.md](guests/arm.md) |
 | hexagon | 13 | 20 | ELF | Linux | — | — | — | bare・oracle・abi・program | [hexagon.md](guests/hexagon.md) |
-| ia64 | 3 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
+| ia64 | 6 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
 | loongarch | 6 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [loongarch.md](guests/loongarch.md) |
-| m68k | 7 | 6 | ELF（`cpus`未掲載） | Linux | — | 専用モデル（検証あり） | — | bare・conformance・abi・program・timing | [m68k.md](guests/m68k.md) |
-| mips | 7 | 6 | ELF | Linux | — | 専用モデル（検証あり） | — | bare・abi・program・timing | [mips.md](guests/mips.md) |
+| m68k | 11 | 10 | ELF（`cpus`未掲載） | Linux | — | 専用モデル（検証あり） | — | bare・conformance・abi・program・timing | [m68k.md](guests/m68k.md) |
+| mips | 9 | 6 | ELF | Linux | — | 専用モデル（検証あり） | — | bare・abi・program・timing | [mips.md](guests/mips.md) |
 | openrisc | 4 | 5 | ELF | Linux | — | — | — | bare・abi・program | [openrisc.md](guests/openrisc.md) |
 | parisc | 7 | 4 | ELF | Linux | — | — | — | bare・abi・program | [parisc.md](guests/parisc.md) |
-| pdp11 | 12 | 16 | a.out（`cpus`未掲載） | Unix V7 | — | — | — | bare・program | [pdp11.md](guests/pdp11.md) |
+| pdp11 | 21 | 16 | a.out（`cpus`未掲載） | Unix V7 | — | — | — | bare・program | [pdp11.md](guests/pdp11.md) |
 | power | 6 | 8 | ELF | Linux | — | — | — | bare・oracle・abi・program | [power.md](guests/power.md) |
-| riscv | 13 | 12 | ELF | Linux・Semihosting | — | approx_uncalibrated | 対応 | bare・conformance・oracle・abi・program | [riscv.md](guests/riscv.md) |
-| s390 | 12 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [s390.md](guests/s390.md) |
-| sparc | 6 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [sparc.md](guests/sparc.md) |
+| riscv | 15 | 26 | ELF | Linux・Semihosting | — | approx_uncalibrated | 対応 | bare・conformance・oracle・abi・program | [riscv.md](guests/riscv.md) |
+| s390 | 19 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [s390.md](guests/s390.md) |
+| sparc | 13 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [sparc.md](guests/sparc.md) |
 | superh | 12 | 10 | ELF | Linux | — | — | — | bare・abi・program | [superh.md](guests/superh.md) |
-| vax | 5 | 7 | a.out | 4.3BSD | — | 専用モデル（未較正） | — | bare・program | [vax.md](guests/vax.md) |
+| vax | 8 | 7 | a.out | 4.3BSD | — | 専用モデル（未較正） | — | bare・program | [vax.md](guests/vax.md) |
 | wasm | 3 | 9 | Wasm（`cpus`未掲載） | WASI | — | — | — | bare・conformance・program・diff | [wasm.md](guests/wasm.md) |
-| x86 | 43 | 143 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
+| x86 | 44 | 145 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
 
 ## OS パーソナリティ（Linux）
 

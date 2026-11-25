@@ -102,6 +102,25 @@ pub fn build_model() -> polyisa_isadl::Model {
         remove_features: vec![],
         ident: vec![],
     });
+    // MIPS III/IV の実機。r4000（MIPS III）は 64 ビット化と LL/SC
+    // を持つが、LL/SC は mips32r1 の旗に MOVZ/MOVN（MIPS IV）と
+    // 束ねて入っているため、R4000 の厳密な層は旗の分割を待つ。
+    // r10000（MIPS IV）は MOVZ/MOVN を持つので mips32r1 層までの
+    // 構成で近似する。
+    for (name, add) in [
+        ("r4000", &["mips1", "mips64", "fpu"][..]),
+        ("r10000", &["mips1", "mips32r1", "mips64", "fpu"][..]),
+    ] {
+        m.models.push(ModelDef {
+        timing: None,
+        params: vec![],
+            name: name.to_string(),
+            parent: String::new(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: vec![],
+            ident: vec![],
+        });
+    }
     // Release 2 は MIPS I の符号化を残し、ロード遅延は持たない。遅延の有無は実行ループが持つ。
     m.models.push(ModelDef {
         timing: None,

@@ -159,6 +159,8 @@ fn declare_features(m: &mut Model) {
     feat(m, "uintr", &[]);
     feat(m, "hreset", &[]);
     feat(m, "serialize", &[]);
+    feat(m, "amx_bf16", &["amx_tile"]);
+    feat(m, "amx_int8", &["amx_tile"]);
     feat(m, "cet_ibt", &[]);
     feat(m, "amx_bf16", &["amx_tile"]);
     feat(m, "avx512_fp16", &["avx512f"]);
@@ -686,6 +688,19 @@ fn declare_models(m: &mut Model) {
         &[],
         &[],
         idtgl,
+    );
+    // Sapphire Rapids は AVX512-FP16 と AMX（tile/bf16/int8）を足す。
+    // AMX-COMPLEX は後代でここには入れない。
+    let mut idspr = intel("6", "143", "4");
+    idspr.extend([("cpuid.max_basic", "0x20"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "sapphire_rapids",
+        "ice_lake",
+        &["avx512_fp16", "amx_tile", "amx_bf16", "amx_int8"],
+        &[],
+        &[],
+        idspr,
     );
     // AMD。K6 はローカル APIC を持たない。3DNow! 系は K6-2 から、
     // 整数 SSE 相当の MMX 拡張と CMOV・PAT は K7（Athlon）から。

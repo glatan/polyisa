@@ -81,6 +81,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("generic", "", &["itanium"][..]),
         ("itanium2", "generic", &["itanium2"][..]),
         ("poulson", "itanium2", &["poulson"][..]),
+        // 製品系列名。9300（Tukwila）は itanium2 と同じ命令集合、
+        // 9500/9700 は Poulson と同じ命令集合で、差はタイミングと
+        // 識別情報の段階で意味を持つ器。
+        ("itanium9300", "itanium2", &[][..]),
+        ("itanium9500", "poulson", &[][..]),
+        ("itanium9700", "itanium9500", &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,

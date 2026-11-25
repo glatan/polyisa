@@ -42,12 +42,21 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
     for (name, parent, add, rem) in [
         ("z900", "", vec!["zarch"], vec![]),
+        // z800/z890 と各世代の BC 機は命令集合が世代と同じで、
+        // 差はタイミングと識別情報の段階で意味を持つ器。
+        ("z800", "z900", vec![], vec![]),
+        ("z890", "z800", vec![], vec![]),
         ("z990", "z900", vec![], vec![]),
         ("z9ec", "z990", vec!["long-disp"], vec![]),
+        ("z9bc", "z9ec", vec![], vec![]),
         ("z10ec", "z9ec", vec![], vec![]),
+        ("z10bc", "z10ec", vec![], vec![]),
         ("z196", "z10ec", vec![], vec![]),
+        ("z114", "z196", vec![], vec![]),
         ("zec12", "z196", vec![], vec![]),
+        ("zbc12", "zec12", vec![], vec![]),
         ("z13", "zec12", vec![], vec![]),
+        ("z13s", "z13", vec![], vec![]),
         ("z14", "z13", vec![], vec![]),
         ("z15", "z14", vec![], vec![]),
         ("z16", "z15", vec![], vec![]),

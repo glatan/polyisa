@@ -73,6 +73,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ultrasparc", "v9", &["vis"][..], &[][..]),
         ("ultrasparc3", "ultrasparc", &["vis2"][..], &[][..]),
         ("leon3", "v8", &[][..], &[][..]),
+        // 実機バリアント。命令集合は親と同じで、差はタイミングと
+        // 識別情報の段階で意味を持つ器。
+        ("supersparc", "v8", &[][..], &[][..]),
+        ("microsparc", "v8", &[][..], &[][..]),
+        ("leon4", "leon3", &[][..], &[][..]),
+        ("ultrasparc2", "ultrasparc", &[][..], &[][..]),
+        ("ultrasparc4", "ultrasparc3", &[][..], &[][..]),
+        // T1/T2 は VIS を持たないスループット志向の実装（構成は
+        // 一次資料の確認待ち）。VIS3 以降は未実装。
+        ("ultrasparc_t1", "v9", &[][..], &[][..]),
+        ("ultrasparc_t2", "ultrasparc_t1", &[][..], &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,

@@ -81,6 +81,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("armv8_0a", "", &["fp", "asimd"][..]),
         ("armv8_1a", "armv8_0a", &["lse"][..]),
         ("armv8_2a", "armv8_1a", &["fp16", "dotprod"][..]),
+        // ARMv8.2 世代の実機。ドット積は v8.2 ではオプションで、
+        // 構成依存の分は -dotprod で落とす近似。MIDR の識別情報
+        // 配線は未整備。
+        ("cortex_a55", "armv8_2a", &[][..]),
+        ("cortex_a75", "armv8_2a", &[][..]),
+        ("neoverse_n1", "armv8_2a", &[][..]),
     ] {
         m.models.push(polyisa_isadl::model::ModelDef {
             timing: None,

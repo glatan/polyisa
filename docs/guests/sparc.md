@@ -4,7 +4,7 @@
 
 SPARC V7・V8・V9 および VIS のうち、ユーザーモード実行に必要な命令群（整数、ロード／ストア、分岐・annul・DCTI couple、レジスタウィンドウ、ユーザー ASR、FPU、`movcc`/`movr`、`cas`/`casx`）を `guests/sparc` で実装している。
 
-- **CPU モデル**：`v7`、`v8`、`v9`、`ultrasparc`、`ultrasparc3`、`leon3`（計 6 モデル）。
+- **CPU モデル**：`v7`、`v8`、`v9`、`ultrasparc`、`ultrasparc3`、`leon3`、`supersparc`、`microsparc`、`leon4`、`ultrasparc2`、`ultrasparc4`、`ultrasparc_t1`、`ultrasparc_t2`（計 13 モデル）。`supersparc`–`ultrasparc4`・`leon4` は命令集合が親と同じ器。T1/T2 は VIS を持たない構成（一次資料の確認待ち）で VIS3 以降は未実装。
 
 ## 対応する OS・ABI と実行環境
 

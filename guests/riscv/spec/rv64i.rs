@@ -41,6 +41,24 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zba", &[][..], &[][..]),
         ("zbb", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
+        // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
+        // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
+        // PMA 系（Ziccif 等）・データ独立レイテンシ（Zkt）のように
+        // 命令の可否に関わらないものは旗に立てない。
+        ("zihintpause", &[][..], &[][..]),
+        ("zicbom", &[][..], &[][..]),
+        ("zicbop", &[][..], &[][..]),
+        ("zicboz", &[][..], &[][..]),
+        ("zfhmin", &[][..], &[][..]),
+        ("v", &[][..], &[][..]),
+        ("zvfhmin", &["v"][..], &[][..]),
+        ("zvbb", &["v"][..], &[][..]),
+        ("zicond", &[][..], &[][..]),
+        ("zimop", &[][..], &[][..]),
+        ("zcmop", &["zimop"][..], &[][..]),
+        ("zcb", &[][..], &[][..]),
+        ("zfa", &[][..], &[][..]),
+        ("zawrs", &[][..], &[][..]),
     ] {
         m.features.push(polyisa_isadl::model::Feature {
             name: name.to_string(),
@@ -107,6 +125,23 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Zba/Zbb/Zbs の命令自体は未実装。
         // Ref: SPEC-RISCV-PROFILES (RVA23 v1.0) の収録表。
         ("rva20u64", "rv64gc", &["zba", "zbb", "zbs"][..]),
+        // RVA22 は RVA20 にキャッシュブロック操作・半精度・pause
+        // ヒントを足す。RVA23 はベクトルを必須化し Zicond・Zimop・
+        // Zfa・Zawrs 等を足す。いずれの拡張命令も未実装。
+        // Ref: SPEC-RISCV-PROFILES (RVA23 v1.0).
+        (
+            "rva22u64",
+            "rva20u64",
+            &["zihintpause", "zicbom", "zicbop", "zicboz", "zfhmin"][..],
+        ),
+        (
+            "rva23u64",
+            "rva22u64",
+            &[
+                "v", "zvfhmin", "zvbb", "zicond", "zimop", "zcmop", "zcb",
+                "zfa", "zawrs",
+            ][..],
+        ),
     ] {
         m.models.push(polyisa_isadl::model::ModelDef {
         timing: None,
