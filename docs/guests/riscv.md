@@ -31,6 +31,7 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
   - `sifive_u74` は `zba`/`zbb` 機能ビットを宣言しているが、両拡張の命令記述と意味論は未実装。
 - **GDB レジスタ表**：FPU レジスタは `fcsr` のみ掲載し、`fflags`/`frm` の個別項目は省略している（XML で regnum を明示しているため GDB 動作に支障はない）。
 - **適合テストスイート**：`heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を広く実行する。riscv-arch-test（ACT4 形式を含む）の実行ハーネスは未実装（[GAP-0010](../known-issues.md)）。
+- **ACT4 の前提**：ACT4 は Sail リファレンスモデルで生成した期待 signature を自己検査 ELF へ埋め込む。ACT4 の要求版は Sail 0.16 で、上流が Linux x86-64 向けの署名検証可能な prebuilt binary を公開している。フレームワーク本体の選定には Ruby/UDB と Python/uv、コンパイルには GCC 15 または Clang 20 以降が要る。現在の開発コンテナには Clang 23 と qemu-user だけがあり、qemu-user は bare-metal ACT ELF の実行基盤にはならない。polyisa 側のハーネスでは、ACT の全体フレームワークに依存せず、選定した代表的なユーザーモード対象について reference signature 生成・compile/link・製品ランタイム実行・console/signature 判定の経路を固定する必要がある。
 
 ## 検証手段
 
