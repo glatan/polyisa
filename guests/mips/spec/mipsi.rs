@@ -37,12 +37,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         implies: vec![],
         conflicts: vec![],
     });
-    // Release 2 の追加命令（EXT/INS/SEB/SEH/WSBH/RDHWR/SYNC/LL/SC/TEQ/MOVZ/MOVN
-    // および SPECIAL2 系）。R6 でも符号化が残る命令群をこの旗で有効にする。
-    // 一次根拠は台帳の SPEC-MIPS32R2。
+    // MIPS32 Release 1 の命令群（LL/SC・MOVZ/MOVN・SYNC・PREF・TEQ・
+    // SPECIAL2 の MUL/MADD/MSUB/CLZ/CLO 系）。MIPS I にはなく R2 を
+    // 待たない層で、R6 でも符号化が残る命令が多い。
+    // 一次根拠は台帳の SPEC-MIPS32R2 の Release 差分記述。
+    m.features.push(Feature {
+        name: "mips32r1".to_string(),
+        implies: vec![],
+        conflicts: vec![],
+    });
+    // Release 2 の追加命令（EXT/INS/SEB/SEH/WSBH/RDHWR/SYNCI 系）。
+    // R2 は R1 の命令集合を含む。
     m.features.push(Feature {
         name: "mips32r2".to_string(),
-        implies: vec![],
+        implies: vec!["mips32r1".to_string()],
         conflicts: vec![],
     });
     // 64 ビット命令群（daddu/dsll/ld/sd など）。素の MIPS64 整数命令は
@@ -76,7 +84,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         params: vec![],
         name: "mips32r1".to_string(),
         parent: String::new(),
-        add_features: vec!["mips1".to_string(), "fpu".to_string()],
+        add_features: vec!["mips1".to_string(), "mips32r1".to_string(), "fpu".to_string()],
         remove_features: vec![],
         ident: vec![],
     });
@@ -85,7 +93,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         params: vec![],
         name: "mips64r1".to_string(),
         parent: String::new(),
-        add_features: vec!["mips1".to_string(), "mips64".to_string(), "fpu".to_string()],
+        add_features: vec![
+            "mips1".to_string(),
+            "mips32r1".to_string(),
+            "mips64".to_string(),
+            "fpu".to_string(),
+        ],
         remove_features: vec![],
         ident: vec![],
     });
@@ -590,12 +603,12 @@ pub fn build_model() -> polyisa_isadl::Model {
     type InsnSpec<'a> = (&'a str, &'a str, &'a str, &'a str, &'a [(&'a str, WhereOp, u64)], &'a str, &'a str);
     let ext: &[InsnSpec] = &[
         // R2 で残る SPECIAL 系。
-        ("movz", "FR", "000000 ..... ..... ..... 00000 001010", "r2", &[], "movz {rd}, {rs}, {rt}", "alu"),
-        ("movn", "FR", "000000 ..... ..... ..... 00000 001011", "r2", &[], "movn {rd}, {rs}, {rt}", "alu"),
+        ("movz", "FR", "000000 ..... ..... ..... 00000 001010", "r1", &[], "movz {rd}, {rs}, {rt}", "alu"),
+        ("movn", "FR", "000000 ..... ..... ..... 00000 001011", "r1", &[], "movn {rd}, {rs}, {rt}", "alu"),
         ("seleqz", "FR", "000000 ..... ..... ..... 00000 110101", "r6", &[], "seleqz {rd}, {rs}, {rt}", "alu"),
         ("selnez", "FR", "000000 ..... ..... ..... 00000 110111", "r6", &[], "selnez {rd}, {rs}, {rt}", "alu"),
-        ("teq", "FR", "000000 ..... ..... ..... ..... 110100", "r2", &[], "teq {rs}, {rt}", "system"),
-        ("sync", "FJ", "000000 00000 00000 00000 ..... 001111", "r2", &[], "sync", "system"),
+        ("teq", "FR", "000000 ..... ..... ..... ..... 110100", "r1", &[], "teq {rs}, {rt}", "system"),
+        ("sync", "FJ", "000000 00000 00000 00000 ..... 001111", "r1", &[], "sync", "system"),
         // ビット操作（BSHFL / EXT / INS）。bitswap は align との衝突を避けるため先に置く。
         // BSHFL/DBSHFL 群は rs=0 が必須。align/dalign は rs!=0 の where で分ける
         // （rs=0 & sa=0 は BSHFL 側が正しい復号。SPEC-MIPS-R6 参照）。
@@ -618,17 +631,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dinsu", "FR", "011111 ..... ..... ..... ..... 000111", "64", &[], "dinsu {rt}, {rs}, {shamt}, {rd}", "alu"),
         ("daddi", "FI", "011000 ..... ..... ................", "64p", &[], "daddi {rt}, {rs}, {imm}", "alu"),
         ("rdhwr", "FI", "011111 00000 ..... ..... 00000 111011", "r2", &[], "rdhwr {rt}, {rd}", "system"),
-        ("pref", "FJ", "110011 ..... ..... ................", "r2", &[], "pref", "load"),
-        ("ll", "FI", "110000 ..... ..... ................", "r2p", &[], "ll {rt}, {imm}({rs})", "load"),
-        ("sc", "FI", "111000 ..... ..... ................", "r2p", &[], "sc {rt}, {imm}({rs})", "store"),
+        ("pref", "FJ", "110011 ..... ..... ................", "r1", &[], "pref", "load"),
+        ("ll", "FI", "110000 ..... ..... ................", "r1p", &[], "ll {rt}, {imm}({rs})", "load"),
+        ("sc", "FI", "111000 ..... ..... ................", "r1p", &[], "sc {rt}, {imm}({rs})", "store"),
         // SPECIAL2（R6 で除去）。
-        ("mul_r2", "FR", "011100 ..... ..... ..... 00000 000010", "r2p", &[], "mul {rd}, {rs}, {rt}", "mult"),
-        ("madd", "FR", "011100 ..... ..... 00000 00000 000000", "r2p", &[], "madd {rs}, {rt}", "mult"),
-        ("maddu", "FR", "011100 ..... ..... 00000 00000 000001", "r2p", &[], "maddu {rs}, {rt}", "mult"),
-        ("msub", "FR", "011100 ..... ..... 00000 00000 000100", "r2p", &[], "msub {rs}, {rt}", "mult"),
-        ("msubu", "FR", "011100 ..... ..... 00000 00000 000101", "r2p", &[], "msubu {rs}, {rt}", "mult"),
-        ("clz_r2", "FR", "011100 ..... 00000 ..... 00000 100000", "r2p", &[], "clz {rd}, {rs}", "alu"),
-        ("clo_r2", "FR", "011100 ..... 00000 ..... 00000 100001", "r2p", &[], "clo {rd}, {rs}", "alu"),
+        ("mul_r2", "FR", "011100 ..... ..... ..... 00000 000010", "r1p", &[], "mul {rd}, {rs}, {rt}", "mult"),
+        ("madd", "FR", "011100 ..... ..... 00000 00000 000000", "r1p", &[], "madd {rs}, {rt}", "mult"),
+        ("maddu", "FR", "011100 ..... ..... 00000 00000 000001", "r1p", &[], "maddu {rs}, {rt}", "mult"),
+        ("msub", "FR", "011100 ..... ..... 00000 00000 000100", "r1p", &[], "msub {rs}, {rt}", "mult"),
+        ("msubu", "FR", "011100 ..... ..... 00000 00000 000101", "r1p", &[], "msubu {rs}, {rt}", "mult"),
+        ("clz_r2", "FR", "011100 ..... 00000 ..... 00000 100000", "r1p", &[], "clz {rd}, {rs}", "alu"),
+        ("clo_r2", "FR", "011100 ..... 00000 ..... 00000 100001", "r1p", &[], "clo {rd}, {rs}", "alu"),
         ("dclz_r2", "FR", "011100 ..... 00000 ..... 00000 100100", "64p", &[], "dclz {rd}, {rs}", "alu"),
         ("dclo_r2", "FR", "011100 ..... 00000 ..... 00000 100101", "64p", &[], "dclo {rd}, {rs}", "alu"),
         // MIPS64 の SPECIAL 系（R6 でも残る）。
@@ -726,6 +739,11 @@ pub fn build_model() -> polyisa_isadl::Model {
 ];
     for (name, format, pattern, pred, wheres, syntax, timing) in ext {
         let when = match *pred {
+            "r1" => Pred::Flag("mips32r1".to_string()),
+            "r1p" => Pred::All(vec![
+                Pred::Flag("mips32r1".to_string()),
+                Pred::Not(Box::new(Pred::Flag("mips_r6".to_string()))),
+            ]),
             "r2" => Pred::Flag("mips32r2".to_string()),
             "r2p" => Pred::All(vec![
                 Pred::Flag("mips32r2".to_string()),

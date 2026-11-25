@@ -15,7 +15,7 @@
 | ia64 | 3 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
 | loongarch | 5 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [loongarch.md](guests/loongarch.md) |
 | m68k | 7 | 6 | ELF（`cpus`未掲載） | Linux | — | 専用モデル（検証あり） | — | bare・conformance・abi・program・timing | [m68k.md](guests/m68k.md) |
-| mips | 7 | 5 | ELF | Linux | — | 専用モデル（検証あり） | — | bare・abi・program・timing | [mips.md](guests/mips.md) |
+| mips | 7 | 6 | ELF | Linux | — | 専用モデル（検証あり） | — | bare・abi・program・timing | [mips.md](guests/mips.md) |
 | openrisc | 3 | 5 | ELF | Linux | — | — | — | bare・abi・program | [openrisc.md](guests/openrisc.md) |
 | parisc | 7 | 4 | ELF | Linux | — | — | — | bare・abi・program | [parisc.md](guests/parisc.md) |
 | pdp11 | 12 | 16 | a.out（`cpus`未掲載） | Unix V7 | — | — | — | bare・program | [pdp11.md](guests/pdp11.md) |

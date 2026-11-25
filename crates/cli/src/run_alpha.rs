@@ -310,7 +310,7 @@ fn setup_alpha_elf(
     if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
         return Err("PT_INTERP のある Alpha ELF は未対応（静的のみ）".to_string());
     }
-    // `--cpu` 省略時は 21264（EV6 世代 = BWX/FIX/CIX/MVI 全搭載）。
+    // `--cpu` 省略時は 21264a（EV67 世代 = BWX/FIX/CIX/MVI 全搭載）。
     let default_sel;
     let sel = match sel {
         Some(s) => s,
@@ -319,7 +319,7 @@ fn setup_alpha_elf(
                 polyisa_guest_alpha::MODEL_DEFS,
                 polyisa_guest_alpha::FEATURE_DEFS,
                 polyisa_guest_alpha::FEAT_BITS,
-                "21264",
+                "21264a",
                 &[],
                 &[],
             )

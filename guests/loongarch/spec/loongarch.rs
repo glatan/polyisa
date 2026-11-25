@@ -52,14 +52,16 @@ pub fn build_model() -> polyisa_isadl::Model {
     // CPU モデル。LA32 系と LA64 系の代表を置く。識別情報
     // （CPUCFG）の値は LA8 で意味論側へ接続する。
     // Ref: SPEC-LOONGARCH-RM §1.2.
+    // LA264 は 64 ビットの双発行コア（2K1000LA 資料）で、LA32 系では
+    // ない。ベクトル拡張の有無は一次資料の確認待ちで lsx は入れない。
     for (name, parent, add) in [
         ("la32", "", &["la32"][..]),
         ("la132", "la32", &[][..]),
-        ("la264", "la32", &[][..]),
+        ("la264", "", &["la64"][..]),
         // la464 は実機の機能構成（LSX 内蔵）に合わせて `lsx` を
         // 持たせる。la664 は親から継承する。
         // Ref: SPEC-LOONGARCH-RM §1.4（LS464 の標準構成）.
-        ("la464", "", &["la64", "lsx", "lbt"][..]),
+        ("la464", "", &["la64", "lsx", "lasx", "lbt"][..]),
         ("la664", "la464", &["lasx"][..]),
     ] {
         m.models.push(ModelDef {

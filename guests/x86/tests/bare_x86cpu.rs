@@ -31,9 +31,10 @@ fn amd_generation_features() {
     // Zen は FMA4 を廃し AVX2 を持つ。
     assert_eq!(model_feats("zen") & FEAT_FMA4, 0);
     assert_ne!(model_feats("zen") & FEAT_AVX2, 0);
-    // K6 はローカル APIC を持たず K6-2 で入る。
+    // K6 系はローカル APIC を持たず、Athlon（K7）で入る。
     assert_eq!(model_feats("k6") & FEAT_APIC, 0);
-    assert_ne!(model_feats("k6_2") & FEAT_APIC, 0);
+    assert_eq!(model_feats("k6_2") & FEAT_APIC, 0);
+    assert_ne!(model_feats("athlon") & FEAT_APIC, 0);
 }
 
 #[test]
@@ -44,7 +45,8 @@ fn intel_generation_chain() {
     assert_eq!(model_feats("core2") & FEAT_AVX2, 0);
     assert_ne!(model_feats("haswell") & FEAT_AVX2, 0);
     assert_ne!(model_feats("haswell") & FEAT_BMI1, 0);
-    // Core 2 は HT を持たない。
-    assert_eq!(model_feats("core2") & FEAT_HTT, 0);
+    // HTT ビットは論理プロセッサ数フィールドの有効性も示すため、
+    // マルチコアの Core 2 でも立つ。
+    assert_ne!(model_feats("core2") & FEAT_HTT, 0);
     assert_ne!(model_feats("pentium4") & FEAT_HTT, 0);
 }

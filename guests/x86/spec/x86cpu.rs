@@ -524,7 +524,7 @@ fn declare_models(m: &mut Model) {
         m,
         "pentium_pro",
         "pentium",
-        &["cmov", "pge", "mca", "pae", "mtrr", "pse36"],
+        &["cmov", "pge", "mca", "pae", "mtrr"],
         &[],
         &[],
         idp6,
@@ -537,7 +537,7 @@ fn declare_models(m: &mut Model) {
         m,
         "pentium_ii",
         "pentium_pro",
-        &["mmx", "fxsr", "sep", "clfsh"],
+        &["mmx", "fxsr", "sep", "pat", "pse36"],
         &[],
         &[],
         idp2,
@@ -545,19 +545,19 @@ fn declare_models(m: &mut Model) {
     // Katmai（model 7）は PSN リーフを持つので最大ベーシックリーフは 3。
     let mut idp3 = intel("6", "7", "3");
     idp3.extend([("cpuid.max_basic", "3"), ("cpuid.max_ext", "0")]);
-    model(m, "pentium_iii", "pentium_ii", &["sse", "pat"], &[], &[], idp3);
+    model(m, "pentium_iii", "pentium_ii", &["sse"], &[], &[], idp3);
     // Willamette（family 15）。PSN リーフは Pentium III 限りなので
     // 最大ベーシックリーフは 2 に戻る。拡張リーフはブランド文字列まで。
     let mut idp4 = intel("15", "1", "4");
     idp4.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0x80000004")]);
-    model(m, "pentium4", "pentium_iii", &["sse2", "htt"], &[], &[], idp4);
+    model(m, "pentium4", "pentium_iii", &["sse2", "htt", "clfsh"], &[], &[], idp4);
     let mut idpre = intel("15", "3", "4");
-    idpre.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0x80000004")]);
+    idpre.extend([("cpuid.max_basic", "5"), ("cpuid.max_ext", "0x80000008")]);
     model(
         m,
         "pentium4_prescott",
         "pentium4",
-        &["sse3", "monitor", "tm2", "eist"],
+        &["sse3", "monitor"],
         &[],
         &[],
         idpre,
@@ -570,8 +570,8 @@ fn declare_models(m: &mut Model) {
         m,
         "core2",
         "pentium4_prescott",
-        &["lm", "nx", "ssse3", "cx16", "vmx"],
-        &["htt"],
+        &["lm", "nx", "ssse3", "cx16", "vmx", "syscall", "lahf_lm"],
+        &[],
         &[],
         idc2,
     );
@@ -580,7 +580,7 @@ fn declare_models(m: &mut Model) {
     model(m, "penryn", "core2", &["sse4_1"], &[], &[], idpen);
     let mut idneh = intel("6", "26", "5");
     idneh.extend([("cpuid.max_basic", "0xb"), ("cpuid.max_ext", "0x80000008")]);
-    model(m, "nehalem", "penryn", &["sse4_2", "popcnt"], &[], &[], idneh);
+    model(m, "nehalem", "penryn", &["sse4_2", "popcnt", "rdtscp"], &[], &[], idneh);
     let mut idwsm = intel("6", "37", "2");
     idwsm.extend([("cpuid.max_basic", "0xb"), ("cpuid.max_ext", "0x80000008")]);
     model(
@@ -595,7 +595,15 @@ fn declare_models(m: &mut Model) {
     // AVX は xsave を含意する。リーフ 0xD まで届くようになる。
     let mut idsnb = intel("6", "42", "7");
     idsnb.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
-    model(m, "sandy_bridge", "westmere", &["avx", "pcid"], &[], &[], idsnb);
+    model(
+        m,
+        "sandy_bridge",
+        "westmere",
+        &["avx", "pcid", "xsaveopt", "x2apic", "tsc_deadline"],
+        &[],
+        &[],
+        idsnb,
+    );
     let mut idivb = intel("6", "58", "9");
     idivb.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
     model(
@@ -624,7 +632,7 @@ fn declare_models(m: &mut Model) {
         m,
         "broadwell",
         "haswell",
-        &["adx", "rdseed", "smap"],
+        &["adx", "rdseed", "smap", "prefetchw"],
         &[],
         &[],
         idbdw,
@@ -635,15 +643,18 @@ fn declare_models(m: &mut Model) {
     idk6.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000005")]);
     model(m, "k6", "pentium", &["mmx"], &["apic"], &[], idk6);
     let mut idk62 = amd("5", "8", "12");
-    idk62.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000006")]);
-    model(m, "k6_2", "k6", &["apic", "dnow"], &[], &[], idk62);
+    idk62.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000005")]);
+    model(m, "k6_2", "k6", &["dnow", "pge", "syscall"], &[], &[], idk62);
     let mut idk7 = amd("6", "2", "1");
-    idk7.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    idk7.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000006")]);
     model(
         m,
         "athlon",
         "k6_2",
-        &["cmov", "mtrr", "pat", "fxsr", "mmxext", "syscall"],
+        &[
+            "cmov", "mtrr", "pat", "fxsr", "mmxext", "apic", "pae", "mca", "pse36", "sep",
+            "dnowext",
+        ],
         &[],
         &[],
         idk7,
@@ -651,7 +662,7 @@ fn declare_models(m: &mut Model) {
     // Palomino 系。SSE と 3DNow! 拡張（dnowext）が入る。
     let mut idaxp = amd("6", "8", "1");
     idaxp.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
-    model(m, "athlon_xp", "athlon", &["sse", "dnowext"], &[], &[], idaxp);
+    model(m, "athlon_xp", "athlon", &["sse"], &[], &[], idaxp);
     // K8（ClawHammer 系）。long mode と NX、SSE2、CMPXCHG16B。
     let mut idk8 = amd("15", "4", "0");
     idk8.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
@@ -666,12 +677,15 @@ fn declare_models(m: &mut Model) {
     );
     // K10（Barcelona 系）。SSE3・SSE4a・misaligned SSE・ABM（lzcnt）・POPCNT・SVM。
     let mut idk10 = amd("16", "2", "3");
-    idk10.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    idk10.extend([("cpuid.max_basic", "5"), ("cpuid.max_ext", "0x8000001a")]);
     model(
         m,
         "phenom",
         "athlon64",
-        &["sse3", "sse4a", "misalignsse", "lzcnt", "popcnt", "svm"],
+        &[
+            "sse3", "sse4a", "misalignsse", "lzcnt", "popcnt", "svm", "monitor", "prefetchw",
+            "pdpe1gb", "rdtscp",
+        ],
         &[],
         &[],
         idk10,
@@ -687,7 +701,8 @@ fn declare_models(m: &mut Model) {
         "bulldozer",
         "phenom_ii",
         &[
-            "ssse3", "sse4_1", "sse4_2", "avx", "aesni", "pclmulqdq", "xop", "fma4", "tbm",
+            "ssse3", "sse4_1", "sse4_2", "avx", "aesni", "pclmulqdq", "xop", "fma4", "lwp",
+            "xsaveopt",
         ],
         &["dnow", "dnowext"],
         &[],
@@ -700,7 +715,7 @@ fn declare_models(m: &mut Model) {
         m,
         "piledriver",
         "bulldozer",
-        &["fma", "f16c", "bmi1"],
+        &["fma", "f16c", "bmi1", "tbm"],
         &[],
         &[],
         idpd,
@@ -714,21 +729,30 @@ fn declare_models(m: &mut Model) {
         "piledriver",
         &[
             "avx2", "bmi2", "sha", "rdseed", "adx", "smap", "clflushopt", "clzero", "movbe",
+            "fsgsbase", "smep", "mwaitx",
         ],
-        &["xop", "fma4", "tbm"],
+        &["xop", "fma4", "tbm", "lwp"],
         &[],
         idz1,
     );
     let mut idz2 = amd("23", "49", "0");
-    idz2.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x8000001f")]);
-    model(m, "zen2", "zen", &["rdpid", "clwb"], &[], &[], idz2);
+    idz2.extend([("cpuid.max_basic", "0x10"), ("cpuid.max_ext", "0x8000001f")]);
+    model(
+        m,
+        "zen2",
+        "zen",
+        &["rdpid", "clwb", "rdpru", "umip", "x2apic"],
+        &[],
+        &[],
+        idz2,
+    );
     let mut idz3 = amd("25", "33", "0");
     idz3.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000021")]);
     model(
         m,
         "zen3",
         "zen2",
-        &["pku", "vaes", "vpclmulqdq"],
+        &["pku", "vaes", "vpclmulqdq", "invpcid", "erms"],
         &[],
         &[],
         idz3,
@@ -750,6 +774,8 @@ fn declare_models(m: &mut Model) {
             "avx512vnni",
             "avx512bitalg",
             "avx512vpopcntdq",
+            "avx512ifma",
+            "gfni",
         ],
         &[],
         &[],

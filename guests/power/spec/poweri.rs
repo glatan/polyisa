@@ -23,8 +23,10 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と CPU モデル。ppc64le ユーザーモードの必須集合を generic に持つ。
-    // いずれの旗も命令の when に接続されていないため、ISA 版ごとの
-    // 機能分割と接続が世代モデル追加の前提になる。
+    // ISA 版の旗は宣言と世代モデルへの対応づけまでで、命令の when への
+    // 接続は残っている（カバレッジ表でモデル参照あり・ゲートなしと見える）。
+    // 厳密には POWER9 は ISA 3.0B で、ISA 3.1 はトランザクショナルメモリを
+    // 削除しており版は完全な累積関係ではないが、接続時の設計課題とする。
     // Gap: GAP-0101
     // Ref: SPEC-POWER-ISA (v3.1C), SPEC-POWER-ABI (ELFv2 r1.5).
     for (name, implies) in [

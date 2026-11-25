@@ -180,10 +180,12 @@ mod tests {
     #[test]
     fn decode_release_ext() {
         let f = |w: u32, feats: u128| decode_model_ex(u128::from(w), 32, true, feats);
-        const R2: u128 = FEAT_MIPS32R2;
-        const M64: u128 = FEAT_MIPS32R2 | FEAT_MIPS64;
-        const R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS_R6;
-        const M64R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS64 | FEAT_MIPS_R6;
+        // 生マスクでもモデル解決（implies 閉包）後の形に合わせ、
+        // mips32r2 は mips32r1 を含めて渡す。
+        const R2: u128 = FEAT_MIPS32R2 | FEAT_MIPS32R1;
+        const M64: u128 = FEAT_MIPS32R2 | FEAT_MIPS32R1 | FEAT_MIPS64;
+        const R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS32R1 | FEAT_MIPS_R6;
+        const M64R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS32R1 | FEAT_MIPS64 | FEAT_MIPS_R6;
 
         // R2 で残る命令（r6 のモデルでも有効）。
         assert_eq!(f(0x0022_180a, R2), Some(Insn::Movz));

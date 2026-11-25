@@ -74,8 +74,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // CPU モデル。generic は Itanium 系のベースライン、itanium2 は
-    // McKinley 系の Itanium 2（9100/9700 系まで）、poulson は 9500 系
-    // の追加命令を持つ世代。
+    // McKinley〜Tukwila 系（9100/9300 系まで）、poulson は 9500 系で
+    // 追加された命令を持つ世代（9700 系は 9500 系と同じ命令集合）。
     // unit_* は文脈旗なのでモデルには含めない。
     for (name, parent, add) in [
         ("generic", "", &["itanium"][..]),
