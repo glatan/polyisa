@@ -24876,6 +24876,16 @@ fn run64_apx_cfcmov() {
         // 真のメモリ形は最後に実行し、NDD に読み値を残す。
         0x45, 0x31, 0xD2, // xor r10d,r10d → ZF=1
         0x62, 0x4C, 0x3C, 0x14, 0x44, 0x01, // cfcmovz r24,r16,[r25] → 0x12345678
+        // 32 ビット形の CFCMOV は、偽条件かつ r/m がメモリのとき
+        // reg ソースを全幅で返す。レジスタ直形と通常の NDD CMOV は
+        // 32 ビット結果をゼロ拡張する（SDE 差分で確認した非対称）。
+        0x48, 0xB8, 0x42, 0x6A, 0xFE, 0x19, 0x2D, 0x74, 0x73,
+        0xE0, // movabs rax,0xe073742d19fe6a42
+        0x45, 0xFF, 0xC2, // inc r10d → ZF=0
+        0x62, 0xDC, 0x4C, 0x14, 0x44, 0xC1, // cfcmovz r22,rax,r25 → r22=zero-ext eax
+        0x62, 0xF4, 0x3C, 0x14, 0x44, 0x04, 0x25, 0x00, 0x20, 0x00,
+        0x00, // cfcmovz r24,rax,[0x2000] → r24=rax 全幅
+        0x62, 0xDC, 0x44, 0x10, 0x44, 0xC1, // cmovz r23,rax,r25 → r23=zero-ext eax
         0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
         0x48, 0x31, 0xFF, // xor rdi,rdi
         0x0F, 0x05, // syscall
@@ -24909,9 +24919,15 @@ fn run64_apx_cfcmov() {
                 .unwrap(),
         )
     };
-    // r24 は最後の真メモリ読みで 0x12345678。r26/r25 は偽条件で
-    // 0 になった後、r25 だけ 0x2000 へ戻る。
-    assert_eq!(egpr(8), 0x1234_5678, "cfcmov memory load");
+    // r24/r23/r22 は末尾の width probe。r26/r25 は偽条件で 0 に
+    // なった後、r25 だけ 0x2000 へ戻る。
+    assert_eq!(
+        egpr(8),
+        0xE073_742D_19FE_6A42,
+        "cfcmov memory false full-width"
+    );
+    assert_eq!(egpr(7), 0x19FE_6A42, "ndd cmov false zero-upper");
+    assert_eq!(egpr(6), 0x19FE_6A42, "cfcmov register false zero-upper");
     assert_eq!(egpr(10), 0, "cfcmov false zero");
     assert_eq!(egpr(9), 0x2000, "r25 restored");
 }

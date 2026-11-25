@@ -2005,7 +2005,16 @@ fn cmov_apx_w<B: Backend, W: Hw>(
                     Ok(())
                 },
                 |b| {
-                    put_ndd::<B, W>(b, ndd, src1);
+                    // CFCMOV の偽側で r/m がメモリのときは reg
+                    // ソースを全幅コピーする。レジスタ直形では通常
+                    // どおり結果幅へゼロ拡張する（SDE 10.13 との
+                    // 差分で確認した非対称）。
+                    if matches!(rm, Rm::Mem { .. }) {
+                        let v = sem::read64(b, dst);
+                        sem::write64(b, ndd, v);
+                    } else {
+                        put_ndd::<B, W>(b, ndd, src1);
+                    }
                     Ok(())
                 },
             );

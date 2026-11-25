@@ -8,7 +8,7 @@
 //! heavy_diff_host（E2）がホスト CPU を直接叩くのに対し、こちらは
 //! `sde64 -future` の下で生成 ELF を走らせるため、REX2 の拡張 GPR
 //! （R16-R31）までカバーできる。EVEX map4 の NDD/NF 昇格形も
-//! reg-direct 形に限ってコーパスへ入れる。
+//! reg-direct 形と、NDD がメモリを入力だけに使う絶対アドレス形をコーパスへ入れる。
 //!
 //! 仕組み:
 //! - 乱択した命令列を1枚の静的 ELF（RWX の1セグメント）に焼く。
@@ -47,6 +47,8 @@ mod imp {
     /// シーケンスあたりの命令数と、既定のシーケンス数。
     const STEPS: usize = 16;
     const SEQS: usize = 48;
+    /// APX メモリ被演算子の入力スクラッチ。
+    const MEM_BYTES: usize = 256;
 
     /// ctx スロット。フィールド順は x86 レジスタ番号順。
     #[repr(C)]
@@ -147,6 +149,21 @@ mod imp {
         init_va_of() + SLOT as u64
     }
 
+    /// メモリ被演算子スクラッチの VA。slots 後の 4KiB は
+    /// ゲストスタックなので、その次を読み出し専用入力にする。
+    fn mem_va_of() -> u64 {
+        slots_va_of() + STEPS as u64 * SLOT as u64 + 4096
+    }
+
+    /// polyisa と SDE が共有する決定的なメモリ入力。
+    fn mem_pattern() -> [u8; MEM_BYTES] {
+        let mut out = [0u8; MEM_BYTES];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(73).wrapping_add(19);
+        }
+        out
+    }
+
     /// 命令列と初期 ctx から静的 ELF64 を組み立てる。
     /// データ領域は init_ctx(272B) + slots(STEPS*272B) を後続に置く。
     fn build_elf(insns: &[Vec<u8>], init: &Ctx) -> Vec<u8> {
@@ -194,9 +211,11 @@ mod imp {
         let data = {
             let mut d = Vec::with_capacity(SLOT * (n + 1) + 4096);
             d.extend_from_slice(unsafe { &*(&raw const *init).cast::<[u8; SLOT]>() });
-            // init + slots + スクラッチスタック（4KiB）。
-            // init.rsp はこの中程を指す。
-            d.resize(SLOT * (n + 1) + 4096, 0);
+            // init + slots + スクラッチスタック（4KiB）+ メモリ入力。
+            // init.rsp はスタック領域の中程を指す。
+            let mem_off = SLOT * (n + 1) + 4096;
+            d.resize(mem_off + MEM_BYTES, 0);
+            d[mem_off..mem_off + MEM_BYTES].copy_from_slice(&mem_pattern());
             d
         };
 
@@ -342,6 +361,33 @@ mod imp {
         v
     }
 
+    /// APX NDD のメモリ被演算子形。SIB の no-index/no-base + disp32
+    /// で絶対アドレスを指す。NDD 昇格ではメモリは入力だけなので、
+    /// 出力メモリ比較なしにアドレス解釈と読み出しを差分できる。
+    fn apx_mem(op: u8, ndd: u8, reg: u8, addr: u64, w: bool, nf: bool) -> Vec<u8> {
+        let mut v = evex4(reg, 0, ndd, w, nf, 0).to_vec();
+        v.push(op);
+        v.push(((reg & 7) << 3) | 4);
+        v.push(0x25); // scale=0,index=100(no index),base=101(disp32)
+        v.extend_from_slice(&(addr as u32).to_le_bytes());
+        v
+    }
+
+    /// APX NDD のグループ命令メモリ形。
+    fn apx_group_mem(op: u8, grp: u8, ndd: u8, addr: u64, w: bool, nf: bool) -> Vec<u8> {
+        let mut v = evex4(0, 0, ndd, w, nf, 0).to_vec();
+        v.push(op);
+        v.push(((grp & 7) << 3) | 4);
+        v.push(0x25);
+        v.extend_from_slice(&(addr as u32).to_le_bytes());
+        v
+    }
+
+    /// スクラッチ内の 8 バイト整列アドレス。
+    fn mem_addr(rng: &mut Rng) -> u64 {
+        mem_va_of() + (rng.next() % 30) * 8
+    }
+
     /// 命令ごとのフラグ比較マスク。`FLAG_MASK` のうち、その命令が
     /// 定義する旗だけを見る。
     const M_SHIFT: u64 = FLAG_MASK & !0x800; // OF 不定
@@ -424,7 +470,12 @@ mod imp {
                 ][(rng.next() % 7) as usize];
                 let d = reg(rng);
                 let nf = nf_ok && rng.next().is_multiple_of(2);
-                (apx_rr(op, d, a, b, w, nf), if nf { 0 } else { FLAG_MASK })
+                let v = if rng.next().is_multiple_of(4) {
+                    apx_mem(op, d, a, mem_addr(rng), w, nf)
+                } else {
+                    apx_rr(op, d, a, b, w, nf)
+                };
+                (v, if nf { 0 } else { FLAG_MASK })
             }
             // EVEX map4 の INC/DEC/NOT/NEG と CL カウントの SHL/SHR/SAR。NOT だけ NF なし。
             13 => {
@@ -440,7 +491,11 @@ mod imp {
                 let d = reg(rng);
                 let nf = nf_ok && rng.next().is_multiple_of(2);
                 (
-                    apx_group(op, grp, d, a, w, nf),
+                    if rng.next().is_multiple_of(4) {
+                        apx_group_mem(op, grp, d, mem_addr(rng), w, nf)
+                    } else {
+                        apx_group(op, grp, d, a, w, nf)
+                    },
                     if nf { 0 } else { FLAG_MASK },
                 )
             }
@@ -474,22 +529,40 @@ mod imp {
                 let d = reg(rng);
                 if rng.next().is_multiple_of(2) {
                     let nf = rng.next().is_multiple_of(2);
-                    (apx_rr(0xAF, d, a, b, w, nf), if nf { 0 } else { M_MUL })
+                    let v = if rng.next().is_multiple_of(4) {
+                        apx_mem(0xAF, d, a, mem_addr(rng), w, nf)
+                    } else {
+                        apx_rr(0xAF, d, a, b, w, nf)
+                    };
+                    (v, if nf { 0 } else { M_MUL })
                 } else {
                     let cc = (rng.next() % 16) as u8;
                     let nf = rng.next().is_multiple_of(2);
-                    (apx_rr(0x40 | cc, d, a, b, w, nf), 0)
+                    let v = if rng.next().is_multiple_of(4) {
+                        apx_mem(0x40 | cc, d, a, mem_addr(rng), w, nf)
+                    } else {
+                        apx_rr(0x40 | cc, d, a, b, w, nf)
+                    };
+                    (v, 0)
                 }
             }
         }
     }
 
-    /// polyisa 側の環境。コード頁だけを写像する（コーパスは
-    /// reg-direct なのでメモリ比較対象はない）。
+    /// polyisa 側の環境。コード頁とメモリ入力スクラッチを写像する。
     fn poly_env() -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(CODE_VA), 1, rwx).unwrap();
+        let mem_base = mem_va_of() & !0xfff;
+        env.backend
+            .mem
+            .map(VirtAddr(mem_base), 2, Perms::RW)
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(mem_va_of()), &mem_pattern())
+            .unwrap();
         env.backend
             .set(polyisa_guest_x86::sem::xcr0_ref(), 0x8_0003);
         env
@@ -633,10 +706,19 @@ mod imp {
                 ds.push(format!("eflags {hf:#x} vs {pf:#x}"));
             }
             if !ds.is_empty() {
+                let before = if i == 0 {
+                    ctx.rflags
+                } else {
+                    native[i - 1].rflags
+                };
                 return Some(format!(
-                    "seq {seed} step {i}: insn {}: {}",
+                    "seq {seed} step {i}: insn {}: {}; init r7={:#x} r23={:#x} flags={:#x}; before flags={:#x}",
                     insn.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-                    ds.join("; ")
+                    ds.join("; "),
+                    ctx.gpr(7),
+                    ctx.gpr(23),
+                    ctx.rflags,
+                    before,
                 ));
             }
             // 不定旗（シフトの OF 等）は SDE 側の実値で同期する。
