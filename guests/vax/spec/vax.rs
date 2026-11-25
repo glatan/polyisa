@@ -100,12 +100,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   だった KA660 TM §3.7 の脚註を合わせた）。
     // - ka660（SOC）: KA630 との差は string_cmp の 6 個を実装
     //   する点。dv_hw はハードが扱わない。
-    // - nvax: compat 以外の全命令を実装する形。登録正本に NVAX
-    //   の実装群の記述はない —— ARM 付録 B の後期 VAX（8200/
-    //   8300/8500「全命令・互換モードなし」）と同型として宣言した
-    //   近似（GAP 記録）。ka650（CVAX）系の実装群差も台帳に
-    //   正本がないため、ka650 の宣言も ka660 形で近似する。
-    // Ref: SPEC-VAX-ARM（付録 B）, SPEC-VAX-MICROVAX §3.7.
+    // - nvax: NVAX チップ機能仕様で確定（下記モデル定義の
+    //   コメント）。string_cmp を実装し decimal/string_ext/crc/
+    //   editpc/hfp/compat を削る。
+    // - ka650（CVAX）: CVAX チップ工学仕様で確定（同）。削減群は
+    //   microvax2 と同じ。
+    // Ref: SPEC-VAX-ARM（付録 B）, SPEC-VAX-MICROVAX §3.7,
+    // SPEC-VAX-CVAXCHIP §1.4, SPEC-VAX-NVAXCHIP.
     let subset: &[&str] = &[
         "decimal",
         "hfp",
@@ -146,10 +147,43 @@ pub fn build_model() -> polyisa_isadl::Model {
             ][..],
             &[("dv_hw", "false")][..],
         ),
-        // ka650（CVAX）の実装群差は台帳に正本がないため、KA660 と
-        // 同型で宣言した近似（nvax と同じ扱い。GAP 記録済み）。
+        // ka650（CVAX）。SPEC-VAX-CVAXCHIP §1.4 で確定: 実装する
+        // のは整数・bit field・制御・procedure call・queue・
+        // MOVC3/MOVC5 と OS 支援で、削るのは「character string
+        // (except for MOVC3/MOVC5), decimal string, EDITPC, CRC,
+        // compatability mode, octaword, h_floating」。文字列の
+        // 比較・走査系（string_cmp）も削られる —— SOC（ka660）が
+        // 実装する点との差。F/D/G は外部 FPU で実現される。
+        // 削減群は microvax2 と同じになる（実装は別系統で、
+        // CVAX はエミュレーションの microcode assist を持つが、
+        // 補完対象として削る方針は同じ）。
         (
             "ka650",
+            "vax11_780",
+            &[][..],
+            &[
+                "decimal",
+                "hfp",
+                "string_ext",
+                "string_cmp",
+                "crc",
+                "editpc",
+                "compat",
+            ][..],
+            &[("dv_hw", "false")][..],
+        ),
+        // nvax。SPEC-VAX-NVAXCHIP で確定: 「The NVAX CPU implements
+        // the VAX base instruction group」で、文字列命令（CMPC3/
+        // CMPC5/LOCC/MOVC3/MOVC5/SCANC/SKPC/SPANC）は実装表の
+        // Character String Instructions に載る（string_cmp を
+        // 実装する）。decimal・CRC・EDITPC・MATCHC/MOVTC/MOVTUC
+        // （string_ext）は Microcode-Assisted Emulated Instructions
+        // の節に列挙され、補完対象として削る。H 形式はデータ型
+        // 自体を持たず（9 データ型に h_floating がない）、
+        // compatibility mode も他機種の機能としてのみ言及される
+        // （実装しない）。F/D/G はチップ内で実装。
+        (
+            "nvax",
             "vax11_780",
             &[][..],
             &[
@@ -160,9 +194,8 @@ pub fn build_model() -> polyisa_isadl::Model {
                 "editpc",
                 "compat",
             ][..],
-            &[("dv_hw", "false")][..],
+            &[][..],
         ),
-        ("nvax", "vax11_780", &[][..], &["compat"][..], &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,

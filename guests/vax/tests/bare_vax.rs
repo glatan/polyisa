@@ -114,13 +114,21 @@ fn cpu_models() {
     // KA630 は string_cmp も補完対象。
     let ka630 = model_feats("microvax2");
     assert_eq!(ka630 & FEAT_STRING_CMP, 0);
-    // KA650 は実装群差の正本がないため KA660 と同型の近似。
+    // KA650（CVAX）は文字列の比較・走査系も削る —— 削減群は
+    // microvax2 と同じ（チップ工学仕様 §1.4 で確定）。
     let ka650 = model_feats("ka650");
-    assert_eq!(ka650, ka660);
-    // NVAX は compat 以外を持つ。
+    assert_eq!(ka650, ka630);
+    assert_ne!(ka650, ka660);
+    // NVAX は string_cmp をハード実装し、decimal/string_ext/crc/
+    // editpc/hfp/compat を削る（NVAX チップ機能仕様で確定）。
     let nvax = model_feats("nvax");
-    assert_ne!(nvax & FEAT_DECIMAL, 0);
+    assert_eq!(nvax & FEAT_DECIMAL, 0);
+    assert_eq!(nvax & FEAT_STRING_EXT, 0);
+    assert_eq!(nvax & FEAT_CRC, 0);
+    assert_eq!(nvax & FEAT_EDITPC, 0);
+    assert_eq!(nvax & FEAT_HFP, 0);
     assert_eq!(nvax & FEAT_COMPAT, 0);
+    assert_ne!(nvax & FEAT_STRING_CMP, 0);
 }
 
 #[test]
@@ -4944,39 +4952,41 @@ fn vx11_model_insn_matrix() {
     let f = |n: &str| model_feats(n);
     let dec = |w: u128, l: u32, m: u128| decode_model_ex(w, l, false, m).is_some();
     // 文字列比較 6 個（cmpc3=0x29）: 780・ka660・nvax では直接
-    // 実行、microvax2 では補完対象。
+    // 実行（NVAX は実装表の Character String Instructions に
+    // 載る）、microvax2 と ka650（CVAX）では補完対象。
     for n in ["vax11_780", "ka660", "nvax"] {
         assert!(dec(0x29, 8, f(n)), "{n}: cmpc3");
     }
-    assert!(!dec(0x29, 8, f("microvax2")), "microvax2: cmpc3");
+    for n in ["microvax2", "ka650"] {
+        assert!(!dec(0x29, 8, f(n)), "{n}: cmpc3");
+    }
     // 十進（movp=0x34）・crc(0x0b)・editpc(0x38)・movtc(0x2e) は
-    // フル集合のモデルのみ。
+    // フル集合（11/780）のみ —— NVAX では microcode-assisted
+    // emulation の節に列挙され補完対象。
     for w in [0x34u128, 0x0b, 0x38, 0x2e] {
-        for n in ["vax11_780", "nvax"] {
-            assert!(dec(w, 8, f(n)), "{n}: {w:#x}");
-        }
-        for n in ["microvax2", "ka660"] {
+        assert!(dec(w, 8, f("vax11_780")), "780: {w:#x}");
+        for n in ["microvax2", "ka660", "ka650", "nvax"] {
             assert!(!dec(w, 8, f(n)), "{n}: {w:#x}");
         }
     }
-    // octaword（movo=0xfd 0x7d）もフル集合のみ。
-    for n in ["vax11_780", "nvax"] {
-        assert!(dec(0x7dfd, 16, f(n)), "{n}: movo");
-    }
-    for n in ["microvax2", "ka660"] {
+    // octaword（movo=0xfd 0x7d）は hfp の群でフル集合のみ ——
+    // NVAX は octaword のデータ型自体を持たない。
+    assert!(dec(0x7dfd, 16, f("vax11_780")), "780: movo");
+    for n in ["microvax2", "ka660", "ka650", "nvax"] {
         assert!(!dec(0x7dfd, 16, f(n)), "{n}: movo");
     }
-    // kernel の movc3/movc5 は全モデルで直接実行。
-    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+    // kernel の movc3/movc5 は全モデルで直接実行（CVAX も
+    // 「except for MOVC3/MOVC5」の例外側）。
+    for n in ["vax11_780", "microvax2", "ka660", "ka650", "nvax"] {
         assert!(dec(0x28, 8, f(n)), "{n}: movc3");
         assert!(dec(0x2c, 8, f(n)), "{n}: movc5");
     }
     // index（0x0a）は全モデルの直接実行集合にある。
-    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+    for n in ["vax11_780", "microvax2", "ka660", "ka650", "nvax"] {
         assert!(dec(0x0a, 8, f(n)), "{n}: index");
     }
     // 予約語（0xfc・顧客定義の xfc は語彙外）はどのモデルでも解けない。
-    for n in ["vax11_780", "microvax2", "ka660", "nvax"] {
+    for n in ["vax11_780", "microvax2", "ka660", "ka650", "nvax"] {
         assert!(!dec(0xfc, 8, f(n)), "{n}: 0xfc");
     }
 }
@@ -5003,7 +5013,8 @@ fn vx11_model_exec_matrix() {
     assert_eq!(sys.unimpl, None);
     assert_eq!(sys.trap, None);
 
-    // nvax で addp4 は直接実行される（decimal あり）。
+    // vax11_780 で addp4 は直接実行される（decimal あり ——
+    // nvax では十進は補完対象で直接実行されない）。
     // addp4 #1,@#a, #1,@#b —— "1"+"2"="3"。
     let mut env = run_env(1);
     put(
@@ -5017,9 +5028,22 @@ fn vx11_model_exec_matrix() {
     put(&mut env, DATA + 1, &pk(&[2], false));
     env.pc = BASE;
     let mut sys = Emul::default();
-    run::step(&mut env, &mut sys, model_feats("nvax")).unwrap();
+    run::step(&mut env, &mut sys, model_feats("vax11_780")).unwrap();
     assert_eq!(mem_pack(&env, DATA + 1, 1), (vec![3], false));
     assert_eq!(sys.unimpl, None);
+    // 同じ命令を nvax で実行すると補完経路へ回る（decimal なし）。
+    let mut env2 = run_env(1);
+    put(
+        &mut env2,
+        BASE,
+        &[
+            0x20, 0x8f, 1, 0, 0x9f, 0, 0x08, 0x01, 0, 0x8f, 1, 0, 0x9f, 1, 0x08, 0x01, 0,
+        ],
+    );
+    env2.pc = BASE;
+    let mut sys2 = Emul::default();
+    run::step(&mut env2, &mut sys2, model_feats("nvax")).unwrap();
+    assert_ne!(sys2.unimpl, None);
 }
 
 #[test]

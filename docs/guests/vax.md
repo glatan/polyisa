@@ -4,7 +4,7 @@
 
 VAX-11/780〜NVAX（MicroVAX サブセットを含む）のユーザーモード命令群（整数・論理・bitfield・分岐、`CALLS`/`CALLG`/`RET`、`PUSHR`/`POPR`、インターロックキュー、中断可能文字列命令、`CHM*`、F/D/G/H 浮動小数点と `POLY*`/`EMOD*`、パック十進・数値文字列・`EDITPC`、`INDEX`/`PROBER`/`PROBEW`）を `guests/vax` で実装している。
 
-- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`ka650`、`nvax`、`vax11_730`、`vax11_750`、`vax11_785`、`vax8200`、`vax8300`、`vax8500`（計 11 モデル）。VAX Hardware Handbook 1986 で確認: 11/730–11/785 はいずれもフル VAX でサブセットはなく、差は G/H 形式の実現経路（11/730 はマイクロコード標準、他は KE780/KU750 オプション）なので、全オプション搭載形を取るモデルでは同一構成で正しい。8200/8300/8500 は ARM 付録 B の「全命令・互換モードなし」の群。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
+- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`ka650`、`nvax`、`vax11_730`、`vax11_750`、`vax11_785`、`vax8200`、`vax8300`、`vax8500`（計 11 モデル）。VAX Hardware Handbook 1986 で確認: 11/730–11/785 はいずれもフル VAX でサブセットはなく、差は G/H 形式の実現経路（11/730 はマイクロコード標準、他は KE780/KU750 オプション）なので、全オプション搭載形を取るモデルでは同一構成で正しい。8200/8300/8500 は ARM 付録 B の「全命令・互換モードなし」の群。`ka650`（CVAX）と `nvax` はチップ仕様書で確定: CVAX は MOVC3/MOVC5 以外の文字列・decimal・EDITPC・CRC・互換モード・H 形式を削る（microvax2 と同じ削減群）、NVAX は文字列比較・走査系（`string_cmp`）をハード実装し decimal・拡張文字列（`string_ext`）・CRC・EDITPC・H 形式・互換モードを削る。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
 - **挙動パラメータ**：`emul_dispatch`（`hook` / `scb`）、`dv_hw`（KA660 での十進オーバーフロー扱い）。
 - **タイミング**：VAX-11/780 の EBOX マイクロサイクル（200 ns）単位の専用モデル `timing::Vax780` を持つ（未較正の `approx_uncalibrated`）。
 
@@ -24,7 +24,6 @@ VAX-11/780〜NVAX（MicroVAX サブセットを含む）のユーザーモード
   - `CHM*` はモード別スタック切替を行わず単一 SP へコードを積んで SCB `0x40 + 4*mode` トラップとして OS パーソナリティへ委ねる。補完例外（SCB `0xC8`/`0xCC`）も指定子フレーム構築をパーソナリティ側へ委譲している。
   - `EDITPC` パターン演算子は主要 17 種に対応。十進演算の仕様上 `UNPREDICTABLE` 入力は決定的挙動へ正規化し、`DIVP` ゼロ除算は共用 `FLT_DIV_ZERO` を使う。
   - `PROBER`/`PROBEW` は両端バイトの読み出し可否で近似し、ページ保護・モード上限検査は省略している。
-  - `nvax` と `ka650` の機能集合は一次資料の制約から近似定義を用いている。
 - **4.3BSD 実行上の既知不具合**：`df -i` が D-float の reserved-operand fault を起こす（D-float 命令語彙側の残件）。
 - **タイミングモデルの未較正**：`timing::Vax780` は Usenet の計測値をアンカーにした未較正近似であり、`vax11_780` 以外のモデル・キャッシュミス・例外時間は未モデル。
 
