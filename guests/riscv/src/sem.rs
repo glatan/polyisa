@@ -2259,6 +2259,31 @@ pub fn c_sw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     sw(b, rs1, rs2, oimm)
 }
 
+/// C.LBU。
+pub fn c_lbu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lbu(b, rd, rs1, oimm)
+}
+
+/// C.LH。
+pub fn c_lh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lh(b, rd, rs1, oimm)
+}
+
+/// C.LHU。
+pub fn c_lhu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lhu(b, rd, rs1, oimm)
+}
+
+/// C.SB。
+pub fn c_sb<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sb(b, rs1, rs2, oimm)
+}
+
+/// C.SH。
+pub fn c_sh<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sh(b, rs1, rs2, oimm)
+}
+
 /// C.SD。
 pub fn c_sd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     sd(b, rs1, rs2, oimm)
@@ -2415,6 +2440,65 @@ pub fn c_subw<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
 pub fn c_addw<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
     let r = rd.0;
     addw(b, rd, Gpr(r), rs2)
+}
+
+/// C.ZEXT.B。
+pub fn c_zext_b<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x = b.trunc::<W64, W8>(x64);
+    let s = b.zext::<W8, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.SEXT.B。
+pub fn c_sext_b<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x = b.trunc::<W64, W8>(x64);
+    let s = b.sext::<W8, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.ZEXT.H。
+pub fn c_zext_h<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x = b.trunc::<W64, W16>(x64);
+    let s = b.zext::<W16, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.SEXT.H。
+pub fn c_sext_h<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x = b.trunc::<W64, W16>(x64);
+    let s = b.sext::<W16, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.ZEXT.W。
+pub fn c_zext_w<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x = b.trunc::<W64, W32>(x64);
+    let s = b.zext::<W32, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.NOT。
+pub fn c_not<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read(b, rd);
+    let s = b.not(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// C.MUL。
+pub fn c_mul<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    mul(b, rd, Gpr(r), rs2)
 }
 
 /// C.LUI / C.ADDI16SP。rd==x2で分岐する（展開先が異なるため）。
@@ -2616,6 +2700,85 @@ pub fn c_mv_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
 pub fn c_add_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
     let r = rd.0;
     add_rv32(b, rd, Gpr(r), rs2)
+}
+
+/// C.LBU（RV32）。
+pub fn c_lbu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lbu_rv32(b, rd, rs1, oimm)
+}
+
+/// C.LH（RV32）。
+pub fn c_lh_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lh_rv32(b, rd, rs1, oimm)
+}
+
+/// C.LHU（RV32）。
+pub fn c_lhu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lhu_rv32(b, rd, rs1, oimm)
+}
+
+/// C.SB（RV32）。
+pub fn c_sb_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sb_rv32(b, rs1, rs2, oimm)
+}
+
+/// C.SH（RV32）。
+pub fn c_sh_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sh_rv32(b, rs1, rs2, oimm)
+}
+
+/// C.ZEXT.B（RV32）。
+pub fn c_zext_b_rv32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.trunc::<W32, W8>(x32);
+    let s = b.zext::<W8, W32>(x);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+/// C.SEXT.B（RV32）。
+pub fn c_sext_b_rv32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.trunc::<W32, W8>(x32);
+    let s = b.sext::<W8, W32>(x);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+/// C.ZEXT.H（RV32）。
+pub fn c_zext_h_rv32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.trunc::<W32, W16>(x32);
+    let s = b.zext::<W16, W32>(x);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+/// C.SEXT.H（RV32）。
+pub fn c_sext_h_rv32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x64 = read(b, rd);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.trunc::<W32, W16>(x32);
+    let s = b.sext::<W16, W32>(x);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+/// C.NOT（RV32）。
+pub fn c_not_rv32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read_w(b, rd);
+    let s = b.not(x);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+/// C.MUL（RV32）。
+pub fn c_mul_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    mul_rv32(b, rd, Gpr(r), rs2)
 }
 
 /// C.FLWSP。RV64 側の実行器（RV32 は事前振り分けで c_flwsp_rv32 を使う）。

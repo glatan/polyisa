@@ -1321,6 +1321,16 @@ fn c_lw_uimm(w: u16) -> u32 {
         | (((w >> 5) & 1) << 6)
 }
 
+/// Zcb の byte アクセス即値（0 または 1）。
+fn c_zcb_b_uimm(w: u16) -> u32 {
+    (((w as u32) >> 6) & 1) | ((((w as u32) >> 5) & 1) << 1)
+}
+
+/// Zcb の half アクセス即値（0 または 2）。
+fn c_zcb_h_uimm(w: u16) -> u32 {
+    (((w as u32) >> 5) & 1) << 1
+}
+
 /// C.ADDI16SP の nzimm[9:4]（符号付き10ビット相当に復元する）。
 fn c_addi16sp_imm(w: u16) -> i64 {
     let w = w as u32;
@@ -1470,6 +1480,56 @@ fn run_c(env: &mut BareEnv, insn: Insn, word: u32, rv32: bool) -> Result<(), Out
                 env.step(|b| sem::c_lw_rv32(b, rd, rs1, off))
             } else {
                 env.step(|b| sem::c_lw(b, rd, rs1, off))
+            }
+        }
+        Insn::CLbu => {
+            let rd = Gpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_zcb_b_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_lbu_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_lbu(b, rd, rs1, off))
+            }
+        }
+        Insn::CLh => {
+            let rd = Gpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_zcb_h_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_lh_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_lh(b, rd, rs1, off))
+            }
+        }
+        Insn::CLhu => {
+            let rd = Gpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_zcb_h_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_lhu_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_lhu(b, rd, rs1, off))
+            }
+        }
+        Insn::CSb => {
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            let off = c_zcb_b_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_sb_rv32(b, rs1, rs2, off))
+            } else {
+                env.step(|b| sem::c_sb(b, rs1, rs2, off))
+            }
+        }
+        Insn::CSh => {
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            let off = c_zcb_h_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_sh_rv32(b, rs1, rs2, off))
+            } else {
+                env.step(|b| sem::c_sh(b, rs1, rs2, off))
             }
         }
         Insn::CFlw => {
@@ -1784,6 +1844,65 @@ fn run_c(env: &mut BareEnv, insn: Insn, word: u32, rv32: bool) -> Result<(), Out
                 env.step(|b| sem::c_and_rv32(b, rd, rs2))
             } else {
                 env.step(|b| sem::c_and(b, rd, rs2))
+            }
+        }
+        Insn::CZextB => {
+            let rd = Gpr(crs1(w));
+            if rv32 {
+                env.step(|b| sem::c_zext_b_rv32(b, rd))
+            } else {
+                env.step(|b| sem::c_zext_b(b, rd))
+            }
+        }
+        Insn::CSextB => {
+            let rd = Gpr(crs1(w));
+            if rv32 {
+                env.step(|b| sem::c_sext_b_rv32(b, rd))
+            } else {
+                env.step(|b| sem::c_sext_b(b, rd))
+            }
+        }
+        Insn::CZextH => {
+            let rd = Gpr(crs1(w));
+            if rv32 {
+                env.step(|b| sem::c_zext_h_rv32(b, rd))
+            } else {
+                env.step(|b| sem::c_zext_h(b, rd))
+            }
+        }
+        Insn::CSextH => {
+            let rd = Gpr(crs1(w));
+            if rv32 {
+                env.step(|b| sem::c_sext_h_rv32(b, rd))
+            } else {
+                env.step(|b| sem::c_sext_h(b, rd))
+            }
+        }
+        Insn::CZextW => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            let rd = Gpr(crs1(w));
+            env.step(|b| sem::c_zext_w(b, rd))
+        }
+        Insn::CNot => {
+            let rd = Gpr(crs1(w));
+            if rv32 {
+                env.step(|b| sem::c_not_rv32(b, rd))
+            } else {
+                env.step(|b| sem::c_not(b, rd))
+            }
+        }
+        Insn::CMul => {
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            if rv32 {
+                env.step(|b| sem::c_mul_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_mul(b, rd, rs2))
             }
         }
         Insn::CSubw => {

@@ -54,7 +54,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zicond", &[][..], &[][..]),
         ("zimop", &[][..], &[][..]),
         ("zcmop", &["zimop"][..], &[][..]),
-        ("zcb", &[][..], &[][..]),
+        ("zcb", &["c"][..], &[][..]),
         ("zfa", &[][..], &[][..]),
         ("zawrs", &[][..], &[][..]),
     ] {
@@ -491,6 +491,22 @@ pub fn build_model() -> polyisa_isadl::Model {
         // C（圧縮。16ビット。funct3とop下位2ビットで区別できる衝突なし subset）
         // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
         ("c_addi4spn", "R", "000 ........ ... 00", "c.addi4spn {rd}, {imm}", "alu"),
+        // Zcb。CL 形式の byte/half アクセス。bit6/bit5 の固定値で
+        // 符号拡張の有無と即値位置を分ける。
+        ("c_lbu", "R", "100 0 00 ... . . ... 00", "c.lbu {rd}, {imm}({rs1})", "load"),
+        ("c_lhu", "R", "100 0 01 ... 0 . ... 00", "c.lhu {rd}, {imm}({rs1})", "load"),
+        ("c_lh", "R", "100 0 01 ... 1 . ... 00", "c.lh {rd}, {imm}({rs1})", "load"),
+        ("c_sb", "R", "100 0 10 ... . . ... 00", "c.sb {rs2}, {imm}({rs1})", "store"),
+        ("c_sh", "R", "100 0 11 ... 0 . ... 00", "c.sh {rs2}, {imm}({rs1})", "store"),
+        // Zcb の単項形と乗算形。bits6:2 が 24〜29 の単項形は
+        // rd'=rs1' として同じレジスタを更新する。
+        ("c_zext_b", "R", "100 1 11 ... 11000 01", "c.zext.b {rd}", "alu"),
+        ("c_sext_b", "R", "100 1 11 ... 11001 01", "c.sext.b {rd}", "alu"),
+        ("c_zext_h", "R", "100 1 11 ... 11010 01", "c.zext.h {rd}", "alu"),
+        ("c_sext_h", "R", "100 1 11 ... 11011 01", "c.sext.h {rd}", "alu"),
+        ("c_zext_w", "R", "100 1 11 ... 11100 01", "c.zext.w {rd}", "alu"),
+        ("c_not", "R", "100 1 11 ... 11101 01", "c.not {rd}", "alu"),
+        ("c_mul", "R", "100 1 11 ... 10 ... 01", "c.mul {rd}, {rs2}", "alu"),
         ("c_fld", "R", "001 ........ ... 00", "c.fld {rd}, {imm}({rs1})", "fload"),
         ("c_fsd", "R", "101 ........ ... 00", "c.fsd {rs2}, {imm}({rs1})", "fstore"),
         ("c_lw", "R", "010 ........ ... 00", "c.lw {rd}, {imm}({rs1})", "load"),
@@ -541,6 +557,31 @@ pub fn build_model() -> polyisa_isadl::Model {
         }
         if name.starts_with("czero_") {
             reqs.push("zicond");
+        }
+        if matches!(
+            *name,
+            "c_lbu"
+                | "c_lhu"
+                | "c_lh"
+                | "c_sb"
+                | "c_sh"
+                | "c_zext_b"
+                | "c_zext_h"
+                | "c_not"
+        ) {
+            reqs.push("zcb");
+        }
+        if matches!(*name, "c_sext_b" | "c_sext_h") {
+            reqs.push("zcb");
+            reqs.push("zbb");
+        }
+        if *name == "c_zext_w" {
+            reqs.push("zcb");
+            reqs.push("zba");
+        }
+        if *name == "c_mul" {
+            reqs.push("zcb");
+            reqs.push("m");
         }
         if *timing == "atomic" {
             reqs.push("a");
@@ -683,6 +724,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "amominu_d" | "amomaxu_d"
                 | "c_ld" | "c_sd"
                 | "c_addiw" | "c_ldsp"
+                | "c_zext_w"
                 | "c_sdsp"
                 | "fcvt_l_s" | "fcvt_lu_s"
                 | "fcvt_s_l" | "fcvt_s_lu"

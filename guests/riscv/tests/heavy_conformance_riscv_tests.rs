@@ -382,6 +382,14 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "\"Zicond\": {\n      \"supported\": true",
         );
     }
+    if test_rel.contains("/Zcb/") {
+        for ext in ["Zcb", "Zba", "Zbb"] {
+            sail_json = sail_json.replace(
+                &format!("\"{ext}\": {{\n      \"supported\": false"),
+                &format!("\"{ext}\": {{\n      \"supported\": true"),
+            );
+        }
+    }
     let sail_cfg = work.join("sail.json");
     std::fs::write(&sail_cfg, sail_json).map_err(|e| format!("write {sail_cfg:?}: {e}"))?;
     let mut cmd = Command::new(sail);
@@ -410,20 +418,27 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     })?;
 
     let mut semi = run_riscv::SemiRv::new("", false);
-    let sel = if test_rel.contains("/Zicond/") {
+    let add_feats: &[&str] = if test_rel.contains("/Zicond/") {
+        &["zicond"]
+    } else if test_rel.contains("/Zcb/") {
+        &["zcb", "zba", "zbb"]
+    } else {
+        &[]
+    };
+    let sel = if add_feats.is_empty() {
+        None
+    } else {
         Some(
             polyisa_isadl::select::resolve(
                 polyisa_guest_riscv::MODEL_DEFS,
                 polyisa_guest_riscv::FEATURE_DEFS,
                 polyisa_guest_riscv::FEAT_BITS,
                 "rv64gc",
-                &["zicond"],
+                add_feats,
                 &[],
             )
             .map_err(|e| format!("cpu select: {e}"))?,
         )
-    } else {
-        None
     };
     let argv: &[String] = &[];
     let path = final_elf
@@ -534,6 +549,11 @@ fn act4_rv64zcd_suite() {
 #[test]
 fn act4_rv64zicond_suite() {
     suite("rv64i/Zicond");
+}
+
+#[test]
+fn act4_rv64zcb_suite() {
+    suite("rv64i/Zcb");
 }
 
 #[test]
