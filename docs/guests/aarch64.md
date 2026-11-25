@@ -4,7 +4,7 @@
 
 Armv8.0-A を起点とする 64 ビット固定長（32 ビット命令語）の ISA を `guests/aarch64` で扱う。整数命令一式、浮動小数点命令、および musl/BusyBox が使用する AdvSIMD の転送・積載系を実装している。
 
-- **CPU モデル**：`generic`、`generic_v81`、`cortex_a53`、`cortex_a57`、`cortex_a72`（計 5 モデル）。Cortex-A5x/7x は ARMv8.0 世代で LSE を持たない構成（現状は `generic` と同じ機能構成の器で、MIDR の識別情報配線は未整備）。ARMv8.2 以降のコアは版差を表す旗が未宣言のため未追加。
+- **CPU モデル**：`generic`、`generic_v81`、`armv8_0a`、`armv8_1a`、`armv8_2a`、`cortex_a53`、`cortex_a57`、`cortex_a72`（計 8 モデル）。Cortex-A5x/7x は ARMv8.0 世代で LSE を持たない構成（現状は `generic` と同じ機能構成の器で、MIDR の識別情報配線は未整備）。`armv8_2a` は FP16 とドット積の旗を足すが、命令自体は未実装でカバレッジ表にゼロ件で見える。
 
 ## 対応する OS・ABI と実行環境
 

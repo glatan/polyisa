@@ -30,29 +30,32 @@ pub fn build_model() -> polyisa_isadl::Model {
     // メディア命令とハードウェア除算）。意味論側は常に受け付けるが、
     // モデル選択の名付け用に旗だけ持つ。
     // Gap: GAP-0101
-    m.features.push(Feature {
-        name: "v7".to_string(),
-        implies: vec![],
-        conflicts: vec![],
-    });
-    m.models.push(ModelDef {
+    for (name, implies) in [("v5", &[][..]), ("v6", &["v5"][..]), ("v7", &["v6"][..])] {
+        m.features.push(Feature {
+            name: name.to_string(),
+            implies: implies.iter().map(|s| s.to_string()).collect(),
+            conflicts: vec![],
+        });
+    }
+    // 版連鎖。v5 は CLZ/BLX 系、v6 はメディア命令層、v7 は MOVW/MOVT
+    // 系の層だが、現状ではいずれの旗も when に接続されていない
+    // （カバレッジ表で未接続として見える）。実機名はタイミング段階。
+    for (name, parent, add) in [
+        ("armv4", "", &[][..]),
+        ("armv5", "armv4", &["v5"][..]),
+        ("armv6", "armv5", &["v6"][..]),
+        ("armv7", "armv6", &["v7"][..]),
+    ] {
+        m.models.push(ModelDef {
         timing: None,
         params: vec![],
-        name: "armv5".to_string(),
-        parent: String::new(),
-        add_features: vec![],
-        remove_features: vec![],
-        ident: vec![],
-    });
-    m.models.push(ModelDef {
-        timing: None,
-        params: vec![],
-        name: "armv7".to_string(),
-        parent: String::new(),
-        add_features: vec!["v7".to_string()],
-        remove_features: vec![],
-        ident: vec![],
-    });
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: vec![],
+            ident: vec![],
+        });
+    }
 
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),

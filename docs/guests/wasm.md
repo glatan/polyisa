@@ -4,7 +4,7 @@
 
 WebAssembly 1.0 および 2.0 のコア仕様（モジュール解析・検証・実行、およびテスト用の WAT/WAST パーサと実行器）を `guests/wasm` で実装している。
 
-- **CPU モデル**：`generic`（計 1 モデル）。
+- **CPU モデル**：`generic`、`wasm1`、`wasm2`（計 3 モデル）。Wasm では実機 CPU に相当するものがないため、モデルは命令セット版のプロファイル。`wasm2` は Core 2.0 の提案機能旗（`sign_ext`・`bulk_memory`・`simd128`・`threads` 等）を足すが、いずれも未実装でカバレッジ表にゼロ件で見える。
 
 ## 対応する OS・ABI と実行環境
 

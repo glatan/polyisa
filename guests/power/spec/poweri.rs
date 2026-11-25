@@ -33,7 +33,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fp", &[][..]),
         ("altivec", &[][..]),
         ("vsx", &["altivec"][..]),
-        ("isa2_07", &[][..]),
+        ("isa2_05", &[][..]),
+        ("isa2_06", &["isa2_05"][..]),
+        ("isa2_07", &["isa2_06"][..]),
         ("isa3_0", &["isa2_07"][..]),
         ("isa3_1", &["isa3_0"][..]),
     ] {
@@ -48,7 +50,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     // POWER10 は 8 バイト接頭辞付き命令が未実装。
     for (name, parent, add) in [
         ("generic", "", &["fp", "altivec", "vsx", "isa3_1"][..]),
-        ("power8", "", &["fp", "altivec", "vsx", "isa2_07"][..]),
+        ("power6", "", &["fp", "altivec", "isa2_05"][..]),
+        ("power7", "power6", &["vsx", "isa2_06"][..]),
+        ("power8", "power7", &["isa2_07"][..]),
         ("power9", "power8", &["isa3_0"][..]),
         ("power10", "power9", &["isa3_1"][..]),
     ] {

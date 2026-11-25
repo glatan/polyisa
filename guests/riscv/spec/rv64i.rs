@@ -40,6 +40,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zifencei", &[][..], &[][..]),
         ("zba", &[][..], &[][..]),
         ("zbb", &[][..], &[][..]),
+        ("zbs", &[][..], &[][..]),
     ] {
         m.features.push(polyisa_isadl::model::Feature {
             name: name.to_string(),
@@ -101,6 +102,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("rv64ima", "rv64im", &["a"][..]),
         // SiFive E31。RV32IMAC に CSR 類を備えた実機構成。
         ("sifive_e31", "rv32imac", &["zicsr", "zifencei"][..]),
+        // RVA20U64 プロファイル。必須は RV64GC+Zba+Zbb+Zbs（Zicntr/
+        // Zihpm のカウンタ類は命令の可否に関わらないため旗に立てない）。
+        // Zba/Zbb/Zbs の命令自体は未実装。
+        // Ref: SPEC-RISCV-PROFILES (RVA23 v1.0) の収録表。
+        ("rva20u64", "rv64gc", &["zba", "zbb", "zbs"][..]),
     ] {
         m.models.push(polyisa_isadl::model::ModelDef {
         timing: None,

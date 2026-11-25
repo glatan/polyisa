@@ -26,15 +26,54 @@ pub fn build_model() -> polyisa_isadl::Model {
         implies: vec![],
         conflicts: vec![],
     });
-    m.models.push(ModelDef {
+    // Core 2.0 で入った提案機能。実装・when 接続はこれからで、
+    // カバレッジ表ではゼロ件として見える。
+    for name in [
+        "sign_ext",
+        "bulk_memory",
+        "simd128",
+        "threads",
+        "reference_types",
+        "multi_value",
+        "tail_call",
+        "nontrapping_fptoint",
+    ] {
+        m.features.push(Feature {
+            name: name.to_string(),
+            implies: vec![],
+            conflicts: vec![],
+        });
+    }
+    // wasm1 は Core 1.0（MVP のみ）、wasm2 は Core 2.0 の機能を足す。
+    // generic は実装の和集合として残す。
+    for (name, parent, add) in [
+        ("generic", "", &["mvp"][..]),
+        ("wasm1", "", &["mvp"][..]),
+        (
+            "wasm2",
+            "wasm1",
+            &[
+                "sign_ext",
+                "bulk_memory",
+                "simd128",
+                "threads",
+                "reference_types",
+                "multi_value",
+                "tail_call",
+                "nontrapping_fptoint",
+            ][..],
+        ),
+    ] {
+        m.models.push(ModelDef {
         timing: None,
         params: vec![],
-        name: "generic".to_string(),
-        parent: String::new(),
-        add_features: vec!["mvp".to_string()],
-        remove_features: vec![],
-        ident: vec![],
-    });
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: vec![],
+            ident: vec![],
+        });
+    }
 
     m.regclasses.push(RegClass {
         name: "local".to_string(),

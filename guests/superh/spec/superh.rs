@@ -43,6 +43,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sh1", &[][..]),
         ("sh2", &["sh1"][..]),
         ("sh2a", &["sh2"][..]),
+        ("dsp", &[][..]),
         ("sh3", &["sh2"][..]),
         ("sh4", &["sh3", "fpu", "fpud"][..]),
         ("sh4a", &["sh4"][..]),
@@ -68,12 +69,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sh2a", "sh2", &["sh2a"][..], &[][..]),
         ("sh2af", "sh2a", &["fpu", "fpud"][..], &[][..]),
         ("sh3", "sh2", &["sh3"][..], &[][..]),
+        // SH3-DSP の DSP 命令は未実装で、dsp 旗は宣言のみ（カバレッジ
+        // 表でゼロ件として見える）。
+        ("sh3dsp", "sh3", &["dsp"][..], &[][..]),
         ("sh3e", "sh3", &["fpu"][..], &[][..]),
         ("sh4", "sh3", &["sh4"][..], &[][..]),
         ("sh4a", "sh4", &["sh4a"][..], &[][..]),
         ("jcore", "sh2", &["jcore"][..], &[][..]),
         ("j2", "jcore", &[][..], &[][..]),
-    ] as [(&str, &str, &[&str], &[&str]); 11] {
+    ] as [(&str, &str, &[&str], &[&str]); 12] {
         m.models.push(ModelDef {
         timing: None,
         params: Default::default(),

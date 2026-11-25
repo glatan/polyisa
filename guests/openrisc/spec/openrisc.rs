@@ -66,6 +66,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or1200", "", &["dslot"][..], &[][..]),
         ("mor1kx", "or1200", &["fpu"][..], &[][..]),
         ("mor1kx_pronto", "mor1kx", &[][..], &["dslot"][..]),
+        // ORBIS64 プロファイル。64 ビット命令は一部実装済みで残りは
+        // カバレッジ表に出る。
+        ("orbis64", "or1200", &["orb64"][..], &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,

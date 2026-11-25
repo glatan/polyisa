@@ -44,6 +44,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         implies: vec![],
         conflicts: vec![],
     });
+    // ARMv8.2-A の FP16 半精度浮動小数点とドット積。命令は未実装で、
+    // when への接続もないためカバレッジ表ではゼロ件で見える。
+    m.features.push(polyisa_isadl::model::Feature {
+        name: "fp16".to_string(),
+        implies: vec!["fp".to_string()],
+        conflicts: vec![],
+    });
+    m.features.push(polyisa_isadl::model::Feature {
+        name: "dotprod".to_string(),
+        implies: vec!["asimd".to_string()],
+        conflicts: vec![],
+    });
     m.models.push(polyisa_isadl::model::ModelDef {
         timing: None,
         params: vec![],
@@ -62,6 +74,24 @@ pub fn build_model() -> polyisa_isadl::Model {
         remove_features: Vec::new(),
         ident: vec![],
     });
+
+    // 版プロファイル。v8.2 は FP16 とドット積を足す（RAS や統計拡張
+    // などの残りは旗の宣言を待つ）。
+    for (name, parent, add) in [
+        ("armv8_0a", "", &["fp", "asimd"][..]),
+        ("armv8_1a", "armv8_0a", &["lse"][..]),
+        ("armv8_2a", "armv8_1a", &["fp16", "dotprod"][..]),
+    ] {
+        m.models.push(polyisa_isadl::model::ModelDef {
+            timing: None,
+            params: vec![],
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: vec![],
+            ident: vec![],
+        });
+    }
 
     // ARMv8.0 世代の実機。LSE は ARMv8.1 からなので fp+asimd のみ。
     // v8.2 以降のコア（Cortex-A55/A75 系・Neoverse）は版差を表す旗が

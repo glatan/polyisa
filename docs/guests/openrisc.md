@@ -4,7 +4,7 @@
 
 OpenRISC 1000（32 ビット固定長・ビッグエンディアン）の ORBIS32 全命令群（整数、ロード／ストア、分岐と遅延スロット、SPR、`l.mac` 系）および ORFPX32・ORFPX64A32 を `guests/openrisc` で実装している。遅延スロットの有無は機能フラグ `dslot`（既定あり、`CPUCFGR[ND]=0` 相当）で切り替える。
 
-- **CPU モデル**：`or1200`（`dslot`）、`mor1kx`（`or1200` + `fpu`）、`mor1kx_pronto`（遅延スロットなし）（計 3 モデル）。Cappuccino・Espresso 間の差はキャッシュ・MMU 等の構成差で命令集合上は同じため、パイプライン版はタイミング段階で分ける。
+- **CPU モデル**：`or1200`（`dslot`）、`mor1kx`（`or1200` + `fpu`）、`mor1kx_pronto`（遅延スロットなし）、`orbis64`（計 4 モデル）。Cappuccino・Espresso 間の差はキャッシュ・MMU 等の構成差で命令集合上は同じため、パイプライン版はタイミング段階で分ける。
 
 ## 対応する OS・ABI と実行環境
 

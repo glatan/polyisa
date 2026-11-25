@@ -637,6 +637,56 @@ fn declare_models(m: &mut Model) {
         &[],
         idbdw,
     );
+    // Skylake クライアントは AVX-512 を持たない。XSAVE 系の残り
+    // （xsavec/xsaves）と MPX・PKU の版対応は旗の宣言を待つ。
+    let mut idske = intel("6", "85", "3");
+    idske.extend([("cpuid.max_basic", "0x16"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "skylake", "broadwell", &["clflushopt"], &[], &[], idske);
+    // Skylake-X/SP は AVX-512 の基盤群（F/VL/DQ/BW/CD）を持つ。
+    let mut idskx = intel("6", "85", "4");
+    idskx.extend([("cpuid.max_basic", "0x16"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "skylake_x",
+        "skylake",
+        &["avx512f", "avx512vl", "avx512dq", "avx512bw", "avx512cd"],
+        &[],
+        &[],
+        idskx,
+    );
+    // Ice Lake は AVX-512 の版別拡張と GFNI/VAES/VPCLMULQDQ を足す。
+    let mut idicl = intel("6", "106", "5");
+    idicl.extend([("cpuid.max_basic", "0x1f"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "ice_lake",
+        "skylake_x",
+        &[
+            "avx512vbmi",
+            "avx512vbmi2",
+            "avx512vnni",
+            "avx512bitalg",
+            "avx512vpopcntdq",
+            "avx512ifma",
+            "gfni",
+            "vaes",
+            "vpclmulqdq",
+        ],
+        &[],
+        &[],
+        idicl,
+    );
+    let mut idtgl = intel("6", "140", "1");
+    idtgl.extend([("cpuid.max_basic", "0x20"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "tiger_lake",
+        "ice_lake",
+        &["movdiri", "movdir64b"],
+        &[],
+        &[],
+        idtgl,
+    );
     // AMD。K6 はローカル APIC を持たない。3DNow! 系は K6-2 から、
     // 整数 SSE 相当の MMX 拡張と CMOV・PAT は K7（Athlon）から。
     let mut idk6 = amd("5", "6", "1");
