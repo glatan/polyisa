@@ -23,10 +23,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と汎用CPUモデル。RVA22U64相当のRV64GCを汎用とする。
-    // m/a/f/d/c/zicsr/zifencei はモデル宣言にだけ使われ、命令の when に
-    // 接続されていないため、rv64imac で f/d を外しても浮動小数点命令は
-    // デコードされる（rv32/rv64 の語長差のみ when で区別）。
-    // Gap: GAP-0101
+    // m/a/f/d/c/zicsr/zifencei は命令の when にも接続し、モデルの
+    // 機能集合で利用可否が変わるようにする。
     // Ref: SPEC-RISCV-UNPRIV (20250508), SPEC-RISCV-PROFILES (RVA23 v1.0).
     for (name, implies, conflicts) in [
         ("rv64", &[][..], &["rv32"][..]),
@@ -518,12 +516,44 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("c_swsp", "R", "110 ........ ... 10", "c.swsp {rs2}, {imm}", "store"),
         ("c_sdsp", "R", "111 ........ ... 10", "c.sdsp {rs2}, {imm}", "store"),
     ];
+    let flag = |name: &str| Pred::Flag(name.to_string());
+    let pred_of = |reqs: &[&str]| match reqs {
+        [] => Pred::True,
+        [one] => flag(one),
+        many => Pred::All(many.iter().map(|f| flag(f)).collect()),
+    };
+    let is_double = |name: &str| {
+        (name.starts_with("fcvt_d_") || name.ends_with("_d"))
+            || matches!(
+                name,
+                "fld" | "fsd" | "fmv_d_x" | "fcvt_d_s" | "c_fld" | "c_fsd" | "c_fldsp" | "c_fsdsp"
+            )
+    };
     for (name, format, pattern, syntax, timing) in insns {
+        let mut reqs = Vec::new();
+        if matches!(*timing, "mult" | "div") {
+            reqs.push("m");
+        }
+        if *timing == "atomic" {
+            reqs.push("a");
+        }
+        if *timing == "csr" {
+            reqs.push("zicsr");
+        }
+        if *name == "fence_i" {
+            reqs.push("zifencei");
+        }
+        if timing.starts_with('f') {
+            reqs.push(if is_double(name) { "d" } else { "f" });
+        }
+        if name.starts_with("c_") {
+            reqs.push("c");
+        }
         m.insns.push(Insn {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: pred_of(&reqs),
             wheres: vec![],
             syntax: syntax.to_string(),
             timing: timing.to_string(),
@@ -536,7 +566,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: "c_jal".to_string(),
         format: "R".to_string(),
         pattern: Pattern::parse("001 ........ ... 01").expect("valid pattern"),
-        when: Pred::Not(Box::new(Pred::Flag("rv64".to_string()))),
+        when: Pred::All(vec![
+            Pred::Flag("rv32".to_string()),
+            Pred::Flag("c".to_string()),
+        ]),
         wheres: vec![],
         syntax: "c.jal {imm}".to_string(),
         timing: "jump".to_string(),
@@ -595,7 +628,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             format: "CR".to_string(),
             pattern: Pattern::parse(&format!("100 {bit12} ..... ..... 10"))
                 .expect("valid pattern"),
-            when: Pred::True,
+            when: Pred::Flag("c".to_string()),
             wheres: vec![w1, w2],
             syntax: syntax.to_string(),
             timing: timing.to_string(),
@@ -613,7 +646,11 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             format: "R".to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::Flag("rv32".to_string()),
+            when: Pred::All(vec![
+                Pred::Flag("rv32".to_string()),
+                Pred::Flag("c".to_string()),
+                Pred::Flag("f".to_string()),
+            ]),
             wheres: vec![],
             syntax: syntax.to_string(),
             timing: timing.to_string(),
@@ -642,9 +679,21 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "c_ld" | "c_sd"
                 | "c_addiw" | "c_ldsp"
                 | "c_sdsp"
+                | "fcvt_l_s" | "fcvt_lu_s"
+                | "fcvt_s_l" | "fcvt_s_lu"
+                | "fcvt_l_d" | "fcvt_lu_d"
+                | "fcvt_d_l" | "fcvt_d_lu"
+                | "fmv_x_d" | "fmv_d_x"
         );
         if rv64_only {
-            insn.when = Pred::Flag("rv64".to_string());
+            insn.when = if insn.when == Pred::True {
+                Pred::Flag("rv64".to_string())
+            } else {
+                Pred::All(vec![
+                    insn.when.clone(),
+                    Pred::Flag("rv64".to_string()),
+                ])
+            };
         }
     }
     m

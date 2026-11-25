@@ -225,6 +225,84 @@ mod tests {
     }
 
     #[test]
+    fn feature_gates_extension_decode() {
+        // 基本整数は rv64i でデコードできるが、M/A/F/C/CSR/Zifencei は
+        // それぞれの機能を持たないモデルでは不正命令になる。
+        let rv64i = model_feats("rv64i");
+        assert_eq!(
+            decode_model_ex(0x0020_8133, 32, true, rv64i),
+            Some(Insn::Add)
+        );
+        assert_eq!(
+            decode_model_ex(0x0ff0_000f, 32, true, rv64i),
+            Some(Insn::Fence)
+        );
+        assert_eq!(
+            decode_model_ex(0x0000_0073, 32, true, rv64i),
+            Some(Insn::Ecall)
+        );
+        assert_eq!(decode_model_ex(0x0220_80b3, 32, true, rv64i), None); // mul
+        assert_eq!(decode_model_ex(0x1000_a12f, 32, true, rv64i), None); // lr.w
+        assert_eq!(decode_model_ex(0x0020_f1d3, 32, true, rv64i), None); // fadd.s
+        assert_eq!(decode_model_ex(0xc001_10f3, 32, true, rv64i), None); // csrrw
+        assert_eq!(decode_model_ex(0x0000_100f, 32, true, rv64i), None); // fence.i
+        assert_eq!(decode_model_ex(0x0001, 16, true, rv64i), None); // c.addi
+
+        let rv64im = model_feats("rv64im");
+        assert_eq!(
+            decode_model_ex(0x0220_80b3, 32, true, rv64im),
+            Some(Insn::Mul)
+        );
+        assert_eq!(decode_model_ex(0x1000_a12f, 32, true, rv64im), None);
+
+        // rv64imac は f/d を外すが M/A/C と CSR 類は使える。
+        let imac = model_feats("rv64imac");
+        assert_eq!(
+            decode_model_ex(0x1000_a12f, 32, true, imac),
+            Some(Insn::LrW)
+        );
+        assert_eq!(decode_model_ex(0x0001, 16, true, imac), Some(Insn::CAddi));
+        assert_eq!(
+            decode_model_ex(0xc001_10f3, 32, true, imac),
+            Some(Insn::Csrrw)
+        );
+        assert_eq!(decode_model_ex(0x0020_f1d3, 32, true, imac), None);
+        assert_eq!(decode_model_ex(0x0220_f1d3, 32, true, imac), None);
+
+        let gc = model_feats("rv64gc");
+        assert_eq!(
+            decode_model_ex(0x0020_f1d3, 32, true, gc),
+            Some(Insn::FaddS)
+        );
+        assert_eq!(
+            decode_model_ex(0x0220_f1d3, 32, true, gc),
+            Some(Insn::FaddD)
+        );
+
+        // D なしで F だけを足した構成では、倍精度から整数への
+        // 変換もデコードしない（誤って F 側へ分類しない）。
+        let f_only = model_feats("rv64imac") | FEAT_F;
+        assert_eq!(decode_model_ex(0xd200_81d3, 32, true, f_only), None);
+    }
+
+    #[test]
+    fn feature_gates_rv32_compressed_and_rv64_float_moves() {
+        // RV32GC では c.flw/c.fsw 側へ振り分け、RV64 限定の
+        // fmv.x.d/fmv.d.x は不正命令になる。
+        let rv32gc = model_feats("rv32gc");
+        assert_eq!(decode_model_ex(0x6000, 16, false, rv32gc), Some(Insn::CFlw));
+        assert_eq!(decode_model_ex(0xe000, 16, false, rv32gc), Some(Insn::CFsw));
+        assert_eq!(decode_model_ex(0xf200_81d3, 32, false, rv32gc), None);
+
+        let rv64gc = model_feats("rv64gc");
+        assert_eq!(decode_model_ex(0x6000, 16, true, rv64gc), Some(Insn::CLd));
+        assert_eq!(
+            decode_model_ex(0xf200_81d3, 32, true, rv64gc),
+            Some(Insn::FmvDX)
+        );
+    }
+
+    #[test]
     fn disasm_word_fills_operands() {
         // 生成したエンコーダで組み立てた語をそのまま逆アセンブルする。
         let w = encode(Insn::Add, &[1, 2, 3]).unwrap();

@@ -52,7 +52,10 @@ pub fn run_elf_gdb(
         "polyisa: gdb の接続を {addr} で待つ（`target remote :{}`）",
         addr.port()
     );
-    let mut target = RiscvDebugEnv::new(env, sel.map_or(0, |s| s.feats));
+    let mut target = RiscvDebugEnv::new(
+        env,
+        sel.map_or(polyisa_guest_riscv::DEFAULT_FEATS, |s| s.feats),
+    );
     polyisa_gdbstub::server::serve(&listener, &mut target).map_err(|e| format!("gdb 接続: {e}"))?;
     Ok(target.exit_code())
 }

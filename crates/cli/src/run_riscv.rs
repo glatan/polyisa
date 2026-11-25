@@ -11,7 +11,7 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::Ctrl;
 use polyisa_guest_riscv::sem::{Csr, Fpr, Gpr};
-use polyisa_guest_riscv::{CpuState, Insn, decode_model_ex, sem};
+use polyisa_guest_riscv::{CpuState, DEFAULT_FEATS, Insn, decode_model_ex, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend as _, StateRef, W64};
 
@@ -157,9 +157,10 @@ fn off_j(word: u32) -> i64 {
 }
 
 /// エントリから実行する。`rv32` は RV32 モデルを選ぶ。
-/// ecall は `sys` に委ね、それ以外は意味論で実行する。
+/// ecall は `sys` に委ね、それ以外は意味論で実行する。機能集合は
+/// 既定モデル（RV64GC 相当）を使う。厳密なモデル選択には `run_ex` を使う。
 pub fn run(env: &mut BareEnv, entry: u64, rv32: bool, sys: &mut impl EcallHandler) -> Outcome {
-    run_ex(env, entry, rv32, 0, sys)
+    run_ex(env, entry, rv32, DEFAULT_FEATS, sys)
 }
 
 /// `run` に機能集合を渡す。`feats` は生成した `FEAT_*` のビット和で、
@@ -1887,7 +1888,7 @@ pub fn run_elf_handler(
     handler: &mut impl EcallHandler,
 ) -> Result<u64, String> {
     let (mut env, entry) = load_elf_env(path, argv)?;
-    let feats = sel.map_or(0, |s| s.feats);
+    let feats = sel.map_or(DEFAULT_FEATS, |s| s.feats);
     match run_ex(&mut env, entry, false, feats, handler) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
