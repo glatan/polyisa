@@ -7,18 +7,20 @@
 //! 命令列を、polyisa と Intel SDE の両方で実行して状態を比較する。
 //! heavy_diff_host（E2）がホスト CPU を直接叩くのに対し、こちらは
 //! `sde64 -future` の下で生成 ELF を走らせるため、REX2 の拡張 GPR
-//! （R16-R31）までカバーできる。EVEX map4 の NDD/NF 昇格形も
-//! reg-direct 形と、NDD がメモリを入力だけに使う絶対アドレス形をコーパスへ入れる。
+//! （R16-R31）までカバーできる。EVEX map4 の NDD/NF 昇格形は
+//! reg-direct 形と絶対アドレスのメモリ形をコーパスへ入れ、CFCMOV の
+//! 条件付きストアと PUSH2/POP2 のメモリ出力も比較する。
 //!
 //! 仕組み:
 //! - 乱択した命令列を1枚の静的 ELF（RWX の1セグメント）に焼く。
 //!   `_start` が初期 ctx を読み込み、命令ごとに全 GPR と RFLAGS を
-//!   ctx スロットへ書き戻し、最後に `write(1, slots)` + `exit` する。
+//!   ctx スロットへ書き戻し、最後に `write(1, slots+memory+stack)` +
+//!   `exit` する。
 //! - SDE の stdout からスロット列を回収し、各ステップの polyisa 状態
 //!   （BareEnv + run_mode_ex）と比較する。
-//! - r15 は ctx ポインタの予約レジスタ、rsp はゲストスタックのため
-//!   コーパスの被演算子と比較対象の双方から除く。比較は残り 30 GPR
-//!   とユーザ可視フラグ。命令ごとに定義済み旗のマスクを掛ける。
+//! - r15 は ctx ポインタの予約レジスタなのでコーパスの被演算子と
+//!   比較対象から除く。比較は rsp を含む残り 31 GPR、ユーザ可視フラグ、
+//!   最終メモリ/スタック。命令ごとに定義済み旗のマスクを掛ける。
 //!
 //! sde64 が無ければスキップする（testkit::reqs でもフィルタ済み）。
 
@@ -30,7 +32,7 @@ mod imp {
     use polyisa_engine::bare::BareEnv;
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_guest_x86::{CpuState, sem};
-    use polyisa_mem::{Perms, VirtAddr};
+    use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
     use polyisa_sem::Backend as _;
     use std::process::Command;
 
@@ -47,8 +49,10 @@ mod imp {
     /// シーケンスあたりの命令数と、既定のシーケンス数。
     const STEPS: usize = 16;
     const SEQS: usize = 48;
-    /// APX メモリ被演算子の入力スクラッチ。
+    /// APX メモリ被演算子の入力/出力スクラッチ。
     const MEM_BYTES: usize = 256;
+    /// PUSH2/POP2 と epilogue の一時 push が使うゲストスタック。
+    const STACK_BYTES: usize = 4096;
 
     /// ctx スロット。フィールド順は x86 レジスタ番号順。
     #[repr(C)]
@@ -149,10 +153,28 @@ mod imp {
         init_va_of() + SLOT as u64
     }
 
-    /// メモリ被演算子スクラッチの VA。slots 後の 4KiB は
-    /// ゲストスタックなので、その次を読み出し専用入力にする。
+    /// メモリ被演算子スクラッチの VA。slots の直後に置き、
+    /// 最後の write syscall で slots と一緒に出力できるようにする。
     fn mem_va_of() -> u64 {
-        slots_va_of() + STEPS as u64 * SLOT as u64 + 4096
+        slots_va_of() + STEPS as u64 * SLOT as u64
+    }
+
+    /// ゲストスタックの VA。メモリスクラッチの直後。
+    fn stack_va_of() -> u64 {
+        mem_va_of() + MEM_BYTES as u64
+    }
+
+    /// stdout に出す後半データのバイト数（メモリ + スタック）。
+    const fn out_tail_bytes() -> usize {
+        MEM_BYTES + STACK_BYTES
+    }
+
+    fn data_access() -> Access {
+        Access {
+            endian: Endian::Le,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        }
     }
 
     /// polyisa と SDE が共有する決定的なメモリ入力。
@@ -168,6 +190,7 @@ mod imp {
     /// データ領域は init_ctx(272B) + slots(STEPS*272B) を後続に置く。
     fn build_elf(insns: &[Vec<u8>], init: &Ctx) -> Vec<u8> {
         let n = insns.len();
+        assert_eq!(n, STEPS, "メモリレイアウトは STEPS 固定");
         let code_start = ELF_BASE + HDRS;
         let mut code = Vec::with_capacity(8192);
         // プロローグ: r15 = init ctx、flags と全 GPR を読む。
@@ -195,13 +218,13 @@ mod imp {
             code.extend_from_slice(insn);
             epilogue(&mut code);
         }
-        // write(1, slots, STEPS*SLOT); exit(0)
+        // write(1, slots, STEPS*SLOT + memory + stack); exit(0)
         code.extend_from_slice(&[0xB8, 1, 0, 0, 0]); // mov eax, 1
         code.extend_from_slice(&[0xBF, 1, 0, 0, 0]); // mov edi, 1
         code.extend_from_slice(&[0x48, 0xBE]); // mov rsi, imm64
         code.extend_from_slice(&slots_va.to_le_bytes());
         code.extend_from_slice(&[0xBA]); // mov edx, imm32
-        code.extend_from_slice(&((n * SLOT) as u32).to_le_bytes());
+        code.extend_from_slice(&((n * SLOT + out_tail_bytes()) as u32).to_le_bytes());
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
         code.extend_from_slice(&[0xB8, 60, 0, 0, 0]); // mov eax, 60
         code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
@@ -209,12 +232,13 @@ mod imp {
         assert!(code.len() <= 8192, "blob too large: {}", code.len());
 
         let data = {
-            let mut d = Vec::with_capacity(SLOT * (n + 1) + 4096);
+            let mut d = Vec::with_capacity(SLOT * (n + 1) + out_tail_bytes());
             d.extend_from_slice(unsafe { &*(&raw const *init).cast::<[u8; SLOT]>() });
-            // init + slots + スクラッチスタック（4KiB）+ メモリ入力。
-            // init.rsp はスタック領域の中程を指す。
-            let mem_off = SLOT * (n + 1) + 4096;
-            d.resize(mem_off + MEM_BYTES, 0);
+            // init + slots + メモリ + スタック。メモリは入力パターン
+            // から始め、条件付きストアの出力先にも使う。スタックは
+            // 0 初期化で、init.rsp はその中程を指す。
+            let mem_off = SLOT * (n + 1);
+            d.resize(mem_off + out_tail_bytes(), 0);
             d[mem_off..mem_off + MEM_BYTES].copy_from_slice(&mem_pattern());
             d
         };
@@ -326,7 +350,7 @@ mod imp {
     /// R/R4 拡張を持つレジスタ番号（グループ命令では 0）、`rm` は
     /// ModRM.r/m、`ndd` は vvvv+V' の宛先レジスタ。mod=11 専用なので
     /// X4 は 0（U=1）に固定する。pp は NP=0。
-    fn evex4(rxreg: u8, rm: u8, ndd: u8, w: bool, nf: bool, pp: u8) -> [u8; 4] {
+    fn evex4_nd(rxreg: u8, rm: u8, ndd: u8, w: bool, nf: bool, pp: u8, nd: bool) -> [u8; 4] {
         let p0 = 0x40 // ~X（X=0）
             | 0x04 // mm=4
             | if rxreg & 8 == 0 { 0x80 } else { 0 } // ~R
@@ -337,10 +361,14 @@ mod imp {
             | ((!ndd & 0x0F) << 3)
             | 0x04 // U=1（X4=0）
             | (pp & 3);
-        let p2 = 0x10 // ND=1（vvvv を新しい宛先にする）
+        let p2 = if nd { 0x10 } else { 0 }
             | if nf { 0x04 } else { 0 }
             | if ndd & 16 == 0 { 0x08 } else { 0 }; // ~V'
         [0x62, p0, p1, p2]
+    }
+
+    fn evex4(rxreg: u8, rm: u8, ndd: u8, w: bool, nf: bool, pp: u8) -> [u8; 4] {
+        evex4_nd(rxreg, rm, ndd, w, nf, pp, true)
     }
 
     /// APX NDD の `op r/m, reg` レジスタ直形。
@@ -373,6 +401,25 @@ mod imp {
         v
     }
 
+    /// APX のメモリ被演算子形。ND=0 も作れる（CFCMOV の
+    /// 条件付きロード/ストアの確認用）。
+    fn apx_mem_nd(op: u8, ndd: u8, reg: u8, addr: u64, w: bool, nf: bool, nd: bool) -> Vec<u8> {
+        let mut v = evex4_nd(reg, 0, ndd, w, nf, 0, nd).to_vec();
+        v.push(op);
+        v.push(((reg & 7) << 3) | 4);
+        v.push(0x25);
+        v.extend_from_slice(&(addr as u32).to_le_bytes());
+        v
+    }
+
+    /// APX のレジスタ直形。ND=0 も作れる。
+    fn apx_rr_nd(op: u8, ndd: u8, reg: u8, rm: u8, w: bool, nf: bool, nd: bool) -> Vec<u8> {
+        let mut v = evex4_nd(reg, rm, ndd, w, nf, 0, nd).to_vec();
+        v.push(op);
+        v.push(0xC0 | ((reg & 7) << 3) | (rm & 7));
+        v
+    }
+
     /// APX NDD のグループ命令メモリ形。
     fn apx_group_mem(op: u8, grp: u8, ndd: u8, addr: u64, w: bool, nf: bool) -> Vec<u8> {
         let mut v = evex4(0, 0, ndd, w, nf, 0).to_vec();
@@ -394,13 +441,31 @@ mod imp {
     const M_MUL: u64 = 0x801; // CF|OF
     const M_BSF: u64 = 0x40; // ZF のみ（他旗は不定）
 
+    /// BSF/BSR は source=0 で destination が不定。マスク上位に
+    /// (dst,src,w) を畳み、SDE 側の不定値で同期できるようにする。
+    const SCAN_TAG: u64 = 1 << 32;
+    fn with_scan(mask: u64, dst: u8, src: u8, w: bool) -> u64 {
+        mask | SCAN_TAG | ((dst as u64) << 33) | ((src as u64) << 39) | ((w as u64) << 45)
+    }
+
+    fn scan_meta(mask: u64) -> Option<(u8, u8, bool)> {
+        if mask & SCAN_TAG == 0 {
+            return None;
+        }
+        Some((
+            ((mask >> 33) & 0x3f) as u8,
+            ((mask >> 39) & 0x3f) as u8,
+            mask & (1 << 45) != 0,
+        ))
+    }
+
     /// 乱択命令を1つ生成する。APX（REX2）の reg-reg 整数命令が主体。
     /// 戻り値は (バイト列, フラグ比較マスク)。
     fn gen_insn(rng: &mut Rng) -> (Vec<u8>, u64) {
         let a = reg(rng);
         let b = reg(rng);
         let w = rng.next().is_multiple_of(2);
-        match rng.next() % 16 {
+        match rng.next() % 18 {
             // ALU 2項（dst rm ← reg）。
             0..=4 => {
                 let op =
@@ -428,7 +493,12 @@ mod imp {
                 } else {
                     FLAG_MASK
                 };
-                (rrm2(op, a, b, w), m)
+                let meta = if op == 0xBC || op == 0xBD {
+                    with_scan(m, a, b, w)
+                } else {
+                    m
+                };
+                (rrm2(op, a, b, w), meta)
             }
             8 => {
                 let op = [0xA4u8, 0xA5, 0xAC, 0xAD][(rng.next() % 4) as usize];
@@ -511,6 +581,47 @@ mod imp {
                     (v, FLAG_MASK)
                 }
             }
+            // PUSH2/POP2。レジスタ被演算子だけだが、実際の読み書きは
+            // ゲストスタックへ行く。W は P 形の選択、flags は変えない。
+            16 => {
+                let d = reg(rng);
+                let mut rm = reg(rng);
+                let pop = rng.next().is_multiple_of(2);
+                if pop && rm == d {
+                    rm = if d == 0 { 1 } else { 0 };
+                }
+                let pp = rng.next().is_multiple_of(2);
+                (
+                    apx_group(
+                        if pop { 0x8F } else { 0xFF },
+                        if pop { 0 } else { 6 },
+                        d,
+                        rm,
+                        pp,
+                        false,
+                    ),
+                    0,
+                )
+            }
+            // CMOV/CFCMOV の ND/NF 4 形。ND=0,NF=1 のメモリ形は
+            // 条件付きストアで、メモリ出力比較の対象になる。
+            17 => {
+                let cc = (rng.next() % 16) as u8;
+                let variant = rng.next() % 4;
+                let (nd, nf) = match variant {
+                    0 => (false, false),
+                    1 => (false, true),
+                    2 => (true, false),
+                    _ => (true, true),
+                };
+                let d = if nd { reg(rng) } else { 0 };
+                let v = if rng.next().is_multiple_of(2) {
+                    apx_mem_nd(0x40 | cc, d, a, mem_addr(rng), w, nf, nd)
+                } else {
+                    apx_rr_nd(0x40 | cc, d, a, b, w, nf, nd)
+                };
+                (v, 0)
+            }
             // CCMP/CTEST の NCI。常に真/偽の両側を固定バイトで入れ、
             // dfv と実比較の双方をカバーする。被演算子は r25/r26 だが、
             // 初期 ctx が乱択なので値はシードごとに変わる。
@@ -523,8 +634,7 @@ mod imp {
                 };
                 (v, FLAG_MASK | 0x10)
             }
-            // EVEX map4 の IMUL または NDD CMOVcc。CFCMOV と
-            // メモリフォールト抑制は reg-direct コーパスの対象外。
+            // EVEX map4 の IMUL または NDD CMOVcc。
             _ => {
                 let d = reg(rng);
                 if rng.next().is_multiple_of(2) {
@@ -549,7 +659,7 @@ mod imp {
         }
     }
 
-    /// polyisa 側の環境。コード頁とメモリ入力スクラッチを写像する。
+    /// polyisa 側の環境。コード頁とメモリ/スタック領域を写像する。
     fn poly_env() -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
@@ -571,7 +681,7 @@ mod imp {
     /// ctx の全状態を polyisa 側に写す。Gpr(16-31) は x2 に行く。
     fn poly_load(env: &mut BareEnv, ctx: &Ctx) {
         for i in 0..32u8 {
-            let v = if i == 4 { CODE_VA } else { ctx.gpr(i as usize) };
+            let v = if i == 4 { ctx.rsp } else { ctx.gpr(i as usize) };
             sem::write64(&mut env.backend, Gpr(i), v);
         }
         let f = (ctx.rflags & FLAG_MASK) as u32 | 0x2;
@@ -610,9 +720,9 @@ mod imp {
                 init.set_gpr(r, rng.imm());
             }
         }
-        // init.rsp をデータ末尾のスクラッチ中程へ向ける
+        // init.rsp をスタック中程の 16 バイト境界へ向ける
         // （popfq 復元の push が生きられるよう有効なスタックが要る）。
-        init.rsp = slots_va_of() + STEPS as u64 * SLOT as u64 + 2048;
+        init.rsp = (stack_va_of() + 2048) & !0xf;
         let elf = build_elf(&insns, &init);
 
         // 一時ファイルに書いて sde64 -future で走らせる。
@@ -636,7 +746,7 @@ mod imp {
             .map_err(|e| format!("sde64 起動失敗: {e}"))
             .unwrap();
         let slots = out.stdout;
-        let want = STEPS * SLOT;
+        let want = STEPS * SLOT + out_tail_bytes();
         let _ = std::fs::remove_dir_all(&dir);
         if !out.status.success() || slots.len() != want {
             let dump = insns
@@ -669,7 +779,16 @@ mod imp {
         let mut env = poly_env();
         let ctx = init;
         poly_load(&mut env, &ctx);
+        // 各 epilogue は flags 復元のために `push;popfq` を行う。
+        // pop はメモリを消さないので、SDE 側の最終メモリに残るこの
+        // 一時 qword を polyisa 側へも再現する。プロローグの初期
+        // flags 読み込みは init.rsp へ張り替える前なので、ゲスト
+        // スタックには残らない。
         for (i, insn) in insns.iter().enumerate() {
+            let scan_zero = scan_meta(masks[i]).is_some_and(|(_, src, w)| {
+                let v = sem::read64(&mut env.backend, Gpr(src));
+                if w { v == 0 } else { v as u32 == 0 }
+            });
             env.backend.mem.write(VirtAddr(CODE_VA), insn).unwrap();
             let out = run_x86::run_mode_ex(
                 &mut env,
@@ -689,9 +808,11 @@ mod imp {
             let n = &native[i];
             let mut ds = Vec::new();
             for r in 0..32u8 {
-                if r == 4 || r == 15 {
-                    // rsp はゲストスタック（コーパスは触らない）、
+                if r == 15 {
                     // r15 は SDE 側で ctx ポインタに使う予約レジスタ。
+                    continue;
+                }
+                if scan_zero && scan_meta(masks[i]).is_some_and(|(dst, _, _)| dst == r) {
                     continue;
                 }
                 let (hv, pv) = (n.gpr(r as usize), sem::read64(&mut env.backend, Gpr(r)));
@@ -699,7 +820,7 @@ mod imp {
                     ds.push(format!("r{r} {hv:#x} vs {pv:#x}"));
                 }
             }
-            let mask = masks[i];
+            let mask = masks[i] & 0xffff_ffff;
             let hf = n.rflags & mask;
             let pf = u64::from(env.backend.get(sem::eflags_ref())) & mask;
             if hf != pf {
@@ -725,6 +846,35 @@ mod imp {
             // 残置すると次ステップの全マスク比較で再浮上する。
             env.backend
                 .set(sem::eflags_ref(), (n.rflags & FLAG_MASK) as u32 | 0x2);
+            if scan_zero && let Some((dst, _, _)) = scan_meta(masks[i]) {
+                sem::write64(&mut env.backend, Gpr(dst), n.gpr(dst as usize));
+            }
+            env.backend
+                .mem
+                .write(VirtAddr(n.rsp - 8), &n.rflags.to_le_bytes())
+                .unwrap();
+        }
+
+        // 最終メモリとスタックを比較する。出力は slots の後ろに
+        // memory(256B)+stack(4KiB) の順で並ぶ。
+        let tail = &slots[STEPS * SLOT..];
+        let mut pmem = vec![0u8; out_tail_bytes()];
+        env.backend
+            .mem
+            .read(VirtAddr(mem_va_of()), &mut pmem, data_access())
+            .unwrap();
+        if tail != pmem.as_slice() {
+            let at = tail
+                .iter()
+                .zip(pmem.iter())
+                .position(|(a, b)| a != b)
+                .unwrap();
+            return Some(format!(
+                "seq {seed}: memory +{at:#x} ({:#x}) {:#x} vs {:#x}",
+                mem_va_of() + at as u64,
+                tail[at],
+                pmem[at],
+            ));
         }
         None
     }
@@ -752,6 +902,7 @@ mod imp {
             let (insn, _) = gen_insn(&mut rng);
             let mut env = poly_env();
             env.backend.set(sem::xcr0_ref(), 0x8_0003);
+            sem::write64(&mut env.backend, Gpr(4), (stack_va_of() + 2048) & !0xf);
             env.backend.mem.write(VirtAddr(CODE_VA), &insn).unwrap();
             let out = run_x86::run_mode_ex(
                 &mut env,

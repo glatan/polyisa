@@ -1364,11 +1364,11 @@ pub fn pop_v<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Result<B::V<W64
     Ok(v)
 }
 
-/// PUSH2 Ev, vvvv（APX）。第1被演算子（rm）→第2被演算子（vvvv）の順に
-/// 64 ビット値を push する。push2p は第2被演算子が r/m、第1が vvvv。
-/// スタックオペランドは常に 64 ビット（W は 2P 形の選択に使われる）。
-/// 仕様上は push 前の RSP が 16 バイト整列でなければ #GP だが、ここでは
-/// 逐次 push として近似する。
+/// PUSH2 Ev, vvvv（APX）。第1被演算子（vvvv）→第2被演算子（rm）の順に
+/// 64 ビット値を push する。push2p の p はペアリング性能ヒントで、
+/// 結果の順序は変わらない。スタックオペランドは常に 64 ビット
+/// （W は 2P 形の選択に使われる）。仕様上は push 前の RSP が 16 バイト
+/// 整列でなければ #GP だが、ここでは逐次 push として近似する。
 pub fn push2<B: Backend>(
     b: &mut B,
     rm: &Rm<B::V<W64>>,
@@ -1379,17 +1379,14 @@ pub fn push2<B: Backend>(
 ) -> Flow<B> {
     let v_rm = rd_w::<B, W64>(b, rm, d)?;
     let v_nd = sem::read64(b, Gpr(d.vex_v));
-    if pp {
-        push_v(b, 64, v_nd, sa, sseg)?;
-        push_v(b, 64, v_rm, sa, sseg)
-    } else {
-        push_v(b, 64, v_rm, sa, sseg)?;
-        push_v(b, 64, v_nd, sa, sseg)
-    }
+    let _ = pp;
+    push_v(b, 64, v_nd, sa, sseg)?;
+    push_v(b, 64, v_rm, sa, sseg)
 }
 
-/// POP2 Ev, vvvv（APX）。スタックトップから第2被演算子→第1被演算子の
-/// 順に pop する。pop2p は第2被演算子が r/m、第1が vvvv。
+/// POP2 Ev, vvvv（APX）。スタックトップから第1被演算子（vvvv）→
+/// 第2被演算子（rm）の順に pop する。pop2p の p はペアリング性能
+/// ヒントで、結果の順序は変わらない。
 pub fn pop2<B: Backend>(
     b: &mut B,
     rm: &Rm<B::V<W64>>,
@@ -1398,21 +1395,12 @@ pub fn pop2<B: Backend>(
     sseg: u64,
     pp: bool,
 ) -> Flow<B> {
-    // push2 は rm→vvvv、push2p は vvvv→rm の順に積む。pop はその
-    // 逆順で取り出して鏡像になるようにする。
-    if pp {
-        let v_rm = pop_v(b, 64, sa, sseg)?;
-        let v_nd = pop_v(b, 64, sa, sseg)?;
-        wr_w::<B, W64>(b, rm, d, v_rm)?;
-        W64::put(b, Gpr(d.vex_v), d, v_nd);
-        Ok(())
-    } else {
-        let v_nd = pop_v(b, 64, sa, sseg)?;
-        let v_rm = pop_v(b, 64, sa, sseg)?;
-        wr_w::<B, W64>(b, rm, d, v_rm)?;
-        W64::put(b, Gpr(d.vex_v), d, v_nd);
-        Ok(())
-    }
+    let _ = pp;
+    let v_nd = pop_v(b, 64, sa, sseg)?;
+    let v_rm = pop_v(b, 64, sa, sseg)?;
+    wr_w::<B, W64>(b, rm, d, v_rm)?;
+    W64::put(b, Gpr(d.vex_v), d, v_nd);
+    Ok(())
 }
 
 // ---- 分岐 ----
