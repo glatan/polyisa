@@ -96,6 +96,20 @@ RUN curl -fsSL -o /tmp/sde.tar.xz \
     && mv "/opt/sde-external-${SDE_VERSION}-lin" /opt/sde \
     && rm /tmp/sde.tar.xz
 
+# Sail RISC-V 参照モデル（台帳 TOOL-SAIL-RISCV に対応）。
+# ACT4 が要求する 0.16 を使う。GitHub release asset の digest を固定する。
+ARG SAIL_RISCV_VERSION=0.16
+ARG SAIL_RISCV_SHA256=f9bb8a32b8f3eddbdf69b3a29d96dff4ba1e77f45877165e0478418367da6bee
+RUN curl -fsSL -o /tmp/sail-riscv.tar.gz \
+        "https://github.com/riscv/sail-riscv/releases/download/${SAIL_RISCV_VERSION}/sail-riscv-Linux-x86_64.tar.gz" \
+    && echo "${SAIL_RISCV_SHA256}  /tmp/sail-riscv.tar.gz" | sha256sum -c - \
+    && mkdir -p /tmp/sail-riscv /usr/local/share/doc/sail-riscv \
+    && tar -xzf /tmp/sail-riscv.tar.gz -C /tmp/sail-riscv --strip-components=1 \
+    && install -m 0755 /tmp/sail-riscv/bin/sail_riscv_sim /usr/local/bin/ \
+    && cp /tmp/sail-riscv/share/doc/sail-riscv/copyright /usr/local/share/doc/sail-riscv/ \
+    && cp /tmp/sail-riscv/share/doc/sail-riscv/Berkeley-SoftFloat-LICENSE.txt /usr/local/share/doc/sail-riscv/ \
+    && rm -rf /tmp/sail-riscv /tmp/sail-riscv.tar.gz
+
 # 実行時の cargo 書き込み先。外部クレートがないため registry はほぼ空だが、
 # 非 root 実行でもエラーにならないよう誰でも書き込める場所を用意する。
 ENV CARGO_HOME=/cache/cargo
@@ -105,5 +119,5 @@ RUN mkdir -p /cache/cargo && chmod 0777 /cache/cargo
 RUN rustc --version && cargo --version && rustup target list --installed \
     && task --version && cargo nextest --version \
     && clang --version && llvm-mc --version && wasmtime --version \
-    && xed -version | head -1 && sde64 -version | head -1 \
+    && xed -version | head -1 && sde64 -version | head -1 && sail_riscv_sim --version \
     && x86_64-linux-gnux32-gcc-14 --version | head -1

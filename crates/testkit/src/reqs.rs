@@ -70,8 +70,9 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     TestBinary {
         binary: "heavy_conformance_riscv_tests",
         needs: &[
-            Req::Data(".testdata/riscv-tests"),
             Req::Data(".testdata/riscv-arch-test"),
+            Req::Tool("clang"),
+            Req::Tool("sail_riscv_sim"),
         ],
     },
     TestBinary {

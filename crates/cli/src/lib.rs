@@ -667,7 +667,7 @@ fn run_riscv_elf(
     if semi {
         let mut semi = run_riscv::SemiRv::new(root.unwrap_or(""), false);
         semi.semi.set_cmdline(&cmdline(path, argv));
-        return run_riscv::run_elf_handler(path, argv, sel.as_ref(), &mut semi);
+        return run_riscv::run_elf_handler_mmode(path, argv, sel.as_ref(), &mut semi);
     }
     run_riscv::run_elf_sel(path, argv, sel.as_ref())
 }

@@ -1887,7 +1887,35 @@ pub fn run_elf_handler(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     handler: &mut impl EcallHandler,
 ) -> Result<u64, String> {
+    run_elf_handler_priv(path, argv, sel, handler, 0)
+}
+
+/// `run_elf_handler` を M モードで始める。bare-metal の semihosting
+/// プログラムはリセット直後の M モードで動き、CSR 初期化を行う。
+pub fn run_elf_handler_mmode(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    handler: &mut impl EcallHandler,
+) -> Result<u64, String> {
+    run_elf_handler_priv(path, argv, sel, handler, 3)
+}
+
+fn run_elf_handler_priv(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    handler: &mut impl EcallHandler,
+    priv_level: u64,
+) -> Result<u64, String> {
     let (mut env, entry) = load_elf_env(path, argv)?;
+    env.backend.set(
+        StateRef::<W64>::from_offset(core::mem::offset_of!(
+            polyisa_guest_riscv::CpuState,
+            priv_level
+        )),
+        priv_level,
+    );
     let feats = sel.map_or(DEFAULT_FEATS, |s| s.feats);
     match run_ex(&mut env, entry, false, feats, handler) {
         Outcome::Exit(code) => Ok(code),

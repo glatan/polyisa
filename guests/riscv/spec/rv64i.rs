@@ -368,9 +368,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sllw", "R", "0000000 ..... ..... 001 ..... 0111011", "sllw {rd}, {rs1}, {rs2}", "alu"),
         ("srlw", "R", "0000000 ..... ..... 101 ..... 0111011", "srlw {rd}, {rs1}, {rs2}", "alu"),
         ("sraw", "R", "0100000 ..... ..... 101 ..... 0111011", "sraw {rd}, {rs1}, {rs2}", "alu"),
-        // SYSTEM（正規形のみ。pred/succ の一般形は後の段階で足す）
-        ("fence", "I", "00001111111100000000000000001111", "fence", "system"),
-        ("fence_i", "I", "00000000000000000001000000001111", "fence.i", "system"),
+        // SYSTEM。fence の fm/pred/succ と rd/rs1 を問わず同じ命令として
+        // 扱う。予約・ヒント形も単一ハートの意味論では順序付けだけなので、
+        // 意味論は共通の no-op で足りる。
+        ("fence", "I", "............ ..... 000 ..... 0001111", "fence", "system"),
+        ("fence_i", "I", "............ ..... 001 ..... 0001111", "fence.i", "system"),
         ("ecall", "I", "000000000000 ..... 000 ..... 1110011", "ecall", "system"),
         ("ebreak", "I", "000000000001 ..... 000 ..... 1110011", "ebreak", "system"),
         // M（乗除算。funct7=0000001）
@@ -496,7 +498,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("c_addiw", "R", "001 ........ ... 01", "c.addiw {rd}, {imm}", "alu"),
         ("c_li", "R", "010 ........ ... 01", "c.li {rd}, {imm}", "alu"),
         ("c_lui_addi16sp", "R", "011 ........ ... 01", "c.lui/addi16sp {rd}, {imm}", "alu"),
-        ("c_srli", "R", "100 0 00 ... ..... 01", "c.srli {rd}, {imm}", "alu"),
+        ("c_srli", "R", "100 . 00 ... ..... 01", "c.srli {rd}, {imm}", "alu"),
         ("c_srai", "R", "100 . 01 ... ..... 01", "c.srai {rd}, {imm}", "alu"),
         ("c_andi", "R", "100 . 10 ... ..... 01", "c.andi {rd}, {imm}", "alu"),
         ("c_sub", "R", "100 0 11 ... 00 ... 01", "c.sub {rd}, {rs2}", "alu"),
@@ -581,44 +583,41 @@ pub fn build_model() -> polyisa_isadl::Model {
         op,
         rhs: WhereRhs::Lit(value),
     };
-    for (name, bit12, w1, w2, syntax, timing) in [
+    for (name, bit12, wheres, syntax, timing) in [
         (
             "c_jr",
             '0',
-            cr(WhereOp::Ne, "cr_rs1", 0),
-            cr(WhereOp::Eq, "cr_rs2", 0),
+            vec![cr(WhereOp::Ne, "cr_rs1", 0), cr(WhereOp::Eq, "cr_rs2", 0)],
             "c.jr {rs1}",
             "jump",
         ),
         (
             "c_mv",
             '0',
-            cr(WhereOp::Ne, "cr_rs1", 0),
-            cr(WhereOp::Ne, "cr_rs2", 0),
+            // rd=x0 の HINT も同じ符号化で、実行影響はない。
+            vec![cr(WhereOp::Ne, "cr_rs2", 0)],
             "c.mv {rd}, {rs2}",
             "alu",
         ),
         (
             "c_jalr",
             '1',
-            cr(WhereOp::Ne, "cr_rs1", 0),
-            cr(WhereOp::Eq, "cr_rs2", 0),
+            vec![cr(WhereOp::Ne, "cr_rs1", 0), cr(WhereOp::Eq, "cr_rs2", 0)],
             "c.jalr {rs1}",
             "jump",
         ),
         (
             "c_add",
             '1',
-            cr(WhereOp::Ne, "cr_rs1", 0),
-            cr(WhereOp::Ne, "cr_rs2", 0),
+            // rd=x0 の HINT も同じ符号化で、実行影響はない。
+            vec![cr(WhereOp::Ne, "cr_rs2", 0)],
             "c.add {rd}, {rs2}",
             "alu",
         ),
         (
             "c_ebreak",
             '1',
-            cr(WhereOp::Eq, "cr_rs1", 0),
-            cr(WhereOp::Eq, "cr_rs2", 0),
+            vec![cr(WhereOp::Eq, "cr_rs1", 0), cr(WhereOp::Eq, "cr_rs2", 0)],
             "c.ebreak",
             "system",
         ),
@@ -629,7 +628,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             pattern: Pattern::parse(&format!("100 {bit12} ..... ..... 10"))
                 .expect("valid pattern"),
             when: Pred::Flag("c".to_string()),
-            wheres: vec![w1, w2],
+            wheres,
             syntax: syntax.to_string(),
             timing: timing.to_string(),
         });

@@ -10,7 +10,7 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
 ## 対応する OS・ABI と実行環境
 
 - **Linux（`os-linux::rv64`）**：RV64 の最小システムコール（`exit`・`exit_group`・`write` 等）。動的リンクを含むテストプログラムを実行できる。
-- **Semihosting 2.0（`os-semihost`）**：ebreak 標識列経由で `polyisa run --os semihost` に対応している（`cli` の `SemiRv` 適合層を使用）。
+- **Semihosting 2.0（`os-semihost`）**：ebreak 標識列経由で `polyisa run --os semihost` に対応している（`cli` の `SemiRv` 適合層を使用）。semihosting は裸実行の入出力なので、初期特権レベルは M モードとする。Linux 実行は従来どおり U モードで始める。
 - **GDB 接続（`gdbstub::riscv`）**：`polyisa run -g <ポート>` に対応している唯一の ISA であり、`x0`–`x31`・`pc`・`f0`–`f31`・`fcsr` のレジスタ表と `target.xml` 生成を持つ。
 - **CLI `disasm`**：`polyisa disasm <hex-word>` の現行対象 ISA である。
 
@@ -30,11 +30,12 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
   - 整数除算の可変レイテンシ（6–68 サイクル）は `div_latency()` 規約を定義済みだが、意味論からの `hint` 送出が未接続のため代表値 6 固定。`fdiv`/`fsqrt`/`fcvt`/`fmv.d`・CSR・分岐誤予測（4 固定）も代表値で近似している。
   - `sifive_u74` は `zba`/`zbb` 機能ビットを宣言しているが、両拡張の命令記述と意味論は未実装。
 - **GDB レジスタ表**：FPU レジスタは `fcsr` のみ掲載し、`fflags`/`frm` の個別項目は省略している（XML で regnum を明示しているため GDB 動作に支障はない）。
-- **適合テストスイート**：`heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を広く実行する。riscv-arch-test（ACT4 形式を含む）の実行ハーネスは未実装（[GAP-0010](../known-issues.md)）。
-- **ACT4 の前提**：ACT4 は Sail リファレンスモデルで生成した期待 signature を自己検査 ELF へ埋め込む。ACT4 の要求版は Sail 0.16 で、上流が Linux x86-64 向けの署名検証可能な prebuilt binary を公開している。フレームワーク本体の選定には Ruby/UDB と Python/uv、コンパイルには GCC 15 または Clang 20 以降が要る。現在の開発コンテナには Clang 23 と qemu-user だけがあり、qemu-user は bare-metal ACT ELF の実行基盤にはならない。polyisa 側のハーネスでは、ACT の全体フレームワークに依存せず、選定した代表的なユーザーモード対象について reference signature 生成・compile/link・製品ランタイム実行・console/signature 判定の経路を固定する必要がある。
+- **適合テストスイート**：`heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を広く実行する。`heavy_conformance_riscv_tests` は riscv-arch-test（ACT4）の RV64I/M/Zca/Zaamo/Zalrsc/Zicsr/Zifencei/Zicclsm 145 件を実行する。F/D と他のユーザーモード拡張はまだ通していない（[GAP-0010](../known-issues.md)）。
+- **ACT4 ハーネス**：ACT4 は Sail リファレンスモデルで生成した期待 signature を自己検査 ELF へ埋め込む。polyisa のハーネスは、qemu-RVI20U64 の linker script と Sail 設定を使い、Sail 0.16 で signature を生成し、Clang と rust-lld で自己検査 ELF を作り、M モードで始まる semihosting 実行系で合否を判定する。ACT の全体フレームワーク（Ruby/UDB と Python/uv）には依存せず、`rvtest_config.h` は代表テストに必要な最小構成である。
+- **ACT4 の装置差**：qemu-RVI20U64 の rvmodel には PC16550 UART の初期化と console 出力があるが、polyisa はこの UART を持たない。ハーネスは入出力マクロだけを no-op に置き換え、合否は semihosting の終了コードで判定する。終了規約と memory layout は変えないため、signature の配置には影響しない。期待 signature を壊した negative test で、不一致が失敗コード 1 として観測できることを確認している。
 
 ## 検証手段
 
 - **OS なし・単体**：`bare_rv64i`、`bare_sifive_u74`
-- **適合・オラクル・実行差分**：`heavy_conformance_rv64ui`、`heavy_oracle_llvm`、`heavy_diff_qemu`（RV64I/M/A・幅違いロード・分岐）
+- **適合・オラクル・実行差分**：`heavy_conformance_rv64ui`、`heavy_conformance_riscv_tests`、`heavy_oracle_llvm`、`heavy_diff_qemu`（RV64I/M/A・幅違いロード・分岐）
 - **ABI・プログラム・GDB**：`heavy_abi_uapi`、`heavy_program_hello`、`heavy_program_dyn`、`heavy_program_semihosting`、`heavy_program_gdbstub`、`heavy_host_wasi`（wasm32 ホスト上で RV64 ELF を実行）

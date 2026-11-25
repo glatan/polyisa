@@ -117,7 +117,11 @@ mod tests {
         assert_eq!(decode(0x0020_8063, 32), Some(Insn::Beq));
         assert_eq!(decode(0x0000_0073, 32), Some(Insn::Ecall));
         assert_eq!(decode(0x0ff0_000f, 32), Some(Insn::Fence));
+        assert_eq!(decode(0x8330_000f, 32), Some(Insn::Fence)); // fence.tso
+        assert_eq!(decode(0x0000_000f, 32), Some(Insn::Fence)); // fence 0,0（ヒント）
+        assert_eq!(decode(0x0331_000f, 32), Some(Insn::Fence)); // rs1 非ゼロの予約形
         assert_eq!(decode(0x0000_100f, 32), Some(Insn::FenceI));
+        assert_eq!(decode(0x0001_100f, 32), Some(Insn::FenceI)); // rs1 非ゼロの予約形
         assert_eq!(decode(0x0220_80b3, 32), Some(Insn::Mul));
         assert_eq!(decode(0x0220_c4b3, 32), Some(Insn::Div));
         assert_eq!(decode(0x0220_f4bb, 32), Some(Insn::Remuw));
@@ -146,6 +150,9 @@ mod tests {
         assert_eq!(decode(0x810e, 16), Some(Insn::CMv));
         assert_eq!(decode(0x9082, 16), Some(Insn::CJalr));
         assert_eq!(decode(0x910a, 16), Some(Insn::CAdd));
+        assert_eq!(decode(0x9012, 16), Some(Insn::CAdd)); // rd=x0 の HINT
+        assert_eq!(decode(0x806a, 16), Some(Insn::CMv)); // rd=x0 の HINT
+        assert_eq!(decode(0x9161, 16), Some(Insn::CSrli)); // RV64 の shamt[5]
         assert_eq!(decode(0x9002, 16), Some(Insn::CEbreak));
         assert_eq!(decode(0x8002, 16), None);
         // 既定は RV64：c_flw と同符号化の c_ld が先に一致する。
@@ -195,9 +202,9 @@ mod tests {
         // 範囲外・個数違い・固定ビットとの衝突は None。
         assert_eq!(encode(Insn::Add, &[1, 2, 32]), None);
         assert_eq!(encode(Insn::Add, &[1, 2]), None);
-        // fence は全ビット固定。fm=0・pred/succ=iorw で imm は 0x0ff のみ。
+        // fence は fm/pred/succ の一般形を持ち、0,0 はヒントとして有効。
         assert_eq!(encode(Insn::Fence, &[0, 0, 0x0ff]), Some(0x0ff0_000f));
-        assert_eq!(encode(Insn::Fence, &[0, 0, 0]), None);
+        assert_eq!(encode(Insn::Fence, &[0, 0, 0]), Some(0x0000_000f));
         // addi x1,x2,3 = 0x00310093。Ref: SPEC-RISCV-UNPRIV。
         assert_eq!(encode(Insn::Addi, &[1, 2, 3]), Some(0x0031_0093));
         // beq x1,x2,8: imm[12|11|10:5|4:1|0] = 0|0|000000|0100|0。

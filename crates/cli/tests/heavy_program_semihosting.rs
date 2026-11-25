@@ -187,7 +187,7 @@ fn riscv_write_exit() {
     let elf = elf.to_str().unwrap();
 
     let mut semi = polyisa_cli::run_riscv::SemiRv::new("", false);
-    let code = polyisa_cli::run_riscv::run_elf_handler(elf, &[], None, &mut semi)
+    let code = polyisa_cli::run_riscv::run_elf_handler_mmode(elf, &[], None, &mut semi)
         .unwrap_or_else(|e| panic!("rv64 semi: {e}"));
     assert_eq!(code, 5);
     assert_eq!(semi.semi.io.stdout, b"semi-hi\nsemi-more\n");

@@ -10,7 +10,7 @@
 |---|---|---|
 | （接頭辞なし / 単体） | 基礎・ISADL 往復・OS なし実行 | `bits`・`softfloat`・`decimal`・`isadl`・`mem`・`engine` の単体テスト、`ENCODE_ROUNDTRIP`、`bare_*` 命令単位テスト |
 | `oracle` | デコーダ差分 | `llvm-objdump`・`llvm-mc`・Intel XED との逆アセンブル差分テスト |
-| `conformance` | 適合テストスイート | SingleStepTests（8088・80286・80386・68000）、WebAssembly 仕様テスト（`.wast`）、decTest、TestFloat、riscv-tests |
+| `conformance` | 適合テストスイート | SingleStepTests（8088・80286・80386・68000）、WebAssembly 仕様テスト（`.wast`）、decTest、TestFloat、riscv-tests、riscv-arch-test（ACT4 の代表テスト） |
 | `abi` | ABI 表照合 | Linux カーネル UAPI ヘッダおよび `syscall.tbl` と `os-linux` の番号・定数・構造体配置の突き合わせ |
 | `program` | プログラム単位実行 | 静的／動的リンクの自前プログラム、BusyBox・Alpine・Unix V7・4.3BSD 配布物バイナリ、Semihosting・WASI・GDB 接続 |
 | `diff` | 実行差分 | ホスト x86-64 CPU、Intel SDE、QEMU user-mode、wasmtime との実行状態差分テスト |
