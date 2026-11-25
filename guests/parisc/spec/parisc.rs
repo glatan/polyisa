@@ -57,6 +57,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 系列は 2.0 と MAX-2 を持つ。
     // Ref: SPEC-PARISC-11, SPEC-PARISC-20.
     for (name, parent, add, rem) in [
+        // PA-7100 は MAX-1 を持たない PA 1.1 実装（MAX-1 は LC 系の
+        // マルチメディア拡張）。7000/7150 はタイミング段階の版。
+        ("pa7100", "", &["pa11"][..], &[][..]),
         ("pa7100lc", "", &["pa11", "max1"][..], &[][..]),
         ("pa7300lc", "pa7100lc", &[][..], &[][..]),
         // PA-8000 系列は MAX-2 のみで MAX-1 を持たない（継承元の

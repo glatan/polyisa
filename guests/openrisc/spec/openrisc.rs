@@ -58,9 +58,14 @@ pub fn build_model() -> polyisa_isadl::Model {
     // mor1kx は FPU 有りの構成を代表として載せる（実機は合成時
     // オプションだが、配布物実行には FP を通せる方が都合が良い）。
     // Ref: SPEC-OPENRISC-1000 §16（実装差の識別レジスタ）.
-    for (name, parent, add) in [
-        ("or1200", "", &["dslot"][..]),
-        ("mor1kx", "or1200", &["fpu"][..]),
+    // Pronto Espresso は分岐遅延スロットを持たない実装。
+    // Cappuccino・Espresso 間の差はキャッシュ・MMU 等の構成差で
+    // 命令集合上は同じなので、パイプライン版はタイミング段階で分ける。
+    // Ref: https://github.com/openrisc/mor1kx doc/mor1kx.asciidoc.
+    for (name, parent, add, rem) in [
+        ("or1200", "", &["dslot"][..], &[][..]),
+        ("mor1kx", "or1200", &["fpu"][..], &[][..]),
+        ("mor1kx_pronto", "mor1kx", &[][..], &["dslot"][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,
@@ -68,7 +73,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),
-            remove_features: vec![],
+            remove_features: rem.iter().map(|s| s.to_string()).collect(),
             ident: vec![],
         });
     }

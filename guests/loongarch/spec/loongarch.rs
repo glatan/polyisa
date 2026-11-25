@@ -54,12 +54,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     // Ref: SPEC-LOONGARCH-RM §1.2.
     for (name, parent, add) in [
         ("la32", "", &["la32"][..]),
+        ("la132", "la32", &[][..]),
         ("la264", "la32", &[][..]),
         // la464 は実機の機能構成（LSX 内蔵）に合わせて `lsx` を
         // 持たせる。la664 は親から継承する。
         // Ref: SPEC-LOONGARCH-RM §1.4（LS464 の標準構成）.
-        ("la464", "", &["la64", "lsx"][..]),
-        ("la664", "la464", &[][..]),
+        ("la464", "", &["la64", "lsx", "lbt"][..]),
+        ("la664", "la464", &["lasx"][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,

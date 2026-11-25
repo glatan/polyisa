@@ -63,6 +63,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         ident: vec![],
     });
 
+    // ARMv8.0 世代の実機。LSE は ARMv8.1 からなので fp+asimd のみ。
+    // v8.2 以降のコア（Cortex-A55/A75 系・Neoverse）は版差を表す旗が
+    // 未宣言のため未追加。MIDR の識別情報配線も未整備。
+    for name in ["cortex_a53", "cortex_a57", "cortex_a72"] {
+        m.models.push(polyisa_isadl::model::ModelDef {
+            timing: None,
+            params: vec![],
+            name: name.to_string(),
+            parent: "generic".to_string(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+    }
+
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,

@@ -27,25 +27,39 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 機能分割と接続が世代モデル追加の前提になる。
     // Gap: GAP-0101
     // Ref: SPEC-POWER-ISA (v3.1C), SPEC-POWER-ABI (ELFv2 r1.5).
-    for name in ["fp", "altivec", "vsx"] {
+    for (name, implies) in [
+        ("fp", &[][..]),
+        ("altivec", &[][..]),
+        ("vsx", &["altivec"][..]),
+        ("isa2_07", &[][..]),
+        ("isa3_0", &["isa2_07"][..]),
+        ("isa3_1", &["isa3_0"][..]),
+    ] {
         m.features.push(Feature {
             name: name.to_string(),
-            implies: vec![],
+            implies: implies.iter().map(|s| s.to_string()).collect(),
             conflicts: vec![],
         });
     }
-    m.models.push(ModelDef {
+    // 世代モデル。ISA 版の旗はまだ命令の when に接続されていない
+    // ため版差はカバレッジ表で未接続として見える（GAP-0101）。
+    // POWER10 は 8 バイト接頭辞付き命令が未実装。
+    for (name, parent, add) in [
+        ("generic", "", &["fp", "altivec", "vsx", "isa3_1"][..]),
+        ("power8", "", &["fp", "altivec", "vsx", "isa2_07"][..]),
+        ("power9", "power8", &["isa3_0"][..]),
+        ("power10", "power9", &["isa3_1"][..]),
+    ] {
+        m.models.push(ModelDef {
         timing: None,
         params: vec![],
-        name: "generic".to_string(),
-        parent: String::new(),
-        add_features: ["fp", "altivec", "vsx"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        remove_features: Vec::new(),
-        ident: vec![],
-    });
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: Vec::new(),
+            ident: vec![],
+        });
+    }
 
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),

@@ -48,7 +48,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("z196", "z10ec", vec![], vec![]),
         ("zec12", "z196", vec![], vec![]),
         ("z13", "zec12", vec![], vec![]),
-        ("generic", "z13", vec![], vec![]),
+        ("z14", "z13", vec![], vec![]),
+        ("z15", "z14", vec![], vec![]),
+        ("z16", "z15", vec![], vec![]),
+        ("generic", "z16", vec![], vec![]),
         ("esa390", "", vec![], vec!["zarch"]),
     ] {
         m.models.push(ModelDef {

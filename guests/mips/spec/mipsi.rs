@@ -70,6 +70,25 @@ pub fn build_model() -> polyisa_isadl::Model {
         remove_features: vec![],
         ident: vec![],
     });
+    // Release 1。R2 追加命令を持たない構成で、32/64 ともに置く。
+    m.models.push(ModelDef {
+        timing: None,
+        params: vec![],
+        name: "mips32r1".to_string(),
+        parent: String::new(),
+        add_features: vec!["mips1".to_string(), "fpu".to_string()],
+        remove_features: vec![],
+        ident: vec![],
+    });
+    m.models.push(ModelDef {
+        timing: None,
+        params: vec![],
+        name: "mips64r1".to_string(),
+        parent: String::new(),
+        add_features: vec!["mips1".to_string(), "mips64".to_string(), "fpu".to_string()],
+        remove_features: vec![],
+        ident: vec![],
+    });
     // Release 2 は MIPS I の符号化を残し、ロード遅延は持たない。遅延の有無は実行ループが持つ。
     m.models.push(ModelDef {
         timing: None,
