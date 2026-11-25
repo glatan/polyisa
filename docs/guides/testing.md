@@ -13,7 +13,7 @@
 | `conformance` | 適合テストスイート | SingleStepTests（8088・80286・80386・68000）、WebAssembly 仕様テスト（`.wast`）、decTest、TestFloat、riscv-tests |
 | `abi` | ABI 表照合 | Linux カーネル UAPI ヘッダおよび `syscall.tbl` と `os-linux` の番号・定数・構造体配置の突き合わせ |
 | `program` | プログラム単位実行 | 静的／動的リンクの自前プログラム、BusyBox・Alpine・Unix V7・4.3BSD 配布物バイナリ、Semihosting・WASI・GDB 接続 |
-| `diff` | 実行差分 | ホスト x86-64 CPU、Intel SDE、wasmtime との実行状態差分テスト |
+| `diff` | 実行差分 | ホスト x86-64 CPU、Intel SDE、QEMU user-mode、wasmtime との実行状態差分テスト |
 | `jit` | JIT 等価性 | インタプリタと JIT のブロック境界ごとの状態一致（`heavy_jit_diff`） |
 | `timing` | タイミング検証 | `exact`（R3000・8088・i486・Pentium・68000）のサイクル一致と `approx`（`heavy_timing_ooo`）の誤差検証 |
 | `host` | ホスト移植性 | wasmtime 上での `wasm32-wasi` ビルド実行（`heavy_host_wasi`） |

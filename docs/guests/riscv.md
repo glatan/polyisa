@@ -35,5 +35,5 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
 ## 検証手段
 
 - **OS なし・単体**：`bare_rv64i`、`bare_sifive_u74`
-- **適合・オラクル**：`heavy_conformance_rv64ui`、`heavy_oracle_llvm`
+- **適合・オラクル・実行差分**：`heavy_conformance_rv64ui`、`heavy_oracle_llvm`、`heavy_diff_qemu`
 - **ABI・プログラム・GDB**：`heavy_abi_uapi`、`heavy_program_hello`、`heavy_program_dyn`、`heavy_program_semihosting`、`heavy_program_gdbstub`、`heavy_host_wasi`（wasm32 ホスト上で RV64 ELF を実行）
