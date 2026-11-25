@@ -197,7 +197,7 @@ pub(crate) fn step_rv(
     if r.is_ok() {
         // カウンタ CSR の最小近似。instret は退役数そのもので、
         // cycle/time は命令ごとに進む単調な時計として扱う。
-        for csr in [0xc00usize, 0xc01, 0xc02] {
+        for csr in (0xc00usize..=0xc02).chain(0xc03..=0xc1f) {
             let rref = StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, csr) + csr * 8);
             let v: u64 = env.backend.get(rref);
             env.backend.set(rref, v.wrapping_add(1));
@@ -782,6 +782,24 @@ fn step_rv_inner(
                 env.step(|b| sem::bne_rv32(b, rs1, rs2, pc, off_b(word)))
             } else {
                 env.step(|b| sem::bne(b, rs1, rs2, pc, off_b(word)))
+            }
+        }
+        Insn::Beqi => {
+            let pc = env.pc;
+            let cimm = rs2.0;
+            if rv32 {
+                env.step(|b| sem::beqi_rv32(b, rs1, cimm, pc, off_b(word)))
+            } else {
+                env.step(|b| sem::beqi(b, rs1, cimm, pc, off_b(word)))
+            }
+        }
+        Insn::Bnei => {
+            let pc = env.pc;
+            let cimm = rs2.0;
+            if rv32 {
+                env.step(|b| sem::bnei_rv32(b, rs1, cimm, pc, off_b(word)))
+            } else {
+                env.step(|b| sem::bnei(b, rs1, cimm, pc, off_b(word)))
             }
         }
         Insn::Blt => {

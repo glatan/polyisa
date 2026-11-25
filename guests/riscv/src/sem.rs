@@ -133,6 +133,26 @@ fn branch<B: Backend>(b: &mut B, op: Cmp, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64
     Ok(())
 }
 
+fn cimm_value(cimm: u8) -> u64 {
+    if cimm == 0 { u64::MAX } else { u64::from(cimm) }
+}
+
+fn branch_imm<B: Backend>(b: &mut B, op: Cmp, rs1: Gpr, cimm: u8, pc: u64, bimm: i64) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = const_w64(b, cimm_value(cimm));
+    let c = b.cmp(op, x, y);
+    b.branch(c, pc.wrapping_add(bimm as u64));
+    Ok(())
+}
+
+pub fn beqi<B: Backend>(b: &mut B, rs1: Gpr, cimm: u8, pc: u64, bimm: i64) -> Flow<B> {
+    branch_imm(b, Cmp::Eq, rs1, cimm, pc, bimm)
+}
+
+pub fn bnei<B: Backend>(b: &mut B, rs1: Gpr, cimm: u8, pc: u64, bimm: i64) -> Flow<B> {
+    branch_imm(b, Cmp::Ne, rs1, cimm, pc, bimm)
+}
+
 pub fn beq<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
     branch(b, Cmp::Eq, rs1, rs2, pc, bimm)
 }
@@ -1260,6 +1280,29 @@ fn branch_rv32<B: Backend>(b: &mut B, op: Cmp, rs1: Gpr, rs2: Gpr, pc: u64, bimm
     };
     b.branch(c, pc.wrapping_add(bimm as u64) & MASK32);
     Ok(())
+}
+
+fn branch_imm_rv32<B: Backend>(
+    b: &mut B,
+    op: Cmp,
+    rs1: Gpr,
+    cimm: u8,
+    pc: u64,
+    bimm: i64,
+) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>((cimm_value(cimm) & 0xffff_ffff) as u32);
+    let c = b.cmp(op, x, y);
+    b.branch(c, pc.wrapping_add(bimm as u64) & MASK32);
+    Ok(())
+}
+
+pub fn beqi_rv32<B: Backend>(b: &mut B, rs1: Gpr, cimm: u8, pc: u64, bimm: i64) -> Flow<B> {
+    branch_imm_rv32(b, Cmp::Eq, rs1, cimm, pc, bimm)
+}
+
+pub fn bnei_rv32<B: Backend>(b: &mut B, rs1: Gpr, cimm: u8, pc: u64, bimm: i64) -> Flow<B> {
+    branch_imm_rv32(b, Cmp::Ne, rs1, cimm, pc, bimm)
 }
 
 pub fn beq_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {

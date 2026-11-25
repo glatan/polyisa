@@ -247,6 +247,9 @@ fn compile_act_test(input: &CompileAct<'_>) -> Result<(), String> {
         .arg(out)
         .arg(format!("-march={march}"))
         .arg("-mabi=lp64");
+    if march.contains("zibi") {
+        cmd.arg("-menable-experimental-extensions");
+    }
     if signature {
         let sail_json = std::fs::read_to_string(qemu_dir().join("sail.json"))
             .map_err(|e| format!("read sail.json: {e}"))?;
@@ -355,7 +358,12 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         std::fs::copy(&rust_lld, &ld_lld).map_err(|e| format!("copy {rust_lld:?}: {e}"))?;
     }
 
-    let march = test_march(&src)?;
+    let mut march = test_march(&src)?;
+    if march.contains("zibi") {
+        // LLVM は草案版 0.1 を `zibi0p1` としてだけ受け付ける。
+        // ACT のYAMLは版なしなので、compile 用の文字列だけ版付きにする。
+        march = march.replace("zibi", "zibi0p1");
+    }
     let sig_elf = build.join(format!("{artifact}.sig.elf"));
     compile_act_test(&CompileAct {
         src: &src,
@@ -395,6 +403,8 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zicbom/")
         || test_rel.contains("/Zicbop/")
         || test_rel.contains("/Zicboz/")
+        || test_rel.contains("/Zihpm/")
+        || test_rel.contains("/Zibi/")
     {
         for ext in [
             "Zcb",
@@ -410,6 +420,8 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zicbom",
             "Zicbop",
             "Zicboz",
+            "Zihpm",
+            "Zibi",
         ] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
                 sail_json = sail_json.replace(
@@ -428,6 +440,9 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     let sail_cfg = work.join("sail.json");
     std::fs::write(&sail_cfg, sail_json).map_err(|e| format!("write {sail_cfg:?}: {e}"))?;
     let mut cmd = Command::new(sail);
+    if test_rel.contains("/Zibi/") {
+        cmd.arg("--enable-experimental-extensions");
+    }
     cmd.arg("--config")
         .arg(&sail_cfg)
         .arg(format!("--test-signature={}", sig.display()))
@@ -468,6 +483,8 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zicbom/")
         || test_rel.contains("/Zicbop/")
         || test_rel.contains("/Zicboz/")
+        || test_rel.contains("/Zihpm/")
+        || test_rel.contains("/Zibi/")
     {
         &[
             "zcb",
@@ -483,6 +500,8 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zicbom",
             "zicbop",
             "zicboz",
+            "zihpm",
+            "zibi",
         ]
     } else {
         &[]
@@ -676,6 +695,16 @@ fn act4_rv64zicbop_suite() {
 #[test]
 fn act4_rv64zicboz_suite() {
     suite("rv64i/Zicboz");
+}
+
+#[test]
+fn act4_rv64zihpm_suite() {
+    suite("rv64i/Zihpm");
+}
+
+#[test]
+fn act4_rv64zibi_suite() {
+    suite("rv64i/Zibi");
 }
 
 #[test]

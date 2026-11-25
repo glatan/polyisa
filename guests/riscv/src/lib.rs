@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件＋C 40 件＋FMA 8 件。
-        assert_eq!(INSNS.len(), 305);
+        assert_eq!(INSNS.len(), 307);
     }
 
     #[test]

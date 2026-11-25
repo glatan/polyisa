@@ -47,6 +47,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zihintpause", &[][..], &[][..]),
         ("zihintntl", &[][..], &[][..]),
         ("zicntr", &[][..], &[][..]),
+        ("zihpm", &[][..], &[][..]),
+        ("zibi", &[][..], &[][..]),
         ("zicbom", &[][..], &[][..]),
         ("zicbop", &[][..], &[][..]),
         ("zicboz", &[][..], &[][..]),
@@ -341,6 +343,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bge", "B", "....... ..... ..... 101 ..... 1100011", "bge {rs1}, {rs2}, {imm}", "branch"),
         ("bltu", "B", "....... ..... ..... 110 ..... 1100011", "bltu {rs1}, {rs2}, {imm}", "branch"),
         ("bgeu", "B", "....... ..... ..... 111 ..... 1100011", "bgeu {rs1}, {rs2}, {imm}", "branch"),
+        ("beqi", "B", "....... ..... ..... 010 ..... 1100011", "beqi {rs1}, {rs2}, {imm}", "branch"),
+        ("bnei", "B", "....... ..... ..... 011 ..... 1100011", "bnei {rs1}, {rs2}, {imm}", "branch"),
         // ロード・ストア
         ("lb", "I", "............ ..... 000 ..... 0000011", "lb {rd}, {imm}({rs1})", "load"),
         ("lh", "I", "............ ..... 001 ..... 0000011", "lh {rd}, {imm}({rs1})", "load"),
@@ -694,6 +698,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         }
         if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
             reqs.push("zbs");
+        }
+        if matches!(*name, "beqi" | "bnei") {
+            reqs.push("zibi");
         }
         if matches!(*name, "cbo_inval" | "cbo_clean" | "cbo_flush") {
             reqs.push("zicbom");
