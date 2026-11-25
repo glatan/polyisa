@@ -2,15 +2,13 @@
 name = "polyisa-engine"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 polyisa-bits = { path = "../bits" }
 polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
-polyisa-guest = { path = "../guest" }
-polyisa-timing = { path = "../timing" }
 polyisa-softfloat = { path = "../softfloat" }
 polyisa-ir = { path = "../ir" }
 

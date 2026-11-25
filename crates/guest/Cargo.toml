@@ -2,12 +2,10 @@
 name = "polyisa-guest"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-polyisa-bits = { path = "../bits" }
-polyisa-sem = { path = "../sem" }
 polyisa-timing = { path = "../timing" }
 
 [lints]

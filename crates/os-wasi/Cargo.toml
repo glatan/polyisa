@@ -2,12 +2,11 @@
 name = "polyisa-os-wasi"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 polyisa-kernel = { path = "../kernel" }
-polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-wasm = { path = "../../guests/wasm" }
 

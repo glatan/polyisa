@@ -2,14 +2,10 @@
 name = "polyisa-kernel"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-polyisa-mem = { path = "../mem" }
-polyisa-engine = { path = "../engine" }
-polyisa-guest = { path = "../guest" }
-polyisa-timing = { path = "../timing" }
 polyisa-host = { path = "../host" }
 
 [lints]

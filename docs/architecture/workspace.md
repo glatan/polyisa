@@ -6,7 +6,7 @@ Cargo ワークスペースは 45 のメンバー（ISA 非依存クレート 25
 
 ```text
 polyisa/
-├── Cargo.toml            ワークスペース定義、共通 lint、heavy プロファイル
+├── Cargo.toml            ワークスペース定義、共通パッケージメタデータ、共通 lint、heavy プロファイル
 ├── crates/               ISA 非依存クレート（25 クレート）
 │   ├── bits/  softfloat/  decimal/  diag/
 │   ├── mem/  timing/
@@ -124,8 +124,10 @@ OS 層          loader → bits, mem
 
 ## ツールチェーンと lint
 
+エディションと MSRV はルートの `[workspace.package]` に一元化し、各メンバーは `.workspace = true` で継承する。
+
 - **Rust エディション**：2024
-- **MSRV（`rust-version`）**：1.99（安定版の機能のみを使用。nightly 機能は使わない）
+- **MSRV（`rust-version`）**：1.100.0（安定版の機能のみを使用。nightly 機能は使わない）
 - **書式・lint**：`rustfmt` 既定設定、`clippy::all = "warn"`（`task check` で `-D warnings`）、`unsafe_code = "deny"`
 
 ## `unsafe` とエラーの扱い

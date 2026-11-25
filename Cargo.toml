@@ -50,7 +50,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]

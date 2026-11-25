@@ -10,7 +10,7 @@ polyisa は、19 の CPU アーキテクチャ向けにビルドされたユー�
 
 ## クイックスタート
 
-Rust 1.99 以降（エディション 2024）が必要です。開発タスクには Task（Arch Linux では `go-task`）と `cargo-nextest` を使用します。
+Rust 1.100.0 以降（エディション 2024）が必要です。開発タスクには Task（Arch Linux では `go-task`）と `cargo-nextest` を使用します。
 
 ```bash
 # ビルドして利用可能な CPU モデルを表示

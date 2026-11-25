@@ -2,8 +2,8 @@
 name = "polyisa-mem"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 polyisa-bits = { path = "../bits" }

@@ -2,11 +2,8 @@
 name = "polyisa-softfloat"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
-
-[dependencies]
-polyisa-bits = { path = "../bits" }
+edition.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

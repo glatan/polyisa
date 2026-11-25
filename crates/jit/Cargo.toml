@@ -2,15 +2,17 @@
 name = "polyisa-jit"
 version = "0.0.0"
 license.workspace = true
-edition = "2024"
-rust-version = "1.99"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 polyisa-ir = { path = "../ir" }
-polyisa-host = { path = "../host" }
 polyisa-engine = { path = "../engine" }
 polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
+
+[target.'cfg(all(unix, target_arch = "x86_64"))'.dependencies]
+polyisa-host = { path = "../host" }
 
 [lints]
 workspace = true
