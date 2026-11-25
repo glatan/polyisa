@@ -1205,6 +1205,132 @@ fn step_rv_inner(
                 env.step(|b| sem::sc_w(b, rd, rs1, rs2, 0))
             }
         }
+        Insn::AmoswapB => {
+            if rv32 {
+                env.step(|b| sem::amoswap_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoswap_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoswapH => {
+            if rv32 {
+                env.step(|b| sem::amoswap_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoswap_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoaddB => {
+            if rv32 {
+                env.step(|b| sem::amoadd_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoadd_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoaddH => {
+            if rv32 {
+                env.step(|b| sem::amoadd_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoadd_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoxorB => {
+            if rv32 {
+                env.step(|b| sem::amoxor_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoxor_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoxorH => {
+            if rv32 {
+                env.step(|b| sem::amoxor_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoxor_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoandB => {
+            if rv32 {
+                env.step(|b| sem::amoand_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoand_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoandH => {
+            if rv32 {
+                env.step(|b| sem::amoand_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoand_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoorB => {
+            if rv32 {
+                env.step(|b| sem::amoor_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoor_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmoorH => {
+            if rv32 {
+                env.step(|b| sem::amoor_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amoor_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmominB => {
+            if rv32 {
+                env.step(|b| sem::amomin_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomin_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmominH => {
+            if rv32 {
+                env.step(|b| sem::amomin_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomin_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmomaxB => {
+            if rv32 {
+                env.step(|b| sem::amomax_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomax_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmomaxH => {
+            if rv32 {
+                env.step(|b| sem::amomax_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomax_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmominuB => {
+            if rv32 {
+                env.step(|b| sem::amominu_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amominu_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmominuH => {
+            if rv32 {
+                env.step(|b| sem::amominu_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amominu_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmomaxuB => {
+            if rv32 {
+                env.step(|b| sem::amomaxu_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomaxu_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmomaxuH => {
+            if rv32 {
+                env.step(|b| sem::amomaxu_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amomaxu_h(b, rd, rs1, rs2, 0))
+            }
+        }
         Insn::AmoswapW => {
             if rv32 {
                 env.step(|b| sem::amoswap_w_rv32(b, rd, rs1, rs2, 0))

@@ -247,7 +247,7 @@ fn compile_act_test(input: &CompileAct<'_>) -> Result<(), String> {
         .arg(out)
         .arg(format!("-march={march}"))
         .arg("-mabi=lp64");
-    if march.contains("zibi") {
+    if march.contains("zibi") || march.contains("zabha") || march.contains("zacas") {
         cmd.arg("-menable-experimental-extensions");
     }
     if signature {
@@ -405,6 +405,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zicboz/")
         || test_rel.contains("/Zihpm/")
         || test_rel.contains("/Zibi/")
+        || test_rel.contains("/Zabha/")
     {
         for ext in [
             "Zcb",
@@ -422,6 +423,8 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zicboz",
             "Zihpm",
             "Zibi",
+            "Zabha",
+            "Zaamo",
         ] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
                 sail_json = sail_json.replace(
@@ -440,7 +443,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     let sail_cfg = work.join("sail.json");
     std::fs::write(&sail_cfg, sail_json).map_err(|e| format!("write {sail_cfg:?}: {e}"))?;
     let mut cmd = Command::new(sail);
-    if test_rel.contains("/Zibi/") {
+    if test_rel.contains("/Zibi/") || test_rel.contains("/Zabha/") || test_rel.contains("/Zacas/") {
         cmd.arg("--enable-experimental-extensions");
     }
     cmd.arg("--config")
@@ -485,6 +488,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zicboz/")
         || test_rel.contains("/Zihpm/")
         || test_rel.contains("/Zibi/")
+        || test_rel.contains("/Zabha/")
     {
         &[
             "zcb",
@@ -502,6 +506,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zicboz",
             "zihpm",
             "zibi",
+            "zabha",
         ]
     } else {
         &[]
@@ -705,6 +710,11 @@ fn act4_rv64zihpm_suite() {
 #[test]
 fn act4_rv64zibi_suite() {
     suite("rv64i/Zibi");
+}
+
+#[test]
+fn act4_rv64zabha_suite() {
+    suite("rv64i/Zabha");
 }
 
 #[test]

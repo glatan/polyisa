@@ -1851,6 +1851,158 @@ where
     Ok(())
 }
 
+fn amo_b<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W8>, B::V<W8>) -> B::V<W8>,
+{
+    let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 1, AMO_ACC)?;
+    let cur: B::V<W8> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W8>(raw);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    let old = b.sext::<W8, W64>(cur);
+    write(b, rd, old);
+    Ok(())
+}
+
+fn amo_h<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W16>, B::V<W16>) -> B::V<W16>,
+{
+    let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 2, AMO_ACC)?;
+    let cur: B::V<W16> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W16>(raw);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    let old = b.sext::<W16, W64>(cur);
+    write(b, rd, old);
+    Ok(())
+}
+
+fn amo_b_rv32<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W8>, B::V<W8>) -> B::V<W8>,
+{
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 1, AMO_ACC)?;
+    let cur: B::V<W8> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W8>(raw);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    let cur32 = b.sext::<W8, W32>(cur);
+    write_w(b, rd, cur32);
+    Ok(())
+}
+
+fn amo_h_rv32<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W16>, B::V<W16>) -> B::V<W16>,
+{
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 2, AMO_ACC)?;
+    let cur: B::V<W16> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W16>(raw);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    let cur32 = b.sext::<W16, W32>(cur);
+    write_w(b, rd, cur32);
+    Ok(())
+}
+
+macro_rules! amo_bh {
+    ($bname:ident, $hname:ident, $b32:ident, $h32:ident, $op:expr) => {
+        pub fn $bname<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            amo_b(b, rd, rs1, rs2, oimm, $op)
+        }
+        pub fn $hname<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            amo_h(b, rd, rs1, rs2, oimm, $op)
+        }
+        pub fn $b32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            amo_b_rv32(b, rd, rs1, rs2, oimm, $op)
+        }
+        pub fn $h32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            amo_h_rv32(b, rd, rs1, rs2, oimm, $op)
+        }
+    };
+}
+
+amo_bh!(
+    amoswap_b,
+    amoswap_h,
+    amoswap_b_rv32,
+    amoswap_h_rv32,
+    |_, _, y| y
+);
+amo_bh!(
+    amoadd_b,
+    amoadd_h,
+    amoadd_b_rv32,
+    amoadd_h_rv32,
+    |b, a, y| b.add(a, y)
+);
+amo_bh!(
+    amoxor_b,
+    amoxor_h,
+    amoxor_b_rv32,
+    amoxor_h_rv32,
+    |b, a, y| b.xor(a, y)
+);
+amo_bh!(
+    amoand_b,
+    amoand_h,
+    amoand_b_rv32,
+    amoand_h_rv32,
+    |b, a, y| b.and(a, y)
+);
+amo_bh!(amoor_b, amoor_h, amoor_b_rv32, amoor_h_rv32, |b, a, y| b
+    .or(a, y));
+amo_bh!(
+    amomin_b,
+    amomin_h,
+    amomin_b_rv32,
+    amomin_h_rv32,
+    |b, a, y| {
+        let c = b.cmp(Cmp::LtS, a, y);
+        b.select(c, a, y)
+    }
+);
+amo_bh!(
+    amomax_b,
+    amomax_h,
+    amomax_b_rv32,
+    amomax_h_rv32,
+    |b, a, y| {
+        let c = b.cmp(Cmp::LtS, a, y);
+        b.select(c, y, a)
+    }
+);
+amo_bh!(
+    amominu_b,
+    amominu_h,
+    amominu_b_rv32,
+    amominu_h_rv32,
+    |b, a, y| {
+        let c = b.cmp(Cmp::LtU, a, y);
+        b.select(c, a, y)
+    }
+);
+amo_bh!(
+    amomaxu_b,
+    amomaxu_h,
+    amomaxu_b_rv32,
+    amomaxu_h_rv32,
+    |b, a, y| {
+        let c = b.cmp(Cmp::LtU, a, y);
+        b.select(c, y, a)
+    }
+);
+
 // A（RV32）。W 接尾辞の演算は 32 ビットで同一だが、アドレスは 32 ビットで包む。
 
 /// LR.W（RV32）。

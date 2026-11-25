@@ -48,6 +48,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zihintntl", &[][..], &[][..]),
         ("zicntr", &[][..], &[][..]),
         ("zihpm", &[][..], &[][..]),
+        ("zabha", &[][..], &[][..]),
+        ("zacas", &[][..], &[][..]),
         ("zibi", &[][..], &[][..]),
         ("zicbom", &[][..], &[][..]),
         ("zicbop", &[][..], &[][..]),
@@ -529,6 +531,24 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("amomax_w", "R", "10100.. ..... ..... 010 ..... 0101111", "amomax_w {rd}, {rs1}, {rs2}", "atomic"),
         ("amominu_w", "R", "11000.. ..... ..... 010 ..... 0101111", "amominu_w {rd}, {rs1}, {rs2}", "atomic"),
         ("amomaxu_w", "R", "11100.. ..... ..... 010 ..... 0101111", "amomaxu_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoswap_b", "R", "00001.. ..... ..... 000 ..... 0101111", "amoswap.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoswap_h", "R", "00001.. ..... ..... 001 ..... 0101111", "amoswap.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoadd_b", "R", "00000.. ..... ..... 000 ..... 0101111", "amoadd.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoadd_h", "R", "00000.. ..... ..... 001 ..... 0101111", "amoadd.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoxor_b", "R", "00100.. ..... ..... 000 ..... 0101111", "amoxor.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoxor_h", "R", "00100.. ..... ..... 001 ..... 0101111", "amoxor.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoand_b", "R", "01100.. ..... ..... 000 ..... 0101111", "amoand.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoand_h", "R", "01100.. ..... ..... 001 ..... 0101111", "amoand.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoor_b", "R", "01000.. ..... ..... 000 ..... 0101111", "amoor.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoor_h", "R", "01000.. ..... ..... 001 ..... 0101111", "amoor.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomin_b", "R", "10000.. ..... ..... 000 ..... 0101111", "amomin.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomin_h", "R", "10000.. ..... ..... 001 ..... 0101111", "amomin.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomax_b", "R", "10100.. ..... ..... 000 ..... 0101111", "amomax.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomax_h", "R", "10100.. ..... ..... 001 ..... 0101111", "amomax.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amominu_b", "R", "11000.. ..... ..... 000 ..... 0101111", "amominu.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amominu_h", "R", "11000.. ..... ..... 001 ..... 0101111", "amominu.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomaxu_b", "R", "11100.. ..... ..... 000 ..... 0101111", "amomaxu.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomaxu_h", "R", "11100.. ..... ..... 001 ..... 0101111", "amomaxu.h {rd}, {rs1}, {rs2}", "atomic"),
         ("amoswap_d", "R", "00001.. ..... ..... 011 ..... 0101111", "amoswap_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amoadd_d", "R", "00000.. ..... ..... 011 ..... 0101111", "amoadd_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amoxor_d", "R", "00100.. ..... ..... 011 ..... 0101111", "amoxor_d {rd}, {rs1}, {rs2}", "atomic"),
@@ -698,6 +718,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         }
         if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
             reqs.push("zbs");
+        }
+        if name.starts_with("amo") && (name.ends_with("_b") || name.ends_with("_h")) {
+            reqs.push("zabha");
         }
         if matches!(*name, "beqi" | "bnei") {
             reqs.push("zibi");
