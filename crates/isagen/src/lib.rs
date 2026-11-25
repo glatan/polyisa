@@ -2465,6 +2465,7 @@ fn gen_metadata(model: &Model) -> String {
         default_feats(model)
     ));
     s.push_str(&params_code(model));
+    s.push_str(model_feats_code());
     s
 }
 
@@ -2709,8 +2710,15 @@ fn params_code(model: &Model) -> String {
         "        _ => DEFAULT_PARAMS,
     }
 }
+",
+    );
+    s
+}
 
-/// CPU モデル名から機能ビットマスクを解決する。親連鎖をたどって
+/// `model_feats` の生成文字列。挙動パラメータを持たない ISA でも
+/// モデル解決が使えるよう params_code と分離する。
+fn model_feats_code() -> &'static str {
+    "/// CPU モデル名から機能ビットマスクを解決する。親連鎖をたどって
 /// add/remove を適用し、機能の `implies` で閉包を取る。
 /// 未知の名前は DEFAULT_FEATS。
 pub fn model_feats(name: &str) -> u128 {
@@ -2758,9 +2766,7 @@ pub fn model_feats(name: &str) -> u128 {
         .filter(|(n, _)| set.contains(n))
         .fold(0u128, |a, (_, b)| a | b)
 }
-",
-    );
-    s
+"
 }
 
 /// 既定 CPU モデル（MODEL_DEFS の先頭）の機能を `implies` で閉包し、
