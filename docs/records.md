@@ -644,11 +644,10 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - `os-linux` の cfg 整理。`sys_socketcall`・sockaddr・host_errno 等の unix 専用経路を `#[cfg(unix)]` に閉じ、非 unix では `EINVAL`/`Unimplemented` に落ちる形に揃えた
 - `cargo check --workspace --target wasm32-wasip1`（および wasip2・wasip3）が通る。`check:targets` に wasip1 を追加して回帰を防ぐ
 - kernel の直接入出力経路は段階 26 の設計（`HostIo::spawn` の `Option` → 呼び出し側の直接 poll/sleep フォールバック）で既に揃っており、追加実装なしに wasm で効くことを確認
-- 実行検証: `cargo build -p polyisa-cli --target wasm32-wasip1/wasip2/wasip3` した `polyisa-cli.wasm` を wasmtime 51.0.0（TOOL-WASMTIME。台帳を 50.0.1 から更新）で走らせ、手組み RV64 ELF（write("hi\n") + exit_group）を `polyisa run` で実行して `hi` の出力と exit 0 を 3 ターゲットすべてで確認。`cpus` も動作
+- `heavy_host_wasi`（S28-4）。`polyisa-cli` を wasip1/2/3 でビルドし、実行器 wasmtime（TOOL-WASMTIME）上の `run` で手組み RV64 ELF（write + exit_group）の出力を確かめる。wasmtime は台帳を 50.0.1 から 51.0.0（手元検証）に更新した
 
 残っている事項：
 
-- S28-4 の判定は所有者（実環境での動作確認）。wasmtime 上での検証は済
 - wasm ホストではソケット系のホスト経路がなく、ホストソケットを要る syscall はエラーに落ちる（GAP-0099）。p2・p3 の `wasi:sockets` 接続は未着手
 - JIT は wasm ホストではスタブで常に IR 解釈（段階表どおりインタプリタのみ）。`heavy_jit_diff` が `jit.compiled() > 0` を無条件に期待するため、段階 2（aarch64 ホスト）でテストを動かすときにアサートのゲートが要る
 
