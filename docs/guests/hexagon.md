@@ -4,7 +4,7 @@
 
 Hexagon V5〜V79（主対象 V73）の VLIW パケット命令群（整数、ロード／ストア、`memop`、`.new` オペランド・ストア、円環・brev・Mu 修飾アドレッシング、分岐・複合／new-value compare-jump、`allocframe`/`dealloc_return`、`loop0`/`loop1` ハードウェアループ、duplex 16 ビット対、定数拡張子 `immext`）、HVX 代表部分集合（`hvx` 機能フラグ）、および複数ハードウェアスレッド交互実行モデル（`threads::Core`）を `guests/hexagon` で実装している。
 
-- **CPU モデル**：`generic`、`v55`、`v60`、`v62`、`v65`、`v66`、`v67`、`v68`、`v69`、`v71`、`v73`、`v75`、`v79`、`v67t`、`v71t`（計 15 モデル）。版モデルは版旗の含意連鎖で前版の機能を引く。`v67t`・`v71t` は tinycore 構成の版で、tinycore が縮減を表すか追加を表すかは一次資料の確認待ち（現状は構成旗を足す器）。
+- **CPU モデル**：`generic`、`v55`、`v60`、`v62`、`v65`、`v66`、`v67`、`v68`、`v69`、`v71`、`v73`、`v75`、`v79`、`v67t`、`v71t`（計 15 モデル）。版モデルは版旗の含意連鎖で前版の機能を引く。`v67t`・`v71t` は tinycore 構成の版で、small core（実行スロット 3 本化）に audio 拡張を標準搭載する構成（V67 PRM と ELF ABI で確認。`tinycore` は `audio` を含意する）。audio の命令は未実装でカバレッジ表にゼロ件で見える。
 
 ## 対応する OS・ABI と実行環境
 

@@ -11,7 +11,7 @@
 | aarch64 | 11 | 6 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [aarch64.md](guests/aarch64.md) |
 | alpha | 13 | 7 | ELF | Linux | — | — | — | bare・abi・program | [alpha.md](guests/alpha.md) |
 | arm | 4 | 3 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [arm.md](guests/arm.md) |
-| hexagon | 13 | 20 | ELF | Linux | — | — | — | bare・oracle・abi・program | [hexagon.md](guests/hexagon.md) |
+| hexagon | 13 | 21 | ELF | Linux | — | — | — | bare・oracle・abi・program | [hexagon.md](guests/hexagon.md) |
 | ia64 | 6 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
 | loongarch | 6 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [loongarch.md](guests/loongarch.md) |
 | m68k | 11 | 12 | ELF（`cpus`未掲載） | Linux | — | 専用モデル（検証あり） | — | bare・conformance・abi・program・timing | [m68k.md](guests/m68k.md) |

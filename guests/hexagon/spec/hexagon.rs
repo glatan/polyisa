@@ -75,13 +75,28 @@ pub fn build_model() -> polyisa_isadl::Model {
             conflicts: vec![],
         });
     }
-    for name in ["tinycore", "hvx"] {
-        m.features.push(Feature {
-            name: name.to_string(),
-            implies: vec![],
-            conflicts: vec![],
-        });
-    }
+    m.features.push(Feature {
+        name: "hvx".to_string(),
+        implies: vec![],
+        conflicts: vec![],
+    });
+    // Hexagon audio extensions。V67 PRM の各命令記述に「can only
+    // execute on a core with the Hexagon audio extensions」の注記が
+    // ある拡張で、命令自体は未実装。tinycore（v67t/v71t の small
+    // core 構成 —— ELF ABI の EF_HEXAGON_MACH_V67T「Small Core」）
+    // は実行スロット 3 本化に加えて audio を標準搭載するため
+    // tinycore から audio へ含意を張る。
+    // Ref: SPEC-HEXAGON-V67PRM, SPEC-HEXAGON-ABI.
+    m.features.push(Feature {
+        name: "audio".to_string(),
+        implies: vec![],
+        conflicts: vec![],
+    });
+    m.features.push(Feature {
+        name: "tinycore".to_string(),
+        implies: vec!["audio".to_string()],
+        conflicts: vec![],
+    });
     // dx_* は互いに排他（1 個の subinsn は 1 つのグループにだけ
     // 属する）。両立しない `when` とみなされるよう conflicts に
     // 後続の旗を並べる（ia64 の unit_* と同じ手順）。
