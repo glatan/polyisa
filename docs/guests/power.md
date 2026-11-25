@@ -16,6 +16,7 @@
 
 ## 既知の簡略化と未対応範囲
 
+- **機能旗のデコード未接続**：`fp`・`altivec`・`vsx` は命令の `when` 条件に接続されていない。現行は `generic` 1 モデルのため実害はないが、POWER 世代モデルの追加に先立ち、ISA 版ごとの機能分割と `when` への接続が必要である（[GAP-0101](../known-issues.md)）。
 - **未対応の ABI・版**：ppc32、ppc64 ビッグエンディアン（ELFv1）、Power ISA 3.1 の 8 バイト接頭辞付き命令、Book E / e500 SPE、601 の POWER 互換機能は未実装。
 - **浮動小数点・VSX の残り**：FPSCR/FPCC/CR1 更新の一部、`lxvl`/`stxvl`、`xvmadd` 系の単一丸めは簡略化が残る。
 - **JIT**：`run_power.rs` への JIT 統合は未実施。

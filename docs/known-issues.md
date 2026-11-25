@@ -33,6 +33,7 @@
 | GAP-0092 | [タイミングモデル](architecture/timing.md) | `timing::ooo` が再帰式近似であり、サイクル単位の資源仲裁、レジスタリネーム（WAW/WAR 偽依存）、発行順キャッシュ状態変化、誤予測経路の実行効果を持たない | 暫定 | `heavy_timing_ooo` 等の較正で宣言誤差を超える対象が現れた時点で、該当資源のモデルを詳細化する |
 | GAP-0099 | [ホスト抽象化](architecture/host.md) | wasm32（WASI）ホストでは Unix ソケット FFI が使えずホストソケット系 syscall がエラーになる。ホスト fd 待ちもスリープ近似で、`wasi:sockets` への接続は未着手 | 未着手 | wasm ホストでネットワーク syscall を要するテストが現れた時点で、`wasi:sockets`（wasip2/p3）を接続する |
 | GAP-0100 | [CLI・トレース・GDB 接続](architecture/cli-debug.md) | `gdbstub` が RISC-V Linux ELF の最小集合に限られる。ウォッチポイント、複数スレッド一覧・切替、シグナル停止報告、他 ISA レジスタ表、detach 継続、NAK 再送、非同期割込み（`0x03`）、および `trace::format_syscall` 配線が未実装 | 未着手 | ウォッチポイント用のメモリアクセス観測点、複数スレッド・シグナル報告、他 ISA のレジスタ表を追加する |
+| GAP-0101 | [CPU モデルとバージョン](architecture/cpu-models.md) | aarch64（fp/asimd/lse）・arm（v7）・power（fp/altivec/vsx）・s390（zarch/long-disp/ext-imm/dfp/hfp）・hexagon（v5–v79）・riscv（m/a/f/d/c/zicsr/zifencei）で世代・拡張の機能旗が命令の `when` 条件に接続されておらず、CPU モデル間で命令の利用可否が変わらない。ISA ごとの具体的な状態は各ゲスト文書を参照 | 暫定 | 各 ISA の機能旗を命令の `when` 条件に接続し、モデル間で命令の利用可否が変わることを bare テストで検証する |
 
 ## 設計判断が未確定の事項
 

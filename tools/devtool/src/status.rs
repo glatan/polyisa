@@ -103,7 +103,7 @@ pub(crate) fn generate_status_md(root: &Path) -> Result<String, String> {
     s.push_str(NOTICE);
     s.push_str("\n\n");
     s.push_str(
-        "各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧が必要な場合は `task status:dump` で `target/status/` に書き出せる。\n\n",
+        "各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で `target/status/` に書き出せる。\n\n",
     );
 
     s.push_str("## ISA 対応マトリクス\n\n");
@@ -538,6 +538,19 @@ fn render_isa_dump(isa: &str, rel_paths: &[&str], model: &Model) -> String {
         &["名前", "親", "追加機能", "除外機能"],
         &cpu_rows,
     ));
+    s.push_str("\n## 機能旗のカバレッジ\n\n");
+    s.push_str(
+        "命令の `when` 条件に現れる回数とモデルからの参照数を機能旗ごとに数えたもの。\
+        「ゲート」は条件中で旗を肯定して使う命令記述の件数、「否定」は `!旗` として使う件数である。\
+        「モデル参照」はモデルの追加・除外欄に直接書かれた件数で、親からの継承や `implies` による\
+        波及は数えない。ゲート・否定がともに 0 の旗は命令の利用可否に効かない\
+        （識別情報の導出や意味論の実行時参照で使われる場合はある。Hexagon の `dx_*` や\
+        IA-64 の `unit_*` のようなデコード文脈旗は、モデルから参照されないのが正しい形である）。\n\n",
+    );
+    s.push_str(&md_table(
+        &["機能旗", "ゲート", "否定", "モデル参照", "識別ビット"],
+        &feature_coverage_rows(model),
+    ));
     s.push_str("\n## 命令\n\n");
     let rows = mnemonic_rows(&insn_attrs(model));
     let table_rows: Vec<Vec<String>> = rows
@@ -590,6 +603,81 @@ fn insn_attrs(model: &Model) -> Vec<InsnAttr<'_>> {
                 MapItem::Map(..) => None,
             })
         }))
+        .collect()
+}
+
+/// 述語に現れる旗を肯定・否定の別に集める。`Any`/`All` の内側まで
+/// 再帰的にたどり、言及があれば極性ごとに一度だけ数える。
+fn collect_flag_polarity(
+    pred: &Pred,
+    polarity: bool,
+    pos: &mut BTreeSet<String>,
+    neg: &mut BTreeSet<String>,
+) {
+    match pred {
+        Pred::True | Pred::False => {}
+        Pred::Flag(name) => {
+            if polarity {
+                pos.insert(name.clone());
+            } else {
+                neg.insert(name.clone());
+            }
+        }
+        Pred::Not(inner) => collect_flag_polarity(inner, !polarity, pos, neg),
+        Pred::All(ps) | Pred::Any(ps) => {
+            for p in ps {
+                collect_flag_polarity(p, polarity, pos, neg);
+            }
+        }
+    }
+}
+
+/// 機能旗ごとのカバレッジ行（ゲート命令数・否定での言及数・
+/// モデル参照数・識別ビット数）を作る。
+fn feature_coverage_rows(model: &Model) -> Vec<Vec<String>> {
+    let mut pos_count: BTreeMap<String, usize> = BTreeMap::new();
+    let mut neg_count: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, _, when, _) in insn_attrs(model) {
+        let mut pos = BTreeSet::new();
+        let mut neg = BTreeSet::new();
+        collect_flag_polarity(when, true, &mut pos, &mut neg);
+        for f in pos {
+            *pos_count.entry(f).or_insert(0) += 1;
+        }
+        for f in neg {
+            *neg_count.entry(f).or_insert(0) += 1;
+        }
+    }
+    let mut model_refs: BTreeMap<&str, usize> = BTreeMap::new();
+    for def in &model.models {
+        for f in def.add_features.iter().chain(def.remove_features.iter()) {
+            *model_refs.entry(f.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut ident_count: BTreeMap<&str, usize> = BTreeMap::new();
+    for bit in &model.ident_bits {
+        *ident_count.entry(bit.feature.as_str()).or_insert(0) += 1;
+    }
+    let or_dash = |n: usize| {
+        if n == 0 {
+            "—".to_string()
+        } else {
+            n.to_string()
+        }
+    };
+    model
+        .features
+        .iter()
+        .map(|f| {
+            let name = f.name.as_str();
+            vec![
+                name.to_string(),
+                or_dash(pos_count.get(name).copied().unwrap_or(0)),
+                or_dash(neg_count.get(name).copied().unwrap_or(0)),
+                or_dash(model_refs.get(name).copied().unwrap_or(0)),
+                or_dash(ident_count.get(name).copied().unwrap_or(0)),
+            ]
+        })
         .collect()
 }
 
@@ -773,5 +861,76 @@ mod tests {
             Pred::Not(Box::new(Pred::Flag("mips_r6".to_string()))),
         ]);
         assert_eq!(pred_string(&pred), "rv64 && !mips_r6");
+    }
+
+    #[test]
+    fn feature_coverage_counts_polarity_and_model_refs() {
+        let mut model = Model::new();
+        for name in ["alpha_feat", "beta_feat", "dead_feat"] {
+            model.features.push(polyisa_isadl::model::Feature {
+                name: name.to_string(),
+                implies: vec![],
+                conflicts: vec![],
+            });
+        }
+        model.insns.push(sample_insn(
+            "gated_pos",
+            "gated_pos",
+            Pred::Flag("alpha_feat".to_string()),
+            "alu",
+        ));
+        model.insns.push(sample_insn(
+            "gated_neg",
+            "gated_neg",
+            Pred::Not(Box::new(Pred::Flag("alpha_feat".to_string()))),
+            "alu",
+        ));
+        model.insns.push(sample_insn(
+            "gated_all",
+            "gated_all",
+            Pred::All(vec![
+                Pred::Flag("alpha_feat".to_string()),
+                Pred::Not(Box::new(Pred::Flag("beta_feat".to_string()))),
+            ]),
+            "alu",
+        ));
+        model.models.push(polyisa_isadl::model::ModelDef {
+            name: "m1".to_string(),
+            parent: String::new(),
+            add_features: vec!["alpha_feat".to_string()],
+            remove_features: vec!["beta_feat".to_string()],
+            params: vec![],
+            ident: vec![],
+            timing: None,
+        });
+        model.ident_bit("alpha_feat", 1, 0, "edx", 0);
+
+        let rows = feature_coverage_rows(&model);
+        assert_eq!(rows.len(), 3);
+        // alpha_feat: 肯定 2 件（gated_pos・gated_all）、否定 1 件、
+        // モデル参照 1 件、識別ビット 1 件。
+        assert_eq!(
+            rows[0],
+            ["alpha_feat", "2", "1", "1", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        // beta_feat: 否定 1 件とモデル参照 1 件のみ。
+        assert_eq!(
+            rows[1],
+            ["beta_feat", "—", "1", "1", "—"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        // dead_feat: どこからも参照されない。
+        assert_eq!(
+            rows[2],
+            ["dead_feat", "—", "—", "—", "—"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }

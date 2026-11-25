@@ -16,6 +16,7 @@ Hexagon V5〜V79（主対象 V73）の VLIW パケット命令群（整数、ロ
 
 ## 既知の簡略化と未対応範囲
 
+- **版旗のデコード未接続**：`v5`–`v79` の版旗は命令の `when` 条件に接続されておらず、`generic`・`v73`・`v79` で命令の利用可否は変わらない。利用可否に効くのは `hvx` とデコード文脈旗 `dx_*` のみである（[GAP-0101](../known-issues.md)）。
 - **未対応の浮動小数点命令と残不具合**：
   - 単精度／倍精度スカラ FP 命令群（`convert_*`・`dfadd`/`dfsub`/`dfmpy*`/`dfcmp*`/`sfmpy`/`sfrecipa` 等）は未実装のため、musl `decfloat`（`printf %f`・BusyBox `seq` 等）に到達すると未実装エラーになる。
   - `__secs_to_tm` 経路で 64 ビット算術に起因するとみられる残不具合があり、`busybox date`・`ls -l` の時刻整形が停止するケースがある。

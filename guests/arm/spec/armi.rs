@@ -29,6 +29,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // ARMv7-A で増えた命令群（MOVW/MOVT/BFI/BFC/UBFX/SBFX/UBFX 等の
     // メディア命令とハードウェア除算）。意味論側は常に受け付けるが、
     // モデル選択の名付け用に旗だけ持つ。
+    // Gap: GAP-0101
     m.features.push(Feature {
         name: "v7".to_string(),
         implies: vec![],

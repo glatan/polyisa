@@ -20,6 +20,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と汎用 CPU モデル。FEAT_* は後の段階で足す。
+    // いずれの旗も命令の when に接続されていないため、generic と
+    // generic_v81 で命令の利用可否は変わらない。LSE 命令自体も未実装。
+    // Gap: GAP-0101
     // Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
     m.features.push(polyisa_isadl::model::Feature {
         name: "fp".to_string(),

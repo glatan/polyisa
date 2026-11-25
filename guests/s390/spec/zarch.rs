@@ -30,6 +30,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と CPU モデル。ESA/390 面は esa390 で z/Arch 追加分を外せる形。
+    // ただし現行ではいずれの旗も命令の when に接続されておらず、
+    // esa390 と z 系各モデルで命令の利用可否は変わらない。
+    // Gap: GAP-0101
     for name in ["zarch", "long-disp", "ext-imm", "dfp", "hfp"] {
         m.features.push(Feature {
             name: name.to_string(),

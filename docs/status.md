@@ -2,7 +2,7 @@
 
 このファイルは `task status` が自動生成する。手で編集しない。
 
-各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧が必要な場合は `task status:dump` で `target/status/` に書き出せる。
+各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で `target/status/` に書き出せる。
 
 ## ISA 対応マトリクス
 
@@ -70,7 +70,7 @@
 
 ## 横断課題の要約
 
-詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 7 件、暫定は 12 件である。
+詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 7 件、暫定は 13 件である。
 
 | ID | 区分 | 関連文書 |
 |---|---|---|
@@ -93,3 +93,4 @@
 | GAP-0092 | 暫定 | [タイミングモデル](architecture/timing.md) |
 | GAP-0099 | 未着手 | [ホスト抽象化](architecture/host.md) |
 | GAP-0100 | 未着手 | [CLI・トレース・GDB 接続](architecture/cli-debug.md) |
+| GAP-0101 | 暫定 | [CPU モデルとバージョン](architecture/cpu-models.md) |

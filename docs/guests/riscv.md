@@ -20,6 +20,7 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
 
 ## 既知の簡略化と未対応範囲
 
+- **拡張機能旗のデコード未接続**：`m`・`a`・`f`・`d`・`c`・`zicsr`・`zifencei` はモデル宣言にだけ使われ、命令の `when` 条件に接続されていない。生成デコーダは `feats` を参照しないため、`rv64imac` で F/D 拡張を外しても浮動小数点命令がデコード・実行できる（`rv32`/`rv64` の語長差だけは `when` で区別している）（[GAP-0101](../known-issues.md)）。
 - **Linux syscall の範囲**：`os-linux::rv64` は初期の最小構成のままであり、`os-linux::sock`・`os-linux::wait` 正準層は未接続である。また、CLI からのトラップ境界に独自の `EcallHandler` 変換層が残っている（[GAP-0024](../known-issues.md)）。
 - **JIT**：`run_riscv.rs` への `polyisa_jit::Jit` 統合は未実施。
 - **SiFive U74 のタイミング近似と未較正**：

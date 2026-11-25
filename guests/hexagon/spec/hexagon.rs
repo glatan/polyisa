@@ -57,6 +57,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   各 subinsn のグループ（L1/L2/S1/S2/A）を指し、対応する
     //   旗を立てて 13 ビット語を decode_model_ex に通す
     //   （ia64 の unit_* と同型で、CPU モデルには含めない）。
+    // 現行では v* の版旗は命令の when に接続されておらず、
+    // generic・v73・v79 で命令の利用可否は変わらない。
+    // Gap: GAP-0101
     // Ref: SPEC-HEXAGON-PRM (V79), SPEC-HEXAGON-PRM-PREV.
     let versions = [
         "v5", "v55", "v60", "v62", "v65", "v66", "v67", "v68", "v69", "v71", "v73", "v75", "v79",

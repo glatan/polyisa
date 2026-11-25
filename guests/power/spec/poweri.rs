@@ -23,6 +23,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と CPU モデル。ppc64le ユーザーモードの必須集合を generic に持つ。
+    // いずれの旗も命令の when に接続されていないため、ISA 版ごとの
+    // 機能分割と接続が世代モデル追加の前提になる。
+    // Gap: GAP-0101
     // Ref: SPEC-POWER-ISA (v3.1C), SPEC-POWER-ABI (ELFv2 r1.5).
     for name in ["fp", "altivec", "vsx"] {
         m.features.push(Feature {

@@ -18,6 +18,7 @@ ARMv5〜ARMv7-A の A32（32 ビット命令）を主対象とし、条件実行
 
 ## 既知の簡略化と未対応範囲
 
+- **機能旗の未接続**：粗分類デコードのため `v7` 旗は命令の `when` 条件に接続されておらず、CLI はモデル選択を破棄して `feats = 0` をデコーダへ渡す。`armv5` と `armv7` の選択は実行に影響せず、ARMv6・ARMv7 系の命令は無条件にデコードされる（[GAP-0101](../known-issues.md)）。
 - **Thumb / Thumb-2・NEON**：未実装である（A32 と VFP が対象）。
 - **ARMv2/ARMv3 の 26 ビットモード・M プロファイル**：未実装である。
 - **kuser helper 領域と `__ARM_NR_cmpxchg`**：未実装であり、`__ARM_NR_cmpxchg` は `ENOSYS` を返す。

@@ -23,6 +23,10 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と汎用CPUモデル。RVA22U64相当のRV64GCを汎用とする。
+    // m/a/f/d/c/zicsr/zifencei はモデル宣言にだけ使われ、命令の when に
+    // 接続されていないため、rv64imac で f/d を外しても浮動小数点命令は
+    // デコードされる（rv32/rv64 の語長差のみ when で区別）。
+    // Gap: GAP-0101
     // Ref: SPEC-RISCV-UNPRIV (20250508), SPEC-RISCV-PROFILES (RVA23 v1.0).
     for (name, implies, conflicts) in [
         ("rv64", &[][..], &["rv32"][..]),
