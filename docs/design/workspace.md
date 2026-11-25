@@ -116,7 +116,7 @@ OS 層        loader → bits
 
 ## 機能フラグ
 
-`cli`・`os-linux`・`os-semihost` は、ゲスト ISA ごとに `guest-<isa>` という機能フラグを持ち、ビルドに含めるゲスト ISA を選べる。既定では、実装済みのゲスト ISA をすべて含める。ゲスト ISA クレートは機能フラグで命令や CPU モデルを削らない。CPU モデルの選択は実行時に行う（[CPU モデル](cpu-models.md)）。
+`cli`・`os-linux`・`os-semihost` は、ゲスト ISA ごとに `guest-<isa>` という機能フラグを持ち、ビルドに含めるゲスト ISA を選べる。既定では、実装済みのゲスト ISA をすべて含める。ゲスト ISA クレートは機能フラグで命令や CPU モデルを削らない。CPU モデルの選択は実行時に行う（[CPU モデル](cpu-models.md)）。`cli` の `guest-riscv` 機能は `gdbstub` への依存も連動させる（`run -g` のデバッグ対象が rv64 のレジスタ表を使う）。
 
 ## 生成コード
 

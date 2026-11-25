@@ -281,6 +281,7 @@ fn finish(o: Outcome) -> Result<u64, String> {
         Outcome::Exit(code) => Ok(code),
         Outcome::StepLimit { pc } => Err(format!("ステップ数を超過（pc={pc:#x}）")),
         Outcome::Deadlock => Err("デッドロック".to_string()),
+        Outcome::Breakpoint { pc } => Err(format!("ブレークポイント（pc={pc:#x}）")),
         Outcome::Unimplemented { pc, word } => Err(format!("未実装: pc={pc:#x} word={word:#x}")),
     }
 }

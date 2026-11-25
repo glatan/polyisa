@@ -7,6 +7,7 @@ rust-version = "1.99"
 
 [dependencies]
 polyisa-engine = { path = "../engine" }
+polyisa-gdbstub = { path = "../gdbstub", optional = true }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
 polyisa-guest-alpha = { path = "../../guests/alpha", optional = true }
@@ -76,7 +77,7 @@ guest-openrisc = ["dep:polyisa-guest-openrisc", "polyisa-os-linux/guest-openrisc
 guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
 guest-pdp11 = ["dep:polyisa-guest-pdp11", "dep:polyisa-os-v7"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
-guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv", "dep:polyisa-os-semihost"]
+guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv", "dep:polyisa-os-semihost", "dep:polyisa-gdbstub"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
@@ -171,6 +172,10 @@ required-features = ["guest-x86"]
 [[test]]
 name = "heavy_program_x86ext"
 required-features = ["guest-x86"]
+
+[[test]]
+name = "heavy_program_gdbstub"
+required-features = ["guest-riscv"]
 
 [[test]]
 name = "heavy_program_semihosting"

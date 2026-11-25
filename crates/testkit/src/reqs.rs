@@ -255,6 +255,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("clang")],
     },
     TestBinary {
+        binary: "heavy_program_gdbstub",
+        needs: &[Req::Tool("clang"), Req::Tool("gdb")],
+    },
+    TestBinary {
         binary: "heavy_conformance_wasm_spec",
         needs: &[Req::Data(".testdata/wasm-spec")],
     },

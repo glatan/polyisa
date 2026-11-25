@@ -84,6 +84,7 @@ fn finish_v7(o: Outcome) -> Result<u64, String> {
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
         Outcome::Deadlock => Err("deadlock".to_string()),
+        Outcome::Breakpoint { pc } => Err(format!("breakpoint at {pc:#x}")),
     }
 }
 

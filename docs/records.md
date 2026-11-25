@@ -31,7 +31,7 @@
 | 22 | Hexagon | 完了 |
 | 23 | VAX | 完了 |
 | 24 | PDP-11 | 完了 |
-| 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
+| 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 完了 |
 
 ## 対応した内容
 
@@ -650,6 +650,26 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 - wasm ホストではソケット系のホスト経路がなく、ホストソケットを要る syscall はエラーに落ちる（GAP-0099）。p2・p3 の `wasi:sockets` 接続は未着手
 - JIT は wasm ホストではスタブで常に IR 解釈（段階表どおりインタプリタのみ）。`heavy_jit_diff` が `jit.compiled() > 0` を無条件に期待するため、段階 2（aarch64 ホスト）でテストを動かすときにアサートのゲートが要る
+
+### 段階 29：GDB 接続
+
+対応した内容：
+
+- `engine` の観測点。`Observer`（`pre_step`/`post_step`/`exit` の空既定実装）と `NoObserver`。`run::run_observed` が各ステップ前後と退出時に呼び、現 `run` は空の観測で畳む
+- ブレークポイントの表（`run::Breakpoints`）。`run_observed` がステップ前に pc を照合し、一致で `Outcome::Breakpoint`（`Stop::Breakpoint` へ写す）。ゲストメモリの書き換えなし
+- `trace::InsnTrace`（GAP-0008 解消）。`Observer` 実装で `format_step` の行を積む。命令名は呼び出し側が `FnMut(u64)->String` で供給
+- `gdbstub` クレート。`rsp`（パケット・チェックサム・ACK/NAK・エスケープ）、`target::DebugTarget`（レジスタ・メモリ・step/resume・bp の trait）、`riscv`（手書きレジスタ表 x0-x31/pc/f0-f31/fcsr と target.xml 生成）、`server`（`?`・qSupported・qXfer:features・g/G・p/P・m/M・c/s・Z0/z0・k・D・H・vCont? 等）
+- `cli` の `run -g <ポート>`。riscv ELF の env 構築（`load_elf_env` を `run_elf_handler` と共通化）後に TCP で接続を待ち、`RiscvDebugEnv` を `serve` に渡す。guest-riscv 機能に連動
+- `heavy_program_gdbstub`（S29-1）。clang の riscv64 ELF に TOOL-GDB が `target remote` で接続し、break・continue・si・レジスタ読み書き・逆アセンブル・kill を検査
+
+残っている事項：
+
+- ウォッチポイント（Z2-Z4）、複数スレッド、シグナルによる停止の報告、`format_syscall` の配線は未実装（GAP-0100）
+- 対象は riscv の linux パーソナリティのみ。他 ISA のレジスタ表・`-g` の semihost 経路・非 ELF 入力は未対応
+- メモリアクセスの観測点呼出しは Observer にない（ウォッチポイント実装時に追加）
+- detach は接続を閉じるだけで、対象を動かし続ける形ではない
+- ブレークポイントはステップ前の pc 照合で、ブロック接続（GAP-0028）後は設計どおりブロック構築時の検査に移す
+- fpu feature のレジスタは `fcsr` のみで `fflags`/`frm` を載せていない（regnum を XML で明示するため現行 gdb では動く）
 
 ## 残っている事項（横断）
 

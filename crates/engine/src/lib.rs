@@ -11,6 +11,7 @@
 pub mod bare;
 pub mod cache;
 pub mod interp;
+pub mod obs;
 pub mod run;
 
 use polyisa_mem::Tlb;

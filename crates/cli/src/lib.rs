@@ -30,6 +30,8 @@ pub mod run_pdp11;
 pub mod run_power;
 
 #[cfg(feature = "guest-riscv")]
+pub mod gdb_riscv;
+#[cfg(feature = "guest-riscv")]
 pub mod run_riscv;
 #[cfg(feature = "guest-s390")]
 pub mod run_s390;
@@ -681,6 +683,57 @@ fn run_riscv_elf(
     Err("この polyisa は riscv ゲストなしでビルドされた".to_string())
 }
 
+/// `run -g <port>` の rv64 経路。linux パーソナリティのみ。
+#[cfg(feature = "guest-riscv")]
+fn run_riscv_gdb(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    port: u16,
+) -> Result<u64, String> {
+    // `-g` は rv64 ELF のみを受け付ける（他 ISA は GD6 の残件）。
+    // EM_RISCV=243。`load_elf_env` でも確かめるが、`-g` 向けに早く弾く。
+    const EM_RISCV: u16 = 243;
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let Ok(ehdr) = polyisa_loader::elf::parse_ehdr(&bytes) else {
+        return Err("-g は現状 rv64 の ELF のみ対応".to_string());
+    };
+    if !ehdr.little || ehdr.machine != EM_RISCV {
+        return Err("-g は現状 rv64 の ELF のみ対応".to_string());
+    }
+    match spec {
+        Some(s) if s.family != "riscv" => {
+            return Err(format!(
+                "--cpu のファミリ {} は -g（riscv）と合わない",
+                s.family
+            ));
+        }
+        _ => {}
+    }
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "riscv",
+                polyisa_guest_riscv::MODEL_DEFS,
+                polyisa_guest_riscv::FEATURE_DEFS,
+                polyisa_guest_riscv::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    gdb_riscv::run_elf_gdb(path, argv, sel.as_ref(), port)
+}
+
+#[cfg(not(feature = "guest-riscv"))]
+fn run_riscv_gdb(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _port: u16,
+) -> Result<u64, String> {
+    Err("この polyisa は riscv ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-wasm")]
 fn run_wasm_mod(
     bytes: &[u8],
@@ -973,6 +1026,32 @@ pub fn run_path_opts(
         }
         _ => Err(format!("{path} は未知の ELF クラスである")),
     }
+}
+
+/// `run -g <port>`：GDB リモートシリアルプロトコルのサーバを開き、
+/// GDB の接続を待ってからゲストを始める（observability.md「GDB の接続」）。
+/// 現状は linux パーソナリティの rv64 ELF のみを受け付ける。
+pub fn run_path_gdb(
+    path: &str,
+    argv: &[String],
+    cpu: Option<&str>,
+    root: Option<&str>,
+    os: Option<&str>,
+    port: u16,
+) -> Result<u64, String> {
+    match os {
+        None | Some("linux") => {}
+        Some(o) => {
+            return Err(format!(
+                "-g と併用できる --os は linux のみ（{o} は未対応）"
+            ));
+        }
+    }
+    if root.is_some() {
+        return Err("-g と --root の併用は未対応".to_string());
+    }
+    let spec = cpu.map(parse_cpu_spec).transpose()?;
+    run_riscv_gdb(path, argv, spec.as_ref(), port)
 }
 
 /// `run`、`cpus`、`disasm` のいずれか。引数の解析は後の段階で足す。

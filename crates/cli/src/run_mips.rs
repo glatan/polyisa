@@ -381,6 +381,11 @@ pub fn run_ex(
                 pc: get_u64(env, sem::pc_ref().offset()),
             }
         }
+        (Outcome::Breakpoint { pc }, _) => {
+            st.dump_hist();
+            st.dump_regs(env);
+            MipsOutcome::StepLimit { pc }
+        }
     }
 }
 

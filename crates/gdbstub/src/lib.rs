@@ -1,33 +1,15 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! GDB リモートシリアルプロトコルのサーバ。`std::net` の TCP で待つ。
+//! GDB リモートシリアルプロトコルのサーバ。
 //!
-//! プロトコルの実装は後の段階で足す。
+//! `rsp` がパケット層、`target` が対象との境界 `DebugTarget`、
+//! `server` がパケットの振り分けと応答、`riscv` が rv64 のレジスタ表と
+//! ターゲット記述（target.xml）の生成を持つ。パケット形式の事実は
+//! SPEC-GDB-RSP による。
 
 #![forbid(unsafe_code)]
 
-/// 待ち受けの設定。
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Config {
-    /// `127.0.0.1:1234` のような addr。
-    pub addr: String,
-}
-
-impl Config {
-    #[must_use]
-    pub fn new(addr: &str) -> Self {
-        Self {
-            addr: addr.to_string(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn holds_addr() {
-        assert_eq!(Config::new("127.0.0.1:1234").addr, "127.0.0.1:1234");
-    }
-}
+pub mod riscv;
+pub mod rsp;
+pub mod server;
+pub mod target;

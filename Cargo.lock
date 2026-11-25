@@ -11,6 +11,7 @@ name = "polyisa-cli"
 version = "0.0.0"
 dependencies = [
  "polyisa-engine",
+ "polyisa-gdbstub",
  "polyisa-guest",
  "polyisa-guest-aarch64",
  "polyisa-guest-alpha",
@@ -83,10 +84,6 @@ dependencies = [
 [[package]]
 name = "polyisa-gdbstub"
 version = "0.0.0"
-dependencies = [
- "polyisa-engine",
- "polyisa-guest",
-]
 
 [[package]]
 name = "polyisa-guest"

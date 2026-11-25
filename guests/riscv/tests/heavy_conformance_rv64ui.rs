@@ -216,6 +216,7 @@ fn check_one_in(sub: &str, name: &str) {
         }
         Outcome::StepLimit { pc } => panic!("{name}: 予算切れ pc={pc:#x}"),
         Outcome::Deadlock => panic!("{name}: deadlock"),
+        Outcome::Breakpoint { pc } => panic!("{name}: breakpoint pc={pc:#x}"),
     }
 }
 

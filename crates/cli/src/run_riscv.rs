@@ -184,8 +184,9 @@ pub fn run_ex(
 
 /// 1 命令ぶんのフェッチ・解読・意味論と ecall 境界の解決。
 /// 継続なら `Ok(())`、退出なら退出理由を返す。
+/// `gdb_riscv` の単歩・継続の実行単位としても使う。
 #[allow(clippy::too_many_lines)]
-fn step_rv(
+pub(crate) fn step_rv(
     env: &mut BareEnv,
     sys: &mut impl EcallHandler,
     rv32: bool,
@@ -1828,15 +1829,10 @@ pub fn run_elf_sel(
     run_elf_handler(path, argv, sel, &mut sys)
 }
 
-/// `run_elf_sel` に `EcallHandler` を差し込む形。semihosting は
-/// `SemiRv` を渡す（`--os semihost`）。
-pub fn run_elf_handler(
-    path: &str,
-    argv: &[String],
-    sel: Option<&polyisa_isadl::select::CpuSel>,
-    handler: &mut impl EcallHandler,
-) -> Result<u64, String> {
-    use polyisa_guest_riscv::sem::Gpr;
+/// ELF の読み込みと初期スタックの構築。返すのは (env, entry)。
+/// `env.pc` への代入は呼び出し側が行う（`run_ex` が `env.pc = entry` を
+/// 書く）。`run_elf_handler` と `run -g` の入口で共有する。
+pub(crate) fn load_elf_env(path: &str, argv: &[String]) -> Result<(BareEnv, u64), String> {
     use polyisa_mem::{PAGE_SIZE, Perms};
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
@@ -1879,11 +1875,24 @@ pub fn run_elf_handler(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(Gpr(2).state(), sp);
+    Ok((env, ehdr.entry))
+}
+
+/// `run_elf_sel` に `EcallHandler` を差し込む形。semihosting は
+/// `SemiRv` を渡す（`--os semihost`）。
+pub fn run_elf_handler(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    handler: &mut impl EcallHandler,
+) -> Result<u64, String> {
+    let (mut env, entry) = load_elf_env(path, argv)?;
     let feats = sel.map_or(0, |s| s.feats);
-    match run_ex(&mut env, ehdr.entry, false, feats, handler) {
+    match run_ex(&mut env, entry, false, feats, handler) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
         Outcome::Deadlock => Err("deadlock".to_string()),
+        Outcome::Breakpoint { pc } => Err(format!("breakpoint at {pc:#x}")),
     }
 }

@@ -21,25 +21,27 @@ fn cpus_line(family: &str, name: &str, timing: &[(&str, &str, &str, &str)]) -> S
     }
 }
 
+/// `run` の使い方の 1 行。引数が足りないときに出す。
+const RUN_USAGE: &str = "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] [--os <linux|semihost>] [-g <ポート>] <elf> [args...]";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match polyisa_cli::parse_command(&args) {
         polyisa_cli::Command::Run => {
-            // `run [--cpu <ファミリ>:<モデル>[,+機能,-機能]] [--root <dir>] <elf> [args...]`。
+            // `run [--cpu <ファミリ>:<モデル>[,+機能,-機能]] [--root <dir>] [--os <linux|semihost>] [-g <port>] <elf> [args...]`。
             // オプションはゲストの引数と混ざらないよう elf の前に置く。
             let mut rest = &args[1..];
             let mut cpu = None;
             let mut root = None;
             let mut os = None;
+            let mut gdb = None;
             loop {
                 if let Some(v) = rest.first().and_then(|a| a.strip_prefix("--cpu=")) {
                     cpu = Some(v.to_string());
                     rest = &rest[1..];
                 } else if rest.first().map(String::as_str) == Some("--cpu") {
                     let Some(v) = rest.get(1) else {
-                        eprintln!(
-                            "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] <elf> [args...]"
-                        );
+                        eprintln!("{RUN_USAGE}");
                         std::process::exit(2);
                     };
                     cpu = Some(v.clone());
@@ -52,39 +54,65 @@ fn main() {
                     rest = &rest[1..];
                 } else if rest.first().map(String::as_str) == Some("--os") {
                     let Some(v) = rest.get(1) else {
-                        eprintln!(
-                            "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] [--os <linux|semihost>] <elf> [args...]"
-                        );
+                        eprintln!("{RUN_USAGE}");
                         std::process::exit(2);
                     };
                     os = Some(v.clone());
                     rest = &rest[2..];
                 } else if rest.first().map(String::as_str) == Some("--root") {
                     let Some(v) = rest.get(1) else {
-                        eprintln!(
-                            "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] <elf> [args...]"
-                        );
+                        eprintln!("{RUN_USAGE}");
                         std::process::exit(2);
                     };
                     root = Some(v.clone());
+                    rest = &rest[2..];
+                } else if let Some(v) = rest
+                    .first()
+                    .and_then(|a| a.strip_prefix("--gdb=").or_else(|| a.strip_prefix("-g=")))
+                {
+                    let Ok(p) = v.parse::<u16>() else {
+                        eprintln!("-g のポート番号が読めない: {v}");
+                        std::process::exit(2);
+                    };
+                    gdb = Some(p);
+                    rest = &rest[1..];
+                } else if matches!(rest.first().map(String::as_str), Some("-g" | "--gdb")) {
+                    let Some(v) = rest.get(1) else {
+                        eprintln!("{RUN_USAGE}");
+                        std::process::exit(2);
+                    };
+                    let Ok(p) = v.parse::<u16>() else {
+                        eprintln!("-g のポート番号が読めない: {v}");
+                        std::process::exit(2);
+                    };
+                    gdb = Some(p);
                     rest = &rest[2..];
                 } else {
                     break;
                 }
             }
             let Some(path) = rest.first() else {
-                eprintln!(
-                    "usage: polyisa run [--cpu <ファミリ>:<モデル>] [--root <dir>] <elf> [args...]"
-                );
+                eprintln!("{RUN_USAGE}");
                 std::process::exit(2);
             };
-            match polyisa_cli::run_path_opts(
-                path,
-                &rest[1..],
-                cpu.as_deref(),
-                root.as_deref(),
-                os.as_deref(),
-            ) {
+            let result = match gdb {
+                Some(port) => polyisa_cli::run_path_gdb(
+                    path,
+                    &rest[1..],
+                    cpu.as_deref(),
+                    root.as_deref(),
+                    os.as_deref(),
+                    port,
+                ),
+                None => polyisa_cli::run_path_opts(
+                    path,
+                    &rest[1..],
+                    cpu.as_deref(),
+                    root.as_deref(),
+                    os.as_deref(),
+                ),
+            };
+            match result {
                 Ok(code) => std::process::exit(code as i32),
                 Err(msg) => {
                     eprintln!("{msg}");

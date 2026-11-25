@@ -491,5 +491,6 @@ fn run_elf_openrisc_impl(
         Outcome::Unimplemented { pc, word } => Err(format!("未実装: pc={pc:#x} word={word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("実行予算を使い切った: pc={pc:#x}")),
         Outcome::Deadlock => Err("デッドロック".to_string()),
+        Outcome::Breakpoint { pc } => Err(format!("ブレークポイント: pc={pc:#x}")),
     }
 }

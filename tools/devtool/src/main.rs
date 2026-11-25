@@ -897,6 +897,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
         "polyisa-gdbstub" => &["polyisa-engine", "polyisa-guest"],
         "polyisa-cli" => &[
             "polyisa-engine",
+            "polyisa-gdbstub",
             "polyisa-guest",
             "polyisa-guest-aarch64",
             "polyisa-guest-alpha",
