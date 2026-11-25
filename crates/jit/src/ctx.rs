@@ -61,6 +61,7 @@ fn kind_code(k: ExceptionKind) -> u64 {
         ExceptionKind::Fp => 4,
         ExceptionKind::Break => 5,
         ExceptionKind::Trap => 6,
+        ExceptionKind::Protection => 7,
     }
 }
 
@@ -72,6 +73,7 @@ fn code_kind(c: u64) -> ExceptionKind {
         4 => ExceptionKind::Fp,
         5 => ExceptionKind::Break,
         6 => ExceptionKind::Trap,
+        7 => ExceptionKind::Protection,
         _ => ExceptionKind::Undefined,
     }
 }

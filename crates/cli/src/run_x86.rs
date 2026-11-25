@@ -2950,9 +2950,9 @@ fn dispatch_map<B: Backend>(
             }
         }
         Insn::MovEbGb => sem_ea::mov_e(b, 8, &ea, d, Src::Reg(reg)),
-        Insn::MovEvGv => sem_ea::mov_e(b, w, &ea, d, Src::Reg(reg)),
-        Insn::MovGbEb => sem_ea::mov_r(b, 8, reg, &ea, d),
-        Insn::MovGvEv => sem_ea::mov_r(b, w, reg, &ea, d),
+        Insn::MovEvGv | Insn::MovntiEvGv => sem_ea::mov_e(b, w, &ea, d, Src::Reg(reg)),
+        Insn::MovGbEb | Insn::MovrsGbEb => sem_ea::mov_r(b, 8, reg, &ea, d),
+        Insn::MovGvEv | Insn::MovrsGvEv => sem_ea::mov_r(b, w, reg, &ea, d),
         Insn::MovEbIb => sem_ea::mov_e(b, 8, &ea, d, Src::Imm(d.imm)),
         Insn::MovEvIz => sem_ea::mov_e(b, w, &ea, d, Src::Imm(iz)),
         Insn::MovRbIb => sem_ea::mov_e(b, 8, &Rm::Reg(decode::op_reg(d)), d, Src::Imm(d.imm)),
@@ -3517,7 +3517,69 @@ fn dispatch_map<B: Backend>(
             let port = dx_port(b);
             sem_ea::io_out(b, w, port, d)
         }
-        Insn::Syscall => sem::syscall(b, eip),
+        Insn::Syscall | Insn::SyscallAmd => sem::syscall(b, eip),
+        Insn::Pause | Insn::PtwriteRv | Insn::UwrmsrRvEv => sem_ea::nop(b),
+        Insn::RdpidRv => sem_ea::rdpid(b, w, &ea, d),
+        Insn::UrdmsrRvEv => sem_ea::urdmsr(b, &ea),
+        Insn::Rdpmc => sem_ea::rdpmc(b),
+        // 特権キャッシュ制御はユーザーモードでは #GP。実モードは
+        // CPL0 相当なので、キャッシュを持たない近似で no-op。
+        Insn::Invd | Insn::Wbinvd | Insn::InvlpgMb => {
+            if mode == 16 {
+                sem_ea::nop(b)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        // MSR アクセスもユーザーモードでは #GP。システムモード側は
+        // MSR 空間を持たない最小近似（RDMSR=0、WRMSR=no-op）。
+        Insn::Rdmsr => {
+            if mode == 16 {
+                sem_ea::rdmsr_zero(b)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        Insn::Wrmsr => {
+            if mode == 16 {
+                sem_ea::nop(b)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        // SYSRET は CPL0 専用。実モードではエンコード自体が無効。
+        Insn::Sysret | Insn::SysretAmd => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, 0, 6, sa, sseg)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        // SMX/VMX/SMM の実行環境はモデル化しない。CR4.SMXE=0、
+        // VMX 非動作・SMM 外なので、これらは #UD となる。実モードでは
+        // 例外を IVT[6] へ配送し、ユーザーモードでは GAP-0026 の
+        // 未配送境界に従って Undefined を返す。
+        Insn::Getsec | Insn::Rsm | Insn::VmreadEvGv | Insn::VmwriteGvEv => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, 0, 6, sa, sseg)
+            } else {
+                sem_ea::undefined(b, eip)
+            }
+        }
+        Insn::Int1 => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, u32::from(d.len), 1, sa, sseg)
+            } else {
+                sem_ea::int_n(b, eip, 1)
+            }
+        }
+        Insn::Ud0GvEv | Insn::Udb => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, 0, 6, sa, sseg)
+            } else {
+                sem_ea::trap(b, eip, 0x06)
+            }
+        }
         Insn::Cpuid => sem::cpuid(b),
         Insn::ImulGvEv => sem_ea::imul2(b, w, reg, &ea, d),
         Insn::ImulGvEvIz => sem_ea::imul3(b, w, reg, &ea, d, iz as i64),
@@ -3588,19 +3650,52 @@ fn dispatch_map<B: Backend>(
         Insn::BoundGvMp => sem_ea::bound(b, w, d, &ea, eip, mode, sa, sseg),
         Insn::PopCs => sem_ea::pop_sr(b, 1, sw, sa, sseg),
         Insn::SmswEw => sem_ea::smsw(b, &ea),
-        Insn::LmswEw => sem_ea::lmsw(b, &ea, eip),
+        // LMSW/LGDT/LIDT/LLDT/LTR は CPL0 専用。実モードは CPL0 相当
+        // だが、32/64 ビットの本経路は Linux ユーザーモードなので #GP
+        // に揃える。SGDT/SIDT/SLDT/STR/SMSW は UMIP=0 の非特権命令。
+        Insn::LmswEw => {
+            if mode == 16 {
+                sem_ea::lmsw(b, &ea, eip)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
         // 0F 00/01 のシステム状態群。ディスクリプタ機構を持たない
         // モデルでは保護系の検査は全て失敗（ZF=0）で近似する。
         Insn::SldtEw => sem_ea::sldt(b, false, &ea, mode, eip, sa, sseg),
         Insn::StrEw => sem_ea::sldt(b, true, &ea, mode, eip, sa, sseg),
-        Insn::LldtEw => sem_ea::lldt(b, false, &ea, mode, eip, sa, sseg),
-        Insn::LtrEw => sem_ea::lldt(b, true, &ea, mode, eip, sa, sseg),
+        Insn::LldtEw => {
+            if mode == 16 {
+                sem_ea::lldt(b, false, &ea, mode, eip, sa, sseg)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        Insn::LtrEw => {
+            if mode == 16 {
+                sem_ea::lldt(b, true, &ea, mode, eip, sa, sseg)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
         Insn::VerrEw | Insn::VerwEw => sem_ea::verrw(b, mode, eip, sa, sseg),
         Insn::LarGvEw | Insn::LslGvEw => sem_ea::lar_lsl(b, mode, eip, sa, sseg),
         Insn::SgdtMs => sem_ea::sgdt(b, &ea, mode),
         Insn::SidtMs => sem_ea::sidt(b, &ea, mode),
-        Insn::LgdtMs => sem_ea::lgdt(b, &ea, mode),
-        Insn::LidtMs => sem_ea::lidt(b, &ea, mode),
+        Insn::LgdtMs => {
+            if mode == 16 {
+                sem_ea::lgdt(b, &ea, mode)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
+        Insn::LidtMs => {
+            if mode == 16 {
+                sem_ea::lidt(b, &ea, mode)
+            } else {
+                sem_ea::protection(b, eip)
+            }
+        }
         // SERIALIZE は逐次化 no-op。
         Insn::Serialize => sem_ea::nop(b),
         Insn::RdrandRv => sem_ea::rdrand(b, w, &ea, d),
@@ -3770,6 +3865,26 @@ fn dispatch_map<B: Backend>(
         Insn::Hlt => Ok(()),
         // CLTS は CR0.TS を下ろすが、CR0 をモデル化していないので nop。
         Insn::Clts => Ok(()),
+        Insn::AaddMvGv => sem_ea::rao_op(b, 0, w, d, &ea),
+        Insn::AandMvGv => sem_ea::rao_op(b, 1, w, d, &ea),
+        Insn::AorMvGv => sem_ea::rao_op(b, 2, w, d, &ea),
+        Insn::AxorMvGv => sem_ea::rao_op(b, 3, w, d, &ea),
+        Insn::CmpoxaddEvGv => sem_ea::cmpccxadd(b, 0, vw, d, &ea),
+        Insn::CmpnoxaddEvGv => sem_ea::cmpccxadd(b, 1, vw, d, &ea),
+        Insn::CmpbxaddEvGv => sem_ea::cmpccxadd(b, 2, vw, d, &ea),
+        Insn::CmpnbxaddEvGv => sem_ea::cmpccxadd(b, 3, vw, d, &ea),
+        Insn::CmpzxaddEvGv => sem_ea::cmpccxadd(b, 4, vw, d, &ea),
+        Insn::CmpnzxaddEvGv => sem_ea::cmpccxadd(b, 5, vw, d, &ea),
+        Insn::CmpbexaddEvGv => sem_ea::cmpccxadd(b, 6, vw, d, &ea),
+        Insn::CmpnbexaddEvGv => sem_ea::cmpccxadd(b, 7, vw, d, &ea),
+        Insn::CmpsxaddEvGv => sem_ea::cmpccxadd(b, 8, vw, d, &ea),
+        Insn::CmpnsxaddEvGv => sem_ea::cmpccxadd(b, 9, vw, d, &ea),
+        Insn::CmppxaddEvGv => sem_ea::cmpccxadd(b, 10, vw, d, &ea),
+        Insn::CmpnpxaddEvGv => sem_ea::cmpccxadd(b, 11, vw, d, &ea),
+        Insn::CmplxaddEvGv => sem_ea::cmpccxadd(b, 12, vw, d, &ea),
+        Insn::CmpnlxaddEvGv => sem_ea::cmpccxadd(b, 13, vw, d, &ea),
+        Insn::CmplexaddEvGv => sem_ea::cmpccxadd(b, 14, vw, d, &ea),
+        Insn::CmpnlexaddEvGv => sem_ea::cmpccxadd(b, 15, vw, d, &ea),
         // ===== SSE/SSE2（0F 系）=====
         Insn::MovupsXvWv
         | Insn::MovupdXvWv
@@ -3782,7 +3897,10 @@ fn dispatch_map<B: Backend>(
         | Insn::MovapsWvXv
         | Insn::MovapdWvXv
         | Insn::MovdqaWvXv
-        | Insn::MovdquWvXv => sem_ea::mov_w_x(b, d, &ea),
+        | Insn::MovdquWvXv
+        | Insn::MovntpsWvXv
+        | Insn::MovntpdWvXv
+        | Insn::MovntdqWvXv => sem_ea::mov_w_x(b, d, &ea),
         // EVEX の VMOVDQU32/64。要素幅は EVEX.W（d.vex_w）。
         Insn::Vmovdqu32XvWv | Insn::Vmovdqu32XvWvVl => sem_ea::emovdqu(b, d, &ea, false, d.vex_w),
         Insn::Vmovdqu32WvXv | Insn::Vmovdqu32WvXvVl => sem_ea::emovdqu(b, d, &ea, true, d.vex_w),
@@ -3802,13 +3920,29 @@ fn dispatch_map<B: Backend>(
         Insn::MovhpsWvXv | Insn::MovhpdWvXv => sem_ea::movh_st(b, d, &ea),
         Insn::MovqXvWv => sem_ea::movq_x_w(b, d, &ea),
         Insn::MovqWvXv => sem_ea::movq_w_x(b, d, &ea),
+        Insn::Movdq2qPvXv => sem_ea::movdq2q(b, d, &ea),
+        Insn::Movq2dqXvQv => sem_ea::movq2dq(b, d, &ea),
         Insn::MovdXvEv => sem_ea::movd_x_e(b, d, &ea),
         Insn::MovdEvXv => sem_ea::movd_e_x(b, d, &ea),
         Insn::MovmskpsGvWv => sem_ea::movmsk(b, 32, d, &ea),
         Insn::MovmskpdGvWv => sem_ea::movmsk(b, 64, d, &ea),
         Insn::PmovmskbGvWv => sem_ea::movmsk(b, 8, d, &ea),
-        Insn::UcomissXvWv | Insn::ComissXvWv => sem_ea::ucomis(b, 32, d, &ea),
-        Insn::UcomisdXvWv | Insn::ComisdXvWv => sem_ea::ucomis(b, 64, d, &ea),
+        Insn::UcomissXvWv | Insn::ComissXvWv | Insn::VucomissXvWv | Insn::VcomissXvWv => {
+            sem_ea::ucomis(b, 32, d, &ea)
+        }
+        Insn::UcomisdXvWv | Insn::ComisdXvWv | Insn::VucomisdXvWv | Insn::VcomisdXvWv => {
+            sem_ea::ucomis(b, 64, d, &ea)
+        }
+        Insn::RsqrtpsXvWv => sem_ea::rcp_rs(b, true, d, &ea),
+        Insn::RcppsXvWv => sem_ea::rcp_rs(b, false, d, &ea),
+        Insn::RsqrtssXvWv => sem_ea::rcp_rs_s(b, true, d, &ea),
+        Insn::RcpssXvWv => sem_ea::rcp_rs_s(b, false, d, &ea),
+        Insn::Cvtpi2psXvQv => sem_ea::cvtpi2ps(b, d, &ea),
+        Insn::Cvtpi2pdXvQv => sem_ea::cvtpi2pd(b, d, &ea),
+        Insn::Cvttps2piPvWv => sem_ea::cvtps2pi(b, true, d, &ea),
+        Insn::Cvtps2piPvWv => sem_ea::cvtps2pi(b, false, d, &ea),
+        Insn::Cvttpd2piPvWv => sem_ea::cvtpd2pi(b, true, d, &ea),
+        Insn::Cvtpd2piPvWv => sem_ea::cvtpd2pi(b, false, d, &ea),
         Insn::Cvtsi2ssXvEv => sem_ea::cvtsi(b, 32, d, &ea),
         Insn::Cvtsi2sdXvEv => sem_ea::cvtsi(b, 64, d, &ea),
         Insn::Cvttss2siGvWv => sem_ea::cvtf2i(b, 32, true, d, &ea, reg),
@@ -4008,6 +4142,13 @@ fn dispatch_map<B: Backend>(
         }
         Insn::VmaxssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 32, d, &ea),
         Insn::VmaxsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        // SSE3 の水平加減算と ADDSUB の VEX 形。
+        Insn::VhaddpsXvHvWv => sem_ea::vphaddsub_f(b, false, 32, d, &ea),
+        Insn::VhaddpdXvHvWv => sem_ea::vphaddsub_f(b, false, 64, d, &ea),
+        Insn::VhsubpsXvHvWv => sem_ea::vphaddsub_f(b, true, 32, d, &ea),
+        Insn::VhsubpdXvHvWv => sem_ea::vphaddsub_f(b, true, 64, d, &ea),
+        Insn::VaddsubpsXvHvWv => sem_ea::vaddsub(b, 32, d, &ea),
+        Insn::VaddsubpdXvHvWv => sem_ea::vaddsub(b, 64, d, &ea),
         Insn::VandpsXvHvWv | Insn::VandpdXvHvWv | Insn::VpandXvHvWv => {
             sem_ea::vlogic(b, sem_ea::Lop::And, d, &ea)
         }
@@ -4050,6 +4191,8 @@ fn dispatch_map<B: Backend>(
         Insn::PaddbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::Add, d, &ea),
         Insn::PaddwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::Add, d, &ea),
         Insn::PadddXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PmulhuwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MulHiU, d, &ea),
+        Insn::PmulhwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MulHiS, d, &ea),
         Insn::PmuludqXvWv => sem_ea::pmuludq(b, d, &ea),
         Insn::PmaddwdXvWv => sem_ea::pmaddwd(b, d, &ea),
         Insn::PsadbwXvWv => sem_ea::psadbw(b, d, &ea),
@@ -4079,6 +4222,8 @@ fn dispatch_map<B: Backend>(
         }
         Insn::VpmulhuwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulHiU, d, &ea),
         Insn::VpmulhwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulHiS, d, &ea),
+        Insn::VpavgbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::Avg, d, &ea),
+        Insn::VpavgwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::Avg, d, &ea),
         Insn::VpsubusbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::SubSatU, d, &ea),
         Insn::VpsubuswXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::SubSatU, d, &ea),
         Insn::VpaddusbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::AddSatU, d, &ea),
@@ -4170,6 +4315,11 @@ fn dispatch_map<B: Backend>(
         Insn::VpsllwXvHvWv => sem_ea::vpshift::<B, W16>(b, sem_ea::Psh::L, d, &ea),
         Insn::VpslldXvHvWv => sem_ea::vpshift::<B, W32>(b, sem_ea::Psh::L, d, &ea),
         Insn::VpsllqXvHvWv => sem_ea::vpshift::<B, W64>(b, sem_ea::Psh::L, d, &ea),
+        Insn::VpsllvdXvHvWv => sem_ea::vpshiftv::<B, W32>(b, sem_ea::Psh::L, d, &ea),
+        Insn::VpsllvqXvHvWv => sem_ea::vpshiftv::<B, W64>(b, sem_ea::Psh::L, d, &ea),
+        Insn::VpsrlvdXvHvWv => sem_ea::vpshiftv::<B, W32>(b, sem_ea::Psh::R, d, &ea),
+        Insn::VpsrlvqXvHvWv => sem_ea::vpshiftv::<B, W64>(b, sem_ea::Psh::R, d, &ea),
+        Insn::VpsravdXvHvWv => sem_ea::vpshiftv::<B, W32>(b, sem_ea::Psh::A, d, &ea),
         Insn::VpsrlwHvWvIb => sem_ea::vpshift_i::<B, W16>(b, sem_ea::Psh::R, d),
         Insn::VpsrldHvWvIb => sem_ea::vpshift_i::<B, W32>(b, sem_ea::Psh::R, d),
         Insn::VpsrlqHvWvIb => sem_ea::vpshift_i::<B, W64>(b, sem_ea::Psh::R, d),
@@ -4191,6 +4341,11 @@ fn dispatch_map<B: Backend>(
         Insn::VmovhlpsXvHvWv => sem_ea::vmovhlps(b, d, &ea),
         Insn::VmovddupXvWv => sem_ea::vmovddup(b, d, &ea),
         Insn::VmovsldupXvWv => sem_ea::vdupps(b, false, d, &ea),
+        Insn::VrsqrtpsXvWv => sem_ea::vrcp_rs(b, true, d, &ea),
+        Insn::VrcppsXvWv => sem_ea::vrcp_rs(b, false, d, &ea),
+        Insn::VrsqrtssXvHvWv => sem_ea::vrcp_rs_s(b, true, d, &ea),
+        Insn::VrcpssXvHvWv => sem_ea::vrcp_rs_s(b, false, d, &ea),
+        Insn::VmaskmovdquXvWv => sem_ea::maskmovdqu(b, d, &ea, seg),
         Insn::VmovshdupXvWv => sem_ea::vdupps(b, true, d, &ea),
         Insn::VmovmskpsGvWv => sem_ea::vmovmsk(b, 32, d, &ea),
         Insn::VmovmskpdGvWv => sem_ea::vmovmsk(b, 64, d, &ea),
@@ -4198,10 +4353,11 @@ fn dispatch_map<B: Backend>(
         Insn::VmovntpsWvXv | Insn::VmovntpdWvXv | Insn::VmovntdqWvXv => sem_ea::vmov_w_x(b, d, &ea),
         Insn::VldmxcsrMd => sem_ea::ldmxcsr(b, &ea),
         Insn::VstmxcsrMd => sem_ea::stmxcsr(b, &ea),
-        Insn::VmovdXvEv => sem_ea::vmovd_x_e(b, d, &ea),
-        Insn::VmovdEvXv => sem_ea::movd_e_x(b, d, &ea),
+        Insn::VmovdXvEv | Insn::VmovqXvEq | Insn::VmovdW1XvEv => sem_ea::vmovd_x_e(b, d, &ea),
+        Insn::VmovdEvXv | Insn::VmovqEqXv | Insn::VmovdW1EvXv => sem_ea::movd_e_x(b, d, &ea),
         Insn::VmovqXvWv => sem_ea::vmovq_x_w(b, d, &ea),
         Insn::VmovqWvXv => sem_ea::vmovq_w_x(b, d, &ea),
+        Insn::VlddquXvMv => sem_ea::vmov_x_w(b, d, &ea),
         // VEX の比較（32 述語）。
         Insn::VcmppsXvHvWvIb => sem_ea::vpfloat(b, sem_ea::Fop::Cmp(d.imm as u8), 32, d, &ea),
         Insn::VcmppdXvHvWvIb => sem_ea::vpfloat(b, sem_ea::Fop::Cmp(d.imm as u8), 64, d, &ea),
@@ -4209,6 +4365,7 @@ fn dispatch_map<B: Backend>(
         Insn::VcmpsdXvHvWvIb => sem_ea::vsfloat(b, sem_ea::Fop::Cmp(d.imm as u8), 64, d, &ea),
         // VEX の乗算・絶対差分和（B1b-2）。
         Insn::VpmuludqXvHvWv => sem_ea::vpmuludq(b, d, &ea),
+        Insn::VpmuldqXvHvWv => sem_ea::vpmuldq(b, d, &ea),
         Insn::VpmaddwdXvHvWv => sem_ea::vpmaddwd(b, d, &ea),
         Insn::VpsadbwXvHvWv => sem_ea::vpsadbw(b, d, &ea),
         // VEX の SSSE3 系・テスト系（B1b-2）。
@@ -4285,12 +4442,42 @@ fn dispatch_map<B: Backend>(
         Insn::VblendpsXvHvWvIb => sem_ea::vblendp(b, 32, d.imm as u8, d, &ea),
         Insn::VblendpdXvHvWvIb => sem_ea::vblendp(b, 64, d.imm as u8, d, &ea),
         Insn::VpblendwXvHvWvIb => sem_ea::vblendp(b, 16, d.imm as u8, d, &ea),
+        Insn::VpblenddXvHvWvIb => sem_ea::vpblendd(b, d.imm as u8, d, &ea),
+        Insn::VpclmulqdqXvHvWvIb => sem_ea::vpclmulqdq(b, d.imm as u8, d, &ea),
+        Insn::Vpmadd52luqXvHvWv => sem_ea::vpmadd52(b, false, d, &ea),
+        Insn::Vpmadd52huqXvHvWv => sem_ea::vpmadd52(b, true, d, &ea),
+        Insn::VpdpbuudXvHvWv => sem_ea::vpdp(b, 8, false, false, false, d, &ea),
+        Insn::VpdpbusdXvHvWv => sem_ea::vpdp(b, 8, false, true, false, d, &ea),
+        Insn::VpdpbsudXvHvWv => sem_ea::vpdp(b, 8, true, false, false, d, &ea),
+        Insn::VpdpbssdXvHvWv => sem_ea::vpdp(b, 8, true, true, false, d, &ea),
+        Insn::VpdpbuudsXvHvWv => sem_ea::vpdp(b, 8, false, false, true, d, &ea),
+        Insn::VpdpbusdsXvHvWv => sem_ea::vpdp(b, 8, false, true, true, d, &ea),
+        Insn::VpdpbsudsXvHvWv => sem_ea::vpdp(b, 8, true, false, true, d, &ea),
+        Insn::VpdpbssdsXvHvWv => sem_ea::vpdp(b, 8, true, true, true, d, &ea),
+        Insn::VpdpwuudXvHvWv => sem_ea::vpdp(b, 16, false, false, false, d, &ea),
+        Insn::VpdpwusdXvHvWv => sem_ea::vpdp(b, 16, false, true, false, d, &ea),
+        Insn::VpdpwsudXvHvWv => sem_ea::vpdp(b, 16, true, false, false, d, &ea),
+        Insn::VpdpwssdXvHvWv => sem_ea::vpdp(b, 16, true, true, false, d, &ea),
+        Insn::VpdpwuudsXvHvWv => sem_ea::vpdp(b, 16, false, false, true, d, &ea),
+        Insn::VpdpwusdsXvHvWv => sem_ea::vpdp(b, 16, false, true, true, d, &ea),
+        Insn::VpdpwsudsXvHvWv => sem_ea::vpdp(b, 16, true, false, true, d, &ea),
+        Insn::VpdpwssdsXvHvWv => sem_ea::vpdp(b, 16, true, true, true, d, &ea),
+        Insn::VaesencXvHvWv => sem_ea::vaesround(b, 0, d, &ea),
+        Insn::VaesenclastXvHvWv => sem_ea::vaesround(b, 1, d, &ea),
+        Insn::VaesdecXvHvWv => sem_ea::vaesround(b, 2, d, &ea),
+        Insn::VaesdeclastXvHvWv => sem_ea::vaesround(b, 3, d, &ea),
+        Insn::VaesimcXvWv => sem_ea::vaesimc(b, d, &ea),
+        Insn::Vgf2p8mulbXvHvWv => sem_ea::vgf2p8mulb(b, d, &ea),
+        Insn::Vgf2p8affineqbXvHvWvIb => sem_ea::vgf2p8affine(b, false, d.imm as u8, d, &ea),
+        Insn::Vgf2p8affineinvqbXvHvWvIb => sem_ea::vgf2p8affine(b, true, d.imm as u8, d, &ea),
+        Insn::VaeskeygenassistXvWvIb => sem_ea::vaeskeygenassist(b, d.imm as u8, d, &ea),
         Insn::VblendvpsXvHvWvIb => sem_ea::vblendv(b, 32, d, &ea),
         Insn::VblendvpdXvHvWvIb => sem_ea::vblendv(b, 64, d, &ea),
         Insn::VpblendvbXvHvWvIb => sem_ea::vblendv(b, 8, d, &ea),
         Insn::VdppsXvHvWvIb => sem_ea::vdpp(b, 32, d.imm as u8, d, &ea),
         Insn::VdppdXvHvWvIb => sem_ea::vdpp(b, 64, d.imm as u8, d, &ea),
         Insn::VmpsadbwXvHvWvIb => sem_ea::vmpsadbw(b, d.imm as u8, d, &ea),
+        Insn::VpalignrXvHvWvIb => sem_ea::vpalignr(b, d.imm as u8, d, &ea),
         Insn::VroundpsXvWvIb => sem_ea::vroundp(b, 32, d.imm as u8, d, &ea),
         Insn::VroundpdXvWvIb => sem_ea::vroundp(b, 64, d.imm as u8, d, &ea),
         Insn::VroundssXvHvWvIb => sem_ea::vrounds(b, 32, d.imm as u8, d, &ea),
@@ -4301,6 +4488,8 @@ fn dispatch_map<B: Backend>(
         Insn::VpinsrdXvHvEvIb => {
             sem_ea::vpinsrx(b, if d.rex & 8 != 0 { 64 } else { 32 }, d.imm as u8, d, &ea)
         }
+        Insn::VpinsrqXvHvEqIb => sem_ea::vpinsrx(b, 64, d.imm as u8, d, &ea),
+        Insn::VpinsrdW1XvHvEvIb => sem_ea::vpinsrx(b, 32, d.imm as u8, d, &ea),
         Insn::VpextrbEbXvIb => sem_ea::pextrx(b, 8, d.imm as u8, d, &ea),
         Insn::VpextrwEwXvIb => sem_ea::pextrx(b, 16, d.imm as u8, d, &ea),
         Insn::VpextrwGvWvIb => sem_ea::pextrw(b, d.imm as u8, d, &ea, reg),
@@ -4327,11 +4516,13 @@ fn dispatch_map<B: Backend>(
         Insn::VpermilpdXvWvIb => sem_ea::vpermilp_i(b, 64, d.imm as u8, d, &ea),
         Insn::VpermilpsXvHvWv => sem_ea::vpermilp_v(b, 32, d, &ea),
         Insn::VpermilpdXvHvWv => sem_ea::vpermilp_v(b, 64, d, &ea),
+        Insn::Vpermil2psXvHvWvIv => sem_ea::vpermil2(b, 32, d, &ea),
+        Insn::Vpermil2pdXvHvWvIv => sem_ea::vpermil2(b, 64, d, &ea),
         Insn::Vperm2f128XvHvWvIb => sem_ea::vperm2x128(b, d.imm as u8, d, &ea),
         Insn::Vperm2i128XvHvWvIb => sem_ea::vperm2x128(b, d.imm as u8, d, &ea),
         Insn::VpermpsXvHvWv => sem_ea::vpermd(b, d, &ea),
         Insn::VpermdXvHvWv => sem_ea::vpermd(b, d, &ea),
-        Insn::VpermqXvWvIb => sem_ea::vpermq(b, d.imm as u8, d, &ea),
+        Insn::VpermqXvWvIb | Insn::VpermpdXvWvIb => sem_ea::vpermq(b, d.imm as u8, d, &ea),
         Insn::Vinsertf128XvHvWvIb => sem_ea::vinsertx128(b, d.imm as u8, d, &ea),
         Insn::Vinserti128XvHvWvIb => sem_ea::vinsertx128(b, d.imm as u8, d, &ea),
         Insn::Vextractf128WvXvIb => sem_ea::vextractx128(b, d.imm as u8, d, &ea),
@@ -5406,6 +5597,8 @@ fn amx_tile_step(
             | Insn::Tilezero
             | Insn::Tileloadd
             | Insn::Tileloaddt1
+            | Insn::Tileloaddrs
+            | Insn::Tileloaddrst1
             | Insn::Tilestored
             | Insn::Tdpbssd
             | Insn::Tdpbsud
@@ -5447,6 +5640,383 @@ fn tile_valid(st: &[u8], t: u8) -> bool {
 /// タイル `t` の行 `r` の先頭オフセット（行は colsb バイトずつ連続）。
 fn tile_cell(st: &[u8], t: u8, r: usize) -> usize {
     TMM_OFF + usize::from(t) * 1024 + r * tile_colsb(st, t)
+}
+
+/// SHA512/SM3/SM4 の VEX 形。全て固定幅の整数写像だが、
+/// 128/256 ビットの lane 構造とメモリ読み込みを既存の AMX/AVX10
+/// 例外写像へ合わせるため具体値で実行する。
+fn vcrypto_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if !matches!(
+        md.insn,
+        Insn::Vsha512rnds2XvHvWv
+            | Insn::Vsha512msg1XvWv
+            | Insn::Vsha512msg2XvWv
+            | Insn::Vsm3msg1XvHvWv
+            | Insn::Vsm3msg2XvHvWv
+            | Insn::Vsm4key4XvHvWv
+            | Insn::Vsm4rnds4XvHvWv
+    ) {
+        return None;
+    }
+    Some(vcrypto_exec(env, md, next_rip, seg, eip))
+}
+
+const SM4_SBOX: [u8; 256] = [
+    0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
+    0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99,
+    0x9c, 0x42, 0x50, 0xf4, 0x91, 0xef, 0x98, 0x7a, 0x33, 0x54, 0x0b, 0x43, 0xed, 0xcf, 0xac, 0x62,
+    0xe4, 0xb3, 0x1c, 0xa9, 0xc9, 0x08, 0xe8, 0x95, 0x80, 0xdf, 0x94, 0xfa, 0x75, 0x8f, 0x3f, 0xa6,
+    0x47, 0x07, 0xa7, 0xfc, 0xf3, 0x73, 0x17, 0xba, 0x83, 0x59, 0x3c, 0x19, 0xe6, 0x85, 0x4f, 0xa8,
+    0x68, 0x6b, 0x81, 0xb2, 0x71, 0x64, 0xda, 0x8b, 0xf8, 0xeb, 0x0f, 0x4b, 0x70, 0x56, 0x9d, 0x35,
+    0x1e, 0x24, 0x0e, 0x5e, 0x63, 0x58, 0xd1, 0xa2, 0x25, 0x22, 0x7c, 0x3b, 0x01, 0x21, 0x78, 0x87,
+    0xd4, 0x00, 0x46, 0x57, 0x9f, 0xd3, 0x27, 0x52, 0x4c, 0x36, 0x02, 0xe7, 0xa0, 0xc4, 0xc8, 0x9e,
+    0xea, 0xbf, 0x8a, 0xd2, 0x40, 0xc7, 0x38, 0xb5, 0xa3, 0xf7, 0xf2, 0xce, 0xf9, 0x61, 0x15, 0xa1,
+    0xe0, 0xae, 0x5d, 0xa4, 0x9b, 0x34, 0x1a, 0x55, 0xad, 0x93, 0x32, 0x30, 0xf5, 0x8c, 0xb1, 0xe3,
+    0x1d, 0xf6, 0xe2, 0x2e, 0x82, 0x66, 0xca, 0x60, 0xc0, 0x29, 0x23, 0xab, 0x0d, 0x53, 0x4e, 0x6f,
+    0xd5, 0xdb, 0x37, 0x45, 0xde, 0xfd, 0x8e, 0x2f, 0x03, 0xff, 0x6a, 0x72, 0x6d, 0x6c, 0x5b, 0x51,
+    0x8d, 0x1b, 0xaf, 0x92, 0xbb, 0xdd, 0xbc, 0x7f, 0x11, 0xd9, 0x5c, 0x41, 0x1f, 0x10, 0x5a, 0xd8,
+    0x0a, 0xc1, 0x31, 0x88, 0xa5, 0xcd, 0x7b, 0xbd, 0x2d, 0x74, 0xd0, 0x12, 0xb8, 0xe5, 0xb4, 0xb0,
+    0x89, 0x69, 0x97, 0x4a, 0x0c, 0x96, 0x77, 0x7e, 0x65, 0xb9, 0xf1, 0x09, 0xc5, 0x6e, 0xc6, 0x84,
+    0x18, 0xf0, 0x7d, 0xec, 0x3a, 0xdc, 0x4d, 0x20, 0x79, 0xee, 0x5f, 0x3e, 0xd7, 0xcb, 0x39, 0x48,
+];
+
+fn sm4_sub_word(x: u32) -> u32 {
+    let mut r = 0u32;
+    for i in 0..4 {
+        r |= u32::from(SM4_SBOX[(x >> (8 * i)) as u8 as usize]) << (8 * i);
+    }
+    r
+}
+
+fn vcrypto_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    _eip: u32,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{Insn, decode, sem};
+    let vbytes = if md.vex_l { 32usize } else { 16 };
+    let acc_r = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    let zget = |env: &mut BareEnv, r: u8| -> [u8; 32] {
+        let mut v = [0u8; 32];
+        for p in 0..2 {
+            v[p * 16..p * 16 + 16]
+                .copy_from_slice(&env.backend.get(sem::zreg_ref(r, p)).to_le_bytes());
+        }
+        v
+    };
+    let zput = |env: &mut BareEnv, r: u8, v: &[u8; 32]| {
+        for p in 0..2 {
+            env.backend.set(
+                sem::zreg_ref(r, p),
+                u128::from_le_bytes(v[p * 16..p * 16 + 16].try_into().unwrap()),
+            );
+        }
+    };
+    let read_src = |env: &mut BareEnv, bytes: usize| -> Result<[u8; 32], InterpExit> {
+        match decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+            decode::Rm::Reg(_) => Ok(zget(env, decode::rm_reg_x5(md))),
+            decode::Rm::Mem { a, .. } => {
+                let mut v = [0u8; 32];
+                env.backend
+                    .mem
+                    .read(VirtAddr(a), &mut v[..bytes], acc_r)
+                    .map_err(|er| amx_mem_exit(a, er))?;
+                Ok(v)
+            }
+        }
+    };
+    let dst_r = decode::reg_x5(md);
+    let dst = zget(env, dst_r);
+    let s1 = zget(env, md.vex_v);
+    let q64 = |v: &[u8; 32], i: usize| u64::from_le_bytes(v[i * 8..i * 8 + 8].try_into().unwrap());
+    let d32 = |v: &[u8; 32], i: usize| u32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
+    let mut out = [0u8; 32];
+    let put64 = |out: &mut [u8; 32], i: usize, x: u64| {
+        out[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());
+    };
+    match md.insn {
+        Insn::Vsha512rnds2XvHvWv => {
+            let s2 = read_src(env, 16)?;
+            let ch = |e: u64, f: u64, g: u64| (e & f) ^ (!e & g);
+            let maj = |a: u64, b: u64, c: u64| (a & b) ^ (a & c) ^ (b & c);
+            let sg0 = |x: u64| x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39);
+            let sg1 = |x: u64| x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41);
+            let mut a = q64(&s1, 3);
+            let mut b = q64(&s1, 2);
+            let mut c = q64(&dst, 3);
+            let mut d = q64(&dst, 2);
+            let mut e = q64(&s1, 1);
+            let mut f = q64(&s1, 0);
+            let mut g = q64(&dst, 1);
+            let mut h = q64(&dst, 0);
+            for i in 0..2 {
+                let wk = q64(&s2, i);
+                let t1 = ch(e, f, g)
+                    .wrapping_add(sg1(e))
+                    .wrapping_add(wk)
+                    .wrapping_add(h);
+                let t2 = maj(a, b, c).wrapping_add(sg0(a));
+                let na = t1.wrapping_add(t2);
+                let ne = t1.wrapping_add(d);
+                h = g;
+                g = f;
+                f = e;
+                d = c;
+                c = b;
+                b = a;
+                e = ne;
+                a = na;
+            }
+            put64(&mut out, 3, a);
+            put64(&mut out, 2, b);
+            put64(&mut out, 1, e);
+            put64(&mut out, 0, f);
+        }
+        Insn::Vsha512msg1XvWv => {
+            let s2 = read_src(env, 16)?;
+            let sg0 = |x: u64| x.rotate_right(1) ^ x.rotate_right(8) ^ (x >> 7);
+            let w = [
+                q64(&dst, 0),
+                q64(&dst, 1),
+                q64(&dst, 2),
+                q64(&dst, 3),
+                q64(&s2, 0),
+            ];
+            for i in 0..4 {
+                put64(&mut out, i, w[i].wrapping_add(sg0(w[i + 1])));
+            }
+        }
+        Insn::Vsha512msg2XvWv => {
+            let s2 = read_src(env, 32)?;
+            let sg1 = |x: u64| x.rotate_right(19) ^ x.rotate_right(61) ^ (x >> 6);
+            let mut w = [0u64; 4];
+            w[0] = q64(&dst, 0).wrapping_add(sg1(q64(&s2, 2)));
+            w[1] = q64(&dst, 1).wrapping_add(sg1(q64(&s2, 3)));
+            w[2] = q64(&dst, 2).wrapping_add(sg1(w[0]));
+            w[3] = q64(&dst, 3).wrapping_add(sg1(w[1]));
+            for (i, x) in w.iter().enumerate() {
+                put64(&mut out, i, *x);
+            }
+        }
+        Insn::Vsm3msg1XvHvWv | Insn::Vsm3msg2XvHvWv => {
+            let s2 = read_src(env, 16)?;
+            let p1 = |x: u32| x ^ x.rotate_left(15) ^ x.rotate_left(23);
+            if md.insn == Insn::Vsm3msg1XvHvWv {
+                for i in 0..4 {
+                    let mut x = d32(&dst, i) ^ d32(&s2, i);
+                    if i < 3 {
+                        x ^= d32(&s1, i).rotate_left(15);
+                    }
+                    out[i * 4..i * 4 + 4].copy_from_slice(&p1(x).to_le_bytes());
+                }
+            } else {
+                let mut first = 0u32;
+                for i in 0..4 {
+                    let mut x = d32(&dst, i) ^ d32(&s2, i) ^ d32(&s1, i).rotate_left(7);
+                    if i == 0 {
+                        first = x;
+                    } else if i == 3 {
+                        x ^= p1(first.rotate_left(15));
+                    }
+                    out[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        _ => {
+            // VSM4KEY4/VSM4RNDS4。128 ビットレーンごとに独立。
+            let s2 = read_src(env, vbytes)?;
+            let key = md.insn == Insn::Vsm4key4XvHvWv;
+            for lane in 0..vbytes / 16 {
+                let base = lane * 4;
+                let mut a = d32(&s1, base);
+                let mut b = d32(&s1, base + 1);
+                let mut c = d32(&s1, base + 2);
+                let mut d = d32(&s1, base + 3);
+                for j in 0..4 {
+                    let x0 = b ^ c ^ d ^ d32(&s2, base + j);
+                    let x1 = sm4_sub_word(x0);
+                    let lin = if key {
+                        x1 ^ x1.rotate_left(13) ^ x1.rotate_left(23)
+                    } else {
+                        x1 ^ x1.rotate_left(2)
+                            ^ x1.rotate_left(10)
+                            ^ x1.rotate_left(18)
+                            ^ x1.rotate_left(24)
+                    };
+                    let x = a ^ lin;
+                    out[(base + j) * 4..(base + j) * 4 + 4].copy_from_slice(&x.to_le_bytes());
+                    a = b;
+                    b = c;
+                    c = d;
+                    d = x;
+                }
+            }
+        }
+    }
+    zput(env, dst_r, &out);
+    Ok(())
+}
+
+/// AVX-NE-CONVERT の VEX 形。狭い浮動小数点変換で例外を
+/// 立てない命令群なので、AVX10 と同じく具体値で処理する。
+fn avxne_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if !matches!(
+        md.insn,
+        Insn::Vcvtneoph2psXvWv
+            | Insn::Vcvtneeph2psXvWv
+            | Insn::Vcvtneebf162psXvWv
+            | Insn::Vcvtneobf162psXvWv
+            | Insn::Vbcstnesh2psXvWv
+            | Insn::Vbcstnebf162psXvWv
+            | Insn::Vcvtneps2bf16XvWv
+    ) {
+        return None;
+    }
+    Some(avxne_exec(env, md, next_rip, seg, eip))
+}
+
+/// FP16 をビット保存で FP32 へ広げる。有限値は正確で、
+/// 非正規 FP16 は正規 FP32 になる。NaN は quiet bit を立てる。
+fn fp16_bits_to_fp32(h: u16) -> u32 {
+    let s = u32::from(h & 0x8000) << 16;
+    let e = u32::from((h >> 10) & 0x1f);
+    let m = u32::from(h & 0x03ff);
+    if e == 0 {
+        if m == 0 {
+            return s;
+        }
+        let v = (m as f32) * 2f32.powi(-24);
+        return s | (v.to_bits() & 0x7fff_ffff);
+    }
+    if e == 0x1f {
+        if m == 0 {
+            return s | 0x7f80_0000;
+        }
+        return s | 0x7f80_0000 | (m << 13) | 0x0040_0000;
+    }
+    s | ((e + 112) << 23) | (m << 13)
+}
+
+fn avxne_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    _eip: u32,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{Insn, decode, sem};
+    let vbytes = if md.vex_l { 32usize } else { 16 };
+    let acc_r = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    let zget = |env: &mut BareEnv, r: u8| -> [u8; 32] {
+        let mut v = [0u8; 32];
+        for p in 0..2 {
+            v[p * 16..p * 16 + 16]
+                .copy_from_slice(&env.backend.get(sem::zreg_ref(r, p)).to_le_bytes());
+        }
+        v
+    };
+    let zput = |env: &mut BareEnv, r: u8, v: &[u8; 32]| {
+        for p in 0..2 {
+            env.backend.set(
+                sem::zreg_ref(r, p),
+                u128::from_le_bytes(v[p * 16..p * 16 + 16].try_into().unwrap()),
+            );
+        }
+    };
+    let rm = decode::rm_of(&mut env.backend, md, next_rip, seg, false, false);
+    let mut src = [0u8; 32];
+    match rm {
+        decode::Rm::Reg(_) => {
+            src = zget(env, decode::rm_reg_x5(md));
+        }
+        decode::Rm::Mem { a, .. } => {
+            let read_len = if matches!(md.insn, Insn::Vbcstnesh2psXvWv | Insn::Vbcstnebf162psXvWv) {
+                2
+            } else {
+                vbytes
+            };
+            env.backend
+                .mem
+                .read(VirtAddr(a), &mut src[..read_len], acc_r)
+                .map_err(|er| amx_mem_exit(a, er))?;
+        }
+    }
+    let mut out = [0u8; 32];
+    match md.insn {
+        Insn::Vcvtneoph2psXvWv
+        | Insn::Vcvtneeph2psXvWv
+        | Insn::Vcvtneebf162psXvWv
+        | Insn::Vcvtneobf162psXvWv => {
+            let odd = matches!(md.insn, Insn::Vcvtneoph2psXvWv | Insn::Vcvtneobf162psXvWv);
+            let bf = matches!(md.insn, Insn::Vcvtneebf162psXvWv | Insn::Vcvtneobf162psXvWv);
+            for i in 0..vbytes / 4 {
+                let at = i * 4 + if odd { 2 } else { 0 };
+                let h = u16::from_le_bytes(src[at..at + 2].try_into().unwrap());
+                let w = if bf {
+                    u32::from(h) << 16
+                } else {
+                    fp16_bits_to_fp32(h)
+                };
+                out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        Insn::Vbcstnesh2psXvWv | Insn::Vbcstnebf162psXvWv => {
+            let h = u16::from_le_bytes(src[0..2].try_into().unwrap());
+            let w = if md.insn == Insn::Vbcstnebf162psXvWv {
+                u32::from(h) << 16
+            } else {
+                fp16_bits_to_fp32(h)
+            };
+            for i in 0..vbytes / 4 {
+                out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        _ => {
+            // VCVTNEPS2BF16。RNE 固定・MXCSR 非参照で、入力の
+            // 非正規は符号付き 0 へフラッシュする。出力は xmm の下位半分。
+            for i in 0..vbytes / 4 {
+                let mut w = u32::from_le_bytes(src[i * 4..i * 4 + 4].try_into().unwrap());
+                if w & 0x7fff_ffff != 0 && w & 0x7f80_0000 == 0 {
+                    w &= 0x8000_0000;
+                }
+                let h = if w & 0x7f80_0000 == 0x7f80_0000 && w & 0x007f_ffff != 0 {
+                    // NaN は符号とペイロード上位を残し、quiet bit を立てる。
+                    ((w >> 16) & 0x8000) | 0x7f80 | ((w >> 16) & 0x007f) | 0x40
+                } else {
+                    // 7FFFh + 保持最下位ビットを足して偶数丸めし、上位 16 ビットを取る。
+                    (w.wrapping_add(0x7fff + ((w >> 16) & 1)) >> 16) & 0xffff
+                };
+                out[i * 2..i * 2 + 2].copy_from_slice(&(h as u16).to_le_bytes());
+            }
+        }
+    }
+    let dst = decode::reg_x5(md);
+    zput(env, dst, &out);
+    Ok(())
 }
 
 /// #UD（64 ビットモードの未定義命令・無効オペランド）。
@@ -5754,6 +6324,293 @@ fn amx_mem_exit(addr: u64, e: polyisa_mem::MemError) -> InterpExit {
     }
 }
 
+/// x87 拡張精度ビットを f64 へ落とす。53 ビットを超える精度と
+/// f64 の範囲を外れる値は近似だが、超越関数の実装には十分な
+/// 入力精度を持つ。exp_word は符号(bit15)+biased exponent、sig は
+/// integer bit(bit63)付きの 64 ビット仮数。
+fn x87_ext_to_f64(sig: u64, exp_word: u16) -> f64 {
+    let neg = exp_word & 0x8000 != 0;
+    let exp = i32::from(exp_word & 0x7fff);
+    let sign = if neg { -1.0 } else { 1.0 };
+    if exp == 0 {
+        return if neg { -0.0 } else { 0.0 };
+    }
+    if exp == 0x7fff {
+        if sig & !(1u64 << 63) != 0 {
+            return f64::NAN;
+        }
+        return sign * f64::INFINITY;
+    }
+    // 先に 64 ビット仮数を [1,2) へスケールする。指数側を先に
+    // 評価すると、f64 の正規数として表せる入力でも係数が先に
+    // underflow して 0 になる。
+    let frac = (sig as f64) * 2f64.powi(-63);
+    sign * frac * 2f64.powi(exp - 16383)
+}
+
+/// f64 を x87 拡張精度ビットへ変換する。f64 で表せる値は拡張精度へ
+/// 正確に写せる（丸め誤差は先行する transcendental 評価側に残る）。
+fn x87_f64_to_ext(v: f64) -> (u64, u16) {
+    let bits = v.to_bits();
+    let sign = ((bits >> 63) as u16) << 15;
+    let exp11 = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    if exp11 == 0x7ff {
+        let sig = if frac == 0 {
+            1u64 << 63
+        } else {
+            0xC000_0000_0000_0000
+        };
+        return (sig, sign | 0x7fff);
+    }
+    if exp11 == 0 && frac == 0 {
+        return (0, sign);
+    }
+    if exp11 == 0 {
+        // f64 非正規化数: frac * 2^-1074。最高位を integer bit へ
+        // 揃え、指数はその位置に応じる。
+        let p = 63 - frac.leading_zeros() as i32;
+        let sig = frac << (63 - p);
+        let exp = (p - 1074 + 16383) as u16;
+        (sig, sign | exp)
+    } else {
+        let sig = (1u64 << 63) | (frac << 11);
+        let exp = (exp11 - 1023 + 16383) as u16;
+        (sig, sign | exp)
+    }
+}
+
+fn x87_st_index(env: &mut BareEnv, logical: u16) -> usize {
+    let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+    usize::from((top + logical) & 7)
+}
+
+fn x87_read_st(env: &mut BareEnv, logical: u16) -> (u64, u16) {
+    let i = x87_st_index(env, logical);
+    (
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(i)),
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(i)),
+    )
+}
+
+fn x87_write_st(env: &mut BareEnv, logical: u16, value: (u64, u16)) {
+    let i = x87_st_index(env, logical);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(i), value.0);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(i), value.1);
+}
+
+fn x87_push(env: &mut BareEnv, value: (u64, u16)) {
+    let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+    let nt = top.wrapping_sub(1) & 7;
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), nt);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(usize::from(nt)), value.0);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(usize::from(nt)), value.1);
+}
+
+fn x87_pop(env: &mut BareEnv) {
+    let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(usize::from(top)), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(usize::from(top)), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::top_ref(), (top + 1) & 7);
+}
+
+fn x87_set_c2(env: &mut BareEnv, on: bool) {
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    let nv = if on { fsw | 0x0400 } else { fsw & !0x0400 };
+    env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
+}
+
+fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
+    let (s0, e0) = x87_read_st(env, 0);
+    // FSIN/FCOS/FSINCOS/FPTAN の有限入力は |x| < 2^63。範囲外では
+    // C2=1、ST(0) 不変で、push 系も push しない。`exp` は bias 付き
+    // なので 2^63 は 16383+63=16446。Infinity/NaN の invalid-operation
+    // 面は host f64 近似に残るが、少なくとも有限大角度の制御規則は
+    // ここで再現する。
+    if matches!(op, 0xFB | 0xF2 | 0xFE | 0xFF) {
+        let exp = i32::from(e0 & 0x7fff);
+        let finite = exp != 0x7fff;
+        if finite && exp >= 16446 {
+            x87_set_c2(env, true);
+            return;
+        }
+        x87_set_c2(env, false);
+    }
+    let x = x87_ext_to_f64(s0, e0);
+    match op {
+        // FSIN/FCOS は ST(0) を置き換える。
+        0xFE | 0xFF => {
+            let y = if op == 0xFE { x.sin() } else { x.cos() };
+            x87_write_st(env, 0, x87_f64_to_ext(y));
+        }
+        // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
+        0xFB => {
+            x87_write_st(env, 0, x87_f64_to_ext(x.sin()));
+            x87_push(env, x87_f64_to_ext(x.cos()));
+        }
+        // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
+        0xF0 => {
+            let y = (x * std::f64::consts::LN_2).exp_m1();
+            x87_write_st(env, 0, x87_f64_to_ext(y));
+        }
+        0xF2 => {
+            x87_write_st(env, 0, x87_f64_to_ext(x.tan()));
+            x87_push(env, x87_f64_to_ext(1.0));
+        }
+        // FPATAN: atan(ST1/ST0)、FYL2X系: ST1*log2(ST0[+1])。
+        // いずれも結果を ST1 へ書いて pop する。
+        0xF1 | 0xF3 | 0xF9 => {
+            let (s1, e1) = x87_read_st(env, 1);
+            let x1 = x87_ext_to_f64(s1, e1);
+            let y = match op {
+                0xF3 => x1.atan2(x),
+                0xF1 => x1 * x.log2(),
+                _ => x1 * (x.ln_1p() / std::f64::consts::LN_2),
+            };
+            x87_write_st(env, 1, x87_f64_to_ext(y));
+            x87_pop(env);
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// メモリや可変幅タイル状態を直接扱う concrete 命令の 1 ステップ。
+/// IR 経由の通常ディスパッチと同じく、前命令の分岐要求を消してから
+/// 実行し、成功時は steps を進める。hook が対象外なら何も変えずに
+/// `None` を返す。
+fn concrete_step(
+    env: &mut BareEnv,
+    f: impl FnOnce(&mut BareEnv) -> Option<Result<(), InterpExit>>,
+) -> Option<Result<(), InterpExit>> {
+    env.backend.ctrl = polyisa_engine::interp::Ctrl::Fallthrough;
+    let r = f(env)?;
+    if r.is_ok() {
+        if let polyisa_engine::interp::Ctrl::Jump(target) = env.backend.ctrl {
+            env.pc = target;
+        }
+        env.steps += 1;
+    }
+    Some(r)
+}
+
+fn x87_transcendental_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if md.modrm < 0xC0 {
+        return None;
+    }
+    let op = md.modrm;
+    let hit = match md.insn {
+        Insn::X87d96 => matches!(op, 0xF0..=0xF3),
+        Insn::FnstcwM16 => matches!(op, 0xF9 | 0xFB | 0xFE | 0xFF),
+        _ => false,
+    };
+    if hit {
+        x87_transcendental_exec(env, op);
+        Some(Ok(()))
+    } else {
+        None
+    }
+}
+
+/// XSTORE/REP XSTORE（VIA PadLock RNG）。真の entropy source は
+/// 持たないので、RDRAND と同じ splitmix64 の決定的列を使う。
+/// plain 形は EDX[1:0] の品質選択に従って 8/4/2/1 バイトを返す。
+fn xstore_exec(env: &mut BareEnv, md: &polyisa_guest_x86::MapDec) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{Insn, sem};
+    let rep = matches!(md.insn, Insn::RepXstore);
+    let rdx: u64 = sem::read64(&mut env.backend, sem::Gpr(2));
+    let quality = rdx & 3;
+    let chunk = match quality {
+        0 => 8usize,
+        1 => 4,
+        2 => 2,
+        _ => 1,
+    };
+    let rcx: u64 = sem::read64(&mut env.backend, sem::Gpr(1));
+    let mut rdi: u64 = sem::read64(&mut env.backend, sem::Gpr(7));
+    let mut state: u64 = env.backend.get(sem::rand_state_ref());
+    let seed = u64::from(env.backend.param::<polyisa_guest_x86::RandSeedParam>());
+    let mut next32 = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state.wrapping_add(seed);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        z as u32
+    };
+    if rep {
+        // REP XSTORE は quality ごとに n=8/4/2/1 バイトを 1 回分と
+        // して生成し、各回を q=0 では 8 バイト、それ以外では 4 バイト
+        // の store で書く。要求数が n で割り切れないときも最後の
+        // 1 回分を生成するため、最大 7 バイト先まで書き、RDI も
+        // 生成バイト数だけ進む。
+        let n = 8usize >> quality;
+        let store_n = if quality == 0 { 8 } else { 4 };
+        let mut left = rcx;
+        while left != 0 {
+            let mut bytes = [0u8; 8];
+            let mut off = 0usize;
+            while off < n {
+                let x = next32().to_le_bytes();
+                let take = (n - off).min(4);
+                bytes[off..off + take].copy_from_slice(&x[..take]);
+                off += take;
+            }
+            env.backend
+                .mem
+                .write(VirtAddr(rdi), &bytes[..store_n])
+                .map_err(|e| amx_mem_exit(rdi, e))?;
+            rdi = rdi.wrapping_add(n as u64);
+            left = left.saturating_sub(n as u64);
+        }
+        sem::write64(&mut env.backend, sem::Gpr(1), 0);
+    } else {
+        // quality 2/3 では残りの 4 バイト store を 0 で埋める。
+        // quality 0 は 8 バイト（2 stores）、1 は 4 バイトを返す。
+        let mut bytes = [0u8; 8];
+        let mut off = 0usize;
+        while off < chunk {
+            let x = next32().to_le_bytes();
+            let n = (chunk - off).min(4);
+            bytes[off..off + n].copy_from_slice(&x[..n]);
+            off += n;
+        }
+        let store_n = if chunk >= 4 { chunk.min(8) } else { 4 };
+        env.backend
+            .mem
+            .write(VirtAddr(rdi), &bytes[..store_n])
+            .map_err(|e| amx_mem_exit(rdi, e))?;
+        rdi = rdi.wrapping_add(chunk as u64);
+        sem::write64(&mut env.backend, sem::Gpr(0), chunk as u64);
+    }
+    env.backend.set(sem::rand_state_ref(), state);
+    sem::write64(&mut env.backend, sem::Gpr(7), rdi);
+    sem::write64(&mut env.backend, sem::Gpr(2), quality);
+    Ok(())
+}
+
+fn xstore_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if matches!(md.insn, Insn::Xstore | Insn::RepXstore) {
+        Some(xstore_exec(env, md))
+    } else {
+        None
+    }
+}
+
 /// FP16 のビットパターンを f32 に変換する。
 fn f16_to_f32(h: u16) -> f32 {
     let s = if h & 0x8000 != 0 { -1.0f32 } else { 1.0 };
@@ -5893,7 +6750,11 @@ fn amx_tile_exec(
             st[TMM_OFF + usize::from(dst) * 1024..TMM_OFF + usize::from(dst) * 1024 + n].fill(0);
             Ok(())
         }
-        Insn::Tileloadd | Insn::Tileloaddt1 | Insn::Tilestored => {
+        Insn::Tileloadd
+        | Insn::Tileloaddt1
+        | Insn::Tileloaddrs
+        | Insn::Tileloaddrst1
+        | Insn::Tilestored => {
             let (load, t) = if insn == Insn::Tilestored {
                 (false, dst)
             } else {
@@ -6211,45 +7072,17 @@ fn step_x86_map(
         return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
     }
     // 80386 以降では LOCK 接頭辞はメモリ宛ての RMW 命令にだけ有効で、
-    // それ以外では #UD（SST 80386 実測。80286 以前は無視される）。
-    if mode == 16 && md.lock && feats & polyisa_guest_x86::FEAT_I386 != 0 {
-        let mut i = 0usize;
-        while i < n
-            && matches!(
-                buf[i],
-                0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
-            )
-        {
-            i += 1;
-        }
-        let op = if buf.get(i) == Some(&0x0F) {
-            buf.get(i + 1).copied().unwrap_or(0)
+    // それ以外では #UD（SST 80386 実測）。80286 以前は無視される。
+    // 形の可否はデコーダが MapDec.lock_ok に写す。ユーザーモードでは
+    // CPU 例外配送をまだ持たないので Undefined 退出にする。
+    if md.lock && !md.lock_ok {
+        if mode == 16 {
+            if feats & polyisa_guest_x86::FEAT_I386 != 0 {
+                let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 6, 16, sseg));
+                return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+            }
         } else {
-            buf[i]
-        };
-        let grp = (md.modrm >> 3) & 7;
-        let mem = md.has_modrm && md.modrm >> 6 != 3;
-        let ok = match op {
-            // XCHG は暗黙 LOCK を主張するが、レジスタ同士では
-            // LOCK 接頭辞そのものが #UD（SST 80386 実測）。
-            0x86 | 0x87 => mem,
-            // 上記以外はメモリ宛ての RMW だけが LOCK を取れる。
-            _ if !mem => false,
-            0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 | 0x20 | 0x21 | 0x28 | 0x29
-            | 0x30 | 0x31 => true,
-            // /r の reg が演算選択のグループでは CMP(/7)は書き込まない。
-            0x80..=0x83 => grp != 7,
-            0xF6 | 0xF7 => grp == 2 || grp == 3,      // NOT/NEG
-            0xFE | 0xFF => grp == 0 || grp == 1,      // INC/DEC
-            0xAB | 0xB3 | 0xBB => true,               // BTS/BTR/BTC
-            0xBA => grp == 5 || grp == 6 || grp == 7, // BTS/BTR/BTC 即値
-            // i486 で追加される RMW 系（SST 80386 の範囲では現れない）。
-            0xB0 | 0xB1 | 0xC0 | 0xC1 => feats & polyisa_guest_x86::FEAT_I486 != 0,
-            0xC7 => grp == 1 && feats & polyisa_guest_x86::FEAT_CX8 != 0,
-            _ => false,
-        };
-        if !ok {
-            let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 6, 16, sseg));
+            let r = env.step(|b| polyisa_guest_x86::sem_ea::undefined(b, eip));
             return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
         }
     }
@@ -6292,9 +7125,14 @@ fn step_x86_map(
         };
         (seg, false, 0)
     };
-    if let Some(r) = avx10_step(env, &md, next_rip, seg, eip)
-        .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip))
-    {
+    if let Some(r) = concrete_step(env, |env| {
+        x87_transcendental_step(env, &md)
+            .or_else(|| xstore_step(env, &md))
+            .or_else(|| avx10_step(env, &md, next_rip, seg, eip))
+            .or_else(|| avxne_step(env, &md, next_rip, seg, eip))
+            .or_else(|| vcrypto_step(env, &md, next_rip, seg, eip))
+            .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip))
+    }) {
         let word = buf[..usize::from(md.len).min(16)]
             .iter()
             .rev()

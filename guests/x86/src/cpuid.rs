@@ -14,18 +14,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::IDENT_BITS;
 
 /// CPUID が報告する (リーフ, サブリーフ) の一覧。
-/// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・0xD.0・
-/// 0xD.1・0xD.2、拡張は 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 9] = [
+/// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
+/// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
+/// 0x8000_0000・0x8000_0001・0x8000_0008。
+pub const LEAF_IDS: [(u32, u32); 16] = [
     (0, 0),
     (1, 0),
     (7, 0),
+    (7, 1),
     (0xD, 0),
     (0xD, 1),
     (0xD, 2),
+    (0x1D, 0),
+    (0x1D, 1),
+    (0x1E, 0),
+    (0x1E, 1),
     (0x8000_0000, 0),
     (0x8000_0001, 0),
     (0x8000_0008, 0),
+    (0xC000_0000, 0),
+    (0xC000_0001, 0),
 ];
 
 /// 最大ベーシックリーフの既定（leaf 0 の EAX）。`xsave` 機能が
@@ -64,7 +72,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 9] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 16] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -97,13 +105,27 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         | (((model >> 4) & 0xf) << 16)
         | (((family >> 4) & 0xff) << 20);
 
-    let def_max = if features.contains("xsave") {
+    let def_max = if features.contains("amx_tile") {
+        // AMX の情報葉 0x1D/0x1E まで報告する。
+        0x1E
+    } else if features.contains("xsave") {
         MAX_BASIC_XSAVE
     } else {
         MAX_BASIC
     };
     let max_basic = num(ident, "cpuid.max_basic", def_max);
     let max_ext = num(ident, "cpuid.max_ext", MAX_EXT);
+    let max_via = if features.contains("via_padlock_rng") {
+        0xC000_0001
+    } else {
+        0
+    };
+    // leaf 7 EAX は最大サブリーフ番号。いま宣言があるのは 1 まで。
+    let max7sub = leaf_regs
+        .keys()
+        .filter_map(|(leaf, subleaf, _)| (*leaf == 7).then_some(*subleaf))
+        .max()
+        .unwrap_or(0);
     let mut tbl = [
         // leaf 0: 最大リーフ + ベンダ。
         [max_basic, ebx_v, ecx_v, edx_v],
@@ -111,10 +133,18 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         [l1_eax, 0, reg_of(1, 0, "ecx"), reg_of(1, 0, "edx")],
         // leaf 7 サブリーフ 0: 最大サブリーフと機能ビット。
         [
-            0,
+            max7sub,
             reg_of(7, 0, "ebx"),
             reg_of(7, 0, "ecx"),
             reg_of(7, 0, "edx"),
+        ],
+        // leaf 7 サブリーフ 1: SHA512/SM3/SM4・RAO-INT・MOVRS・
+        // USER_MSR などの新しい機能ビット。
+        [
+            reg_of(7, 1, "eax"),
+            reg_of(7, 1, "ebx"),
+            reg_of(7, 1, "ecx"),
+            reg_of(7, 1, "edx"),
         ],
         // leaf D サブリーフ 0: XCR0 対応成分（`xcomp_supp` と同じ
         // マスク）、現在有効サイズ・最大サイズ。成分の保存実装は
@@ -146,6 +176,37 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         } else {
             [0; 4]
         },
+        // leaf 1D サブリーフ 0/1: AMX tile palette 情報。
+        // palette 1 は 8 枚×最大 16 行×64 バイト（計 8192 バイト、
+        // 1 枚 1024 バイト）。AMX-TILE がなければ葉全体を 0 にする。
+        if features.contains("amx_tile") {
+            [1, 0, 0, 0]
+        } else {
+            [0; 4]
+        },
+        if features.contains("amx_tile") {
+            [0x0400_2000, 0x0008_0040, 0x10, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf 1E サブリーフ 0: TMUL の形状（maxk=16、maxn=64）。
+        // EAX は reserved。サブリーフ 1 は AMX 機能の mirror と
+        // AMX-MOVRS を EAX に持つ。
+        if features.contains("amx_tile") {
+            [0, 16 | (64 << 8), 0, 0]
+        } else {
+            [0; 4]
+        },
+        if features.contains("amx_tile") {
+            [
+                reg_of(0x1e, 1, "eax"),
+                reg_of(0x1e, 1, "ebx"),
+                reg_of(0x1e, 1, "ecx"),
+                reg_of(0x1e, 1, "edx"),
+            ]
+        } else {
+            [0; 4]
+        },
         // leaf 0x8000_0000: 最大拡張リーフ。
         [max_ext, 0, 0, 0],
         // leaf 0x8000_0001: 拡張機能ビット。
@@ -158,11 +219,22 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         // leaf 0x8000_0008: アドレスサイズ（32/48 ビット固定）と
         // EBX の拡張機能ビット（CLZERO/RDPRU 等）。
         [0x0000_3020, reg_of(0x8000_0008, 0, "ebx"), 0, 0],
+        // VIA/Zhaoxin の拡張葉。C000_0000 は最大葉、C000_0001
+        // EDX[2:3] が PadLock RNG の present/enabled。
+        [max_via, 0, 0, 0],
+        [
+            0,
+            0,
+            reg_of(0xC000_0001, 0, "ecx"),
+            reg_of(0xC000_0001, 0, "edx"),
+        ],
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。
     for (i, (leaf, _)) in LEAF_IDS.iter().enumerate() {
-        let beyond = if *leaf >= 0x8000_0000 {
+        let beyond = if (0xC000_0000..=0xC000_FFFF).contains(leaf) {
+            *leaf > max_via
+        } else if *leaf >= 0x8000_0000 {
             *leaf > max_ext
         } else {
             *leaf > max_basic

@@ -6907,10 +6907,10 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
     for (i, (id, sid)) in crate::cpuid::LEAF_IDS.iter().enumerate() {
         let k = b.konst::<W32>(*id);
         let is = b.cmp::<W32>(Cmp::Eq, leaf, k);
-        // ECX をサブリーフとして読むのは 7・0xD 系だけ。他の
-        // リーフは入力 ECX を無視する（1 回目の CPUID が ECX を
-        // 上書きするため、無条件照合だと続けて読めない）。
-        let hit = if *sid == 0 && *id != 7 && *id != 0xD {
+        // ECX をサブリーフとして読むのは 7・0xD・AMX の
+        // 0x1D/0x1E 系。他のリーフは入力 ECX を無視する（1 回目の
+        // CPUID が ECX を上書きするため、無条件照合だと続けて読めない）。
+        let hit = if *sid == 0 && !matches!(*id, 7 | 0xD | 0x1D | 0x1E) {
             is
         } else {
             let sk = b.konst::<W32>(*sid);

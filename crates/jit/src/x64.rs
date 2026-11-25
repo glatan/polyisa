@@ -531,6 +531,7 @@ impl Gen<'_> {
             polyisa_sem::ExceptionKind::Fp => 4,
             polyisa_sem::ExceptionKind::Break => 5,
             polyisa_sem::ExceptionKind::Trap => 6,
+            polyisa_sem::ExceptionKind::Protection => 7,
         };
         self.st_ctx_imm(coff!(exc_kind), kind);
         self.st_ctx_imm(coff!(exc_code), e.code);

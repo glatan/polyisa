@@ -149,6 +149,8 @@ pub enum Cmp {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExceptionKind {
     Undefined,
+    /// 特権違反・保護違反（x86 #GP 相当）。
+    Protection,
     PageFault,
     Align,
     DivZero,

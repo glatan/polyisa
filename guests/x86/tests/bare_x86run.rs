@@ -14078,6 +14078,42 @@ fn run_ud1_traps() {
 }
 
 #[test]
+fn run32_cpl0_system_instructions_gp() {
+    // Linux ユーザーモード経路では CPL0 専用命令を実行せず #GP 側へ
+    // 倒す。GAP-0026 の例外配送がない間は VM 境界で Unimplemented。
+    for prog in [
+        &[0x0F, 0x01, 0x15, 0x00, 0x20, 0x00, 0x00][..], // lgdt [0x2000]
+        &[0x0F, 0x01, 0x1D, 0x00, 0x20, 0x00, 0x00][..], // lidt [0x2000]
+        &[0x0F, 0x01, 0xF0][..],                         // lmsw ax
+        &[0x0F, 0x00, 0xD0][..],                         // lldt ax
+        &[0x0F, 0x00, 0xD8][..],                         // ltr ax
+    ] {
+        let (out, _) = run32(prog, 3);
+        assert!(matches!(out, Outcome::Unimplemented { .. }), "{prog:02x?}");
+    }
+}
+
+#[test]
+fn run32_invalid_lock_forms_ud() {
+    // LOCK はメモリ宛て RMW にだけ有効。通常ロードやレジスタ宛て
+    // RMW では #UD。ユーザーモードでは例外配送まで行かず VM 境界。
+    for prog in [
+        &[0xF0, 0x8B, 0x00][..], // lock mov eax,[eax]
+        &[0xF0, 0x01, 0xC0][..], // lock add eax,eax
+    ] {
+        let (out, _) = run32(prog, 3);
+        assert!(matches!(out, Outcome::Unimplemented { .. }), "{prog:02x?}");
+    }
+    // 対照: lock add [eax],eax は受理される。
+    let prog = &[
+        0xB8, 0x00, 0x20, 0x00, 0x00, // mov eax,0x2000
+        0xF0, 0x01, 0x00, // lock add [eax],eax
+    ];
+    let (out, _) = run32(prog, 2);
+    assert!(matches!(out, Outcome::StepLimit { .. }), "{out:?}");
+}
+
+#[test]
 fn run_jrcxz64() {
     // 64ビットモードでは JRCXZ が RCX を見る。
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
@@ -16006,6 +16042,53 @@ fn run16_int3_ivt() {
 }
 
 #[test]
+fn run16_gdtr_idtr_roundtrip() {
+    // 実モードは CPL0 相当なので LGDT/LIDT を実行できる。
+    // 16 ビット addressing の mod=00/rm=110 は disp16 直参照。
+    let prog = &[
+        0x0F, 0x01, 0x16, 0x00, 0x21, // lgdt [0x2100]
+        0x0F, 0x01, 0x06, 0x00, 0x22, // sgdt [0x2200]
+        0x0F, 0x01, 0x1E, 0x00, 0x21, // lidt [0x2100]
+        0x0F, 0x01, 0x0E, 0x08, 0x22, // sidt [0x2208]
+    ];
+    let mut env = env16(prog, 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56])
+        .unwrap();
+    let out = run16m(&mut env, 0x1000, "i286", 4);
+    assert!(matches!(out, Outcome::StepLimit { .. }), "{out:?}");
+    let acc = polyisa_mem::Access::DATA_LE;
+    let mut a = [0u8; 6];
+    let mut b = [0u8; 6];
+    env.backend.mem.read(VirtAddr(0x2200), &mut a, acc).unwrap();
+    env.backend.mem.read(VirtAddr(0x2208), &mut b, acc).unwrap();
+    assert_eq!(a, [0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sgdt");
+    assert_eq!(b, [0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sidt");
+}
+
+#[test]
+fn run16_sysret_ud_ivt() {
+    // SYSRET は実モードでは #UD。VM を止めず IVT[6] へ配送し、
+    // フォールト命令の IP を積む。
+    let mut env = env16(&[0x0F, 0x07], 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x18), &[0x00, 0x04, 0x00, 0x03])
+        .unwrap(); // IVT[6] = 0300:0400
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000);
+    let out = run16m(&mut env, 0x1000, "x86_64", 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0400 });
+    let mut stk = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2FFA), &mut stk, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(stk), 0x1000, "faulting ip");
+}
+
+#[test]
 fn run16_iret() {
     // CF = iret。スタックから IP、CS、FLAGS を戻す（POPF と同じ強制ビット）。
     let mut env = env16(&[0xCF], 0x1000);
@@ -16852,6 +16935,163 @@ fn run_a2_fcompp_fucompp() {
 }
 
 #[test]
+fn run_x87_transcendental() {
+    // 超越関数は host f64 による近似。代表値で三角・指数・対数・
+    // 逆正接とスタック規則（push/pop）を確認する。
+    let mut prog = vec![
+        0xDD, 0x05, 0x00, 0x18, 0, 0, 0xD9, 0xFE, 0xDD, 0x1D, 0x00, 0x20, 0, 0, // sin(pi/6)
+        0xDD, 0x05, 0x08, 0x18, 0, 0, 0xD9, 0xFF, 0xDD, 0x1D, 0x08, 0x20, 0, 0, // cos(pi/3)
+        0xDD, 0x05, 0x00, 0x18, 0, 0, 0xD9, 0xFB, 0xDD, 0x1D, 0x10, 0x20, 0, 0, 0xDD, 0x1D, 0x18,
+        0x20, 0, 0, // fsincos: cos then sin
+        0xDD, 0x05, 0x10, 0x18, 0, 0, 0xD9, 0xF2, 0xDD, 0x1D, 0x20, 0x20, 0, 0, 0xDD, 0x1D, 0x28,
+        0x20, 0, 0, // fptan: 1 then tan
+        0xDD, 0x05, 0x18, 0x18, 0, 0, 0xD9, 0xF0, 0xDD, 0x1D, 0x30, 0x20, 0, 0, // f2xm1(0.5)
+        0xDD, 0x05, 0x20, 0x18, 0, 0, 0xDD, 0x05, 0x28, 0x18, 0, 0, 0xD9, 0xF1, 0xDD, 0x1D, 0x38,
+        0x20, 0, 0, // 8*log2(3)
+        0xDD, 0x05, 0x38, 0x18, 0, 0, 0xDD, 0x05, 0x30, 0x18, 0, 0, 0xD9, 0xF9, 0xDD, 0x1D, 0x40,
+        0x20, 0, 0, // 5*log2(1+1)
+        0xDD, 0x05, 0x30, 0x18, 0, 0, 0xDD, 0x05, 0x28, 0x18, 0, 0, 0xD9, 0xF3, 0xDD, 0x1D, 0x48,
+        0x20, 0, 0, // atan2(1,3)
+        0xB8, 1, 0, 0, 0, 0xCD, 0x80,
+    ];
+    prog.resize(0x800, 0x90);
+    for v in [
+        std::f64::consts::FRAC_PI_6,
+        std::f64::consts::FRAC_PI_3,
+        std::f64::consts::FRAC_PI_6,
+        0.5f64,
+        8.0,
+        3.0,
+        1.0,
+        5.0,
+    ] {
+        prog.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    let (out, env) = run32(&prog, 200);
+    assert_eq!(out, Outcome::Exit(0));
+    let read = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(a), &mut b, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        f64::from_bits(u64::from_le_bytes(b))
+    };
+    for (a, want) in [
+        (0x2000, 0.5f64),
+        (0x2008, 0.5),
+        (0x2010, (std::f64::consts::FRAC_PI_6).cos()),
+        (0x2018, 0.5),
+        (0x2020, 1.0),
+        (0x2028, (std::f64::consts::FRAC_PI_6).tan()),
+        (0x2030, 2f64.powf(0.5) - 1.0),
+        (0x2038, 8.0 * 3f64.log2()),
+        (0x2040, 5.0),
+        (0x2048, 1f64.atan2(3.0)),
+    ] {
+        let got = read(a);
+        assert!(
+            (got - want).abs() < 1e-14,
+            "offset {a:#x}: got {got:?}, want {want:?}"
+        );
+    }
+}
+
+#[test]
+fn run_x87_transcendental_branch_target() {
+    // taken branch の直後に concrete hook の命令が来ても、古い
+    // Ctrl::Jump に引きずられず EIP が進むことを確認する。
+    let mut prog = vec![
+        0xDD, 0x05, 0x00, 0x18, 0, 0, // fld qword [0x1800] = 0.5
+        0xEB, 0x00, // jmp +0（次の fsin へ）
+        0xD9, 0xFE, // fsin
+        0xDD, 0x1D, 0x00, 0x20, 0, 0, // fstp qword [0x2000]
+        0xB8, 1, 0, 0, 0, 0xCD, 0x80,
+    ];
+    prog.resize(0x800, 0x90);
+    prog.extend_from_slice(&0.5f64.to_bits().to_le_bytes());
+    let (out, env) = run32(&prog, 20);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert!((f64::from_bits(u64::from_le_bytes(b)) - 0.5f64.sin()).abs() < 1e-15);
+}
+
+#[test]
+fn run_x87_transcendental_small_and_range() {
+    // 2^-1022 は f64 の最小正規数。変換で 0 に潰れなければ
+    // fsin(x) は x として残る。2^63 は範囲外なので ST(0) 不変、
+    // C2=1。続く範囲内 fsin は C2 を下ろす。
+    let mut prog = vec![
+        0xDD, 0x05, 0x00, 0x18, 0, 0, // fld qword [0x1800] = 2^-1022
+        0xD9, 0xFE, // fsin
+        0xDD, 0x1D, 0x00, 0x20, 0, 0, // fstp qword [0x2000]
+        0xDB, 0x2D, 0x08, 0x18, 0, 0, // fld tbyte [0x1808] = 2^63
+        0xD9, 0xFE, // fsin（範囲外）
+        0xDD, 0x3D, 0x08, 0x20, 0, 0, // fnstsw word [0x2008]
+        0xDD, 0x05, 0x00, 0x18, 0, 0, // fld qword [0x1800]
+        0xD9, 0xFE, // fsin（範囲内）
+        0xDD, 0x3D, 0x0A, 0x20, 0, 0, // fnstsw word [0x200a]
+        0xB8, 1, 0, 0, 0, 0xCD, 0x80,
+    ];
+    prog.resize(0x800, 0x90);
+    prog.extend_from_slice(&f64::MIN_POSITIVE.to_bits().to_le_bytes());
+    prog.extend_from_slice(&(1u64 << 63).to_le_bytes());
+    prog.extend_from_slice(&0x403eu16.to_le_bytes()); // biased exp for 2^63
+    prog.resize(0x820, 0);
+    let (out, env) = run32(&prog, 80);
+    assert_eq!(out, Outcome::Exit(0));
+    let read64 = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(a), &mut b, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        f64::from_bits(u64::from_le_bytes(b))
+    };
+    assert_eq!(read64(0x2000), f64::MIN_POSITIVE.sin());
+    let read16 = |a: u64| {
+        let mut b = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(a), &mut b, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        u16::from_le_bytes(b)
+    };
+    assert_ne!(read16(0x2008) & 0x0400, 0, "2^63 は C2=1");
+    assert_eq!(read16(0x200a) & 0x0400, 0, "範囲内 fsin は C2=0");
+}
+
+#[test]
+fn run_x87_trig_out_of_range_does_not_push() {
+    // FPTAN/FSINCOS は範囲外なら push しない。1 回の fld で
+    // top は 0 から 7 へ進むだけで、out-of-range では 7 のまま。
+    for op in [0xF2u8, 0xFB] {
+        let mut prog = vec![
+            0xDB, 0x2D, 0x00, 0x18, 0, 0, // fld tbyte [0x1800] = 2^63
+            0xD9, op, // fptan/fsincos（範囲外、push しない）
+            0xB8, 1, 0, 0, 0, 0xCD, 0x80,
+        ];
+        prog.resize(0x800, 0x90);
+        prog.extend_from_slice(&(1u64 << 63).to_le_bytes());
+        prog.extend_from_slice(&0x403eu16.to_le_bytes());
+        prog.resize(0x810, 0);
+        let (out, mut env) = run32(&prog, 30);
+        assert_eq!(out, Outcome::Exit(0));
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            7,
+            "op {op:#x} は push しない"
+        );
+        let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+        assert_ne!(fsw & 0x0400, 0);
+    }
+}
+
+#[test]
 fn run_a2_fscale_fxtract_fprem() {
     // fscale: 3.0 * 2^2 = 12.0。fxtract: 8.0 → 指数 3.0 / 仮数 1.0。
     // fprem: 7 mod 2 = 1.0（trunc）。fprem1: 3.5→RNE 4 → 7-8 = -1.0。
@@ -17664,15 +17904,8 @@ fn run32_sdt_lar() {
         )
         .unwrap();
     let prog: &[u8] = &[
-        0x0F, 0x01, 0x15, 0x00, 0x21, 0x00, 0x00, // lgdt [0x2100]
         0x0F, 0x01, 0x05, 0x00, 0x22, 0x00, 0x00, // sgdt [0x2200]
-        0x0F, 0x01, 0x1D, 0x00, 0x21, 0x00, 0x00, // lidt [0x2100]
         0x0F, 0x01, 0x0D, 0x08, 0x22, 0x00, 0x00, // sidt [0x2208]
-        0x0F, 0x00, 0xC0, // sldt ax
-        0x0F, 0x00, 0xCB, // str bx
-        0xB8, 0x1B, 0x00, 0x00, 0x00, // mov eax,0x1B
-        0x0F, 0x00, 0xD0, // lldt ax
-        0x0F, 0x00, 0xD8, // ltr ax
         0x0F, 0x00, 0xC1, // sldt cx
         0x0F, 0x00, 0xCA, // str dx
         0x0F, 0x00, 0xE0, // verr ax
@@ -17689,7 +17922,8 @@ fn run32_sdt_lar() {
     env.backend.set(Gpr(4).state(), 0x2000);
     let out = run_x86::run_mode(&mut env, 0x1000, &mut ExitOne, 1000, false);
     assert_eq!(out, Outcome::Exit(0));
-    // SGDT/SIDT は limit+base をそのまま往復する。
+    // SGDT/SIDT は初期値 0 を退避する（load 系は CPL0 なので
+    // ユーザーモードのこの経路では実行しない）。
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -17697,13 +17931,13 @@ fn run32_sdt_lar() {
     };
     let mut v = [0u8; 16];
     env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
-    assert_eq!(&v[..6], &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sgdt");
-    assert_eq!(&v[8..14], &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sidt");
-    // LLDT/LTR → SLDT/STR で往復（cx=ldtr、dx=tr）。
+    assert_eq!(&v[..6], &[0; 6], "sgdt initial");
+    assert_eq!(&v[8..14], &[0; 6], "sidt initial");
+    // ディスクリプタ機構を持たないので LDTR/TR は 0。
     let cx: u32 = env.backend.get(Gpr(1).state());
     let dx: u32 = env.backend.get(Gpr(2).state());
-    assert_eq!(cx & 0xFFFF, 0x1B, "lldt→sldt");
-    assert_eq!(dx & 0xFFFF, 0x1B, "ltr→str");
+    assert_eq!(cx & 0xFFFF, 0, "sldt");
+    assert_eq!(dx & 0xFFFF, 0, "str");
     // VERR/VERW/LAR/LSL は ZF=0 かつ dest 不変（eax=0x7777）。
     let efl: u32 = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
     assert_eq!(efl & 0x40, 0, "verr/verw/lar/lsl ZF");
@@ -18188,6 +18422,128 @@ fn run64_vex_avx() {
 }
 
 #[test]
+fn run64_vex_haddsub() {
+    // SSE3 の水平加減算と ADDSUB の VEX 形。xmm 形の上位クリアと
+    // ymm 形の 128 ビットレーン独立性を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let f32v = |a: &[f32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let f64v = |a: &[f64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &f32v(&[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2020),
+            &f32v(&[3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0]),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &f64v(&[1.0, 4.0, 9.0, 16.0]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2120), &f64v(&[2.0, 8.0, 18.0, 32.0]))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFC, 0x10, 0x00, // vmovups ymm0,[rax]
+        0xC5, 0xFC, 0x10, 0x48, 0x20, // vmovups ymm1,[rax+0x20]
+        0xC5, 0xFF, 0x7C, 0xD1, // vhaddps ymm2,ymm0,ymm1
+        0xC5, 0xFC, 0x11, 0x50, 0x40, // vmovups [rax+0x40],ymm2
+        0xC5, 0xFF, 0x7D, 0xD9, // vhsubps ymm3,ymm0,ymm1
+        0xC5, 0xFC, 0x11, 0x58, 0x60, // vmovups [rax+0x60],ymm3
+        0xC5, 0xFF, 0xD0, 0xE1, // vaddsubps ymm4,ymm0,ymm1
+        0xC5, 0xFC, 0x11, 0xA0, 0x80, 0x00, 0x00, 0x00, // vmovups [rax+0x80],ymm4
+        0xC5, 0xFC, 0x10, 0x23, // vmovups ymm4,[rbx]
+        0xC5, 0xFC, 0x10, 0x6B, 0x20, // vmovups ymm5,[rbx+0x20]
+        0xC5, 0xD9, 0x7C, 0xF5, // vhaddpd xmm6,xmm4,xmm5
+        0xC5, 0xFC, 0x11, 0x73, 0x40, // vmovups [rbx+0x40],ymm6
+        0xC5, 0xDD, 0x7D, 0xFD, // vhsubpd ymm7,ymm4,ymm5
+        0xC5, 0xFC, 0x11, 0x7B, 0x60, // vmovups [rbx+0x60],ymm7
+        0xC5, 0xDD, 0xD0, 0xC5, // vaddsubpd ymm0,ymm4,ymm5
+        0xC5, 0xFC, 0x11, 0x83, 0x80, 0x00, 0x00, 0x00, // vmovups [rbx+0x80],ymm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x20];
+    let read32 = |env: &BareEnv, at: u64, expect: &[f32]| {
+        let mut v = [0u8; 0x20];
+        env.backend.mem.read(VirtAddr(at), &mut v, acc).unwrap();
+        for (i, e) in expect.iter().enumerate() {
+            assert_eq!(w32(&v, i * 4), e.to_bits(), "f32 lane{i} at {at:#x}");
+        }
+    };
+    read32(
+        &env,
+        0x2040,
+        &[3.0, 12.0, 8.0, 16.0, 48.0, 192.0, 24.0, 32.0],
+    );
+    read32(
+        &env,
+        0x2060,
+        &[-1.0, -4.0, -2.0, -2.0, -16.0, -64.0, -2.0, -2.0],
+    );
+    read32(
+        &env,
+        0x2080,
+        &[-2.0, 7.0, -3.0, 17.0, 5.0, 45.0, 49.0, 145.0],
+    );
+    env.backend.mem.read(VirtAddr(0x2140), &mut v, acc).unwrap();
+    let r64 = |v: &[u8; 0x20], i: usize| f64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    assert_eq!((r64(&v, 0), r64(&v, 8)), (5.0, 10.0), "vhaddpd xmm 下位");
+    assert_eq!(
+        (r64(&v, 16), r64(&v, 24)),
+        (0.0, 0.0),
+        "vhaddpd xmm は上位をゼロクリア"
+    );
+    env.backend.mem.read(VirtAddr(0x2160), &mut v, acc).unwrap();
+    assert_eq!(
+        [r64(&v, 0), r64(&v, 8), r64(&v, 16), r64(&v, 24)],
+        [-3.0, -6.0, -7.0, -14.0],
+        "vhsubpd ymm"
+    );
+    env.backend.mem.read(VirtAddr(0x2180), &mut v, acc).unwrap();
+    assert_eq!(
+        [r64(&v, 0), r64(&v, 8), r64(&v, 16), r64(&v, 24)],
+        [-1.0, 12.0, -9.0, 48.0],
+        "vaddsubpd ymm"
+    );
+}
+
+#[test]
 fn run64_vex_avx2() {
     // AVX/AVX2 のパック整数演算（B1b-1）。x86_64_v3（avx2 あり）。
     // 3 オペランド演算・xmm カウントシフト・即値シフト
@@ -18360,6 +18716,1642 @@ fn run64_vex_avx2() {
             let e = if i < 12 { 0xFF } else { 0 };
             assert_eq!(v[l * 16 + i], e, "vpsrldq lane{l} byte{i}");
         }
+    }
+}
+
+#[test]
+fn run64_vex_variable_shift() {
+    // AVX2 の可変シフト。要素ごとのカウント、幅以上のカウント、
+    // 算術右シフトの符号埋め、xmm 形の上位クリアを確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u64v = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &u32v(&[
+                0x1234_5678,
+                0x8000_0000,
+                0x0000_F000,
+                0xFFFF_0000,
+                2,
+                4,
+                8,
+                16,
+            ]),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &u32v(&[4, 1, 8, 32, 0, 4, 8, 40]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2100),
+            &u64v(&[
+                0x1234_5678_9ABC_DEF0,
+                0x8000_0000_0000_0000,
+                0x0000_F000_0000_0000,
+                4,
+            ]),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2120), &u64v(&[4, 1, 8, 64]))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFE, 0x6F, 0x00, // vmovdqu ymm0,[rax]
+        0xC5, 0xFE, 0x6F, 0x48, 0x20, // vmovdqu ymm1,[rax+0x20]
+        0xC4, 0xE2, 0x7D, 0x47, 0xD1, // vpsllvd ymm2,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x50, 0x40, // vmovdqu [rax+0x40],ymm2
+        0xC4, 0xE2, 0x7D, 0x45, 0xD9, // vpsrlvd ymm3,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x58, 0x60, // vmovdqu [rax+0x60],ymm3
+        0xC4, 0xE2, 0x7D, 0x46, 0x60, 0x20, // vpsravd ymm4,ymm0,[rax+0x20]
+        0xC5, 0xFE, 0x7F, 0xA0, 0x80, 0x00, 0x00, 0x00, // vmovdqu [rax+0x80],ymm4
+        0xC4, 0xE2, 0x79, 0x47, 0xE9, // vpsllvd xmm5,xmm0,xmm1
+        0xC5, 0xFE, 0x7F, 0xA8, 0xA0, 0x00, 0x00, 0x00, // vmovdqu [rax+0xA0],ymm5
+        0xC5, 0xFE, 0x6F, 0x03, // vmovdqu ymm0,[rbx]
+        0xC5, 0xFE, 0x6F, 0x4B, 0x20, // vmovdqu ymm1,[rbx+0x20]
+        0xC4, 0xE2, 0xFD, 0x47, 0xD1, // vpsllvq ymm2,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x53, 0x40, // vmovdqu [rbx+0x40],ymm2
+        0xC4, 0xE2, 0xFD, 0x45, 0x5B, 0x20, // vpsrlvq ymm3,ymm0,[rbx+0x20]
+        0xC5, 0xFE, 0x7F, 0x5B, 0x60, // vmovdqu [rbx+0x60],ymm3
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let read32s = |at: u64, expect: &[u32; 8]| {
+        let mut v = [0u8; 0x20];
+        env.backend.mem.read(VirtAddr(at), &mut v, acc).unwrap();
+        for (i, e) in expect.iter().enumerate() {
+            assert_eq!(w32(&v, i * 4), *e, "dword lane{i} at {at:#x}");
+        }
+    };
+    read32s(0x2040, &[0x2345_6780, 0, 0x00F0_0000, 0, 2, 0x40, 0x800, 0]);
+    read32s(
+        0x2060,
+        &[0x0123_4567, 0x4000_0000, 0x0000_00F0, 0, 2, 0, 0, 0],
+    );
+    read32s(
+        0x2080,
+        &[
+            0x0123_4567,
+            0xC000_0000,
+            0x0000_00F0,
+            0xFFFF_FFFF,
+            2,
+            0,
+            0,
+            0,
+        ],
+    );
+    read32s(0x20A0, &[0x2345_6780, 0, 0x00F0_0000, 0, 0, 0, 0, 0]);
+    let read64s = |at: u64, expect: &[u64; 4]| {
+        let mut v = [0u8; 0x20];
+        env.backend.mem.read(VirtAddr(at), &mut v, acc).unwrap();
+        for (i, e) in expect.iter().enumerate() {
+            let got = u64::from_le_bytes(v[i * 8..i * 8 + 8].try_into().unwrap());
+            assert_eq!(got, *e, "qword lane{i} at {at:#x}");
+        }
+    };
+    read64s(
+        0x2140,
+        &[0x2345_6789_ABCD_EF00, 0, 0x00F0_0000_0000_0000, 0],
+    );
+    read64s(
+        0x2160,
+        &[
+            0x0123_4567_89AB_CDEF,
+            0x4000_0000_0000_0000,
+            0x0000_00F0_0000_0000,
+            0,
+        ],
+    );
+}
+
+#[test]
+fn run64_vex_avg_muldq() {
+    // VPAVGB/W の丸め付き平均と VPMULDQ の符号付き偶数 dword 積。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &[0xFFu8; 32])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &[0x01u8; 32])
+        .unwrap();
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2100),
+            &u32v(&[
+                0xFFFF_FFFE,
+                111,
+                0x4000_0000,
+                222,
+                0xFFFF_FFFF,
+                333,
+                123_456,
+                444,
+            ]),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2120),
+            &u32v(&[3, 0, 0xFFFF_FFFC, 0, 2, 0, 0xFFFF_FFF9, 0]),
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFE, 0x6F, 0x00, // vmovdqu ymm0,[rax]
+        0xC5, 0xFE, 0x6F, 0x48, 0x20, // vmovdqu ymm1,[rax+0x20]
+        0xC5, 0xFD, 0xE0, 0xD1, // vpavgb ymm2,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x50, 0x40, // vmovdqu [rax+0x40],ymm2
+        0xC5, 0xFD, 0xE3, 0xD9, // vpavgw ymm3,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x58, 0x60, // vmovdqu [rax+0x60],ymm3
+        0xC5, 0xFE, 0x6F, 0x03, // vmovdqu ymm0,[rbx]
+        0xC5, 0xFE, 0x6F, 0x4B, 0x20, // vmovdqu ymm1,[rbx+0x20]
+        0xC4, 0xE2, 0x7D, 0x28, 0xE1, // vpmuldq ymm4,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x63, 0x40, // vmovdqu [rbx+0x40],ymm4
+        0xC4, 0xE2, 0x79, 0x28, 0x6B, 0x20, // vpmuldq xmm5,xmm0,[rbx+0x20]
+        0xC5, 0xFE, 0x7F, 0x6B, 0x60, // vmovdqu [rbx+0x60],ymm5
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x20];
+    env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
+    assert!(v.iter().all(|x| *x == 0x80), "vpavgb は桁あふれしても 0x80");
+    env.backend.mem.read(VirtAddr(0x2060), &mut v, acc).unwrap();
+    for i in 0..16 {
+        assert_eq!(
+            u16::from_le_bytes(v[i * 2..i * 2 + 2].try_into().unwrap()),
+            0x8080,
+            "vpavgw lane{i}"
+        );
+    }
+    let read64s = |at: u64, expect: &[u64; 4]| {
+        let mut v = [0u8; 0x20];
+        env.backend.mem.read(VirtAddr(at), &mut v, acc).unwrap();
+        for (i, e) in expect.iter().enumerate() {
+            let got = u64::from_le_bytes(v[i * 8..i * 8 + 8].try_into().unwrap());
+            assert_eq!(got, *e, "qword lane{i} at {at:#x}");
+        }
+    };
+    read64s(
+        0x2140,
+        &[
+            0xFFFF_FFFF_FFFF_FFFA,
+            0xFFFF_FFFF_0000_0000,
+            0xFFFF_FFFF_FFFF_FFFE,
+            0xFFFF_FFFF_FFF2_D040,
+        ],
+    );
+    read64s(
+        0x2160,
+        &[0xFFFF_FFFF_FFFF_FFFA, 0xFFFF_FFFF_0000_0000, 0, 0],
+    );
+}
+
+#[test]
+fn run64_vex_align_blend_perm_ins() {
+    // VPALIGNR・VPBLENDD・VPERMPD・VPINSRQ。VPBLENDD は
+    // imm[7:4] が上位 128 ビットに効くことを確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let a: Vec<u8> = (0x40..0x60).collect();
+    let c: Vec<u8> = (0x00..0x20).collect();
+    env.backend.mem.write(VirtAddr(0x2000), &a).unwrap();
+    env.backend.mem.write(VirtAddr(0x2020), &c).unwrap();
+    let qv = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &qv(&[1, 2, 3, 4]))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFE, 0x6F, 0x00, // vmovdqu ymm0,[rax]
+        0xC5, 0xFE, 0x6F, 0x48, 0x20, // vmovdqu ymm1,[rax+0x20]
+        0xC4, 0xE3, 0x7D, 0x0F, 0xD1, 0x04, // vpalignr ymm2,ymm0,ymm1,4
+        0xC5, 0xFE, 0x7F, 0x50, 0x40, // vmovdqu [rax+0x40],ymm2
+        0xC4, 0xE3, 0x7D, 0x02, 0xD9, 0xA5, // vpblendd ymm3,ymm0,ymm1,0xA5
+        0xC5, 0xFE, 0x7F, 0x58, 0x60, // vmovdqu [rax+0x60],ymm3
+        0xC4, 0xE3, 0xFD, 0x01, 0x23, 0x1B, // vpermpd ymm4,[rbx],0x1B
+        0xC5, 0xFE, 0x7F, 0x63, 0x20, // vmovdqu [rbx+0x20],ymm4
+        0xC4, 0xE3, 0xF9, 0x22, 0x2B, 0x01, // vpinsrq xmm5,xmm0,[rbx],1
+        0xC5, 0xFA, 0x7F, 0x6B, 0x40, // vmovdqu [rbx+0x40],xmm5
+        0xC4, 0xE3, 0x79, 0x0F, 0x70, 0x20, 0x04, // vpalignr xmm6,xmm0,[rax+0x20],4
+        0xC5, 0xFA, 0x7F, 0xB0, 0x80, 0x00, 0x00, 0x00, // vmovdqu [rax+0x80],xmm6
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x20];
+    let align_expect: Vec<u8> = [
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x40, 0x41, 0x42,
+        0x43, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x50, 0x51,
+        0x52, 0x53,
+    ]
+    .into_iter()
+    .collect();
+    env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &align_expect[..], "vpalignr ymm");
+    env.backend
+        .mem
+        .read(VirtAddr(0x2080), &mut v[..16], acc)
+        .unwrap();
+    assert_eq!(&v[..16], &align_expect[..16], "vpalignr xmm mem");
+    env.backend.mem.read(VirtAddr(0x2060), &mut v, acc).unwrap();
+    let blend_expect = [
+        0x0302_0100,
+        0x4746_4544,
+        0x0B0A_0908,
+        0x4F4E_4D4C,
+        0x5352_5150,
+        0x1716_1514,
+        0x5B5A_5958,
+        0x1F1E_1D1C,
+    ];
+    for (i, e) in blend_expect.iter().enumerate() {
+        assert_eq!(w32(&v, i * 4), *e, "vpblendd lane{i}");
+    }
+    env.backend.mem.read(VirtAddr(0x2120), &mut v, acc).unwrap();
+    for (i, e) in [4u64, 3, 2, 1].iter().enumerate() {
+        let got = u64::from_le_bytes(v[i * 8..i * 8 + 8].try_into().unwrap());
+        assert_eq!(got, *e, "vpermpd q{i}");
+    }
+    env.backend
+        .mem
+        .read(VirtAddr(0x2140), &mut v[..16], acc)
+        .unwrap();
+    let lo = u64::from_le_bytes(v[..8].try_into().unwrap());
+    let hi = u64::from_le_bytes(v[8..16].try_into().unwrap());
+    assert_eq!(lo, 0x4746_4544_4342_4140, "vpinsrq は下位を温存");
+    assert_eq!(hi, 1, "vpinsrq は q1 に挿入");
+}
+
+#[test]
+fn run64_vex_permil2() {
+    // XOP の VPERMIL2PS/PD。W=1 では r/m が選択子、is4 が第2
+    // データソースになることと、M2Z=2 のゼロ化を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX
+        | polyisa_guest_x86::FEAT_XOP;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u64v = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &u32v(&[10, 20, 30, 40]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &u32v(&[50, 60, 70, 80]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &u32v(&[1, 14, 7, 0]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &u64v(&[11, 22]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2050), &u64v(&[33, 44]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2060), &u64v(&[14, 6]))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
+        0xC5, 0xFA, 0x6F, 0x00, // vmovdqu xmm0,[rax]
+        0xC5, 0xFA, 0x6F, 0x50, 0x10, // vmovdqu xmm2,[rax+0x10]
+        0xC5, 0xFA, 0x6F, 0x48, 0x20, // vmovdqu xmm1,[rax+0x20]
+        // vpermil2ps xmm3,xmm0,xmm2,xmm1,2（W=1:is4=src2,rm=ctrl）
+        0xC4, 0xE3, 0xF9, 0x48, 0xD9, 0x22, 0xC5, 0xFA, 0x7F, 0x1B, // vmovdqu [rbx],xmm3
+        0xC5, 0xFA, 0x6F, 0x60, 0x40, // vmovdqu xmm4,[rax+0x40]
+        0xC5, 0xFA, 0x6F, 0x70, 0x50, // vmovdqu xmm6,[rax+0x50]
+        0xC5, 0xFA, 0x6F, 0x68, 0x60, // vmovdqu xmm5,[rax+0x60]
+        // vpermil2pd xmm7,xmm4,xmm6,xmm5,2（W=1）
+        0xC4, 0xE3, 0xD9, 0x49, 0xFD, 0x62, 0xC5, 0xFA, 0x7F, 0x7B,
+        0x10, // vmovdqu [rbx+0x10],xmm7
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x20];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    for (i, e) in [20u32, 0, 80, 10].iter().enumerate() {
+        assert_eq!(w32(&v, i * 4), *e, "vpermil2ps lane{i}");
+    }
+    for (i, e) in [0u64, 44].iter().enumerate() {
+        let got = u64::from_le_bytes(v[0x10 + i * 8..0x10 + i * 8 + 8].try_into().unwrap());
+        assert_eq!(got, *e, "vpermil2pd lane{i}");
+    }
+}
+
+#[test]
+fn run64_vex_pclmul() {
+    // VPCLMULQDQ。imm の qword 選択と ymm のレーン独立性を見る。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_VPCLMULQDQ;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let qv = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &qv(&[3, 5, 11, 13]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &qv(&[7, 9, 15, 17]))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFE, 0x6F, 0x00, // vmovdqu ymm0,[rax]
+        0xC5, 0xFE, 0x6F, 0x48, 0x20, // vmovdqu ymm1,[rax+0x20]
+        0xC4, 0xE3, 0x79, 0x44, 0xD1, 0x00, // vpclmulqdq xmm2,xmm0,xmm1,0
+        0xC5, 0xFA, 0x7F, 0x13, // vmovdqu [rbx],xmm2
+        0xC4, 0xE3, 0x79, 0x44, 0x18, 0x11, // vpclmulqdq xmm3,xmm0,[rax],0x11
+        0xC5, 0xFA, 0x7F, 0x5B, 0x10, // vmovdqu [rbx+0x10],xmm3
+        0xC4, 0xE3, 0x7D, 0x44, 0xE1, 0x00, // vpclmulqdq ymm4,ymm0,ymm1,0
+        0xC5, 0xFE, 0x7F, 0x63, 0x20, // vmovdqu [rbx+0x20],ymm4
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x40];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    for (at, e) in [(0usize, 9u64), (16, 17), (32, 9), (48, 0x69)] {
+        let got = u64::from_le_bytes(v[at..at + 8].try_into().unwrap());
+        assert_eq!(got, e, "pclmul qword at {at:#x}");
+    }
+}
+
+#[test]
+fn run64_vex_aesenc() {
+    // VAESENC の FIPS-197 既知ベクトル。xmm 形・メモリ形・ymm の
+    // 2 レーンを同じ入力で確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_VAES;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let x = [
+        0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0,
+        0xf0,
+    ];
+    let k = [
+        0xd6, 0xaa, 0x74, 0xfd, 0xd2, 0xaf, 0x72, 0xfa, 0xda, 0xa6, 0x78, 0xf1, 0xd6, 0xab, 0x76,
+        0xfe,
+    ];
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &[x, x].concat())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2060), &[k, k].concat())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFE, 0x6F, 0x40, 0x40, // vmovdqu ymm0,[rax+0x40]
+        0xC5, 0xFE, 0x6F, 0x48, 0x60, // vmovdqu ymm1,[rax+0x60]
+        0xC4, 0xE2, 0x79, 0xDC, 0xD1, // vaesenc xmm2,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x13, // vmovdqu [rbx],xmm2
+        0xC4, 0xE2, 0x79, 0xDC, 0x58, 0x60, // vaesenc xmm3,xmm0,[rax+0x60]
+        0xC5, 0xFA, 0x7F, 0x5B, 0x10, // vmovdqu [rbx+0x10],xmm3
+        0xC4, 0xE2, 0x7D, 0xDC, 0xE9, // vaesenc ymm5,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x6B, 0x20, // vmovdqu [rbx+0x20],ymm5
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let expect = [
+        0x89, 0xd8, 0x10, 0xe8, 0x85, 0x5a, 0xce, 0x68, 0x2d, 0x18, 0x43, 0xd8, 0xcb, 0x12, 0x8f,
+        0xe4,
+    ];
+    let mut v = [0u8; 0x40];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &expect[..], "vaesenc xmm");
+    assert_eq!(&v[16..32], &expect[..], "vaesenc xmm mem");
+    assert_eq!(&v[32..48], &expect[..], "vaesenc ymm low");
+    assert_eq!(&v[48..64], &expect[..], "vaesenc ymm high");
+}
+
+#[test]
+fn run64_vex_aeskey_gfni() {
+    // VAESKEYGENASSIST と GFNI の VEX 形。GF2P8MULB は ymm の
+    // 2 レーン、affine は恒等行列でデータ/行列のオペランド順を見る。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_VAES
+        | polyisa_guest_x86::FEAT_GFNI;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let key = [
+        0xd6, 0xaa, 0x74, 0xfd, 0xd2, 0xaf, 0x72, 0xfa, 0xda, 0xa6, 0x78, 0xf1, 0xd6, 0xab, 0x76,
+        0xfe,
+    ];
+    env.backend.mem.write(VirtAddr(0x2000), &key).unwrap();
+    let gfin: Vec<u8> = (0u8..15).chain([0x95]).collect();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &[gfin.clone(), gfin.clone()].concat())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &[gfin.clone(), gfin.clone()].concat())
+        .unwrap();
+    let idq = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01];
+    let id32 = idq.repeat(4);
+    env.backend.mem.write(VirtAddr(0x2060), &id32).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFA, 0x6F, 0x08, // vmovdqu xmm1,[rax]
+        0xC4, 0xE3, 0x79, 0xDF, 0xD1, 0x02, // vaeskeygenassist xmm2,xmm1,2
+        0xC5, 0xFE, 0x7F, 0x13, // vmovdqu [rbx],ymm2（上位は 0 化を見る）
+        0xC5, 0xFE, 0x6F, 0x40, 0x20, // vmovdqu ymm0,[rax+0x20]
+        0xC5, 0xFE, 0x6F, 0x48, 0x40, // vmovdqu ymm1,[rax+0x40]
+        0xC4, 0xE2, 0x79, 0xCF, 0xD1, // vgf2p8mulb xmm2,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x53, 0x20, // vmovdqu [rbx+0x20],xmm2
+        0xC4, 0xE2, 0x7D, 0xCF, 0xE9, // vgf2p8mulb ymm5,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x6B, 0x30, // vmovdqu [rbx+0x30],ymm5
+        0xC5, 0xFA, 0x6F, 0x48, 0x60, // vmovdqu xmm1,[rax+0x60]
+        0xC4, 0xE3, 0xF9, 0xCE, 0xD9, 0x00, // vgf2p8affineqb xmm3,xmm0,xmm1,0
+        0xC5, 0xFA, 0x7F, 0x5B, 0x50, // vmovdqu [rbx+0x50],xmm3
+        0xC4, 0xE3, 0xF9, 0xCF, 0xE1, 0x00, // vgf2p8affineinvqb xmm4,xmm0,xmm1,0
+        0xC5, 0xFA, 0x7F, 0x63, 0x60, // vmovdqu [rbx+0x60],xmm4
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let read = |a: u64| {
+        let mut v = [0u8; 16];
+        env.backend.mem.read(VirtAddr(a), &mut v, acc).unwrap();
+        v
+    };
+    let key_expect = [
+        0xb5, 0x79, 0x40, 0x2d, 0x7b, 0x40, 0x2d, 0xb5, 0xf6, 0x62, 0x38, 0xbb, 0x60, 0x38, 0xbb,
+        0xf6,
+    ];
+    assert_eq!(read(0x2100), key_expect, "vaeskeygenassist");
+    assert_eq!(
+        read(0x2110),
+        [0u8; 16],
+        "vaeskeygenassist xmm は ymm 上位を 0 化"
+    );
+    let mulx = read(0x2120);
+    for (i, v) in mulx.iter().enumerate() {
+        assert_eq!(*v, ref_gf8mul(gfin[i], gfin[i]), "vgf2p8mulb xmm byte {i}");
+    }
+    let mut wide = [0u8; 32];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2130), &mut wide, acc)
+        .unwrap();
+    for lane in 0..2 {
+        for (i, x) in gfin.iter().enumerate() {
+            let at = lane * 16 + i;
+            assert_eq!(wide[at], ref_gf8mul(*x, *x), "vgf2p8mulb ymm byte {at}");
+        }
+    }
+    assert_eq!(read(0x2150), gfin.as_slice(), "vgf2p8affineqb identity");
+    let inv = read(0x2160);
+    for (i, v) in inv.iter().enumerate() {
+        assert_eq!(*v, ref_gf8inv(gfin[i]), "vgf2p8affineinvqb byte {i}");
+    }
+}
+
+#[test]
+fn run64_vex_ifma() {
+    // AVX-IFMA（VEX 形）。52 ビット入力マスク、低位/高位積、
+    // dest の累算入力と ymm レーンを確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_AVXIFMA;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let qv = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let x0 = ((1u64 << 51) + 3) | (1u64 << 63);
+    let y0 = ((1u64 << 50) + 5) | (1u64 << 62);
+    let xv = [x0, 0x12345, x0, 0x12345];
+    let yv = [y0, 0x23456, y0, 0x23456];
+    let av = [7, 0x1000, 7, 0x1000];
+    env.backend.mem.write(VirtAddr(0x2000), &qv(&xv)).unwrap();
+    env.backend.mem.write(VirtAddr(0x2020), &qv(&yv)).unwrap();
+    env.backend.mem.write(VirtAddr(0x2040), &qv(&av)).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0x48, 0xB9, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rcx,0x2020
+        0xC5, 0xFE, 0x6F, 0x00, // vmovdqu ymm0,[rax]
+        0xC5, 0xFE, 0x6F, 0x48, 0x20, // vmovdqu ymm1,[rax+0x20]
+        0xC5, 0xFA, 0x6F, 0x50, 0x40, // vmovdqu xmm2,[rax+0x40]
+        0xC4, 0xE2, 0xF9, 0xB4, 0xD1, // vpmadd52luq xmm2,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x13, // vmovdqu [rbx],xmm2
+        0xC5, 0xFA, 0x6F, 0x58, 0x40, // vmovdqu xmm3,[rax+0x40]
+        0xC4, 0xE2, 0xF9, 0xB5, 0xD9, // vpmadd52huq xmm3,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x5B, 0x10, // vmovdqu [rbx+0x10],xmm3
+        0xC5, 0xFE, 0x6F, 0x60, 0x40, // vmovdqu ymm4,[rax+0x40]
+        0xC4, 0xE2, 0xFD, 0xB4, 0xE1, // vpmadd52luq ymm4,ymm0,ymm1
+        0xC5, 0xFE, 0x7F, 0x63, 0x20, // vmovdqu [rbx+0x20],ymm4
+        0xC5, 0xFE, 0x6F, 0x68, 0x40, // vmovdqu ymm5,[rax+0x40]
+        0xC4, 0xE2, 0xFD, 0xB5, 0x29, // vpmadd52huq ymm5,ymm0,[rcx]
+        0xC5, 0xFE, 0x7F, 0x6B, 0x40, // vmovdqu [rbx+0x40],ymm5
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x60];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    let q = |at: usize| u64::from_le_bytes(v[at..at + 8].try_into().unwrap());
+    assert_eq!(q(0), 0x0004_0000_0000_0016, "l xmm q0");
+    assert_eq!(q(8), 0x0000_0002_8215_ed2e, "l xmm q1");
+    assert_eq!(q(16), 0x0002_0000_0000_000a, "h xmm q0");
+    assert_eq!(q(24), 0x1000, "h xmm q1");
+    for at in [32usize, 48] {
+        assert_eq!(q(at), 0x0004_0000_0000_0016, "l ymm q0 at {at}");
+        assert_eq!(q(at + 8), 0x0000_0002_8215_ed2e, "l ymm q1 at {at}");
+    }
+    for at in [64usize, 80] {
+        assert_eq!(q(at), 0x0002_0000_0000_000a, "h ymm mem q0 at {at}");
+        assert_eq!(q(at + 8), 0x1000, "h ymm mem q1 at {at}");
+    }
+}
+
+#[test]
+fn run64_vex_vnni() {
+    // AVX-VNNI と INT8/INT16 拡張の代表形。符号性・ラップと
+    // 符号飽和を dword レーンごとに確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVXVNNI
+        | polyisa_guest_x86::FEAT_AVXVNNIINT8
+        | polyisa_guest_x86::FEAT_AVXVNNIINT16;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let bytes = |v: &[u8]| -> Vec<u8> { v.repeat(4) };
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &bytes(&[0xff, 2, 3, 4]))
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &bytes(&[1, 1, 1, 1]))
+        .unwrap();
+    let w10 = [1u8, 0, 0, 0].repeat(4);
+    env.backend.mem.write(VirtAddr(0x2020), &w10).unwrap();
+    env.backend.mem.write(VirtAddr(0x2030), &w10).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &[0xffu8; 16])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2050), &[0xffu8; 16])
+        .unwrap();
+    let d32 = |x: u32| -> Vec<u8> { x.to_le_bytes().repeat(4) };
+    env.backend.mem.write(VirtAddr(0x2060), &d32(1000)).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2070), &d32(0x7fff_ffff))
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFA, 0x6F, 0x00, // vmovdqu xmm0,[rax]
+        0xC5, 0xFA, 0x6F, 0x48, 0x10, // vmovdqu xmm1,[rax+0x10]
+        0xC5, 0xFA, 0x6F, 0x50, 0x60, // vmovdqu xmm2,[rax+0x60]
+        0xC4, 0xE2, 0x79, 0x50, 0xD1, // vpdpbusd xmm2,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x13, // vmovdqu [rbx],xmm2
+        0xC5, 0xFA, 0x6F, 0x58, 0x70, // vmovdqu xmm3,[rax+0x70]
+        0xC4, 0xE2, 0x79, 0x51, 0xD9, // vpdpbusds xmm3,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x5B, 0x10, // vmovdqu [rbx+0x10],xmm3
+        0xC5, 0xFA, 0x6F, 0x40, 0x20, // vmovdqu xmm0,[rax+0x20]
+        0xC5, 0xFA, 0x6F, 0x48, 0x30, // vmovdqu xmm1,[rax+0x30]
+        0xC5, 0xFA, 0x6F, 0x60, 0x70, // vmovdqu xmm4,[rax+0x70]
+        0xC4, 0xE2, 0x79, 0x52, 0xE1, // vpdpwssd xmm4,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x63, 0x20, // vmovdqu [rbx+0x20],xmm4
+        0xC5, 0xFA, 0x6F, 0x68, 0x70, // vmovdqu xmm5,[rax+0x70]
+        0xC4, 0xE2, 0x79, 0x53, 0xE9, // vpdpwssds xmm5,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x6B, 0x30, // vmovdqu [rbx+0x30],xmm5
+        0xC5, 0xFA, 0x6F, 0x40, 0x40, // vmovdqu xmm0,[rax+0x40]
+        0xC5, 0xFA, 0x6F, 0x48, 0x40, // vmovdqu xmm1,[rax+0x40]
+        0xC5, 0xC9, 0xEF, 0xF6, // vpxor xmm6,xmm6,xmm6
+        0xC4, 0xE2, 0x78, 0x50, 0xF1, // vpdpbuud xmm6,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x73, 0x40, // vmovdqu [rbx+0x40],xmm6
+        0xC5, 0xC1, 0xEF, 0xFF, // vpxor xmm7,xmm7,xmm7
+        0xC4, 0xE2, 0x7B, 0x50, 0xF9, // vpdpbssd xmm7,xmm0,xmm1
+        0xC5, 0xFA, 0x7F, 0x7B, 0x50, // vmovdqu [rbx+0x50],xmm7
+        0xC5, 0xFA, 0x6F, 0x40, 0x50, // vmovdqu xmm0,[rax+0x50]
+        0xC5, 0xFA, 0x6F, 0x48, 0x50, // vmovdqu xmm1,[rax+0x50]
+        0xC4, 0x41, 0x39, 0xEF, 0xC0, // vpxor xmm8,xmm8,xmm8
+        0xC4, 0x62, 0x78, 0xD2, 0xC1, // vpdpwuud xmm8,xmm0,xmm1
+        0xC5, 0x7A, 0x7F, 0x43, 0x60, // vmovdqu [rbx+0x60],xmm8
+        0xC4, 0x41, 0x31, 0xEF, 0xC9, // vpxor xmm9,xmm9,xmm9
+        0xC4, 0x62, 0x7A, 0xD2, 0xC9, // vpdpwsud xmm9,xmm0,xmm1
+        0xC5, 0x7A, 0x7F, 0x4B, 0x70, // vmovdqu [rbx+0x70],xmm9
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x80];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    for ((base, insn), e) in [
+        (0usize, "vpdpbusd"),
+        (16, "vpdpbusds"),
+        (32, "vpdpwssd"),
+        (48, "vpdpwssds"),
+        (64, "vpdpbuud"),
+        (80, "vpdpbssd"),
+        (96, "vpdpwuud"),
+        (112, "vpdpwsud"),
+    ]
+    .into_iter()
+    .zip([
+        0x0000_04f0,
+        0x7fff_ffff,
+        0x8000_0000,
+        0x7fff_ffff,
+        0x0003_f804,
+        4,
+        0xfffc_0002,
+        0xfffe_0002,
+    ]) {
+        for lane in 0..4 {
+            assert_eq!(w32(&v, base + lane * 4), e, "{insn} lane{lane}");
+        }
+    }
+}
+
+#[test]
+fn run64_user_system_misc() {
+    // PAUSE は no-op、RDPID/RDPMC/URDMSR は 0 固定、UWRMSR は
+    // uarch 制御なので no-op。XSTORE は決定的 RNG バイトを書く。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_USER_MSR
+        | polyisa_guest_x86::FEAT_VIA_PADLOCK_RNG_EN;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // mov rbx,0x2000
+        0x48, 0xBF, 0x00, 0x21, 0, 0, 0, 0, 0, 0, // mov rdi,0x2100
+        0xBA, 3, 0, 0, 0, // mov edx,3
+        0x0F, 0xA7, 0xC0, // xstore
+        0x48, 0x89, 0x03, // mov [rbx],rax
+        0x48, 0x89, 0x7B, 0x08, // mov [rbx+8],rdi
+        0x48, 0x89, 0x53, 0x10, // mov [rbx+0x10],rdx
+        0xF3, 0x90, // pause
+        0xF3, 0x0F, 0xC7, 0xF9, // rdpid rcx
+        0x48, 0x89, 0x4B, 0x18, // mov [rbx+0x18],rcx
+        0x0F, 0x33, // rdpmc
+        0x48, 0x89, 0x43, 0x20, // mov [rbx+0x20],rax
+        0x48, 0x89, 0x53, 0x28, // mov [rbx+0x28],rdx
+        0xF2, 0x0F, 0x38, 0xF8, 0xCA, // urdmsr ...
+        0x48, 0x89, 0x53, 0x30, // mov [rbx+0x30],rdx
+        0xF3, 0x0F, 0x38, 0xF8, 0xCA, // uwrmsr ...
+        0xB9, 6, 0, 0, 0, // mov ecx,6
+        0x31, 0xD2, // xor edx,edx
+        0xF3, 0x0F, 0xA7, 0xC0, // rep xstore
+        0x48, 0x89, 0x4B, 0x38, // mov [rbx+0x38],rcx
+        0x48, 0x89, 0x7B, 0x40, // mov [rbx+0x40],rdi
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(q(0x2000), 1, "xstore count");
+    assert_eq!(q(0x2008), 0x2101, "xstore rdi advance");
+    assert_eq!(q(0x2010), 3, "xstore edx upper bits clear");
+    assert_eq!(q(0x2018), 0, "rdpid zero");
+    assert_eq!(q(0x2020), 0, "rdpmc eax zero");
+    assert_eq!(q(0x2028), 0, "rdpmc edx zero");
+    assert_eq!(q(0x2030), 0, "urdmsr zero");
+    assert_eq!(q(0x2038), 0, "rep xstore rcx zero");
+    assert_eq!(
+        q(0x2040),
+        0x2109,
+        "rep xstore advances one full 8-byte quantum"
+    );
+    let mut bytes = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut bytes, acc)
+        .unwrap();
+    assert_ne!(bytes, [0u8; 8], "rng bytes were stored");
+}
+
+#[test]
+fn run64_movrs() {
+    // MOVRS は read-shared ヒント以外 MOV と同じ値を返す。
+    // 8/16 ビットは上位を残し、32 ビットはゼロ拡張する。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_MOVRS;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &[0xaa, 0x99, 0xcc, 0xbb, 0x12, 0x34, 0x56, 0x78],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x0123_4567_89ab_cdefu64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0x48, 0xBB, 0x00, 0x28, 0, 0, 0, 0, 0, 0, 0x48,
+        0xB9, 0x00, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // movabs rcx,0x1122334455667700
+        0x0F, 0x38, 0x8A, 0x08, // movrs cl,[rax]
+        0x48, 0x89, 0x0B, // mov [rbx],rcx
+        0x48, 0xB9, 0x00, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // movabs rcx,...
+        0x66, 0x0F, 0x38, 0x8B, 0x48, 0x02, // movrs cx,[rax+2]
+        0x48, 0x89, 0x4B, 0x08, // mov [rbx+8],rcx
+        0x0F, 0x38, 0x8B, 0x48, 0x04, // movrs ecx,[rax+4]
+        0x48, 0x89, 0x4B, 0x10, // mov [rbx+0x10],rcx
+        0x48, 0x0F, 0x38, 0x8B, 0x48, 0x08, // movrs rcx,[rax+8]
+        0x48, 0x89, 0x4B, 0x18, // mov [rbx+0x18],rcx
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(
+        q(0x2800),
+        0x1122_3344_5566_77aa,
+        "movrs byte preserves upper bits"
+    );
+    assert_eq!(
+        q(0x2808),
+        0x1122_3344_5566_bbcc,
+        "movrs word preserves upper bits"
+    );
+    assert_eq!(q(0x2810), 0x7856_3412, "movrs dword zero-extends");
+    assert_eq!(q(0x2818), 0x0123_4567_89ab_cdef, "movrs qword");
+}
+
+#[test]
+fn run64_sse_mmx_bridge_rcp() {
+    // SSE1/2 の残り: RCP/RSQRT、MMX との整数・浮動小数点変換、
+    // MOVDQ2Q/MOVQ2DQ、EMMS の実行到達を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let mut data = Vec::new();
+    for x in [0x4080_0000u32, 0x3f80_0000, 0x4180_0000, 0x3e80_0000] {
+        data.extend(x.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &data).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &3i32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2024), &(-2i32).to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2028), &5i32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x202c), &(-6i32).to_le_bytes())
+        .unwrap();
+    let mut cvt = Vec::new();
+    for x in [2.5f32, -3.5, 0.0, 0.0] {
+        cvt.extend(x.to_bits().to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2030), &cvt).unwrap();
+    let mut cvd = Vec::new();
+    for x in [2.5f64, -3.5] {
+        cvd.extend(x.to_bits().to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2040), &cvd).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2060), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2068), &0xdead_beef_cafe_babeu64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2070), &0xaaaa_5555_aaaa_5555u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2078), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0x48, 0xBB, 0x00, 0x28, 0, 0, 0, 0, 0, 0, 0x0F,
+        0x53, 0x08, 0xC5, 0xFA, 0x7F, 0x0B, 0x0F, 0x52, 0x10, 0xC5, 0xFA, 0x7F, 0x53, 0x10, 0x0F,
+        0x6F, 0x40, 0x20, 0x0F, 0x6F, 0x48, 0x28, 0x0F, 0x10, 0x78, 0x70, 0x0F, 0x2A, 0xF8, 0xC5,
+        0xFA, 0x7F, 0x7B, 0x20, 0x66, 0x44, 0x0F, 0x2A, 0xC1, 0xC5, 0x7A, 0x7F, 0x43, 0x30, 0x0F,
+        0x10, 0x48, 0x30, 0x0F, 0x2D, 0xD1, 0x0F, 0x7F, 0x53, 0x40, 0x0F, 0x2C, 0xD9, 0x0F, 0x7F,
+        0x5B, 0x48, 0x66, 0x44, 0x0F, 0x10, 0x40, 0x40, 0x66, 0x41, 0x0F, 0x2D, 0xE0, 0x0F, 0x7F,
+        0x63, 0x50, 0x66, 0x41, 0x0F, 0x2C, 0xE8, 0x0F, 0x7F, 0x6B, 0x58, 0x0F, 0x6F, 0x70, 0x60,
+        0xF3, 0x44, 0x0F, 0xD6, 0xCE, 0xC5, 0x7A, 0x7F, 0x4B, 0x60, 0x44, 0x0F, 0x10, 0x50, 0x60,
+        0xF2, 0x41, 0x0F, 0xD6, 0xFA, 0x0F, 0x7F, 0x7B, 0x70, 0x0F, 0x77, 0x48, 0xC7, 0xC0, 0x3C,
+        0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x80];
+    env.backend.mem.read(VirtAddr(0x2800), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[0x00..0x10],
+        &[
+            0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f, 0, 0, 0x80, 0x3d, 0, 0, 0x80, 0x40
+        ],
+        "rcpps"
+    );
+    assert_eq!(
+        &v[0x10..0x20],
+        &[
+            0, 0, 0, 0x3f, 0, 0, 0x80, 0x3f, 0, 0, 0x80, 0x3e, 0, 0, 0, 0x40
+        ],
+        "rsqrtps"
+    );
+    assert_eq!(
+        &v[0x20..0x28],
+        &[0, 0, 0x40, 0x40, 0, 0, 0, 0xc0],
+        "cvtpi2ps low"
+    );
+    assert_eq!(
+        &v[0x28..0x30],
+        &0x1122_3344_5566_7788u64.to_le_bytes(),
+        "cvtpi2ps preserves high"
+    );
+    assert_eq!(
+        &v[0x30..0x40],
+        &[0, 0, 0, 0, 0, 0, 0x14, 0x40, 0, 0, 0, 0, 0, 0, 0x18, 0xc0],
+        "cvtpi2pd"
+    );
+    assert_eq!(
+        &v[0x40..0x48],
+        &[2, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff],
+        "cvtps2pi rne"
+    );
+    assert_eq!(
+        &v[0x48..0x50],
+        &[2, 0, 0, 0, 0xfd, 0xff, 0xff, 0xff],
+        "cvttps2pi"
+    );
+    assert_eq!(
+        &v[0x50..0x58],
+        &[2, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff],
+        "cvtpd2pi rne"
+    );
+    assert_eq!(
+        &v[0x58..0x60],
+        &[2, 0, 0, 0, 0xfd, 0xff, 0xff, 0xff],
+        "cvttpd2pi"
+    );
+    assert_eq!(
+        &v[0x60..0x68],
+        &0x1122_3344_5566_7788u64.to_le_bytes(),
+        "movq2dq low"
+    );
+    assert_eq!(&v[0x68..0x70], &[0; 8], "movq2dq high zero");
+    assert_eq!(
+        &v[0x70..0x78],
+        &0x1122_3344_5566_7788u64.to_le_bytes(),
+        "movdq2q"
+    );
+}
+
+#[test]
+fn run64_rao_cmpccxadd() {
+    // RAO-INT のメモリ読み書きと、CMPZXADD の成立/不成立両側。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_RAOINT
+        | polyisa_guest_x86::FEAT_CMPCCXADD;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    let vals: [(u64, u64); 7] = [
+        (0x2000, 5),
+        (0x2008, 0x1f),
+        (0x2010, 0x41),
+        (0x2018, 0x33),
+        (0x2020, 5),
+        (0x2028, 10),
+        (0x2030, 10),
+    ];
+    for (a, x) in vals {
+        env.backend
+            .mem
+            .write(VirtAddr(a), &x.to_le_bytes())
+            .unwrap();
+    }
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+        0xB9, 0x12, 0, 0, 0, // mov ecx,0x12
+        0x0F, 0x38, 0xFC, 0x08, // aadd [rax],ecx
+        0x66, 0x0F, 0x38, 0xFC, 0x48, 0x08, // aand [rax+8],ecx
+        0xF2, 0x0F, 0x38, 0xFC, 0x48, 0x10, // aor [rax+0x10],ecx
+        0xF3, 0x0F, 0x38, 0xFC, 0x48, 0x18, // axor [rax+0x18],ecx
+        0x48, 0x0F, 0x38, 0xFC, 0x48, 0x20, // aadd [rax+0x20],rcx
+        0xB9, 0x0A, 0, 0, 0, // mov ecx,10
+        0xBA, 0x07, 0, 0, 0, // mov edx,7
+        0xC4, 0xE2, 0x69, 0xE4, 0x48, 0x28, // cmpzxadd [rax+0x28],ecx,edx
+        0xB9, 0x0B, 0, 0, 0, // mov ecx,11
+        0xC4, 0xE2, 0x69, 0xE4, 0x48, 0x30, // cmpzxadd [rax+0x30],ecx,edx
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(q(0x2000), 0x17, "aadd32");
+    assert_eq!(q(0x2008), 0x12, "aand32");
+    assert_eq!(q(0x2010), 0x53, "aor32");
+    assert_eq!(q(0x2018), 0x21, "axor32");
+    assert_eq!(q(0x2020), 0x17, "aadd64");
+    assert_eq!(q(0x2028), 17, "cmpzxadd taken memory");
+    assert_eq!(q(0x2030), 10, "cmpzxadd not-taken memory");
+    assert_eq!(
+        env.backend.get(Gpr(1).state()),
+        10,
+        "cmpzxadd returns old memory"
+    );
+}
+
+#[test]
+fn run64_cmpccxadd_width() {
+    // VEX.W=0 は 32 ビット、W=1 は 64 ビット。pp=66 を legacy
+    // operand-size prefix と混同すると 16 ビットに縮むので、上位
+    // ビットを持つ値で writeback と destination を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_CMPCCXADD;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xdead_beef_0000_0010u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x1234_5678_9abc_def0u64.to_le_bytes())
+        .unwrap();
+    let mut prog = vec![
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+        0xB9, 0x10, 0, 0, 0, // mov ecx,0x10
+        0xBA, 0x20, 0, 0, 0, // mov edx,0x20
+        0xC4, 0xE2, 0x69, 0xE4, 0x08, // cmpzxadd [rax],ecx,edx (W=0)
+        0x48, 0x89, 0x48, 0x10, // mov [rax+0x10],rcx（32 ビット old のゼロ拡張）
+        0x48, 0xB9, // movabs rcx,old64
+    ];
+    prog.extend_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+    prog.extend_from_slice(&[
+        0x48, 0xBA, // movabs rdx,0x1_0000_0000
+    ]);
+    prog.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
+    prog.extend_from_slice(&[
+        0xC4, 0xE2, 0xE9, 0xE4, 0x48, 0x08, // cmpzxadd [rax+8],rcx,rdx (W=1)
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ]);
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let q = |a: u64| {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(a), &mut b, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(
+        q(0x2000),
+        0xdead_beef_0000_0030,
+        "W=0 は上位 32 ビットを残す"
+    );
+    assert_eq!(q(0x2010), 0x10, "W=0 の destination は 32 ビットゼロ拡張");
+    assert_eq!(
+        q(0x2008),
+        0x1234_5678_9abc_def0u64.wrapping_add(0x1_0000_0000),
+        "W=1 は 64 ビットで加算する"
+    );
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)),
+        0x1234_5678_9abc_def0
+    );
+}
+
+#[test]
+fn run64_vcrypto_sha_sm() {
+    // SHA512/SM3/SM4 の代表形。SHA512 は状態語の配置、SM3 は
+    // dest 入力、SM4 は 128 ビットレーン独立性を固定ベクトルで見る。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_SHA512
+        | polyisa_guest_x86::FEAT_SM3
+        | polyisa_guest_x86::FEAT_SM4;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    fn wq(env: &mut BareEnv, at: u64, xs: &[u64]) {
+        let mut v = Vec::new();
+        for x in xs {
+            v.extend(x.to_le_bytes());
+        }
+        env.backend.mem.write(VirtAddr(at), &v).unwrap();
+    }
+    fn wd(env: &mut BareEnv, at: u64, xs: &[u32]) {
+        let mut v = Vec::new();
+        for x in xs {
+            v.extend(x.to_le_bytes());
+        }
+        env.backend.mem.write(VirtAddr(at), &v).unwrap();
+    }
+    wq(
+        &mut env,
+        0x2000,
+        &[
+            0x0123_4567_89ab_cdef,
+            0xfedc_ba98_7654_3210,
+            0x1111_1111_1111_1111,
+            0x2222_2222_2222_2222,
+        ],
+    );
+    wq(
+        &mut env,
+        0x2020,
+        &[
+            0x3333_3333_3333_3333,
+            0x4444_4444_4444_4444,
+            0x5555_5555_5555_5555,
+            0x6666_6666_6666_6666,
+        ],
+    );
+    wq(
+        &mut env,
+        0x2040,
+        &[0x7777_7777_7777_7777, 0x8888_8888_8888_8888],
+    );
+    wq(&mut env, 0x2050, &[1, 2, 3, 4]);
+    wq(&mut env, 0x2070, &[5, 0]);
+    wq(&mut env, 0x2080, &[1, 2, 3, 4]);
+    wq(&mut env, 0x20a0, &[0, 0, 14, 15]);
+    wd(&mut env, 0x20c0, &[10, 11, 12, 13]);
+    wd(&mut env, 0x20d0, &[20, 21, 22, 23]);
+    wd(&mut env, 0x20e0, &[30, 31, 32, 33]);
+    wd(&mut env, 0x20f0, &[40, 41, 42, 43]);
+    wd(&mut env, 0x2100, &[50, 51, 52, 53]);
+    wd(&mut env, 0x2110, &[60, 61, 62, 63]);
+    wd(&mut env, 0x2120, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    wd(&mut env, 0x2140, &[9, 10, 11, 12, 13, 14, 15, 16]);
+    wd(&mut env, 0x2160, &[17, 18, 19, 20, 21, 22, 23, 24]);
+    wd(&mut env, 0x2180, &[25, 26, 27, 28, 29, 30, 31, 32]);
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0x48, 0xBB, 0x00, 0x28, 0, 0, 0, 0, 0, 0, 0xC5,
+        0xFE, 0x6F, 0x08, 0xC5, 0xFE, 0x6F, 0x50, 0x20, 0xC5, 0xFA, 0x6F, 0x58, 0x40, 0xC4, 0xE2,
+        0x6F, 0xCB, 0xCB, 0xC5, 0xFE, 0x7F, 0x0B, 0xC5, 0xFE, 0x6F, 0x60, 0x50, 0xC5, 0xFA, 0x6F,
+        0x68, 0x70, 0xC4, 0xE2, 0x7F, 0xCC, 0xE5, 0xC5, 0xFE, 0x7F, 0x63, 0x20, 0xC5, 0xFE, 0x6F,
+        0xB0, 0x80, 0, 0, 0, 0xC5, 0xFE, 0x6F, 0xB8, 0xA0, 0, 0, 0, 0xC4, 0xE2, 0x7F, 0xCD, 0xF7,
+        0xC5, 0xFE, 0x7F, 0x73, 0x40, 0xC5, 0xFA, 0x6F, 0x88, 0xC0, 0, 0, 0, 0xC5, 0xFA, 0x6F,
+        0x90, 0xD0, 0, 0, 0, 0xC5, 0xFA, 0x6F, 0x98, 0xE0, 0, 0, 0, 0xC4, 0xE2, 0x68, 0xDA, 0xCB,
+        0xC5, 0xFA, 0x7F, 0x4B, 0x60, 0xC5, 0xFA, 0x6F, 0x88, 0xF0, 0, 0, 0, 0xC5, 0xFA, 0x6F,
+        0x90, 0x00, 0x01, 0, 0, 0xC5, 0xFA, 0x6F, 0x98, 0x10, 0x01, 0, 0, 0xC4, 0xE2, 0x69, 0xDA,
+        0xCB, 0xC5, 0xFA, 0x7F, 0x4B, 0x70, 0xC5, 0xFE, 0x6F, 0x90, 0x20, 0x01, 0, 0, 0xC5, 0xFE,
+        0x6F, 0x98, 0x40, 0x01, 0, 0, 0xC4, 0xE2, 0x6E, 0xDA, 0xCB, 0xC5, 0xFE, 0x7F, 0x8B, 0x80,
+        0, 0, 0, 0xC5, 0xFE, 0x6F, 0x90, 0x60, 0x01, 0, 0, 0xC5, 0xFE, 0x6F, 0x98, 0x80, 0x01, 0,
+        0, 0xC4, 0xE2, 0x6F, 0xDA, 0xCB, 0xC5, 0xFE, 0x7F, 0x8B, 0xA0, 0, 0, 0, 0x48, 0xC7, 0xC0,
+        0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        300,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0xc0];
+    env.backend.mem.read(VirtAddr(0x2800), &mut v, acc).unwrap();
+    let q = |at: usize| u64::from_le_bytes(v[at..at + 8].try_into().unwrap());
+    let d = |at: usize| u32::from_le_bytes(v[at..at + 4].try_into().unwrap());
+    for (i, e) in [
+        0x6666_aaaa_6666_aaa9u64,
+        0x5419_69aa_cb04_2122,
+        0xeeef_3332_eeef_3331,
+        0xc8f3_e0b4_05de_97f9,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(q(i * 8), e, "sha512rnds2 q{i}");
+    }
+    for (i, e) in [
+        0x0200_0000_0000_0002u64,
+        0x8300_0000_0000_0003,
+        0x0400_0000_0000_0005,
+        0x8500_0000_0000_0006,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(q(0x20 + i * 8), e, "sha512msg1 q{i}");
+    }
+    for (i, e) in [
+        0x0001_c000_0000_0071u64,
+        0x0001_e000_0000_007a,
+        0x0000_2700_3800_038c,
+        0x0000_4780_3c00_03d5,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(q(0x40 + i * 8), e, "sha512msg2 q{i}");
+    }
+    for (i, e) in [0x0a00_0511u32, 0x4a00_8551, 0x961d_05a9, 0x1616_002c]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(d(0x60 + i * 4), e, "sm3msg1 d{i}");
+    }
+    for (i, e) in [0x1914u32, 0x1994, 0x1a14, 0x0c8c_59d1]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(d(0x70 + i * 4), e, "sm3msg2 d{i}");
+    }
+    for (i, e) in [
+        0x1878_a798u32,
+        0x3c1f_d34f,
+        0x548f_fc55,
+        0xeaed_2b4c,
+        0x6a64_2778,
+        0x081b_8401,
+        0xaf40_600b,
+        0xc5ef_035b,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(d(0x80 + i * 4), e, "sm4key4 d{i}");
+    }
+    for (i, e) in [
+        0xa6a0_a04cu32,
+        0x8879_f297,
+        0x6c9a_d4c2,
+        0xcace_3e24,
+        0x4133_333c,
+        0xd793_85f4,
+        0xe72a_a03f,
+        0x64dc_139e,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(d(0xa0 + i * 4), e, "sm4rnds4 d{i}");
+    }
+}
+
+#[test]
+fn run64_avxneconvert() {
+    // AVX-NE-CONVERT。偶奇要素の拡張、broadcast、RNE 固定の
+    // BF16 縮小（tie-to-even・NaN quiet・入力非正規フラッシュ）を見る。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_AVXNECONVERT;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let mut half = Vec::new();
+    for h in [0x3c00u16, 0x4000, 0x4200, 0x4400, 0x0001, 0, 0x7c01, 0] {
+        half.extend(h.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &half).unwrap();
+    let mut fp = Vec::new();
+    for x in [
+        0x3f80_0000u32,
+        0x3f80_8000,
+        0x3f81_8000,
+        0x7f81_2345,
+        0x7f7f_ffff,
+        0x007f_c000,
+        0xbf80_0000,
+        0,
+    ] {
+        fp.extend(x.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2020), &fp).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC4, 0xE2, 0x79, 0xB0, 0x08, // vcvtneeph2ps xmm1,[rax]
+        0xC5, 0xFA, 0x7F, 0x0B, // vmovdqu [rbx],xmm1
+        0xC4, 0xE2, 0x78, 0xB0, 0x10, // vcvtneoph2ps xmm2,[rax]
+        0xC5, 0xFA, 0x7F, 0x53, 0x10, // vmovdqu [rbx+0x10],xmm2
+        0xC4, 0xE2, 0x7A, 0xB0, 0x18, // vcvtneebf162ps xmm3,[rax]
+        0xC5, 0xFA, 0x7F, 0x5B, 0x20, // vmovdqu [rbx+0x20],xmm3
+        0xC4, 0xE2, 0x7B, 0xB0, 0x20, // vcvtneobf162ps xmm4,[rax]
+        0xC5, 0xFA, 0x7F, 0x63, 0x30, // vmovdqu [rbx+0x30],xmm4
+        0xC4, 0xE2, 0x79, 0xB1, 0x28, // vbcstnesh2ps xmm5,[rax]
+        0xC5, 0xFA, 0x7F, 0x6B, 0x40, // vmovdqu [rbx+0x40],xmm5
+        0xC4, 0xE2, 0x7A, 0xB1, 0x30, // vbcstnebf162ps xmm6,[rax]
+        0xC5, 0xFA, 0x7F, 0x73, 0x50, // vmovdqu [rbx+0x50],xmm6
+        0xC5, 0xFE, 0x6F, 0x40, 0x20, // vmovdqu ymm0,[rax+0x20]
+        0xC4, 0xE2, 0x7A, 0x72, 0xF8, // vcvtneps2bf16 xmm7,xmm0
+        0xC5, 0xFA, 0x7F, 0x7B, 0x60, // vmovdqu [rbx+0x60],xmm7
+        0xC4, 0x62, 0x7E, 0x72, 0xC0, // vcvtneps2bf16 xmm8,ymm0
+        0xC5, 0x7A, 0x7F, 0x43, 0x70, // vmovdqu [rbx+0x70],xmm8
+        0xC4, 0x62, 0x7D, 0xB0, 0x08, // vcvtneeph2ps ymm9,[rax]
+        0xC5, 0x7E, 0x7F, 0x8B, 0x80, 0x00, 0x00, 0x00, // vmovdqu [rbx+0x80],ymm9
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0xa0];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    let even = [0x3f80_0000, 0x4040_0000, 0x3380_0000, 0x7fc0_2000];
+    let odd = [0x4000_0000, 0x4080_0000, 0, 0];
+    let bfe = [0x3c00_0000, 0x4200_0000, 0x0001_0000, 0x7c01_0000];
+    let bfo = [0x4000_0000, 0x4400_0000, 0, 0];
+    for (base, exp) in [(0usize, even), (16, odd), (32, bfe), (48, bfo)] {
+        for (i, e) in exp.into_iter().enumerate() {
+            assert_eq!(w32(&v, base + i * 4), e, "cvt at {base} lane{i}");
+        }
+    }
+    for i in 0..4 {
+        assert_eq!(w32(&v, 64 + i * 4), 0x3f80_0000, "bcst fp16 lane{i}");
+        assert_eq!(w32(&v, 80 + i * 4), 0x3c00_0000, "bcst bf16 lane{i}");
+    }
+    assert_eq!(
+        &v[0x60..0x68],
+        &[0x80, 0x3f, 0x80, 0x3f, 0x82, 0x3f, 0xc1, 0x7f]
+    );
+    assert_eq!(
+        &v[0x70..0x80],
+        &[
+            0x80, 0x3f, 0x80, 0x3f, 0x82, 0x3f, 0xc1, 0x7f, 0x80, 0x7f, 0, 0, 0x80, 0xbf, 0, 0
+        ]
+    );
+    for (i, e) in even.into_iter().enumerate() {
+        assert_eq!(w32(&v, 0x80 + i * 4), e, "ymm even lane{i}");
+    }
+    for i in 4..8 {
+        assert_eq!(w32(&v, 0x80 + i * 4), 0, "ymm even upper lane{i}");
     }
 }
 
@@ -20827,11 +22819,12 @@ fn run64_movdir_waitpkg() {
     assert_eq!(d.insn, Insn::Xsaveopt);
     // 0F 38 F8 の F2/F3 mod=11 は ENQCMD/ENQCMDS ではなく
     // URDMSR/UWRMSR（ユーザ MSR アクセス）。
+    let feats_user_msr = feats | polyisa_guest_x86::FEAT_USER_MSR;
     for (bytes, want) in [
         (&[0xF2, 0x0F, 0x38, 0xF8, 0xC0][..], Insn::UrdmsrRvEv),
         (&[0xF3, 0x0F, 0x38, 0xF8, 0xC0][..], Insn::UwrmsrRvEv),
     ] {
-        let d = decode_map(bytes, m64, feats).unwrap_or_else(|| panic!("{bytes:?}"));
+        let d = decode_map(bytes, m64, feats_user_msr).unwrap_or_else(|| panic!("{bytes:?}"));
         assert_eq!(d.insn, want, "{bytes:?}");
     }
     // 受理系: 各命令の正しい形。
@@ -22000,7 +23993,8 @@ fn run64_amx() {
         | polyisa_guest_x86::FEAT_AMX_INT8
         | polyisa_guest_x86::FEAT_AMX_BF16
         | polyisa_guest_x86::FEAT_AMX_FP16
-        | polyisa_guest_x86::FEAT_AMX_COMPLEX;
+        | polyisa_guest_x86::FEAT_AMX_COMPLEX
+        | polyisa_guest_x86::FEAT_AMX_MOVRS;
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
@@ -22030,9 +24024,9 @@ fn run64_amx() {
         0x48, 0xBE, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2100
         0x48, 0xBF, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, // movabs rdi,8（stride）
-        0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, // tileloadd (%rsi,%rdi),tmm1
+        0xC4, 0xE2, 0x7B, 0x4A, 0x0C, 0x3E, // tileloaddrs (%rsi,%rdi),tmm1
         0x48, 0xBE, 0x10, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2110
-        0xC4, 0xE2, 0x7B, 0x4B, 0x14, 0x3E, // tileloadd (%rsi,%rdi),tmm2
+        0xC4, 0xE2, 0x79, 0x4A, 0x14, 0x3E, // tileloaddrst1 (%rsi,%rdi),tmm2
         0xC4, 0xE2, 0x6B, 0x5E, 0xC1, // tdpbssd %tmm2,%tmm1,%tmm0
         0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
         0xC4, 0xE2, 0x7A, 0x4B, 0x04, 0x3B, // tilestored %tmm0,(%rbx,%rdi)

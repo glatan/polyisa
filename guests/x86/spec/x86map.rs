@@ -86,6 +86,12 @@ fn ex(
     it
 }
 
+/// VEX 接頭辞の命令項目に追加の機能ゲートを付ける。
+fn vf(mut it: MapInsn, flag: &str) -> MapInsn {
+    it.when = Pred::Flag(flag.to_string());
+    it
+}
+
 /// VEX 接頭辞で AVX2 ゲートの命令項目（256 ビット整数演算用）。
 /// `apply_gates` の VEX 既定 `avx` と `when` の `avx2` が結合される。
 fn vax(
@@ -1131,6 +1137,12 @@ pub fn build_maps(m: &mut Model) {
     m0f.push(MapItem::Insn(0x01, it));
     let mut it = m01(6, "lmsw_ew", "lmsw {e}");
     it.ops = vec![Ea(W16)];
+    m0f.push(MapItem::Insn(0x01, it));
+    // INVLPG /7。TLB はモデル化しないが、実モードでは no-op、
+    // ユーザーモードでは #GP とする。メモリ形だけ有効。
+    let mut it = m01(7, "invlpg_mb", "invlpg {e}");
+    it.ops = vec![Ea(B8)];
+    it.group_mod = Some(false);
     m0f.push(MapItem::Insn(0x01, it));
     // 0F 01 /5 mod=11 は rm 副エンコーディング（rm×接頭辞で
     // 命令が分かれる）: NP rm=0 SERIALIZE、F3 rm=0 SETSSBSY、
@@ -3044,7 +3056,7 @@ fn build_map_0f38(m: &mut Model) {
     ] {
         v.push(MapItem::Insn(
             0xFC,
-            mmem(mi(
+            mmem(vf(mi(
                 &format!("{mn}_mv_gv"),
                 &[Ea(V), Reg(V)],
                 None,
@@ -3052,7 +3064,7 @@ fn build_map_0f38(m: &mut Model) {
                 Pred::True,
                 &format!("{mn} {{e}}, {{g}}"),
                 "alu",
-            )),
+            ), "raoint")),
         ));
     }
     // URDMSR/UWRMSR（user MSR アクセス・0F 38 F8 mod=3、
@@ -3067,17 +3079,20 @@ fn build_map_0f38(m: &mut Model) {
             &format!("{mn} {{g}}, {{e}}"),
             "system",
         );
+        it = vf(it, "user_msr");
         it.group_mod = Some(true);
         v.push(MapItem::Insn(0xF8, it));
     }
     // MOVRS（0F 38 8A/8B・メモリ形のみ・64 ビットモード）。
-    // NP と 66 を受理し F2/F3 は #UD（XED 実測）。
-    for op in [0x8Au8, 0x8B] {
-        v.push(MapItem::Insn(
-            op,
-            mmem(mi("movrs_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::NoF2F3, w("m64"), "movrs {g}, {e}", "load")),
-        ));
-    }
+    // 8A がバイト、8B が 16/32/64。NP と 66 を受理し F2/F3 は #UD。
+    v.push(MapItem::Insn(
+        0x8A,
+        mmem(mi("movrs_gb_eb", &[Reg(B8), Ea(B8)], None, PfxSel::NoF2F3, w("m64"), "movrs {g}, {e}", "load")),
+    ));
+    v.push(MapItem::Insn(
+        0x8B,
+        mmem(mi("movrs_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::NoF2F3, w("m64"), "movrs {g}, {e}", "load")),
+    ));
     // MOVNTDQA はメモリ形のみ。
     for it in v.iter_mut() {
         if let MapItem::Insn(0x2A, mi) = it {
@@ -3463,7 +3478,7 @@ fn build_map_0f38(m: &mut Model) {
             vmx(&format!("{mn}_gv_ev_by"), &[Reg(V), Ea(V), Vv], sel, L0, false, "{op} {g}, {e}, {h}", "alu"),
         ));
     }
-    // CMPccXADD（RAO-INT・VEX.66 0F 38 E0-EF・メモリ形のみ）。
+    // CMPccXADD（VEX.66 0F 38 E0-EF・メモリ形のみ）。
     // legacy 66 0F 38 Ex は予約で XED が #UD とする（VEX 必須）。
     // オペコード下位4ビットが条件コード。
     for (op, mn) in [
@@ -3493,9 +3508,10 @@ fn build_map_0f38(m: &mut Model) {
             "{op} {e}, {g}",
             "alu",
         );
+        it = vf(it, "cmpccxadd");
         // CMPccXADD は 64 ビットモード専用かつ L=0 必須（XED 実測。
         // W はオペランド幅を選ぶので両対応）。
-        it.when = w("m64");
+        it.when = Pred::All(vec![w("m64"), it.when]);
         v.push(MapItem::Insn(op, mmem(it)));
     }
     // VPMULDQ・可変シフト（AVX2・W=0 が D 要素、W=1 が Q 要素）。
@@ -3527,14 +3543,14 @@ fn build_map_0f38(m: &mut Model) {
     // VGF2P8MULB（66 0F 38 CF、W=0 必須・L 両対応）。
     v.push(MapItem::Insn(
         0xCF,
-        w0(vmx("vgf2p8mulb_xv_wv", &[RegX, RmX], PfxSel::P66, Any, true, "{op} {x}, {w}", "alu")),
+        w0(vf(vmx("vgf2p8mulb_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::P66, Any, true, "{op} {x}, {h}, {w}", "alu"), "gfni")),
     ));
     // VAES の VEX 形（66 0F 38 DB-DF）。VAESIMC は単項で
     // vvvv=1111b 必須・128 のみ（L=1 は #UD、XED 実測）。暗号
     // 往復系は 3 被演算子で L 両対応。
     v.push(MapItem::Insn(
         0xDB,
-        vmx("vaesimc_xv_wv", &[RegX, RmX], PfxSel::P66, L0, true, "{op} {x}, {w}", "alu"),
+        vf(vmx("vaesimc_xv_wv", &[RegX, RmX], PfxSel::P66, L0, true, "{op} {x}, {w}", "alu"), "vaes"),
     ));
     for (op, mn) in [
         (0xDCu8, "vaesenc"),
@@ -3544,7 +3560,7 @@ fn build_map_0f38(m: &mut Model) {
     ] {
         v.push(MapItem::Insn(
             op,
-            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}", "alu"),
+            vf(vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}", "alu"), "vaes"),
         ));
     }
     // AVX-VNNI(-INT8/-INT16) のドット積（0F 38 50-53・D2-D3）。
@@ -3567,9 +3583,14 @@ fn build_map_0f38(m: &mut Model) {
         (0xD3, PfxSel::P66, "vpdpwusds"),
         (0xD3, PfxSel::PF3, "vpdpwsuds"),
     ] {
+        let feat = match mn {
+            "vpdpbusd" | "vpdpbusds" | "vpdpwssd" | "vpdpwssds" => "avxvnni",
+            _ if mn.starts_with("vpdpb") => "avxvnniint8",
+            _ => "avxvnniint16",
+        };
         v.push(MapItem::Insn(
             op,
-            w0(vax(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, Any, false, "{op} {x}, {h}, {w}", "alu")),
+            w0(vf(vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, Any, false, "{op} {x}, {h}, {w}", "alu"), feat)),
         ));
     }
     // AVX-FP16/BF16 の変換・ブロードキャスト（0F 38 B0-B1・
@@ -3584,49 +3605,49 @@ fn build_map_0f38(m: &mut Model) {
     ] {
         v.push(MapItem::Insn(
             op,
-            w0(mmem(vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "load"))),
+            w0(mmem(vf(vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "load"), "avxneconvert"))),
         ));
     }
     // VCVTNEPS2BF16（F3 0F 38 72・W=0 必須・L 両対応）。
     v.push(MapItem::Insn(
         0x72,
-        w0(vmx("vcvtneps2bf16_xv_wv", &[RegX, RmX], PfxSel::PF3, Any, true, "{op} {x}, {w}", "alu")),
+        w0(vf(vmx("vcvtneps2bf16_xv_wv", &[RegX, RmX], PfxSel::PF3, Any, true, "{op} {x}, {w}", "alu"), "avxneconvert")),
     ));
     // VSHA512（F2 0F 38 CB-CD・W=0 必須・reg 形のみ・256 のみ。
     // XED 実測）。
-    for (op, mn) in [
-        (0xCBu8, "vsha512rnds2"),
-        (0xCC, "vsha512msg1"),
-        (0xCD, "vsha512msg2"),
-    ] {
+    v.push(MapItem::Insn(
+        0xCB,
+        w0(mreg(vf(vmx("vsha512rnds2_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::PF2, L1, false, "{op} {x}, {h}, {w}", "alu"), "sha512"))),
+    ));
+    for (op, mn) in [(0xCCu8, "vsha512msg1"), (0xCD, "vsha512msg2")] {
         v.push(MapItem::Insn(
             op,
-            w0(mreg(vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::PF2, L1, false, "{op} {x}, {h}, {w}", "alu"))),
+            w0(mreg(vf(vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], PfxSel::PF2, L1, true, "{op} {x}, {w}", "alu"), "sha512"))),
         ));
     }
     // VSM3MSG2（66 0F 38 DA・128）と VSM4KEY4/RNDS4（F3/F2 0F
     // 38 DA・256）。同じオペコードで pp が選ぶ（XED 実測）。
     v.push(MapItem::Insn(
         0xDA,
-        w0(vmx("vsm3msg1_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::Plain, L0, false, "{op} {x}, {h}, {w}", "alu")),
+        w0(vf(vmx("vsm3msg1_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::Plain, L0, false, "{op} {x}, {h}, {w}", "alu"), "sm3")),
     ));
     v.push(MapItem::Insn(
         0xDA,
-        w0(vmx("vsm3msg2_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu")),
+        w0(vf(vmx("vsm3msg2_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu"), "sm3")),
     ));
     v.push(MapItem::Insn(
         0xDA,
-        w0(vmx("vsm4key4_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::PF3, Any, false, "{op} {x}, {h}, {w}", "alu")),
+        w0(vf(vmx("vsm4key4_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::PF3, Any, false, "{op} {x}, {h}, {w}", "alu"), "sm4")),
     ));
     v.push(MapItem::Insn(
         0xDA,
-        w0(vmx("vsm4rnds4_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::PF2, Any, false, "{op} {x}, {h}, {w}", "alu")),
+        w0(vf(vmx("vsm4rnds4_xv_hv_wv", &[RegX, Vv, RmX], PfxSel::PF2, Any, false, "{op} {x}, {h}, {w}", "alu"), "sm4")),
     ));
     // VPMADD52LUQ/HUQ（66 0F 38 B4-B5・W=1 必須・L 両対応）。
     for (op, mn) in [(0xB4u8, "vpmadd52luq"), (0xB5, "vpmadd52huq")] {
         v.push(MapItem::Insn(
             op,
-            w1(vax(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}", "alu")),
+            w1(vf(vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}", "alu"), "avxifma")),
         ));
     }
     // VCVTPH2PS（66 0F 38 13）。半精度→単精度。vvvv は 1111b 必須。
@@ -3754,7 +3775,10 @@ fn build_map_0f38(m: &mut Model) {
     let mut tile = |op: u8, mut it: MapInsn| {
         it.vex = Some(VexL::L0);
         it.wsel = Some(false);
-        it.when = w("m64");
+        it.when = match it.when {
+            Pred::True => w("m64"),
+            extra => Pred::All(vec![w("m64"), extra]),
+        };
         v.push(MapItem::Insn(op, it));
     };
     // TILECFG 系は必須接頭辞がグループ選択子（NP=LD/RELEASE、
@@ -3785,7 +3809,8 @@ fn build_map_0f38(m: &mut Model) {
     it.vex_rv = true;
     it.sib = true;
     tile(0x4B, it);
-    // TILELOADRS/TILELOADRST1（AMX-TRANSPOSE・0F 38 4A）。
+    // TILELOADDRS/TILELOADDRST1（AMX-MOVRS・0F 38 4A）。
+    // タイル内容は TILELOADD/T1 と同じで、read-shared ヒントだけが増える。
     for (sel, mn) in [(PfxSel::PF2, "tileloaddrs"), (PfxSel::P66, "tileloaddrst1")] {
         let mut it = mi(mn, &[RegT, Ea(V)], None, sel, Pred::True, &format!("{mn} {{x}}, {{e}}"), "load");
         it.vex_rv = true;
@@ -3938,7 +3963,7 @@ fn build_map_0f3a(m: &mut Model) {
         // VPCLMULQDQ（66 0F 3A 44・W/L 両対応。XED 実測）。
         items.push(MapItem::Insn(
             0x44,
-            vmx(
+            vf(vmx(
                 "vpclmulqdq_xv_hv_wv_ib",
                 &[RegX, Vv, RmX, Imm(B8)],
                 PfxSel::P66,
@@ -3946,13 +3971,13 @@ fn build_map_0f3a(m: &mut Model) {
                 false,
                 "{op} {x}, {h}, {w}, {i}",
                 "alu",
-            ),
+            ), "vpclmulqdq"),
         ));
         // VAESKEYGENASSIST（66 0F 3A DF /r ib・128・vvvv=1111b
         // 必須。XED 実測）。
         items.push(MapItem::Insn(
             0xDF,
-            vmx(
+            vf(vmx(
                 "vaeskeygenassist_xv_wv_ib",
                 &[RegX, RmX, Imm(B8)],
                 PfxSel::P66,
@@ -3960,7 +3985,7 @@ fn build_map_0f3a(m: &mut Model) {
                 true,
                 "{op} {x}, {w}, {i}",
                 "alu",
-            ),
+            ), "vaes"),
         ));
         // VPERMIL2PS/PD（66 0F 3A 48/49・is4 で 4 番目のソースを
         // 選ぶ・W/L 両対応。XED 実測）。
@@ -3989,7 +4014,7 @@ fn build_map_0f3a(m: &mut Model) {
         ] {
             items.push(MapItem::Insn(
                 op,
-                w1(vmx(
+                w1(vf(vmx(
                     &format!("{mn}_xv_hv_wv_ib"),
                     &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
@@ -3997,7 +4022,7 @@ fn build_map_0f3a(m: &mut Model) {
                     false,
                     "{op} {x}, {h}, {w}, {i}",
                     "alu",
-                )),
+                ), "gfni")),
             ));
         }
         // RORX（F2 0F 3A F0 /r ib、BMI2）。幅は VEX.W。

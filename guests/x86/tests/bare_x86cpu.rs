@@ -5,6 +5,39 @@
 
 use polyisa_guest_x86::*;
 
+fn model_feature_names(name: &str) -> std::collections::BTreeSet<&'static str> {
+    let mut chain = Vec::new();
+    let mut cur = name;
+    loop {
+        let row = MODEL_DEFS.iter().find(|r| r.0 == cur).expect("model");
+        chain.push(row);
+        if row.1.is_empty() || chain.len() > MODEL_DEFS.len() {
+            break;
+        }
+        cur = row.1;
+    }
+    let mut out = std::collections::BTreeSet::new();
+    for row in chain.iter().rev() {
+        out.extend(row.2.iter().copied());
+        for f in row.3 {
+            out.remove(*f);
+        }
+    }
+    loop {
+        let mut grew = false;
+        for (fname, implies, _) in FEATURE_DEFS {
+            if out.contains(*fname) {
+                for i in *implies {
+                    grew |= out.insert(*i);
+                }
+            }
+        }
+        if !grew {
+            return out;
+        }
+    }
+}
+
 #[test]
 fn pentium_family_mmx_split() {
     // P54C（pentium）は MMX を持たず、P55C（pentium_mmx）で入る。
@@ -47,6 +80,6 @@ fn intel_generation_chain() {
     assert_ne!(model_feats("haswell") & FEAT_BMI1, 0);
     // HTT ビットは論理プロセッサ数フィールドの有効性も示すため、
     // マルチコアの Core 2 でも立つ。
-    assert_ne!(model_feats("core2") & FEAT_HTT, 0);
-    assert_ne!(model_feats("pentium4") & FEAT_HTT, 0);
+    assert!(model_feature_names("core2").contains("htt"));
+    assert!(model_feature_names("pentium4").contains("htt"));
 }

@@ -159,15 +159,14 @@ fn declare_features(m: &mut Model) {
     feat(m, "uintr", &[]);
     feat(m, "hreset", &[]);
     feat(m, "serialize", &[]);
-    feat(m, "amx_bf16", &["amx_tile"]);
-    feat(m, "amx_int8", &["amx_tile"]);
     feat(m, "cet_ibt", &[]);
-    feat(m, "amx_bf16", &["amx_tile"]);
     feat(m, "avx512_fp16", &["avx512f"]);
     feat(m, "amx_tile", &[]);
+    feat(m, "amx_bf16", &["amx_tile"]);
     feat(m, "amx_int8", &["amx_tile"]);
     feat(m, "amx_fp16", &["amx_tile"]);
     feat(m, "amx_complex", &["amx_tile"]);
+    feat(m, "amx_movrs", &["amx_tile"]);
     // Leaf 0x8000_0001 ECX。
     feat(m, "lahf_lm", &[]);
     feat(m, "svm", &[]);
@@ -183,8 +182,26 @@ fn declare_features(m: &mut Model) {
     // Leaf 0x8000_0008 EBX。
     feat(m, "clzero", &[]);
     feat(m, "rdpru", &[]);
-    // Leaf 7.1 EAX。REX2・拡張 EVEX（map4 昇格形・NDD・NF）。
+    // VIA/Zhaoxin PadLock RNG。present と enable は別ビットで、
+    // XSTORE が実行できるのは enabled のときだけ。
+    feat(m, "via_padlock_rng", &[]);
+    feat(m, "via_padlock_rng_en", &["via_padlock_rng"]);
+    // Leaf 7.1 EAX。RAO/CMPccXADD/AVX-VNNI/SHA512/SM3/SM4 と
+    // VEX 版 IFMA。REX2・拡張 EVEX（map4 昇格形・NDD・NF）もこの葉。
+    feat(m, "sha512", &["avx"]);
+    feat(m, "sm3", &["avx"]);
+    feat(m, "sm4", &["avx"]);
+    feat(m, "raoint", &[]);
+    feat(m, "avxvnni", &["avx"]);
+    feat(m, "cmpccxadd", &[]);
+    feat(m, "avxifma", &["avx"]);
+    feat(m, "movrs", &[]);
     feat(m, "apx", &[]);
+    // Leaf 7.1 EDX の AVX 系拡張。
+    feat(m, "avxvnniint8", &["avx"]);
+    feat(m, "avxneconvert", &["avx"]);
+    feat(m, "avxvnniint16", &["avx"]);
+    feat(m, "user_msr", &[]);
     // Leaf 7.1 EDX。AVX10 は EVEX 系命令の再編成で、基盤として
     // AVX-512 の中核部分集合（F/VL/BW/DQ/CD）を前提にする。
     feat(m, "avx10", &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"]);
@@ -552,7 +569,7 @@ fn declare_models(m: &mut Model) {
     // 最大ベーシックリーフは 2 に戻る。拡張リーフはブランド文字列まで。
     let mut idp4 = intel("15", "1", "4");
     idp4.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0x80000004")]);
-    model(m, "pentium4", "pentium_iii", &["sse2", "htt", "clfsh"], &[], &[], idp4);
+    model(m, "pentium4", "pentium_iii", &["sse2", "clfsh", "htt"], &[], &[], idp4);
     let mut idpre = intel("15", "3", "4");
     idpre.extend([("cpuid.max_basic", "5"), ("cpuid.max_ext", "0x80000008")]);
     model(
@@ -601,7 +618,7 @@ fn declare_models(m: &mut Model) {
         m,
         "sandy_bridge",
         "westmere",
-        &["avx", "pcid", "xsaveopt", "x2apic", "tsc_deadline"],
+        &["avx", "pcid", "xsaveopt", "x2apic"],
         &[],
         &[],
         idsnb,
@@ -1022,14 +1039,33 @@ fn declare_ident_bits(m: &mut Model) {
         b(f, 0x8000_0001, "edx", bit);
     }
     // Leaf 7.1（APX_F=EDX.21、AMX_FP16=EAX.21、AMX_COMPLEX=EDX.8）。
-    // 現行の CPUID 表はサブリーフ行を持たないため `derive` では
-    // 報告されないが、`ident_bit` の対応はここが正本。機能旗自体は
-    // 明示モデルで使える。
+    // derive は subleaf 0/1 を報告する。
+    b_sub(m, "sha512", 0x7, 1, "eax", 0);
+    b_sub(m, "sm3", 0x7, 1, "eax", 1);
+    b_sub(m, "sm4", 0x7, 1, "eax", 2);
+    b_sub(m, "raoint", 0x7, 1, "eax", 3);
+    b_sub(m, "avxvnni", 0x7, 1, "eax", 4);
+    b_sub(m, "cmpccxadd", 0x7, 1, "eax", 7);
+    b_sub(m, "avxifma", 0x7, 1, "eax", 23);
+    b_sub(m, "movrs", 0x7, 1, "eax", 31);
+    // Leaf 1E.1 は AMX 機能を集約した報告葉。bit0-3 は既存の
+    // AMX-INT8/BF16/COMPLEX/FP16 の mirror、bit8 が AMX-MOVRS。
+    b_sub(m, "amx_int8", 0x1e, 1, "eax", 0);
+    b_sub(m, "amx_bf16", 0x1e, 1, "eax", 1);
+    b_sub(m, "amx_complex", 0x1e, 1, "eax", 2);
+    b_sub(m, "amx_fp16", 0x1e, 1, "eax", 3);
+    b_sub(m, "amx_movrs", 0x1e, 1, "eax", 8);
+    b_sub(m, "avxvnniint8", 0x7, 1, "edx", 4);
+    b_sub(m, "avxneconvert", 0x7, 1, "edx", 5);
+    b_sub(m, "avxvnniint16", 0x7, 1, "edx", 10);
+    b_sub(m, "user_msr", 0x7, 1, "edx", 15);
     b_sub(m, "apx", 0x7, 1, "edx", 21);
     b_sub(m, "amx_fp16", 0x7, 1, "eax", 21);
     b_sub(m, "amx_complex", 0x7, 1, "edx", 8);
     b_sub(m, "avx10", 0x7, 1, "edx", 19);
     b_sub(m, "ace", 0x7, 1, "ecx", 11);
+    b_sub(m, "via_padlock_rng", 0xc000_0001, 0, "edx", 2);
+    b_sub(m, "via_padlock_rng_en", 0xc000_0001, 0, "edx", 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1124,8 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // ADX 系と POPCNT 系の拡張。
         "lzcnt" => &["lzcnt"],
         "adcx" | "adox" => &["adx"],
+        // CMPccXADD（VEX を使うが基底 AVX ではなく独立機能）。
+        _ if mn.starts_with("cmp") && mn.ends_with("xadd") => &["cmpccxadd"],
         // BMI1/BMI2（VEX の GPR 演算。既定の avx を上書き）。
         "andn" | "blsr" | "blsmsk" | "blsi" | "bextr" => &["bmi1"],
         "bzhi" | "mulx" | "pdep" | "pext" | "rorx" | "sarx" | "shlx" | "shrx" => &["bmi2"],
@@ -1127,7 +1165,13 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // MXCSR の読み書きは SSE 付随。
         "ldmxcsr" | "stmxcsr" => &["sse"],
         // i486 で追加された命令（i386 との区別は i486 旗で表す）。
-        "bswap" | "xadd" | "cmpxchg" => &["i486"],
+        "bswap" | "xadd" | "cmpxchg" | "invd" | "wbinvd" | "invlpg" => &["i486"],
+        // SMM 外では実行時 #UD だが、RSM 自体は 386SL/486 系の
+        // 命令なので 286 以前へは出さない。
+        "rsm" => &["i486"],
+        "sysret" => &["syscall"],
+        "getsec" => &["smx"],
+        "vmread" | "vmwrite" => &["vmx"],
         // Pentium の CMPXCHG8B。REX.W 形（CMPXCHG16B）は
         // `cx16` が要るが、REX はデコード時の `when` で表せないので
         // dispatch 側で検査する。`cx16` の参照は FEAT_CX16 定数を
@@ -1158,6 +1202,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // `fwait` は FPU なしでも定義される待機命令なのでゲートしない。
         "fwait" => &[],
         "cpuid" => &["cpuid"],
+        "xstore" | "rep_xstore" => &["via_padlock_rng_en"],
         "syscall" => &["syscall"],
         "sysenter" | "sysexit" => &["sep"],
         "rdtscp" => &["rdtscp"],
@@ -1250,6 +1295,8 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         // ドット積は対応する下位機能にする。
         "ldtilecfg" | "sttilecfg" | "tilerelease" | "tilezero" | "tileloadd"
         | "tileloaddt1" | "tilestored" => &["amx_tile"],
+        "tileloaddrs" | "tileloaddrst1" => &["amx_movrs"],
+        "movrs_gv_ev" | "movrs_gb_eb" => &["movrs"],
         "tdpbssd" | "tdpbsud" | "tdpbusd" | "tdpbuud" => &["amx_int8"],
         "tdpbf16ps" => &["amx_bf16"],
         "tdpfp16ps" => &["amx_fp16"],

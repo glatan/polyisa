@@ -282,19 +282,24 @@ fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
             }
         }
     }
-    let mut out = Vec::new();
+    let mut direct = Vec::new();
     for insn in &model.insns {
-        collect(&insn.when, &mut out);
+        collect(&insn.when, &mut direct);
     }
     for map in &model.maps {
         for item in &map.items {
             if let polyisa_isadl::model::MapItem::Insn(_, mi) = item {
-                collect(&mi.when, &mut out);
+                collect(&mi.when, &mut direct);
             }
         }
     }
-    // `when` で参照されなくても、CPU モデル宣言が使う機能は旗を持つ。
-    // `model_feats` の解決と実行時の世代判定に FEAT_* 定数が必要。
+    direct.retain(|f| !mode_names.contains(f));
+    let mut out = direct.clone();
+    // 通常は CPU モデル宣言が使う機能も旗を持たせ、`model_feats`
+    // がモデル構成をそのまま表せるようにする。x86 のように宣言数が
+    // u128 の容量を超える場合だけ、decode 述語が実際に参照する旗へ
+    // 絞る。CPUID 報告は名前集合から別途導出するため、この枝刈りで
+    // 報告ビット自体は失われない。
     for m in &model.models {
         for f in m.add_features.iter().chain(m.remove_features.iter()) {
             if !mode_names.contains(f) && !out.iter().any(|x| x == f) {
@@ -320,6 +325,23 @@ fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
         }
     }
     out.retain(|f| !mode_names.contains(f));
+    if out.len() > 128 {
+        // decode が参照する旗を優先し、残りの容量へモデル専用旗を
+        // 辞書順に詰める。容量に入らないのは decode に影響しない
+        // モデル専用旗だけになる。
+        let mut rest: Vec<String> = out
+            .iter()
+            .filter(|f| !direct.iter().any(|d| d.as_str() == f.as_str()))
+            .cloned()
+            .collect();
+        rest.sort();
+        out = direct;
+        for f in rest {
+            if out.len() < 128 && !out.iter().any(|x| x == &f) {
+                out.push(f);
+            }
+        }
+    }
     out.sort();
     {
         use std::collections::BTreeSet;
@@ -1348,6 +1370,8 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub rep: u8,\n\
          \x20   /// 0xF0 LOCK。\n\
          \x20   pub lock: bool,\n\
+         \x20   /// この命令形が LOCK を取れるメモリ RMW 形か。\n\
+         \x20   pub lock_ok: bool,\n\
          \x20   /// セグメント上書きの接頭辞バイト（0 はなし）。\n\
          \x20   pub seg: u8,\n\
          \x20   /// ModRM バイト。\n\
@@ -1546,9 +1570,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   if needs_modrm && !pre {\n\
          \x20       modrm_dec(bytes, i, d, edisp, ebok)?;\n\
          \x20   }\n\
-         \x20   if d.lock && !(lock_ok && d.has_modrm && d.modrm >> 6 != 3) {\n\
-         \x20       return None;\n\
-         \x20   }\n\
+         \x20   d.lock_ok = lock_ok && d.has_modrm && d.modrm >> 6 != 3;\n\
          \x20   for op in ops {\n\
          \x20       match op {\n\
          \x20           OpK::Imm(w) => {\n\

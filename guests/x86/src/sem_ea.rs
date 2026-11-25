@@ -1321,6 +1321,79 @@ pub fn jmp_rel<B: Backend>(b: &mut B, eip: u32, len: u32, rel: i64) -> Flow<B> {
     Ok(())
 }
 
+/// RAO-INT の AADD/AAND/AOR/AXOR。返り値とフラグ更新はない。
+/// op は 0:add, 1:and, 2:or, 3:xor。
+pub fn rao_op<B: Backend>(
+    b: &mut B,
+    op: u8,
+    w: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let reg = decode::reg(d);
+    let src64 = sem::read64(b, reg);
+    if w == 64 {
+        let x = rd_w::<B, W64>(b, ea, d)?;
+        let y: B::V<W64> = src64;
+        let r = match op {
+            0 => b.add::<W64>(x, y),
+            1 => b.and::<W64>(x, y),
+            2 => b.or::<W64>(x, y),
+            _ => b.xor::<W64>(x, y),
+        };
+        wr_w::<B, W64>(b, ea, d, r)
+    } else {
+        let x = rd_w::<B, W32>(b, ea, d)?;
+        let y: B::V<W32> = b.trunc::<W64, W32>(src64);
+        let r = match op {
+            0 => b.add::<W32>(x, y),
+            1 => b.and::<W32>(x, y),
+            2 => b.or::<W32>(x, y),
+            _ => b.xor::<W32>(x, y),
+        };
+        wr_w::<B, W32>(b, ea, d, r)
+    }
+}
+
+/// CMPccXADD。old=mem として cmp old,r1 の旗を立て、cc 成立なら
+/// mem=old+r2(vvvv)、r1=old とする。幅は 32 または 64。
+pub fn cmpccxadd<B: Backend>(
+    b: &mut B,
+    ccnum: u8,
+    w: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let r1g = decode::reg(d);
+    let r1all = sem::read64(b, r1g);
+    let r2all = sem::read64(b, Gpr(d.vex_v));
+    if w == 64 {
+        let old = rd_w::<B, W64>(b, ea, d)?;
+        let r1: B::V<W64> = r1all;
+        let diff = b.sub::<W64>(old, r1);
+        sem::update_sub_flags(b, old, r1, diff);
+        let r2: B::V<W64> = r2all;
+        let sum = b.add::<W64>(old, r2);
+        let take = cc(b, ccnum);
+        let out = b.select::<W64>(take, sum, old);
+        wr_w::<B, W64>(b, ea, d, out)?;
+        sem::write64(b, r1g, old);
+    } else {
+        let old = rd_w::<B, W32>(b, ea, d)?;
+        let r1: B::V<W32> = b.trunc::<W64, W32>(r1all);
+        let diff = b.sub::<W32>(old, r1);
+        sem::update_sub_flags(b, old, r1, diff);
+        let r2: B::V<W32> = b.trunc::<W64, W32>(r2all);
+        let sum = b.add::<W32>(old, r2);
+        let take = cc(b, ccnum);
+        let out = b.select::<W32>(take, sum, old);
+        wr_w::<B, W32>(b, ea, d, out)?;
+        let z = b.zext::<W32, W64>(old);
+        sem::write64(b, r1g, z);
+    }
+    Ok(())
+}
+
 /// 幅 w の被演算子を 64 ビット値として読む。
 fn rd_any<B: Backend>(
     b: &mut B,
@@ -1908,6 +1981,18 @@ pub fn flagop<B: Backend>(b: &mut B, bit: u32, op: u8) -> Flow<B> {
 /// NOP。
 pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
+}
+
+/// 無効命令例外（#UD）。ユーザーモードでは OS パーソナリティが
+/// シグナルへ変換する退出として表す。
+pub fn undefined<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Undefined,
+        code: 0x06,
+        addr: Some(u64::from(eip)),
+        in_delay_slot: false,
+    }))
 }
 
 /// UD2 / HLT 等のトラップ（ユーザーモードは #UD/#GP）。
@@ -2817,6 +2902,75 @@ pub fn vpcmov<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
         let n = b.not::<W128>(h3);
         let o = b.and::<W128>(h2, n);
         b.or::<W128>(t, o)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VPERMIL2PS/PD の 128 ビットレーン内演算。`s1`/`s2` がデータ
+/// ソース、`ctrl` が選択子。選択はレーン内に閉じ、M2Z で 0 を
+/// 選べる。
+fn vpermil2_val<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    m2z: u8,
+    s1: B::V<W128>,
+    s2: B::V<W128>,
+    ctrl: B::V<W128>,
+) -> B::V<W128> {
+    let idx_bits = if fbits == 32 { 2 } else { 1 };
+    let idx_at = if fbits == 32 { 0 } else { 1 };
+    let shmul = b.konst::<W128>(u128::from(fbits.trailing_zeros()));
+    let maskv = b.konst::<W128>((1u128 << fbits) - 1);
+    let zv = b.konst::<W128>(0);
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..(128 / fbits) {
+        let base = i * fbits;
+        let idx = lane128(b, ctrl, base + idx_at, idx_bits);
+        let sh = b.shl::<W128>(idx, shmul);
+        let ashift = b.shr_l::<W128>(s1, sh);
+        let a = b.and::<W128>(ashift, maskv);
+        let cshift = b.shr_l::<W128>(s2, sh);
+        let c = b.and::<W128>(cshift, maskv);
+        let sb = lane128(b, ctrl, base + 2, 1);
+        let use_s2 = nez::<B, W128>(b, sb);
+        let mut v = b.select::<W128>(use_s2, c, a);
+        let mb = lane128(b, ctrl, base + 3, 1);
+        let zero = match m2z & 3 {
+            2 => nez::<B, W128>(b, mb),
+            3 => eqz::<B, W128>(b, mb),
+            _ => bool_k(b, false),
+        };
+        v = b.select::<W128>(zero, zv, v);
+        acc = put_lane128(b, acc, v, base, fbits);
+    }
+    acc
+}
+
+/// VPERMIL2PS/PD。src1=vvvv。W=0 は src2=r/m・選択子=is4、
+/// W=1 は逆。
+pub fn vpermil2<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let m2z = (d.imm & 3) as u8;
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let rmv = rx(b, ea, 128)?;
+    let iv: B::V<W128> = b.get(sem::xmm_ref(is4_x(d)));
+    let (s2, ctrl) = if d.vex_w { (iv, rmv) } else { (rmv, iv) };
+    let lo = vpermil2_val(b, fbits, m2z, s1, s2, ctrl);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let rh = rx_hi(b, ea)?;
+        let ih: B::V<W128> = b.get(sem::ymm_hi_ref(is4_x(d)));
+        let (h2, hc) = if d.vex_w { (ih, rh) } else { (rh, ih) };
+        vpermil2_val(b, fbits, m2z, h1, h2, hc)
     } else {
         b.konst::<W128>(0)
     };
@@ -4828,6 +4982,92 @@ fn pfloat_lane<B: Backend>(
     acc
 }
 
+/// RCP/RSQRT の 1 要素。近似命令だが、正確な商/逆平方根も
+/// 許容される近似として計算する。
+fn rcp_rs_elem<B: Backend>(b: &mut B, rsqrt: bool, x: B::V<W32>) -> B::V<W32> {
+    use polyisa_sem::F32;
+    let onebits = b.konst::<W32>(0x3f80_0000);
+    let one = b.trunc::<W32, F32>(onebits);
+    let f = b.trunc::<W32, F32>(x);
+    let den = if rsqrt { b.fsqrt::<F32>(f) } else { f };
+    let q = b.fdiv::<F32>(one, den);
+    b.trunc::<F32, W32>(q)
+}
+
+/// RCPPS/RSQRTPS の 128 ビット処理。
+fn rcp_rs_val<B: Backend>(b: &mut B, rsqrt: bool, v: B::V<W128>) -> B::V<W128> {
+    let mut r = b.konst::<W128>(0);
+    for i in 0..4u32 {
+        let x128 = lane128(b, v, i * 32, 32);
+        let x = b.trunc::<W128, W32>(x128);
+        let q = rcp_rs_elem(b, rsqrt, x);
+        let q128 = b.zext::<W32, W128>(q);
+        r = put_lane128(b, r, q128, i * 32, 32);
+    }
+    r
+}
+
+/// RCPPS/RSQRTPS（レガシー）。
+pub fn rcp_rs<B: Backend>(
+    b: &mut B,
+    rsqrt: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let v = rx(b, ea, 128)?;
+    let r = rcp_rs_val(b, rsqrt, v);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// RCPSS/RSQRTSS（レガシー）。下位だけを更新する。
+pub fn rcp_rs_s<B: Backend>(
+    b: &mut B,
+    rsqrt: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let old: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let v = rx(b, ea, 32)?;
+    let x = b.trunc::<W128, W32>(v);
+    let q = rcp_rs_elem(b, rsqrt, x);
+    let q128 = b.zext::<W32, W128>(q);
+    let r = put_lane128(b, old, q128, 0, 32);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// VRCPPS/VRSQRTPS。
+pub fn vrcp_rs<B: Backend>(
+    b: &mut B,
+    rsqrt: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vun2(b, d, ea, |b, x| rcp_rs_val(b, rsqrt, x))
+}
+
+/// VRCPSS/VRSQRTSS。下位は src2 から計算し、128 ビット内の
+/// 残りは src1（vvvv）を継承する。
+pub fn vrcp_rs_s<B: Backend>(
+    b: &mut B,
+    rsqrt: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let old: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let v = rx(b, ea, 32)?;
+    let x = b.trunc::<W128, W32>(v);
+    let q = rcp_rs_elem(b, rsqrt, x);
+    let q128 = b.zext::<W32, W128>(q);
+    let r = put_lane128(b, old, q128, 0, 32);
+    b.set(sem::xmm_ref(dst), r);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
 /// CMPPS/CMPPD と VEX の VCMPPS/VCMPPD の判定。`wide` が真なら
 /// VEX の 32 述語（pred&0x1F）、偽ならレガシーの 8 述語（pred&7）。
 /// _S/_Q の signal 差は例外をモデル化しないので同一視する。
@@ -5686,6 +5926,44 @@ pub fn vpshift<B: Backend, W: polyisa_sem::Width>(
     Ok(())
 }
 
+/// VPSLLV/VPSRLV/VPSRAV の 128 ビットレーン内演算。各要素を
+/// 同じ位置のカウント要素でシフトする。Backend のシフトは幅
+/// 以上を全域化しているので、VPSLLV/VPSRLV は 0、VPSRAV は
+/// 符号埋めとそのまま一致する。
+fn pvshift_val<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    a: B::V<W128>,
+    c: B::V<W128>,
+) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..(128 / W::BITS) {
+        let at = i * W::BITS;
+        let al = lane128(b, a, at, W::BITS);
+        let cl = lane128(b, c, at, W::BITS);
+        let a_w: B::V<W> = b.trunc::<W128, W>(al);
+        let c_w: B::V<W> = b.trunc::<W128, W>(cl);
+        let r = match dir {
+            Psh::L => b.shl::<W>(a_w, c_w),
+            Psh::A => b.shr_a::<W>(a_w, c_w),
+            Psh::R => b.shr_l::<W>(a_w, c_w),
+        };
+        let r128 = b.zext::<W, W128>(r);
+        acc = put_lane128(b, acc, r128, at, W::BITS);
+    }
+    acc
+}
+
+/// VPSLLVD/VPSLLVQ/VPSRLVD/VPSRLVQ/VPSRAVD。
+pub fn vpshiftv<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| pvshift_val::<B, W>(b, dir, a, c))
+}
+
 /// VEX のグループ即値シフト（Op/En B：vvvv が宛先）。
 /// ソースは r/m。L=1 では r/m の YMM 上位も処理する。
 pub fn vpshift_i<B: Backend, W: polyisa_sem::Width>(b: &mut B, dir: Psh, d: &MapDec) -> Flow<B> {
@@ -5938,6 +6216,165 @@ fn vbin2<B: Backend>(
         let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
         let h2 = rx_hi(b, ea)?;
         f(b, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VPMADD52LUQ/HUQ の 128 ビットレーン内演算。qword ごとに
+/// 下位 52 ビット同士の 104 ビット積を作り、下位/上位 52 ビットを
+/// 既存の dest へ足す。
+fn vpmadd52_val<B: Backend>(
+    b: &mut B,
+    high: bool,
+    acc: B::V<W128>,
+    s1: B::V<W128>,
+    s2: B::V<W128>,
+) -> B::V<W128> {
+    let m52 = b.konst::<W128>((1u128 << 52) - 1);
+    let k52 = b.konst::<W128>(52);
+    let mut r = b.konst::<W128>(0);
+    for i in 0..2u32 {
+        let x0 = lane128(b, s1, i * 64, 64);
+        let y0 = lane128(b, s2, i * 64, 64);
+        let x = b.and::<W128>(x0, m52);
+        let y = b.and::<W128>(y0, m52);
+        let prod = b.mul::<W128>(x, y);
+        let part = if high {
+            let h = b.shr_l::<W128>(prod, k52);
+            b.and::<W128>(h, m52)
+        } else {
+            b.and::<W128>(prod, m52)
+        };
+        let a = lane128(b, acc, i * 64, 64);
+        let sum = b.add::<W128>(a, part);
+        r = put_lane128(b, r, sum, i * 64, 64);
+    }
+    r
+}
+
+/// VPMADD52LUQ/HUQ。dest は入力の累算器でもある。
+pub fn vpmadd52<B: Backend>(
+    b: &mut B,
+    high: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let acc: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = vpmadd52_val(b, high, acc, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let ah: B::V<W128> = b.get(sem::ymm_hi_ref(dst));
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        vpmadd52_val(b, high, ah, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// 8/16 ビット要素を必要に応じて符号拡張する。`v` は lane128 で
+/// 下位へ取り出した値。
+fn vnni_elem<B: Backend>(b: &mut B, bits: u32, signed: bool, v: B::V<W128>) -> B::V<W128> {
+    if !signed {
+        return v;
+    }
+    if bits == 8 {
+        let x = b.trunc::<W128, W8>(v);
+        b.sext::<W8, W128>(x)
+    } else {
+        let x = b.trunc::<W128, W16>(v);
+        b.sext::<W16, W128>(x)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VnniOp {
+    bits: u32,
+    s1signed: bool,
+    s2signed: bool,
+    sat: bool,
+}
+
+/// AVX-VNNI のドット積の 128 ビットレーン内演算。`bits` は 8 か 16。
+/// 積とそのグループ内合計は常に正確に計算し、dest への加算だけを
+/// 32 ビットで折り返すか符号飽和する。
+fn vpdp_val<B: Backend>(
+    b: &mut B,
+    op: VnniOp,
+    acc: B::V<W128>,
+    s1: B::V<W128>,
+    s2: B::V<W128>,
+) -> B::V<W128> {
+    let VnniOp {
+        bits,
+        s1signed,
+        s2signed,
+        sat,
+    } = op;
+    let max = b.konst::<W128>(0x7fff_ffff);
+    let min = b.konst::<W128>(u128::MAX - ((1u128 << 31) - 1));
+    let mut r = b.konst::<W128>(0);
+    for dword in 0..4u32 {
+        let mut sum = b.konst::<W128>(0);
+        for j in 0..(32 / bits) {
+            let at = dword * 32 + j * bits;
+            let x0 = lane128(b, s1, at, bits);
+            let y0 = lane128(b, s2, at, bits);
+            let x = vnni_elem(b, bits, s1signed, x0);
+            let y = vnni_elem(b, bits, s2signed, y0);
+            let p = b.mul::<W128>(x, y);
+            sum = b.add::<W128>(sum, p);
+        }
+        let a0 = lane128(b, acc, dword * 32, 32);
+        let a32 = b.trunc::<W128, W32>(a0);
+        let a = b.sext::<W32, W128>(a32);
+        let mut total = b.add::<W128>(a, sum);
+        if sat {
+            let hi = b.cmp::<W128>(Cmp::GtS, total, max);
+            total = b.select::<W128>(hi, max, total);
+            let lo = b.cmp::<W128>(Cmp::LtS, total, min);
+            total = b.select::<W128>(lo, min, total);
+        }
+        r = put_lane128(b, r, total, dword * 32, 32);
+    }
+    r
+}
+
+/// AVX-VNNI のドット積。dest は入力の累算器でもある。
+pub fn vpdp<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    s1signed: bool,
+    s2signed: bool,
+    sat: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let acc: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let op = VnniOp {
+        bits,
+        s1signed,
+        s2signed,
+        sat,
+    };
+    let lo = vpdp_val(b, op, acc, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let ah: B::V<W128> = b.get(sem::ymm_hi_ref(dst));
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        vpdp_val(b, op, ah, h1, h2)
     } else {
         b.konst::<W128>(0)
     };
@@ -7627,6 +8064,103 @@ pub fn movq_qv_pv<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Resu
     }
 }
 
+/// CVTPI2PS xmm, mm/m64。2 個の s32 を f32 にして下位 64 へ
+/// 書く。上位 64 は従来値のまま。
+pub fn cvtpi2ps<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rq(b, ea)?;
+    let mut conv = b.konst::<W64>(0);
+    for i in 0..2u32 {
+        let l = lane64(b, v, i * 32, 32);
+        let x = b.trunc::<W64, W32>(l);
+        let f = b.fcvt_from_s32::<polyisa_sem::F32>(x, RM_RNE);
+        let bits = b.trunc::<polyisa_sem::F32, W32>(f);
+        let z = b.zext::<W32, W64>(bits);
+        conv = put_lane64(b, conv, z, i * 32, 32);
+    }
+    let old: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let conv128 = b.zext::<W64, W128>(conv);
+    let out = put_lane128(b, old, conv128, 0, 64);
+    b.set(sem::xmm_ref(reg_x(d)), out);
+    Ok(())
+}
+
+/// CVTPI2PD xmm, mm/m64。2 個の s32 を f64 にして xmm 全体へ書く。
+pub fn cvtpi2pd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rq(b, ea)?;
+    let mut out = b.konst::<W128>(0);
+    for i in 0..2u32 {
+        let l = lane64(b, v, i * 32, 32);
+        let x = b.trunc::<W64, W32>(l);
+        let f = b.fcvt_from_s32::<polyisa_sem::F64>(x, RM_RNE);
+        let bits = b.trunc::<polyisa_sem::F64, W64>(f);
+        let z = b.zext::<W64, W128>(bits);
+        out = put_lane128(b, out, z, i * 64, 64);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), out);
+    Ok(())
+}
+
+/// CVTPS2PI/CVTTPS2PI mm, xmm/m64。下位 2 個の f32 を s32 にする。
+pub fn cvtps2pi<B: Backend>(
+    b: &mut B,
+    trunc: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let v128 = rx(b, ea, 64)?;
+    let mut out = b.konst::<W64>(0);
+    let rm = if trunc { RM_RTZ } else { RM_RNE };
+    for i in 0..2u32 {
+        let l = lane128(b, v128, i * 32, 32);
+        let bits = b.trunc::<W128, W32>(l);
+        let f = b.trunc::<W32, polyisa_sem::F32>(bits);
+        let x = b.fcvt_s32::<polyisa_sem::F32>(f, rm);
+        let z = b.zext::<W32, W64>(x);
+        out = put_lane64(b, out, z, i * 32, 32);
+    }
+    b.set(sem::st_sig_ref(reg_m(d)), out);
+    Ok(())
+}
+
+/// CVTPD2PI/CVTTPD2PI mm, xmm/m128。2 個の f64 を s32 にする。
+pub fn cvtpd2pi<B: Backend>(
+    b: &mut B,
+    trunc: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let v128 = rx(b, ea, 128)?;
+    let mut out = b.konst::<W64>(0);
+    let rm = if trunc { RM_RTZ } else { RM_RNE };
+    for i in 0..2u32 {
+        let l = lane128(b, v128, i * 64, 64);
+        let bits = b.trunc::<W128, W64>(l);
+        let f = b.trunc::<W64, polyisa_sem::F64>(bits);
+        let x = b.fcvt_s32::<polyisa_sem::F64>(f, rm);
+        let z = b.zext::<W32, W64>(x);
+        out = put_lane64(b, out, z, i * 32, 32);
+    }
+    b.set(sem::st_sig_ref(reg_m(d)), out);
+    Ok(())
+}
+
+/// MOVDQ2Q mm, xmm。xmm の下位 64 ビットを mm へ写す。
+pub fn movdq2q<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let x = rx(b, ea, 128)?;
+    let v = lane128(b, x, 0, 64);
+    let v64 = b.trunc::<W128, W64>(v);
+    b.set(sem::st_sig_ref(reg_m(d)), v64);
+    Ok(())
+}
+
+/// MOVQ2DQ xmm, mm。mm を下位 64 ビットへ写し上位を 0 にする。
+pub fn movq2dq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rq(b, ea)?;
+    let out = b.zext::<W64, W128>(v);
+    b.set(sem::xmm_ref(reg_x(d)), out);
+    Ok(())
+}
+
 /// PINSRW mm, r32/m16, imm8。imm の下位 2 ビットの word を置き換える。
 pub fn mpinsrw<B: Backend>(
     b: &mut B,
@@ -8445,10 +8979,9 @@ pub fn pmovx<B: Backend>(
     Ok(())
 }
 
-/// PMULDQ。偶数 i32 レーンの符号付き積を i64 で 2 本得る。
-pub fn pmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
-    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
-    let c = rx(b, ea, 128)?;
+/// PMULDQ の 128 ビットレーン内演算。偶数 i32 レーンの符号付き
+/// 積を i64 で 2 本得る。
+fn pmuldq_val<B: Backend>(b: &mut B, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     for i in 0..2u32 {
         let al = lane128(b, a, i * 64, 32);
@@ -8461,8 +8994,17 @@ pub fn pmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
         let p128 = b.zext::<W64, W128>(p);
         acc = put_lane128(b, acc, p128, i * 64, 64);
     }
-    b.set(sem::xmm_ref(reg_x(d)), acc);
-    Ok(())
+    acc
+}
+
+/// PMULDQ。
+pub fn pmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    pdst_val(b, d, ea, pmuldq_val)
+}
+
+/// VPMULDQ。
+pub fn vpmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, pmuldq_val)
 }
 
 /// PACKSS*/PACKUS* の 128 ビット処理（値関数）。`W` 要素を半分の
@@ -8521,19 +9063,11 @@ pub fn packusdw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result
     ppack::<B, W32>(b, true, d, ea)
 }
 
-/// PALIGNR。`(dst:src)` の 256 ビット連結を imm バイト右にずらし下位
-/// 128 ビットを取る。
-pub fn palignr<B: Backend>(
-    b: &mut B,
-    imm: u8,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
-    let c = rx(b, ea, 128)?;
+/// PALIGNR の 128 ビットレーン内演算。`(a:c)` の 256 ビット連結を
+/// imm バイト右にずらし下位 128 ビットを取る。
+fn palignr_val<B: Backend>(b: &mut B, imm: u8, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
     let sh = u32::from(imm) * 8;
-    let v = if sh == 0 {
+    if sh == 0 {
         c
     } else if sh < 128 {
         let ksh = b.konst::<W128>(u128::from(sh));
@@ -8546,8 +9080,55 @@ pub fn palignr<B: Backend>(
         b.shr_l::<W128>(a, ksh)
     } else {
         b.konst::<W128>(0)
-    };
+    }
+}
+
+/// PALIGNR。
+pub fn palignr<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let v = palignr_val(b, imm, a, c);
     b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// VPALIGNR。VEX.256 でも連結は 128 ビットレーンごとに閉じる。
+pub fn vpalignr<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| palignr_val(b, imm, a, c))
+}
+
+/// VPBLENDD。imm のビットは ymm 全体の dword レーンに対応する
+/// ため、上位 128 ビットでは imm[7:4] を使う。
+pub fn vpblendd<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = blendp_val(b, 32, imm, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        blendp_val(b, 32, imm >> 4, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
     Ok(())
 }
 
@@ -10503,6 +11084,62 @@ pub fn rdssp<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> F
     Ok(())
 }
 
+/// 特権違反・保護違反（#GP(0)相当）。
+pub fn protection<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Protection,
+        code: 0x0D,
+        addr: Some(u64::from(eip)),
+        in_delay_slot: false,
+    }))
+}
+
+/// システムモード側の RDMSR 近似。MSR 空間はモデル化しないので
+/// 既知の制御値も 0 とし、EDX:EAX=0 を返す。
+pub fn rdmsr_zero<B: Backend>(b: &mut B) -> Flow<B> {
+    let z = b.konst::<W32>(0);
+    decode::gwr32(b, Gpr(0), z);
+    decode::gwr32(b, Gpr(2), z);
+    Ok(())
+}
+
+/// RDPID r。TSC_AUX の内容を返す命令だが、エミュレータは
+/// TSC_AUX を 0 に固定する。
+pub fn rdpid<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> Flow<B> {
+    let Rm::Reg(g) = rm else {
+        return Ok(());
+    };
+    if w == 64 {
+        let z = b.konst::<W64>(0);
+        decode::gwr64(b, *g, z);
+    } else {
+        let z = b.konst::<W32>(0);
+        decode::gwr32(b, *g, z);
+    }
+    Ok(())
+}
+
+/// URDMSR/UWRMSR の最小ユーザーモデル。公開された user MSR は
+/// IA32_UARCH_MISC_CTL だけで、ここではマイクロアーキテクチャ
+/// 制御なので値を 0 固定・書き込み無視にする。
+pub fn urdmsr<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Flow<B> {
+    if let Rm::Reg(g) = rm {
+        let z = b.konst::<W64>(0);
+        decode::gwr64(b, *g, z);
+    }
+    Ok(())
+}
+
+/// RDPMC。PMU をモデル化しないのでカウンタは 0。ECX の選択子は
+/// そのまま残し、EDX:EAX を 0 にする。
+pub fn rdpmc<B: Backend>(b: &mut B) -> Flow<B> {
+    let z = b.konst::<W32>(0);
+    decode::gwr32(b, Gpr(0), z);
+    decode::gwr32(b, Gpr(2), z);
+    Ok(())
+}
+
 /// RDRAND/RDSEED r。決定的列を書き込み、CF=1・他のフラグは 0。
 pub fn rdrand<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> Flow<B> {
     let z = rand_next(b);
@@ -11322,18 +11959,16 @@ fn frint_f64<B: Backend>(b: &mut B, a: B::V<F64>, rm: u8) -> B::V<F64> {
     b.select::<F64>(ordered, via_int, a)
 }
 
-/// HADDPD/HADDPS/HSUBPD/HSUBPS。隣接ペアを加減算し、dst 側ペアを
-/// 下位、src 側ペアを上位に詰める（phaddsub の浮動小数点版）。
-pub fn phaddsub_f<B: Backend>(
+/// HADDPD/HADDPS/HSUBPD/HSUBPS の 128 ビットレーン内演算。
+/// 隣接ペアを加減算し、src1 側ペアを下位、src2 側ペアを上位に
+/// 詰める（phaddsub の浮動小数点版）。
+fn phaddsub_f_val<B: Backend>(
     b: &mut B,
     sub: bool,
     fbits: u32,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
-    let c = rx(b, ea, 128)?;
+    a: B::V<W128>,
+    c: B::V<W128>,
+) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     let n = 64 / fbits;
     for (src_i, s) in [a, c].into_iter().enumerate() {
@@ -11360,13 +11995,13 @@ pub fn phaddsub_f<B: Backend>(
             }
         }
     }
-    b.set(sem::xmm_ref(dst), acc);
-    Ok(())
+    acc
 }
 
-/// ADDSUBPD/ADDSUBPS。偶数レーンは減算、奇数レーンは加算。
-pub fn addsub<B: Backend>(
+/// HADDPD/HADDPS/HSUBPD/HSUBPS。
+pub fn phaddsub_f<B: Backend>(
     b: &mut B,
+    sub: bool,
     fbits: u32,
     d: &MapDec,
     ea: &Rm<B::V<W64>>,
@@ -11374,6 +12009,26 @@ pub fn addsub<B: Backend>(
     let dst = reg_x(d);
     let a: B::V<W128> = b.get(sem::xmm_ref(dst));
     let c = rx(b, ea, 128)?;
+    let acc = phaddsub_f_val(b, sub, fbits, a, c);
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// VHADDPD/VHADDPS/VHSUBPD/VHSUBPS。VEX.256 も 128 ビット
+/// レーンごとの独立演算なので `vbin2` で上下に展開する。
+pub fn vphaddsub_f<B: Backend>(
+    b: &mut B,
+    sub: bool,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| phaddsub_f_val(b, sub, fbits, a, c))
+}
+
+/// ADDSUBPD/ADDSUBPS の 128 ビットレーン内演算。偶数レーンは
+/// 減算、奇数レーンは加算。
+fn addsub_val<B: Backend>(b: &mut B, fbits: u32, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     for i in 0..(128 / fbits) {
         let sub = i % 2 == 0;
@@ -11397,8 +12052,32 @@ pub fn addsub<B: Backend>(
             acc = put_flane32(b, acc, r, i);
         }
     }
+    acc
+}
+
+/// ADDSUBPD/ADDSUBPS。
+pub fn addsub<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let acc = addsub_val(b, fbits, a, c);
     b.set(sem::xmm_ref(dst), acc);
     Ok(())
+}
+
+/// VADDSUBPD/VADDSUBPS。
+pub fn vaddsub<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| addsub_val(b, fbits, a, c))
 }
 
 /// PBLENDVB。XMM0 の各バイトの MSB で `c` のバイトを選ぶ（0 は `a`）。
@@ -12830,16 +13509,9 @@ fn aes_mix_columns<B: Backend>(b: &mut B, v: B::V<W128>, inv: bool) -> B::V<W128
     r
 }
 
-/// AES-NI のラウンド変換。`kind`: 0=ENC 1=ENCLAST 2=DEC 3=DECLAST 4=IMC。
-pub fn aesround<B: Backend>(
-    b: &mut B,
-    kind: u8,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let mut v: B::V<W128> = b.get(sem::xmm_ref(dst));
-    let key = rx(b, ea, 128)?;
+/// AES-NI のラウンド変換の値計算。`kind`: 0=ENC 1=ENCLAST
+/// 2=DEC 3=DECLAST。IMC は逆 MixColumns だけなので別扱い。
+fn aesround_val<B: Backend>(b: &mut B, kind: u8, mut v: B::V<W128>, key: B::V<W128>) -> B::V<W128> {
     match kind {
         0 | 1 => {
             v = aes_sub_bytes(b, v, false);
@@ -12848,27 +13520,50 @@ pub fn aesround<B: Backend>(
                 v = aes_mix_columns(b, v, false);
             }
         }
-        4 => {
-            // AESIMC は第2オペランドを入力として逆 MixColumns を
-            // 適用する（ラウンド鍵の XOR はない）。
-            v = aes_mix_columns(b, key, true);
-            b.set(sem::xmm_ref(dst), v);
-            return Ok(());
-        }
         _ => {
             v = aes_shift_rows(b, v, true);
             v = aes_sub_bytes(b, v, true);
             if kind == 2 {
                 v = b.xor::<W128>(v, key);
-                v = aes_mix_columns(b, v, true);
-                b.set(sem::xmm_ref(dst), v);
-                return Ok(());
+                return aes_mix_columns(b, v, true);
             }
         }
     }
-    v = b.xor::<W128>(v, key);
+    b.xor::<W128>(v, key)
+}
+
+/// AES-NI のラウンド変換。`kind`: 0=ENC 1=ENCLAST 2=DEC 3=DECLAST 4=IMC。
+pub fn aesround<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let key = rx(b, ea, 128)?;
+    let v = if kind == 4 {
+        aes_mix_columns(b, key, true)
+    } else {
+        let x: B::V<W128> = b.get(sem::xmm_ref(dst));
+        aesround_val(b, kind, x, key)
+    };
     b.set(sem::xmm_ref(dst), v);
     Ok(())
+}
+
+/// VAESENC/VAESDEC 系。VEX.256 でも各 128 ビットレーン独立。
+pub fn vaesround<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| aesround_val(b, kind, a, c))
+}
+
+/// VAESIMC。入力は第2オペランドだけ。
+pub fn vaesimc<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    vun2(b, d, ea, |b, x| aes_mix_columns(b, x, true))
 }
 
 /// AESKEYGENASSIST。各 64 ビット半区画について、下位 dword に
@@ -12881,7 +13576,13 @@ pub fn aeskeygenassist<B: Backend>(
     ea: &Rm<B::V<W64>>,
 ) -> Result<(), B::Exit> {
     let src = rx(b, ea, 128)?;
-    // 1 dword の各バイトに S-box を適用する。
+    let r = aeskeygenassist_val(b, imm, src);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// AESKEYGENASSIST の 128 ビットレーン内演算。
+fn aeskeygenassist_val<B: Backend>(b: &mut B, imm: u8, src: B::V<W128>) -> B::V<W128> {
     let subw = |b: &mut B, w: B::V<W128>| {
         let mut r = b.konst::<W128>(0);
         for i in 0..4u32 {
@@ -12891,7 +13592,6 @@ pub fn aeskeygenassist<B: Backend>(
         }
         r
     };
-    // dword の右 8 ビットローテート（RotWord）。
     let rotw = |b: &mut B, w: B::V<W128>| {
         let k8 = b.konst::<W128>(8);
         let k24 = b.konst::<W128>(24);
@@ -12917,20 +13617,22 @@ pub fn aeskeygenassist<B: Backend>(
         }
         r = put_lane128(b, r, s, at, 32);
     }
-    b.set(sem::xmm_ref(reg_x(d)), r);
-    Ok(())
+    r
 }
 
-/// PCLMULQDQ。imm[0]・imm[4] で両オペランドの qword を選び、
-/// 64×64 のキャリーレス乗算を 128 ビットで返す。
-pub fn pclmulqdq<B: Backend>(
+/// VAESKEYGENASSIST。
+pub fn vaeskeygenassist<B: Backend>(
     b: &mut B,
     imm: u8,
     d: &MapDec,
     ea: &Rm<B::V<W64>>,
 ) -> Result<(), B::Exit> {
-    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
-    let c = rx(b, ea, 128)?;
+    vun2(b, d, ea, |b, x| aeskeygenassist_val(b, imm, x))
+}
+
+/// PCLMULQDQ の 128 ビットレーン内演算。imm[0]・imm[4] で両
+/// オペランドの qword を選び、64×64 のキャリーレス乗算を返す。
+fn pclmulqdq_val<B: Backend>(b: &mut B, imm: u8, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
     let x = lane128(b, a, if imm & 1 == 0 { 0 } else { 64 }, 64);
     let y = lane128(b, c, if imm & 0x10 == 0 { 0 } else { 64 }, 64);
     let mut r = b.konst::<W128>(0);
@@ -12944,8 +13646,31 @@ pub fn pclmulqdq<B: Backend>(
         let xr = b.xor::<W128>(r, xs);
         r = b.select::<W128>(has, xr, r);
     }
+    r
+}
+
+/// PCLMULQDQ。
+pub fn pclmulqdq<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c = rx(b, ea, 128)?;
+    let r = pclmulqdq_val(b, imm, a, c);
     b.set(sem::xmm_ref(reg_x(d)), r);
     Ok(())
+}
+
+/// VPCLMULQDQ。VEX.256 でも 128 ビットレーンごとに独立。
+pub fn vpclmulqdq<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| pclmulqdq_val(b, imm, a, c))
 }
 
 // ---- SHA-NI / GFNI ----
@@ -13298,6 +14023,13 @@ fn gf8inv<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
 pub fn gf2p8mulb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
     let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
     let s2 = rx(b, ea, 128)?;
+    let r = gf2p8mulb_val(b, s1, s2);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// GF2P8MULB の 128 ビットレーン内演算。
+fn gf2p8mulb_val<B: Backend>(b: &mut B, s1: B::V<W128>, s2: B::V<W128>) -> B::V<W128> {
     let mut r = b.konst::<W128>(0);
     for i in 0..16u32 {
         let x = lane128(b, s1, i * 8, 8);
@@ -13305,8 +14037,12 @@ pub fn gf2p8mulb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Resul
         let p = gf8mul(b, x, y);
         r = put_lane128(b, r, p, i * 8, 8);
     }
-    b.set(sem::xmm_ref(reg_x(d)), r);
-    Ok(())
+    r
+}
+
+/// VGF2P8MULB。
+pub fn vgf2p8mulb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| gf2p8mulb_val(b, a, c))
 }
 
 /// バイト値（下位 8 ビット）のパリティを 0/1 の値で返す。
@@ -13335,6 +14071,19 @@ pub fn gf2p8affine<B: Backend>(
 ) -> Result<(), B::Exit> {
     let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
     let s2 = rx(b, ea, 128)?;
+    let r = gf2p8affine_val(b, inv, imm, s1, s2);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// GF2P8AFFINEQB/AFFINEINVQB の 128 ビットレーン内演算。
+fn gf2p8affine_val<B: Backend>(
+    b: &mut B,
+    inv: bool,
+    imm: u8,
+    s1: B::V<W128>,
+    s2: B::V<W128>,
+) -> B::V<W128> {
     let mut r = b.konst::<W128>(0);
     for q in 0..2u32 {
         let mat = lane128(b, s2, q * 64, 64);
@@ -13359,8 +14108,18 @@ pub fn gf2p8affine<B: Backend>(
             r = put_lane128(b, r, ob, (q * 8 + i) * 8, 8);
         }
     }
-    b.set(sem::xmm_ref(reg_x(d)), r);
-    Ok(())
+    r
+}
+
+/// VGF2P8AFFINEQB/AFFINEINVQB。
+pub fn vgf2p8affine<B: Backend>(
+    b: &mut B,
+    inv: bool,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| gf2p8affine_val(b, inv, imm, a, c))
 }
 
 // ===== EVEX（AVX-512）

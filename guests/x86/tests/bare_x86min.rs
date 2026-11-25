@@ -117,6 +117,38 @@ fn cpuid_leaf0_returns_vendor() {
 }
 
 #[test]
+fn cpuid_amx_leaf_uses_subleaf() {
+    let mut env = env();
+    let features: std::collections::BTreeSet<String> = [
+        "amx_tile",
+        "amx_int8",
+        "amx_bf16",
+        "amx_fp16",
+        "amx_complex",
+        "amx_movrs",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let tbl = polyisa_guest_x86::cpuid::derive(&features, &std::collections::BTreeMap::new());
+    for (i, regs) in tbl.iter().enumerate() {
+        for (r, v) in regs.iter().enumerate() {
+            env.backend.set(polyisa_guest_x86::sem::cpuid_ref(i, r), *v);
+        }
+    }
+    env.backend.set(sem::Gpr(0).state(), 0x1e);
+    env.backend.set(sem::Gpr(1).state(), 1);
+    env.step(sem::cpuid).unwrap();
+    let eax = env.backend.get(sem::Gpr(0).state());
+    assert_eq!(eax & 0x10f, 0x10f, "AMX mirror bits and AMX-MOVRS");
+    // 無効な subleaf では leaf 本体に fallback せず 0 を返す。
+    env.backend.set(sem::Gpr(0).state(), 0x1e);
+    env.backend.set(sem::Gpr(1).state(), 2);
+    env.step(sem::cpuid).unwrap();
+    assert_eq!(env.backend.get(sem::Gpr(0).state()), 0);
+}
+
+#[test]
 fn modrm_register_direct() {
     let mut env = env();
     env.backend.set(Gpr(1).state(), 35);

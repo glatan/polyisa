@@ -69,7 +69,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 9],
+    pub cpuid: [[u32; 4]; 16],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -197,27 +197,27 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 144 を
-        // gs_base 以降に足した 654 を 8 境界へ揃えた位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 656);
+        // mxcsr（sregs 12 + fsw 2 + cpuid 256 を
+        // gs_base 以降に足した位置）。
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 768);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 712);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 720);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 728);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 736);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 992);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1504);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2528);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2592);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2720);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2720 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 10976);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 824);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 832);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 840);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 848);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1104);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1616);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2640);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2704);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2832);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2832 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11088);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2335);
+        assert_eq!(INSNS.len(), 2337);
     }
 
     #[test]
@@ -2211,20 +2211,58 @@ mod tests {
     fn cpuid_leaf_regs() {
         // CPUID テーブル導出。MWAITX = 8000_0001:ECX[29]、
         // CLZERO/RDPRU = 8000_0008:EBX[0]/EBX[4]。
-        let feats: std::collections::BTreeSet<String> = ["clzero", "rdpru", "mwaitx"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let feats: std::collections::BTreeSet<String> = [
+            "clzero",
+            "rdpru",
+            "mwaitx",
+            "sha512",
+            "sm3",
+            "sm4",
+            "raoint",
+            "cmpccxadd",
+            "movrs",
+            "avxneconvert",
+            "user_msr",
+            "amx_tile",
+            "amx_int8",
+            "amx_bf16",
+            "amx_fp16",
+            "amx_complex",
+            "amx_movrs",
+            "via_padlock_rng",
+            "via_padlock_rng_en",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let tbl = cpuid::derive(&feats, &Default::default());
-        // LEAF_IDS 順: index 7 = 0x8000_0001、index 8 = 0x8000_0008。
-        assert_eq!(tbl[7][2] & (1 << 29), 1 << 29, "mwaitx");
-        assert_eq!(tbl[8][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
-        assert_eq!(tbl[8][0], 0x3020, "addr size");
+        assert_eq!(tbl[2][0], 1, "leaf 7 max subleaf");
+        assert_eq!(tbl[3][0] & 0b1111, 0b1111, "sha512/sm3/sm4/raoint");
+        assert_eq!(tbl[3][0] & (1 << 7), 1 << 7, "cmpccxadd");
+        assert_eq!(tbl[3][0] & (1 << 31), 1 << 31, "movrs");
+        assert_eq!(tbl[3][3] & (1 << 5), 1 << 5, "avxneconvert");
+        assert_eq!(tbl[3][3] & (1 << 15), 1 << 15, "user_msr");
+        assert_eq!(tbl[7][0], 1, "leaf 1d max palette");
+        assert_eq!(tbl[8][0], 0x0400_2000, "leaf 1d tile geometry eax");
+        assert_eq!(tbl[8][1], 0x0008_0040, "leaf 1d tile geometry ebx");
+        assert_eq!(tbl[8][2], 0x10, "leaf 1d max rows");
+        assert_eq!(tbl[9][1], 16 | (64 << 8), "leaf 1e tmul shape");
+        assert_eq!(tbl[10][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
+        // LEAF_IDS 順: index 12 = 0x8000_0001、index 13 = 0x8000_0008。
+        assert_eq!(tbl[12][2] & (1 << 29), 1 << 29, "mwaitx");
+        assert_eq!(tbl[13][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
+        assert_eq!(tbl[13][0], 0x3020, "addr size");
+        assert_eq!(tbl[14][0], 0xC000_0001, "via max leaf");
+        assert_eq!(tbl[15][3] & 0xC, 0xC, "padlock present+enabled");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());
-        assert_eq!(tbl[7][2] & (1 << 29), 0);
-        assert_eq!(tbl[8][1], 0);
+        assert_eq!(tbl[12][2] & (1 << 29), 0);
+        assert_eq!(tbl[13][1], 0);
+        assert_eq!(tbl[7], [0; 4]);
+        assert_eq!(tbl[10], [0; 4]);
+        assert_eq!(tbl[14], [0; 4]);
+        assert_eq!(tbl[15], [0; 4]);
     }
 
     #[test]
@@ -2232,6 +2270,23 @@ mod tests {
         // 世代ゲート（A0）。実モードの modes = o16/a16 = 0。
         let sel = model_feats;
         let m16 = 0u32;
+        // INVD/WBINVD/INVLPG は i486 以降。386 では #UD 側。
+        for op in [0x08u8, 0x09] {
+            assert!(decode_map(&[0x0F, op], m16, sel("i386")).is_none());
+            assert!(decode_map(&[0x0F, op], m16, sel("i486")).is_some());
+        }
+        assert!(decode_map(&[0x0F, 0x01, 0x38], m16, sel("i386")).is_none());
+        assert!(decode_map(&[0x0F, 0x01, 0x38], m16, sel("i486")).is_some());
+        // XSTORE は enabled ビット付きの VIA/Zhaoxin PadLock RNG
+        // 命令。present だけまたは通常 Intel/AMD モデルでは #UD。
+        let m64 = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        assert!(decode_map(&[0x0F, 0xA7, 0xC0], m64, sel("x86_64")).is_none());
+        assert!(decode_map(&[0x0F, 0xA7, 0xC0], m64, 0).is_none());
+        let enabled = FEAT_VIA_PADLOCK_RNG_EN;
+        assert_eq!(
+            decode_map(&[0x0F, 0xA7, 0xC0], m64, enabled).unwrap().insn,
+            Insn::Xstore
+        );
         // 0F: 8088/186 では POP CS、286 以降は副表。
         assert_eq!(
             decode_map(&[0x0F], m16, sel("i8088")).map(|d| d.insn),
@@ -2576,6 +2631,21 @@ fn amx_decode() {
     assert_eq!(d.insn, Insn::Tileloadd);
     let d = decode_map(&[0xC4, 0xE2, 0x79, 0x4B, 0x0C, 0x98], modes, tile).unwrap();
     assert_eq!(d.insn, Insn::Tileloaddt1);
+    // TILELOADDRS/T1 は MOVRS ではなく AMX-MOVRS にゲートする。
+    let rs = tile | FEAT_AMX_MOVRS;
+    let d = decode_map(&[0xC4, 0xE2, 0x7B, 0x4A, 0x0C, 0x98], modes, rs).unwrap();
+    assert_eq!(d.insn, Insn::Tileloaddrs);
+    let d = decode_map(&[0xC4, 0xE2, 0x79, 0x4A, 0x0C, 0x98], modes, rs).unwrap();
+    assert_eq!(d.insn, Insn::Tileloaddrst1);
+    assert!(
+        decode_map(
+            &[0xC4, 0xE2, 0x7B, 0x4A, 0x0C, 0x98],
+            modes,
+            tile | FEAT_MOVRS
+        )
+        .is_none(),
+        "MOVRS only では AMX-MOVRS 形をデコードしない"
+    );
     let d = decode_map(&[0xC4, 0xE2, 0x7A, 0x4B, 0x0C, 0x98], modes, tile).unwrap();
     assert_eq!(d.insn, Insn::Tilestored);
     // 非 SIB 形（r/m=000）は拒否。
