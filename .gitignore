@@ -18,3 +18,4 @@ target/nextest/
 .idea/
 *.swp
 *~
+.cache/

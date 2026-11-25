@@ -321,7 +321,7 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|s| s.to_str())
-                && (name == "target" || name == ".testdata")
+                && (name == "target" || name == ".testdata" || name == ".cache")
             {
                 continue;
             }

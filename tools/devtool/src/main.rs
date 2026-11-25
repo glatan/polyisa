@@ -791,7 +791,11 @@ fn scan_notices(root: &std::path::Path) -> Vec<String> {
         if rel == "LICENSE-MIT" || rel == "LICENSE-APACHE" {
             continue;
         }
-        if rel.starts_with(".git/") || rel.contains("/target/") || rel.starts_with(".testdata/") {
+        if rel.starts_with(".git/")
+            || rel.contains("/target/")
+            || rel.starts_with(".testdata/")
+            || rel.starts_with(".cache/")
+        {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&f) else {
