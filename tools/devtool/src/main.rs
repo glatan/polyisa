@@ -415,7 +415,6 @@ fn check_no_external_crates() -> Result<(), String> {
 }
 
 /// クレート間の依存規則を検査する。許可表は `docs/architecture/workspace.md` の「依存規則」による。
-// Gap: GAP-0012
 fn check_dep_rules() -> Result<(), String> {
     let violations = dep_violations(&workspace_root());
     if violations.is_empty() {
@@ -1103,6 +1102,22 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// `[build-dependencies]` で依存してよい相手の表。
+///
+/// ゲスト ISA クレートは `build.rs` から ISADL のモデル型を直接使い、
+/// `isagen` の生成器を呼ぶ。依存規則のある ISA 非依存クレートには
+/// 現在 build-dependency を認めない。規則表にない開発用クレートは
+/// 従来どおり `[dependencies]` と同じく検査対象外である。
+fn allowed_build_deps(pkg: &str) -> Option<&'static [&'static str]> {
+    if pkg.starts_with("polyisa-guest-") {
+        return Some(&["polyisa-isadl", "polyisa-isagen"]);
+    }
+    if allowed_deps(pkg).is_some() {
+        return Some(&[]);
+    }
+    None
+}
+
 /// 各メンバーの `Cargo.toml` を読み、許可表にない依存を列挙する。
 fn dep_violations(root: &std::path::Path) -> Vec<String> {
     let members = workspace_members(root);
@@ -1115,9 +1130,15 @@ fn dep_violations(root: &std::path::Path) -> Vec<String> {
         let Some(allowed) = allowed_deps(pkg) else {
             continue;
         };
-        for dep in workspace_dep_names(&text) {
-            if !allowed.contains(&dep.as_str()) {
-                out.push(format!("{pkg} -> {dep}"));
+        for (section, dep) in workspace_dep_entries(&text) {
+            let violation = match section {
+                "dependencies" => !allowed.contains(&dep.as_str()),
+                "build-dependencies" => allowed_build_deps(pkg)
+                    .is_some_and(|build_allowed| !build_allowed.contains(&dep.as_str())),
+                _ => false,
+            };
+            if violation {
+                out.push(format!("{pkg} -> {dep} ({section})"));
             }
         }
     }
@@ -1248,24 +1269,28 @@ fn package_name_of(text: &str) -> Option<String> {
     None
 }
 
-/// `[dependencies]` の `polyisa-*` を集める。
-fn workspace_dep_names(manifest: &str) -> Vec<String> {
+/// `[dependencies]` と `[build-dependencies]` の `polyisa-*` を節名つきで集める。
+fn workspace_dep_entries(manifest: &str) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
-    let mut in_deps = false;
+    let mut section = None;
     for line in manifest.lines() {
         let t = line.trim();
         if t.starts_with('[') {
-            in_deps = t == "[dependencies]";
+            section = match t {
+                "[dependencies]" => Some("dependencies"),
+                "[build-dependencies]" => Some("build-dependencies"),
+                _ => None,
+            };
             continue;
         }
-        if !in_deps {
+        let Some(section_name) = section else {
             continue;
-        }
+        };
         let t = t.split('#').next().unwrap_or("").trim();
         if let Some(name) = t.split(['=', ' ']).next()
             && name.starts_with("polyisa-")
         {
-            out.push(name.to_string());
+            out.push((section_name, name.to_string()));
         }
     }
     out
@@ -1403,12 +1428,20 @@ mod tests {
 
     #[test]
     fn dep_names_parsed() {
-        let manifest = "[dependencies]\npolyisa-bits = { path = \"../bits\" }\nserde = \"1\"\n";
+        let manifest = "[dependencies]\npolyisa-bits = { path = \"../bits\" }\nserde = \"1\"\n\n[build-dependencies]\npolyisa-isagen = { path = \"../isagen\" }\n";
         assert_eq!(
-            workspace_dep_names(manifest),
-            vec!["polyisa-bits".to_string()]
+            workspace_dep_entries(manifest),
+            vec![
+                ("dependencies", "polyisa-bits".to_string()),
+                ("build-dependencies", "polyisa-isagen".to_string()),
+            ]
         );
         assert_eq!(allowed_deps("polyisa-mem"), Some(&["polyisa-bits"][..]));
         assert_eq!(allowed_deps("no-such-crate"), None);
+        assert_eq!(
+            allowed_build_deps("polyisa-guest-riscv"),
+            Some(&["polyisa-isadl", "polyisa-isagen"][..])
+        );
+        assert_eq!(allowed_build_deps("polyisa-mem"), Some(&[][..]));
     }
 }

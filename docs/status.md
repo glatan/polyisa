@@ -70,14 +70,13 @@
 
 ## 横断課題の要約
 
-詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 6 件、暫定は 14 件である。
+詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 6 件、暫定は 13 件である。
 
 | ID | 区分 | 関連文書 |
 |---|---|---|
 | GAP-0002 | 暫定 | [OS 層](architecture/os-layer.md) |
 | GAP-0009 | 暫定 | [浮動小数点と十進演算](architecture/arithmetic.md) |
 | GAP-0010 | 暫定 | [テストガイド](guides/testing.md) |
-| GAP-0012 | 暫定 | [ワークスペース構成](architecture/workspace.md) |
 | GAP-0021 | 未着手 | [テストガイド](guides/testing.md) |
 | GAP-0023 | 暫定 | [ISA 記述とコード生成](architecture/isadl.md) |
 | GAP-0024 | 暫定 | [命令意味論・実行エンジン・JIT](architecture/execution.md) |

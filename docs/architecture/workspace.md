@@ -78,7 +78,7 @@ ISA 基盤層     isagen → isadl
                sem → bits, mem
                guest → bits, sem, timing
 ゲスト ISA 層  guests/* → bits, softfloat, decimal, mem, sem, guest, timing
-               （build-dependency として isagen）
+               （build-dependency として isadl, isagen）
 実行層         engine → bits, mem, sem, guest, timing, softfloat, ir
                ir → sem, guest, mem
                jit → ir, host, engine, mem, sem
@@ -102,7 +102,7 @@ OS 層          loader → bits, mem
 - `host` への直接依存は `kernel`・`os-*`（`os-semihost` を除く）・`jit`・`cli` に限られる。
 - ゲスト ISA クレート同士は互いに依存しない。
 
-依存規則の許可表は `tools/devtool/src/main.rs` の `allowed_deps` が検査し、`task check` で実行する。現行の検査は各 `Cargo.toml` の `[dependencies]` のみを対象としており、`build-dependencies` の検査は未対応である（[GAP-0012](../known-issues.md)）。
+依存規則の許可表は `tools/devtool/src/main.rs` の `allowed_deps` と `allowed_build_deps` が検査し、`task check` で実行する。検査は各 `Cargo.toml` の `[dependencies]` と `[build-dependencies]` を対象とする。`build.rs` は ISADL のモデル型を直接使うため、ゲスト ISA クレートの build-dependency は `isadl` と `isagen` に限る。
 
 ## 外部依存の禁止
 
