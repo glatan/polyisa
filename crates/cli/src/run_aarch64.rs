@@ -15,7 +15,7 @@ use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::Ctrl;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_aarch64::sem::{self, Gpr};
-use polyisa_guest_aarch64::{Insn, decode_model_ex};
+use polyisa_guest_aarch64::{DEFAULT_FEATS, Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, PAGE_SIZE, PageNo, Perms, VirtAddr};
 use polyisa_sem::Backend;
 
@@ -62,9 +62,9 @@ pub fn run_ex(
     )
 }
 
-/// `run_ex` に機能集合 0・LE・成長なしを渡す既定の入口。
+/// `run_ex` に既定モデルの機能集合・LE・成長なしを渡す既定の入口。
 pub fn run(env: &mut BareEnv, entry: u64, sys: &mut impl TrapHandler) -> Outcome {
-    run_ex(env, entry, 0, Endian::Le, None, sys)
+    run_ex(env, entry, DEFAULT_FEATS, Endian::Le, None, sys)
 }
 
 /// 即値の符号拡張。`v` の下位 `bits` を符号付きで取る。
@@ -877,7 +877,7 @@ fn run_elf_aarch64_impl(
     sys.set_exe_path(path);
     sys.set_endian(data_endian);
     sys.init_brk(image_end);
-    let feats = sel.map_or(0, |s| s.feats);
+    let feats = sel.map_or(DEFAULT_FEATS, |s| s.feats);
     let growth = Some(StackGrowth {
         top,
         limit: top - STACK_LIMIT,
@@ -1094,7 +1094,7 @@ mod tests {
             &mut sys,
             3,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 1), 3);
     }
@@ -1112,7 +1112,7 @@ mod tests {
             &mut sys,
             1,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(env.backend.get(sem::sp_ref()), 0x7010);
     }
@@ -1132,7 +1132,7 @@ mod tests {
             &mut sys,
             1,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(env.backend.get(sem::nzcv_ref()) & 4, 4, "Z=1 で一致");
     }
@@ -1153,7 +1153,7 @@ mod tests {
             &mut sys,
             1,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 3), 111, "hs 成立で rn を選択");
     }
@@ -1172,7 +1172,7 @@ mod tests {
             &mut sys,
             2,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 2), 31);
         assert_eq!(xreg(&mut env, 3), 63);
@@ -1199,7 +1199,7 @@ mod tests {
             &mut sys,
             1,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 25), 0x1111);
         assert_eq!(xreg(&mut env, 26), 0x2222);
@@ -1224,7 +1224,7 @@ mod tests {
             &mut sys,
             1,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 5), 0xbeef);
     }
@@ -1244,7 +1244,7 @@ mod tests {
             &mut sys,
             3,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
         assert_eq!(xreg(&mut env, 0), 0x410f_d034);
         assert_eq!(xreg(&mut env, 1), 0x2);
@@ -1278,7 +1278,7 @@ mod tests {
             &mut sys,
             2,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, growth),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, growth),
         );
         // 成長して書き込みが完了し、sp が書き戻されている。
         assert_eq!(env.backend.get(sem::sp_ref()), top - PAGE_SIZE - 0x200);
@@ -1314,7 +1314,7 @@ mod tests {
             &mut sys,
             n,
             |e| e.pc,
-            |e, s| step_a64(e, s, 0, Endian::Le, None),
+            |e, s| step_a64(e, s, DEFAULT_FEATS, Endian::Le, None),
         );
     }
 

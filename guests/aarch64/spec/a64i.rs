@@ -20,8 +20,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と汎用 CPU モデル。FEAT_* は後の段階で足す。
-    // いずれの旗も命令の when に接続されていないため、generic と
-    // generic_v81 で命令の利用可否は変わらない。LSE 命令自体も未実装。
+    // fp/asimd は命令の when に接続する。lse を使う命令自体は未実装で、
+    // 実装時に同じ仕組みへ接続する。
     // Gap: GAP-0101
     // Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
     m.features.push(polyisa_isadl::model::Feature {
@@ -534,12 +534,68 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ldaxrh", "FL", "01 001000 01 0 11111 1 11111 ..... .....", "ldaxrh {rt}, [{rn}]", "load"),
     ];
 
+    let scalar_fp = |name: &str| {
+        ["stp_s_", "ldp_s_", "str_s_", "ldr_s_", "stp_d_", "ldp_d_", "str_d_", "ldr_d_"]
+            .iter()
+            .any(|p| name.starts_with(p))
+            || matches!(
+                name,
+                "stur_s"
+                    | "ldur_s"
+                    | "stur_d"
+                    | "ldur_d"
+                    | "fmov_w_s"
+                    | "fmov_s_w"
+                    | "fmov_x_d"
+                    | "fmov_d_x"
+                    | "fp3"
+                    | "fp1"
+                    | "fma"
+                    | "fcvt"
+                    | "fcvt_a"
+                    | "fcmp"
+                    | "fccmp"
+                    | "fcsel"
+                    | "fmov_imm"
+            )
+    };
+    let adv_simd = |name: &str| {
+        ["stp_q_", "ldp_q_", "str_q_", "ldr_q_", "str_b_", "ldr_b_", "str_h_", "ldr_h_"]
+            .iter()
+            .any(|p| name.starts_with(p))
+            || matches!(
+                name,
+                "stur_q"
+                    | "ldur_q"
+                    | "stur_b"
+                    | "ldur_b"
+                    | "stur_h"
+                    | "ldur_h"
+                    | "dup_gen"
+                    | "ins_gen"
+                    | "umov"
+                    | "mod_imm"
+                    | "fmov_x_dhi"
+                    | "fmov_dhi_x"
+            )
+    };
     for (name, format, pattern, syntax, timing) in insns {
+        // スカラー FP は fp、ベクタ要素・128 ビットアクセスは asimd で
+        // ゲートする。実アーキテクチャでは FP と AdvSIMD は同時実装が
+        // 必須だが、機能集合を細かく選ぶデバッグ構成でも区別できるよう
+        // 命令の利用面に近い側へ割り当てる。
+        let feature = if adv_simd(name) {
+            Some("asimd")
+        } else if scalar_fp(name) {
+            Some("fp")
+        } else {
+            None
+        };
         m.insns.push(Insn {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: feature.map_or(Pred::True, |f| Pred::Flag(f.to_string())),
             wheres: vec![],
             syntax: syntax.to_string(),
             timing: timing.to_string(),

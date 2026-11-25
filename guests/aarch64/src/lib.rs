@@ -76,6 +76,71 @@ mod tests {
     }
 
     #[test]
+    fn feature_gates_fp_and_asimd_decode() {
+        let generic = model_feats("generic");
+        assert_ne!(generic & FEAT_FP, 0);
+        assert_ne!(generic & FEAT_ASIMD, 0);
+
+        // fmov w1,s0 / str s0,[x0,#4] / dup v0.16b,w1 / ldr q0,[x0,#0x20]
+        let fmov = 0x1e26_0001u32;
+        let str_s = 0xbd00_0400u32;
+        let dup = 0x4e01_0c20u32;
+        let ldr_q = 0x3dc0_0800u32;
+        let add = 0x9100_1020u32;
+        assert_eq!(
+            decode_model_ex(u128::from(fmov), 32, true, generic),
+            Some(Insn::FmovWS)
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(str_s), 32, true, generic),
+            Some(Insn::StrSVu)
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(dup), 32, true, generic),
+            Some(Insn::DupGen)
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(ldr_q), 32, true, generic),
+            Some(Insn::LdrQVu)
+        );
+
+        // FP/ASIMD を両方落としても整数命令は残る。スカラー FP と
+        // ベクタアクセスはともにデコードしない。
+        let no_fp_simd = generic & !(FEAT_FP | FEAT_ASIMD);
+        assert_eq!(
+            decode_model_ex(u128::from(add), 32, true, no_fp_simd),
+            Some(Insn::AddImm)
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(fmov), 32, true, no_fp_simd),
+            None
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(str_s), 32, true, no_fp_simd),
+            None
+        );
+        assert_eq!(decode_model_ex(u128::from(dup), 32, true, no_fp_simd), None);
+        assert_eq!(
+            decode_model_ex(u128::from(ldr_q), 32, true, no_fp_simd),
+            None
+        );
+
+        // デバッグ用に機能を個別へ崩した場合は、スカラー FP と
+        // ベクタアクセスのゲートが分かれる。
+        let fp_only = (generic & !FEAT_ASIMD) | FEAT_FP;
+        assert_eq!(
+            decode_model_ex(u128::from(fmov), 32, true, fp_only),
+            Some(Insn::FmovWS)
+        );
+        assert_eq!(
+            decode_model_ex(u128::from(str_s), 32, true, fp_only),
+            Some(Insn::StrSVu)
+        );
+        assert_eq!(decode_model_ex(u128::from(dup), 32, true, fp_only), None);
+        assert_eq!(decode_model_ex(u128::from(ldr_q), 32, true, fp_only), None);
+    }
+
+    #[test]
     fn decode_spot_checks() {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-ARM-ARM-A。
         assert_eq!(decode(0x1400_0001, 32), Some(Insn::B));
