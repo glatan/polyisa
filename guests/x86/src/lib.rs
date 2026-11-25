@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2338);
+        assert_eq!(INSNS.len(), 2349);
     }
 
     #[test]
@@ -2566,6 +2566,24 @@ fn apx_decode() {
     assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x90, 0x29, 0xD1], modes, FEAT_APX).is_none());
     assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x30, 0x29, 0xD1], modes, FEAT_APX).is_none());
     assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x11, 0x29, 0xD1], modes, FEAT_APX).is_none());
+    // CCMPscc/CTESTscc。`62 4C 14 0B 39 D1` は P1.vvvv=0010
+    // （dfv=ZF）、P2=0000_1011（ND=0・scc=F）の条件付き CMP。
+    let d = decode_map(&[0x62, 0x4C, 0x14, 0x0B, 0x39, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::CcmpsccEvGv);
+    assert!(!d.ndd);
+    assert_eq!(d.vex_v & 0xF, 0xD, "dfv=2 は反転後 d");
+    assert_eq!(d.evex_aaa, 3);
+    // scc=T（1010）の CTEST（F7 /0, imm32 付き）。
+    let d = decode_map(
+        &[0x62, 0x4C, 0x14, 0x0A, 0xF7, 0xC1, 1, 0, 0, 0],
+        modes,
+        FEAT_APX,
+    )
+    .unwrap();
+    assert_eq!(d.insn, Insn::CtestsccEvI);
+    assert_eq!(d.imm, 1);
+    // ND=1 は CCMP/CTEST では #UD（CMP/TEST の通常昇格形はない）。
+    assert!(decode_map(&[0x62, 0x4C, 0x14, 0x1B, 0x39, 0xD1], modes, FEAT_APX).is_none());
     // PUSH2（FF /6, ND 必須）・POP2（8F /0）。
     // push2 %r13,%r12 = 62 D4 1C 18 FF F5、push2p は W=1（P1=9C）。
     let d = decode_map(&[0x62, 0xD4, 0x1C, 0x18, 0xFF, 0xF5], modes, FEAT_APX).unwrap();

@@ -404,6 +404,10 @@ pub struct MapInsn {
     /// （ADC/SBB/NOT/CMP/TEST/RCL/RCR・PUSH2/POP2 など）では
     /// NF=1 のエンコードは #UD。`promoted` とだけ併用する。
     pub nf_ok: bool,
+    /// APX の CCMPscc/CTESTscc。ND=0 の昇格形で、P1.vvvv は
+    /// default flags value、P2.3（V'）と P2.2-0 は source condition
+    /// code に再解釈される。`promoted` とだけ併用する。
+    pub nci: bool,
     /// VEX.vvvv / EVEX.vvvv+V' が未使用（全ビット 1 固定）か。
     /// `vex`/`evex` が Some のときのみ意味を持つ。
     pub vex_rv: bool,

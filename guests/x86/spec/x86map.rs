@@ -39,6 +39,7 @@ fn mi(
         ndd_req: false,
         zu: false,
         nf_ok: false,
+        nci: false,
         vex_rv: false,
         lock_ok: false,
         sib: false,
@@ -134,6 +135,21 @@ fn px(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
 fn pxg(name: &str, group: u8, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
     let mut it = mi(name, ops, Some(group), PfxSel::NoF2F3, Pred::True, syntax, timing);
     it.promoted = true;
+    it
+}
+
+/// APX CCMPscc/CTESTscc の命令項目。ND=0 で、vvvv/V'/aaa を
+/// dfv/scc へ再解釈する。
+fn pxc(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
+    let mut it = px(name, ops, syntax, timing);
+    it.nci = true;
+    it
+}
+
+/// グループ選択の APX CCMPscc/CTESTscc。
+fn pxcg(name: &str, group: u8, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
+    let mut it = pxg(name, group, ops, syntax, timing);
+    it.nci = true;
     it
 }
 
@@ -4710,6 +4726,65 @@ fn build_map_apx(m: &mut Model) {
             MapItem::Insn(0xFF, it)
         },
     ]);
+    // CCMPscc/CTESTscc。CMP/TEST の昇格形で ND=0 のものは
+    // 条件付き比較として vvvv=dfv・V'+aaa=scc を再解釈する。
+    // メモリ被演算子は条件が偽でも読む（フォールト抑制はしない）。
+    for (byte, name, ops, syn) in [
+        (0x38u8, "ccmpscc_eb_gb", vec![Ea(B8), Reg(B8)], "ccmpscc {e}, {g}"),
+        (0x3A, "ccmpscc_gb_eb", vec![Reg(B8), Ea(B8)], "ccmpscc {g}, {e}"),
+    ] {
+        let mut it = pxc(name, &ops, syn, "alu");
+        it.pfx = PfxSel::Plain;
+        v.push(MapItem::Insn(byte, it));
+    }
+    for (byte, name, ops, syn) in [
+        (0x39u8, "ccmpscc_ev_gv", vec![Ea(V), Reg(V)], "ccmpscc {e}, {g}"),
+        (0x3B, "ccmpscc_gv_ev", vec![Reg(V), Ea(V)], "ccmpscc {g}, {e}"),
+        (0x84, "ctestscc_eb_gb", vec![Ea(B8), Reg(B8)], "ctestscc {e}, {g}"),
+        (0x85, "ctestscc_ev_gv", vec![Ea(V), Reg(V)], "ctestscc {e}, {g}"),
+    ] {
+        let mut it = pxc(name, &ops, syn, "alu");
+        if byte == 0x84 {
+            it.pfx = PfxSel::Plain;
+        }
+        v.push(MapItem::Insn(byte, it));
+    }
+    for (byte, wdt, ikind, suf, cmp) in [
+        (0x80u8, B8, Imm(B8), "eb_ib", true),
+        (0x81, V, Imm(Z), "ev_iz", true),
+        (0x83, V, Imm(B8), "ev_ib", true),
+    ] {
+        let mut it = pxcg(
+            &format!("ccmpscc_{suf}"),
+            7,
+            &[Ea(wdt), ikind],
+            "ccmpscc {e}, {i}",
+            "alu",
+        );
+        let _ = cmp;
+        if wdt == B8 {
+            it.pfx = PfxSel::Plain;
+        }
+        v.push(MapItem::Insn(byte, it));
+    }
+    for (byte, wdt, ikind, suf) in [
+        (0xF6u8, B8, Imm(B8), "eb_i"),
+        (0xF7, V, Imm(Z), "ev_i"),
+    ] {
+        for gi in [0u8, 1] {
+            let mut it = pxcg(
+                &format!("ctestscc_{suf}"),
+                gi,
+                &[Ea(wdt), ikind],
+                "ctestscc {e}, {i}",
+                "alu",
+            );
+            if wdt == B8 {
+                it.pfx = PfxSel::Plain;
+            }
+            v.push(MapItem::Insn(byte, it));
+        }
+    }
     // POP2/POP2P（8F /0、ND=1 必須。W が 2P 形を選ぶ）。
     v.extend([
         {

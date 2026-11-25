@@ -24110,6 +24110,21 @@ fn run64_apx() {
         0x62, 0x4C, 0x3C, 0x14, 0x29, 0xD1, // sub.nf r24,r25,r26
         0x9C, // pushf
         0x59, // pop rcx → 旗の退避
+        // CCMPF（常に偽）は比較せず dfv=ZF を立てる。
+        0x62, 0x4C, 0x14, 0x0B, 0x39, 0xD1, // ccmpf {dfv=zf} r25,r26
+        0x9C, // pushf
+        0x5A, // pop rdx
+        // CCMPT（常に真）は r25-r26（1-2）を普通に比較する。
+        0x62, 0x4C, 0x14, 0x0A, 0x39, 0xD1, // ccmpt {dfv=zf} r25,r26
+        0x9C, // pushf
+        0x5B, // pop rbx
+        // CTESTF（常に偽）は dfv=CF、CTESTT（常に真）は 1&2=0 の TEST。
+        0x62, 0x4C, 0x0C, 0x0B, 0xF7, 0xC1, 0x02, 0x00, 0x00, 0x00, // ctestf {dfv=cf} r25,2
+        0x9C, // pushf
+        0x41, 0x58, // pop r8
+        0x62, 0x4C, 0x0C, 0x0A, 0xF7, 0xC1, 0x02, 0x00, 0x00, 0x00, // ctestt {dfv=cf} r25,2
+        0x9C, // pushf
+        0x41, 0x59, // pop r9
         // PUSH2/POP2 往復。
         0x49, 0xBC, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r12,0x1111
         0x49, 0xBD, 0x22, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r13,0x2222
@@ -24147,6 +24162,20 @@ fn run64_apx() {
     // NF: pushf で取った旗の ZF（bit6）が立っている。
     let fl: u32 = env.backend.get(Gpr(1).state());
     assert_ne!(fl & 0x40, 0, "nf は旗を保持");
+    // CCMPF は dfv の ZF を立て、CCMPT は 1-2 の SF/CF を立てて ZF を下ろす。
+    let ff: u32 = env.backend.get(Gpr(2).state());
+    assert_ne!(ff & 0x40, 0, "ccmpf は dfv の zf");
+    let ft: u32 = env.backend.get(Gpr(3).state());
+    assert_ne!(ft & 0x80, 0, "ccmpt は sf");
+    assert_ne!(ft & 0x1, 0, "ccmpt は cf");
+    assert_eq!(ft & 0x40, 0, "ccmpt は zf を下ろす");
+    // CTESTF は CF=1/ZF=0、CTESTT は 1&2=0 なので ZF=1/CF=0。
+    let tf: u32 = env.backend.get(Gpr(8).state());
+    assert_ne!(tf & 0x1, 0, "ctestf は dfv の cf");
+    assert_eq!(tf & 0x40, 0, "ctestf は zf を下ろす");
+    let tt: u32 = env.backend.get(Gpr(9).state());
+    assert_ne!(tt & 0x40, 0, "ctestt は zf");
+    assert_eq!(tt & 0x1, 0, "ctestt は cf を下ろす");
 }
 
 #[test]

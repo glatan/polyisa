@@ -10,8 +10,9 @@ use polyisa_sem::{Backend, Cmp, Flow, W8, W16, W32, W64, W128, Width};
 use crate::MapDec;
 use crate::decode::{self, Hw, Rm};
 use crate::sem::{
-    self, FLAG_CF, FLAG_OF, Gpr, eflags_ref, eip_ref, read_cf, read_of, read_pf, read_sf, read_zf,
-    update_add_flags, update_addc_flags, update_logic_flags, update_sub_flags, update_subb_flags,
+    self, FLAG_CF, FLAG_OF, FLAG_PF, FLAG_SF, FLAG_ZF, Gpr, eflags_ref, eip_ref, read_cf, read_of,
+    read_pf, read_sf, read_zf, update_add_flags, update_addc_flags, update_logic_flags,
+    update_sub_flags, update_subb_flags,
 };
 use crate::sem::{pf_bit, pick, szp_bits};
 
@@ -292,6 +293,129 @@ fn sf_num<B: Backend>(b: &mut B) -> B::V<W32> {
 }
 fn of_num<B: Backend>(b: &mut B) -> B::V<W32> {
     sem::of_num(b)
+}
+
+/// CCMPscc/CTESTscc の source condition。1010/1011 は PF/NP ではなく
+/// 常に真/偽になる。
+fn cc_nci<B: Backend>(b: &mut B, n: u8) -> B::B {
+    match n {
+        0xA => bool_k(b, true),
+        0xB => bool_k(b, false),
+        _ => cc(b, n),
+    }
+}
+
+/// NCI エンコードの dfv（物理 vvvv ビット）と scc（物理 V'/aaa ビット）。
+/// `MapDec::vex_v` はレジスタ番号用に反転済みなので、ここでは元の
+/// ペイロード値へ戻す。
+fn nci_fields(d: &MapDec) -> (u8, u8) {
+    let dfv = (!d.vex_v) & 0xF;
+    let sc3 = (!((d.vex_v >> 4) & 1)) & 1;
+    let scc = (sc3 << 3) | (d.evex_aaa & 7);
+    (dfv, scc)
+}
+
+fn dfv_flags(dfv: u8) -> u32 {
+    let cf = u32::from(dfv & 1);
+    let zf = u32::from((dfv >> 1) & 1);
+    let sf = u32::from((dfv >> 2) & 1);
+    let of = u32::from((dfv >> 3) & 1);
+    cf * FLAG_CF + zf * FLAG_ZF + sf * FLAG_SF + of * FLAG_OF + cf * FLAG_PF
+}
+
+/// 条件が真なら通常の CMP/TEST の旗、偽なら dfv の旗を選ぶ。
+/// 被演算子は条件に関係なく先に読む（メモリは偽でも読み、フォールトする）。
+fn nci_select_flags<B: Backend>(b: &mut B, old: B::V<W32>, cond: B::B, dfv: u8) {
+    let new = b.get(eflags_ref());
+    let ones = b.konst::<W32>(u32::MAX);
+    let zero = b.konst::<W32>(0);
+    let cm = b.select::<W32>(cond, ones, zero);
+    let ncm = b.not::<W32>(cm);
+    let mask = b.konst::<W32>(sem::FLAG_OSZPCA);
+    let def = b.konst::<W32>(dfv_flags(dfv));
+    let cm_mask = b.and::<W32>(cm, mask);
+    let new_part = b.and::<W32>(new, cm_mask);
+    let ncm_mask = b.and::<W32>(ncm, mask);
+    let def_part = b.and::<W32>(def, ncm_mask);
+    let nmask = b.not::<W32>(mask);
+    let rest = b.and::<W32>(old, nmask);
+    let chosen = b.or::<W32>(new_part, def_part);
+    let merged = b.or::<W32>(chosen, rest);
+    b.set(eflags_ref(), merged);
+}
+
+/// CCMPscc。条件が真なら CMP、偽なら dfv を旗へ写す。
+pub fn ccmp<'a, B: Backend>(
+    b: &mut B,
+    w: u8,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Src<'a, B::V<W64>>,
+) -> Flow<B> {
+    match w {
+        8 => ccmp_w::<B, W8>(b, rm, d, src),
+        16 => ccmp_w::<B, W16>(b, rm, d, src),
+        32 => ccmp_w::<B, W32>(b, rm, d, src),
+        _ => ccmp_w::<B, W64>(b, rm, d, src),
+    }
+}
+
+fn ccmp_w<'a, B: Backend, W: Hw>(
+    b: &mut B,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Src<'a, B::V<W64>>,
+) -> Flow<B> {
+    let (dfv, scc) = nci_fields(d);
+    let cond = cc_nci(b, scc);
+    let old = b.get(eflags_ref());
+    let x = rd_w::<B, W>(b, rm, d)?;
+    let y = match src {
+        Src::Reg(g) => grd_w::<B, W>(b, g, d),
+        Src::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i))),
+        Src::Ea(e) => rd_w::<B, W>(b, e, d)?,
+    };
+    let v = b.sub::<W>(x, y);
+    update_sub_flags(b, x, y, v);
+    nci_select_flags(b, old, cond, dfv);
+    Ok(())
+}
+
+/// CTESTscc。条件が真なら TEST、偽なら dfv を旗へ写す。
+pub fn ctest<'a, B: Backend>(
+    b: &mut B,
+    w: u8,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Src<'a, B::V<W64>>,
+) -> Flow<B> {
+    match w {
+        8 => ctest_w::<B, W8>(b, rm, d, src),
+        16 => ctest_w::<B, W16>(b, rm, d, src),
+        32 => ctest_w::<B, W32>(b, rm, d, src),
+        _ => ctest_w::<B, W64>(b, rm, d, src),
+    }
+}
+
+fn ctest_w<'a, B: Backend, W: Hw>(
+    b: &mut B,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Src<'a, B::V<W64>>,
+) -> Flow<B> {
+    let (dfv, scc) = nci_fields(d);
+    let cond = cc_nci(b, scc);
+    let old = b.get(eflags_ref());
+    let x = rd_w::<B, W>(b, rm, d)?;
+    let y = match src {
+        Src::Reg(g) => grd_w::<B, W>(b, g, d),
+        Src::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i))),
+        Src::Ea(e) => rd_w::<B, W>(b, e, d)?,
+    };
+    let v = b.and::<W>(x, y);
+    update_logic_flags(b, v);
+    nci_select_flags(b, old, cond, dfv);
+    Ok(())
 }
 
 // ---- 転送・交換 ----

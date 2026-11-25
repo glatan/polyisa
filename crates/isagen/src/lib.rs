@@ -2099,7 +2099,12 @@ fn emit_map_candidate(
         // 反転済みでは 0）を要求する。NF は `nf_ok` の項目でのみ
         // 受理。`zu` は ND=1 かつ vvvv 未使用を要求（vvvv は
         // レジスタを指さず、ND は ZU を選ぶ）。
-        let mut c = String::from("d.evex && !d.evex_z && d.evex_ll == 0 && d.evex_aaa & 3 == 0");
+        let mut c = if mi.nci {
+            // NCI では aaa が scc の下位 3 ビットなので制約しない。
+            String::from("d.evex && !d.evex_z && d.evex_ll == 0")
+        } else {
+            String::from("d.evex && !d.evex_z && d.evex_ll == 0 && d.evex_aaa & 3 == 0")
+        };
         // U ビット（~X4）はメモリ形でのみ有効フィールド。
         // mod=11 では予約の 1 でなければ #UD（XED 実測）。
         let modreg = if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
@@ -2110,16 +2115,22 @@ fn emit_map_candidate(
             "*bytes.get(*i)? >> 6 == 3"
         };
         c.push_str(&format!(" && (d.evex_u || !({modreg}))"));
-        if !mi.nf_ok {
-            c.push_str(" && !d.nf");
-        }
-        if mi.zu {
-            c.push_str(" && d.ndd && d.vex_v == 0");
+        if mi.nci {
+            // CCMP/CTEST は ND=0。vvvv は dfv、V'+aaa は scc で、
+            // NF ビットも scc の一部なので独立条件にはしない。
+            c.push_str(" && !d.ndd");
         } else {
-            c.push_str(" && (d.ndd || d.vex_v == 0)");
-        }
-        if mi.ndd_req {
-            c.push_str(" && d.ndd");
+            if !mi.nf_ok {
+                c.push_str(" && !d.nf");
+            }
+            if mi.zu {
+                c.push_str(" && d.ndd && d.vex_v == 0");
+            } else {
+                c.push_str(" && (d.ndd || d.vex_v == 0)");
+            }
+            if mi.ndd_req {
+                c.push_str(" && d.ndd");
+            }
         }
         c
     } else {
