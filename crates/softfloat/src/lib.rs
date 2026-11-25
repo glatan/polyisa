@@ -605,7 +605,7 @@ impl<const E: u32, const M: u32> Binary<E, M> {
                     if sp == s3 {
                         Self::zero_signed(sp)
                     } else {
-                        Self::zero()
+                        Self::zero_signed(rm == Rm::Rdn)
                     },
                     0,
                 );
@@ -621,51 +621,47 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         let m_p = m1 * m2;
         let lsb_p = ue_p - 2 * M as i64;
         let lsb3 = ue3 - M as i64;
-        let bl_p = bitlen_u128(m_p);
-        let bl3 = bitlen_u128(m3);
-        // 両項の上位 121 ビットを残し、下位は jam に畳む。
-        // 121 ビットあれば丸め（上位 M+4 ビット＋sticky）は正確であり、
-        // 幅は u128 に収まる。m3 == 0（加数がゼロ）のとき bl3 == 0 である。
-        let msb_p = lsb_p + bl_p - 1;
-        let msb3 = lsb3 + bl3 - 1;
-        let top = msb_p.max(msb3);
-        let base = top - 120;
-        let mut sticky = 0i8;
-        let mut s_jam = 0i8;
-        let mut acc = 0u128;
-        let mut neg = false;
-        let mut first = true;
-        for (mm, lsb, s) in [(m_p, lsb_p, sp), (m3, lsb3, s3)] {
-            let shift = lsb - base;
-            let mut v = mm;
-            if shift >= 0 {
-                v <<= shift as u32;
-            } else if shr_jam(&mut v, (-shift) as u32) {
-                sticky = 1;
-                s_jam += if s { -1 } else { 1 };
+        // 積と加数を最小の位へ正確にそろえる。両項とも 2 進整数なので、
+        // キャンセルが起きても丸め前の値を失わない。指数差は f64 でも
+        // 数千ビットに収まり、リム数は小さい。
+        let base = lsb_p.min(lsb3);
+        let vp = big_shifted(m_p, (lsb_p - base) as usize);
+        let v3 = big_shifted(m3, (lsb3 - base) as usize);
+        let (acc, neg) = if sp == s3 {
+            (big_add(&vp, &v3), sp)
+        } else {
+            match big_cmp(&vp, &v3) {
+                core::cmp::Ordering::Greater => (big_sub(&vp, &v3), sp),
+                core::cmp::Ordering::Less => (big_sub(&v3, &vp), s3),
+                core::cmp::Ordering::Equal => (Vec::new(), false),
             }
-            if first {
-                acc = v;
-                neg = s;
-                first = false;
-            } else if neg == s {
-                acc += v;
-            } else if acc >= v {
-                acc -= v;
-            } else {
-                acc = v - acc;
-                neg = s;
-            }
+        };
+        if acc.is_empty() {
+            // 正確な打ち消しは、加減算と同じく RDN だけ -0 になる。
+            return (Self::zero_signed(rm == Rm::Rdn), 0);
         }
-        if acc == 0 {
-            // add_sub と同じく、切り捨てだけ残れば切り捨てた側の符号にする。
-            return (Self::zero_signed(sticky != 0 && s_jam < 0), 0);
-        }
-        // acc は base 刻みにある。
-        let mut e = base + M as i64 + 3;
-        let mut m_win = acc;
+        // finish の不変条件に合わせ、上位 M+4 ビットとそれ以下の
+        // sticky へ畳む。ここでの端数は常に正なので、加減算のような
+        // 符号つき sticky は要らない。
+        let bitlen = big_bitlen(&acc);
+        let shift = bitlen as i64 - (M as i64 + 4);
+        let (mut m_win, sticky) = if shift >= 0 {
+            let sh = shift as usize;
+            (
+                big_shr_low(&acc, sh, M as usize + 4),
+                i8::from(big_any_below(&acc, sh)),
+            )
+        } else {
+            (big_to_u128(&acc) << (-shift) as u32, 0)
+        };
+        let mut e = base + bitlen as i64 - 1;
+        let tiny = tiny_after_rounding_exact::<E, M>(&acc, base, neg, rm);
         let s = normalize_window::<E, M>(&mut e, &mut m_win, sticky);
-        finish::<E, M>(neg, &mut e, &mut m_win, s, rm)
+        let (v, mut flags) = finish::<E, M>(neg, &mut e, &mut m_win, s, rm);
+        if tiny && flags & FP_NX != 0 {
+            flags |= FP_UF;
+        }
+        (v, flags)
     }
 
     /// 平方根。RNE。負の値（負の無限大を含む）は NaN になる。
@@ -723,6 +719,147 @@ fn expand(exp: u32, frac: u64, m_bits: u32, bias: i64) -> (i64, u128) {
     } else {
         (i64::from(exp) - bias, u128::from(frac) | (1u128 << m_bits))
     }
+}
+
+/// 内部利用の最小限の多倍長自然数。リムは little-endian で、
+/// 末尾の 0 リムは持たない。空は 0 を表す。
+fn big_trim(mut v: Vec<u64>) -> Vec<u64> {
+    while v.last() == Some(&0) {
+        v.pop();
+    }
+    v
+}
+
+fn big_shifted(v: u128, shift: usize) -> Vec<u64> {
+    let limb_shift = shift / 64;
+    let bit = (shift % 64) as u32;
+    let mut out = vec![0; limb_shift];
+    let mut carry = 0u64;
+    for limb in [v as u64, (v >> 64) as u64] {
+        if bit == 0 {
+            out.push(limb);
+        } else {
+            out.push((limb << bit) | carry);
+            carry = limb >> (64 - bit);
+        }
+    }
+    if bit != 0 && carry != 0 {
+        out.push(carry);
+    }
+    big_trim(out)
+}
+
+fn big_shl(v: &[u64], shift: usize) -> Vec<u64> {
+    let limb_shift = shift / 64;
+    let bit = (shift % 64) as u32;
+    let mut out = vec![0; limb_shift];
+    let mut carry = 0u64;
+    for limb in v.iter().copied() {
+        if bit == 0 {
+            out.push(limb);
+        } else {
+            out.push((limb << bit) | carry);
+            carry = limb >> (64 - bit);
+        }
+    }
+    if bit != 0 && carry != 0 {
+        out.push(carry);
+    }
+    big_trim(out)
+}
+
+fn big_bitlen(v: &[u64]) -> usize {
+    let Some((i, hi)) = v.iter().enumerate().rev().find(|(_, x)| **x != 0) else {
+        return 0;
+    };
+    i * 64 + (64 - hi.leading_zeros() as usize)
+}
+
+fn big_cmp(a: &[u64], b: &[u64]) -> core::cmp::Ordering {
+    let la = big_bitlen(a);
+    let lb = big_bitlen(b);
+    if la != lb {
+        return la.cmp(&lb);
+    }
+    for i in (0..a.len().max(b.len())).rev() {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+fn big_add(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let n = a.len().max(b.len());
+    let mut out = Vec::with_capacity(n + 1);
+    let mut carry = 0u64;
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        let (s1, c1) = x.overflowing_add(y);
+        let (s2, c2) = s1.overflowing_add(carry);
+        out.push(s2);
+        carry = u64::from(c1 || c2);
+    }
+    if carry != 0 {
+        out.push(carry);
+    }
+    big_trim(out)
+}
+
+/// `a - b`。`a >= b` を要求する。
+fn big_sub(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = Vec::with_capacity(a.len());
+    let mut borrow = 0u64;
+    for (i, x) in a.iter().copied().enumerate() {
+        let y = b.get(i).copied().unwrap_or(0);
+        let (d1, b1) = x.overflowing_sub(y);
+        let (d2, b2) = d1.overflowing_sub(borrow);
+        out.push(d2);
+        borrow = u64::from(b1 || b2);
+    }
+    debug_assert_eq!(borrow, 0);
+    big_trim(out)
+}
+
+fn big_bit(v: &[u64], bit: usize) -> bool {
+    (v.get(bit / 64).copied().unwrap_or(0) >> (bit % 64)) & 1 != 0
+}
+
+/// `v >> shift` の下位 `bits` ビットを返す。`bits <= 128` とする。
+fn big_shr_low(v: &[u64], shift: usize, bits: usize) -> u128 {
+    debug_assert!(bits <= 128);
+    let mut out = 0u128;
+    for i in 0..bits {
+        if big_bit(v, shift + i) {
+            out |= 1u128 << i;
+        }
+    }
+    out
+}
+
+/// 下位 `bits` ビットのどれかが立つか。`bits=0` は偽。
+fn big_any_below(v: &[u64], bits: usize) -> bool {
+    if bits == 0 {
+        return false;
+    }
+    let whole = bits / 64;
+    if v.iter().take(whole).any(|x| *x != 0) {
+        return true;
+    }
+    let rem = bits % 64;
+    rem != 0 && (v.get(whole).copied().unwrap_or(0) & ((1u64 << rem) - 1)) != 0
+}
+
+/// 128 ビットに収まることを確かめて返す。
+fn big_to_u128(v: &[u64]) -> u128 {
+    debug_assert!(big_bitlen(v) <= 128);
+    v.iter()
+        .take(2)
+        .enumerate()
+        .fold(0u128, |a, (i, x)| a | ((*x as u128) << (i * 64)))
 }
 
 fn bitlen_u128(mut v: u128) -> i64 {
@@ -843,6 +980,46 @@ fn add_sub<const E: u32, const M: u32>(
 
 /// 正規化。窓 [2^(M+3), 2^(M+4)) に寄せ、emin を下回る分は jam で寄せる。
 /// 戻り値は更新後の sticky である。`m == 0` では何もしない。
+/// 正確な値 `acc * 2^base` について、SoftFloat/RISC-V の
+/// underflow で使う精度丸め後の tininess を判定する。境界付近では
+/// 丸め増分を足しても最小正規数へ届かないかを、丸めモードに応じた
+/// 増分で比較する。
+fn tiny_after_rounding_exact<const E: u32, const M: u32>(
+    acc: &[u64],
+    base: i64,
+    neg: bool,
+    rm: Rm,
+) -> bool {
+    let bias = (1i64 << (E - 1)) - 1;
+    let emin = 1 - bias;
+    let msb_exp = base + big_bitlen(acc) as i64 - 1;
+    if msb_exp < emin - 1 {
+        return true;
+    }
+    if msb_exp >= emin {
+        return false;
+    }
+    // 増分は下側ビナーデの ulp 単位。方向丸めでは Berkeley
+    // SoftFloat と同じく ulp の 127/128 を使い、最近接では 1/2 を使う。
+    let inc256 = match rm {
+        Rm::Rtz => 0,
+        Rm::Rdn => u32::from(neg) * 254,
+        Rm::Rup => u32::from(!neg) * 254,
+        Rm::Rne | Rm::Rmm => 128,
+    };
+    if inc256 == 0 {
+        return true;
+    }
+    let ulp_exp = emin - 1 - M as i64;
+    let unit_exp = ulp_exp - 8;
+    let low = base.min(unit_exp);
+    let x = big_shl(acc, (base - low) as usize);
+    let inc = big_shifted(inc256 as u128, (unit_exp - low) as usize);
+    let lhs = big_add(&x, &inc);
+    let boundary = big_shifted(1, (emin - low) as usize);
+    big_cmp(&lhs, &boundary) == core::cmp::Ordering::Less
+}
+
 fn normalize_window<const E: u32, const M: u32>(e: &mut i64, m: &mut u128, sticky: i8) -> i8 {
     let emin = 1 - Binary::<E, M>::bias();
     let mut s = sticky;
@@ -888,6 +1065,11 @@ fn finish<const E: u32, const M: u32>(
         Rm::Rup => !neg && (r0 != 0 || sticky != 0),
         Rm::Rmm => r0 >= 4,
     };
+    // tininess は精度丸め後の値で判定する。方向丸めの交付値が
+    // 最小正規数でも、最近接丸めでは非正規化数へ留まる場合は tiny
+    // なので UF が立つ。逆に、最近接丸めで最小正規数へ入る場合は立たない。
+    let rne_up = (r0 > 4) || (r0 == 4 && (sticky > 0 || (sticky == 0 && ((*m >> 3) & 1 == 1))));
+    let tiny = ((*m >> 3) + u128::from(rne_up)) < (1u128 << M);
     let mut sig = (*m >> 3) + u128::from(up);
     let mut exp = *e;
     if sig >= (1u128 << (M + 1)) {
@@ -912,6 +1094,9 @@ fn finish<const E: u32, const M: u32>(
         let v = Binary::from_bits(((neg as u64) << (E + M)) | (((exp_max - 1) as u64) << M) | frac);
         return (v, flags | FP_OF | FP_NX);
     }
+    if tiny && flags & FP_NX != 0 {
+        flags |= FP_UF;
+    }
     // 隠れビットがなければ非正規数であり、指数部は 0 とする。
     // 正規化の保証により、この場合は exp == emin である。
     if sig >= (1u128 << M) {
@@ -921,9 +1106,6 @@ fn finish<const E: u32, const M: u32>(
         (v, flags)
     } else {
         debug_assert!(exp == 1 - bias);
-        if flags & FP_NX != 0 {
-            flags |= FP_UF;
-        }
         (
             Binary::from_bits(((neg as u64) << (E + M)) | sig as u64),
             flags,
@@ -1305,6 +1487,30 @@ mod tests {
         let z = F32::from_bits(0);
         let n = F32::from_bits(0x88d5_1b22);
         assert_eq!(z.sub(n).0.bits(), 0x08d5_1b22);
+    }
+
+    #[test]
+    fn directed_underflow_to_normal_still_sets_uf() {
+        // 最小正規数×小型正規数+最大非正規数。RUP では最小正規数へ
+        // 丸め上がるが、丸め前は tiny なので NX|UF が立つ。
+        let a = F32::from_bits(0x0080_0000);
+        let b = F32::from_bits(0x0a1f_0529);
+        let c = F32::from_bits(0x007f_ffff);
+        let (got, flags) = a.fmadd_rm(b, c, Rm::Rup);
+        assert_eq!(got.bits(), 0x0080_0000);
+        assert_eq!(flags, FP_NX | FP_UF);
+    }
+
+    #[test]
+    fn underflow_rounded_to_normal_in_rne_does_not_set_uf() {
+        // min normal から窓外の小さい値を引く。交付値は RNE で
+        // min normal へ戻るため tininess はなく、NX だけが立つ。
+        let a = F32::from_bits(0x0080_0000);
+        let b = F32::from_bits(0xa3a7_488e);
+        let c = F32::from_bits(0x0080_0000);
+        let (got, flags) = a.fmadd(b, c);
+        assert_eq!(got.bits(), 0x0080_0000);
+        assert_eq!(flags, FP_NX);
     }
 
     #[test]
