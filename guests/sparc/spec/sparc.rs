@@ -80,10 +80,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("leon4", "leon3", &[][..], &[][..]),
         ("ultrasparc2", "ultrasparc", &[][..], &[][..]),
         ("ultrasparc4", "ultrasparc3", &[][..], &[][..]),
-        // T1/T2 は VIS を持たないスループット志向の実装（構成は
-        // 一次資料の確認待ち）。VIS3 以降は未実装。
+        // T1 は UltraSPARC T1 Supplement §5.4（SPEC-UST1-SUPPL）
+        // で確認: ハード実装は VIS1 のサブセットと VIS2 の SIAM
+        // のみで、FCMPEQ/FPACK/PDIST/FEXPAND/FPMERGE など中核の
+        // VIS1 命令を含む残りは illegal_instruction でソフトウェア
+        // 補完に回る。補完前提の命令は実装しない扱いの本方針では
+        // vis を名乗れず、vis を外した構成で正しい。SIAM や残存
+        // ハード実装分の細粒化は旗の分割を待つ。T2 は OpenSPARC
+        // T2 Supplement（SPEC-UST2-SUPPL）で「fully supports all
+        // VIS 2.0 instructions」と確認できたので vis2 までを引く
+        // 構成とする。VIS3 以降は未実装。
         ("ultrasparc_t1", "v9", &[][..], &[][..]),
-        ("ultrasparc_t2", "ultrasparc_t1", &[][..], &[][..]),
+        ("ultrasparc_t2", "ultrasparc3", &[][..], &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,
