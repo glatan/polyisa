@@ -489,6 +489,11 @@ fn act4_rv64f_suite() {
 }
 
 #[test]
+fn act4_rv64d_suite() {
+    suite("rv64i/D");
+}
+
+#[test]
 fn act4_failure_is_nonzero() {
     let err = build_and_run("rv64i/I/I-add-00.S", true)
         .expect_err("壊した期待 signature を合格と判定してはいけない");

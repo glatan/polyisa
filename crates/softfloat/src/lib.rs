@@ -1452,6 +1452,15 @@ fn convert<const E1: u32, const M1: u32, const E2: u32, const M2: u32>(
     let bias1 = Binary::<E1, M1>::bias();
     let (ue, m) = expand(exp, frac, M1, bias1);
     let mut e = ue;
+    let mut m = m;
+    // 非正規化数の仮数を先に正規化する。精度変換の右シフトを先に
+    // 行うと、小さい非正規化数が 0 に潰れて指数だけが残る。
+    let bitlen = bitlen_u128(m);
+    if bitlen < M1 as i64 + 1 {
+        let k = (M1 as i64 + 1 - bitlen) as u32;
+        m <<= k;
+        e -= i64::from(k);
+    }
     // 対象の形式の仮数幅に合わせる。余りは sticky に畳む。
     let mut m = m << 3;
     let mut sticky: i8 = 0;
@@ -1487,6 +1496,13 @@ mod tests {
         let z = F32::from_bits(0);
         let n = F32::from_bits(0x88d5_1b22);
         assert_eq!(z.sub(n).0.bits(), 0x08d5_1b22);
+    }
+
+    #[test]
+    fn subnormal_input_is_normalized_before_precision_conversion() {
+        let (got, flags) = F64::from_bits(1).to_f32(Rm::Rne);
+        assert_eq!(got.bits(), 0);
+        assert_eq!(flags, FP_NX | FP_UF);
     }
 
     #[test]
