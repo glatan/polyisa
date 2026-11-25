@@ -770,12 +770,15 @@ fn add_sub<const E: u32, const M: u32>(
     let zero1 = a.is_zero();
     let zero2 = b.is_zero();
     if zero1 && zero2 {
-        // RNE では +0。-0 + -0 のみ -0 になる。
-        return (Binary::zero_signed(s1 && s2), 0);
+        // 同符号のゼロはその符号を保つ。+0 + -0 は RDN だけ -0、
+        // それ以外では +0 になる。Ref: SPEC-IEEE754 (2019).
+        let neg = if s1 == s2 { s1 } else { rm == Rm::Rdn };
+        return (Binary::zero_signed(neg), 0);
     }
     if zero1 {
+        let magnitude = Binary::<E, M>::mask() & !(1u64 << (E + M));
         return (
-            Binary::from_bits(b.bits & Binary::<E, M>::mask() | ((s2 as u64) << (E + M))),
+            Binary::from_bits(b.bits & magnitude | ((s2 as u64) << (E + M))),
             0,
         );
     }
@@ -816,10 +819,23 @@ fn add_sub<const E: u32, const M: u32>(
         // exact zero は +0。切り捨てで残っただけなら切り捨てた側の符号になる。
         // 切り捨てがあれば微小な非ゼロ値であり、不正確である。
         let f = if dropped { FP_NX } else { 0 };
-        return (Binary::zero_signed(dropped && s_shifted < 0), f);
+        let neg = if dropped {
+            s_shifted < 0
+        } else {
+            rm == Rm::Rdn
+        };
+        return (Binary::zero_signed(neg), f);
     }
     let r_sign: i8 = if neg { -1 } else { 1 };
-    let sticky: i8 = if dropped { r_sign * s_shifted } else { 0 };
+    let mut sticky: i8 = if dropped { r_sign * s_shifted } else { 0 };
+    // 反対符号の加算で、指数合わせにより小さい側が窓の外へ落ちたとき、
+    // 整数部どうしの差は正確な値より 1 スケール単位未満だけ大きい。
+    // 負の端数は、下位 3 ビットが 0 なら 1 単位借りて正の端数へ読み替える。
+    // これをしないと、有効桁に入らない減算が丸め方向の結果へ反映されない。
+    if sticky < 0 && m & 7 == 0 {
+        m -= 1;
+        sticky = 1;
+    }
     // 正規化。e は emin を下回りうる。下回り分は jam で寄せる。
     let sticky = normalize_window::<E, M>(&mut e, &mut m, sticky);
     finish::<E, M>(neg, &mut e, &mut m, sticky, rm)
@@ -1283,6 +1299,52 @@ fn shr_jam(m: &mut u128, d: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_minus_negative_finite_is_positive() {
+        let z = F32::from_bits(0);
+        let n = F32::from_bits(0x88d5_1b22);
+        assert_eq!(z.sub(n).0.bits(), 0x08d5_1b22);
+    }
+
+    #[test]
+    fn opposite_signed_zero_sum_is_negative_only_in_rdn() {
+        let pz = F32::from_bits(0);
+        let nz = F32::from_bits(0x8000_0000);
+        assert_eq!(pz.add(nz).0.bits(), 0);
+        assert_eq!(pz.add_rm(nz, Rm::Rdn).0.bits(), 0x8000_0000);
+        assert_eq!(nz.add(nz).0.bits(), 0x8000_0000);
+    }
+
+    #[test]
+    fn exact_cancellation_is_negative_zero_in_rdn() {
+        let one = F32::from_bits(0x3f80_0000);
+        let minus_one = F32::from_bits(0xbf80_0000);
+        assert_eq!(one.add(minus_one).0.bits(), 0);
+        assert_eq!(one.add_rm(minus_one, Rm::Rdn).0.bits(), 0x8000_0000);
+    }
+
+    #[test]
+    fn directed_rounding_sees_shifted_out_subtrahend() {
+        // 0xfca5ba01 + 0x5dc732fa は負の大きい値から正の小さい値を引く。
+        // 小さい側は有効桁の窓外だが、RUP では負側が 0 へ近づくため 1 ulp 下がる。
+        let a = F32::from_bits(0xfca5_ba01);
+        let b = F32::from_bits(0x5dc7_32fa);
+        let (got, flags) = a.add_rm(b, Rm::Rup);
+        assert_eq!(got.bits(), 0xfca5_ba00);
+        assert_eq!(flags, FP_NX);
+    }
+
+    #[test]
+    fn negative_sticky_makes_exact_half_round_down() {
+        // 0x4dcb5323 + 0xc2e09f01 は、丸め前の端数が半 ulp より
+        // わずかに小さい。符号つき sticky を潰すと RNE で上へ誤る。
+        let a = F32::from_bits(0x4dcb_5323);
+        let b = F32::from_bits(0xc2e0_9f01);
+        let (got, flags) = a.add(b);
+        assert_eq!(got.bits(), 0x4dcb_531f);
+        assert_eq!(flags, FP_NX);
+    }
 
     #[test]
     fn basics() {
