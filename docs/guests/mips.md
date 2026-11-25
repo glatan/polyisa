@@ -4,7 +4,7 @@
 
 MIPS I（R3000）、MIPS32 Release 2、MIPS64 Release 2、および Release 6（32/64 ビット、コンパクト分岐 19 系・乗除・PC 相対ロード等）を `guests/mips` で扱う。リトルエンディアン・ビッグエンディアン双方に対応する。
 
-- **CPU モデル**：`r3000`、`mips32r1`、`mips32r2`、`r6`、`mips64r1`、`mips64r2`、`mips64r6`、`r4000`、`r10000`（計 9 モデル）。`r4000`（MIPS III）の厳密な層は LL/SC が `mips32r1` 旗に MOVZ/MOVN と束ねられている関係で旗の分割待ち、`r10000`（MIPS IV）は MOVZ/MOVN を持つので R1 層までの構成で近似。R1 は R2 追加命令を持たない構成で、LL/SC・MOVZ/MOVN・SYNC・PREF・TEQ・SPECIAL2 の MUL/MADD/MSUB/CLZ/CLO 系は R1 の層（`mips32r1` 旗）として R2 とは別にゲートする。実機コア（24Kf など）は ASE 構成の確認待ち。
+- **CPU モデル**：`r3000`、`mips32r1`、`mips32r2`、`r6`、`mips64r1`、`mips64r2`、`mips64r6`、`r4000`、`r10000`（計 9 モデル）。`r4000`（MIPS III）は MIPS II 以来の LL/SC・SYNC・TEQ 系を持ち MOVZ/MOVN を持たない構成、`r10000`（MIPS IV）は `mips4` 層までを含む。MIPS IV Instruction Set Rev 3.2 の各命令記述の ISA レベル表記で層を確定し、LL/SC・SYNC・TEQ は `mips2`、MOVZ/MOVN・PREF・MADD/MSUB は `mips4` に再ゲートした（CLZ/CLO・MUL は MIPS32 固有）。R1 は R2 追加命令を持たない構成で、LL/SC・MOVZ/MOVN・SYNC・PREF・TEQ・SPECIAL2 の MUL/MADD/MSUB/CLZ/CLO 系は R1 の層（`mips32r1` 旗）として R2 とは別にゲートする。実機コア（24Kf など）は ASE 構成の確認待ち。
 - **タイミング**：R3000 の `exact` タイミングモデルを持つ（`heavy_timing_r3000` で全検証列が一致）。
 
 ## 対応する OS・ABI と実行環境

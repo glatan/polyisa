@@ -19,3 +19,17 @@ fn release_layering() {
     assert_ne!(model_feats("mips64r1") & FEAT_MIPS32R1, 0);
     assert_ne!(model_feats("mips64r1") & FEAT_MIPS64, 0);
 }
+
+#[test]
+fn mips_historical_layering() {
+    // SPEC-MIPS-IV Rev 3.2 の ISA レベル表記に基づく層。
+    // R1 層は MIPS IV（mips4）を含意し、さらに MIPS II（mips2）を引く。
+    assert_ne!(model_feats("mips32r1") & FEAT_MIPS4, 0);
+    assert_ne!(model_feats("mips32r1") & FEAT_MIPS2, 0);
+    // r4000（MIPS III）は mips2 を持つが mips4 は持たない。
+    assert_ne!(model_feats("r4000") & FEAT_MIPS2, 0);
+    assert_eq!(model_feats("r4000") & FEAT_MIPS4, 0);
+    // r10000（MIPS IV）は mips4 まで持つ。
+    assert_ne!(model_feats("r10000") & FEAT_MIPS4, 0);
+    assert_ne!(model_feats("r10000") & FEAT_MIPS2, 0);
+}
