@@ -281,6 +281,8 @@ pub(crate) fn step_rv(
             }
             env.step(|b| sem::addiw(b, rd, rs1, imm_i(word)))
         }
+        Insn::CzeroEqz => env.step(|b| sem::czero_eqz(b, rd, rs1, rs2)),
+        Insn::CzeroNez => env.step(|b| sem::czero_nez(b, rd, rs1, rs2)),
         Insn::Lui => {
             if rv32 {
                 env.step(|b| sem::lui_rv32(b, rd, imm_u(word)))

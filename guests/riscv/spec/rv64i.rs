@@ -362,6 +362,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sra", "R", "0100000 ..... ..... 101 ..... 0110011", "sra {rd}, {rs1}, {rs2}", "alu"),
         ("or", "R", "0000000 ..... ..... 110 ..... 0110011", "or {rd}, {rs1}, {rs2}", "alu"),
         ("and", "R", "0000000 ..... ..... 111 ..... 0110011", "and {rd}, {rs1}, {rs2}", "alu"),
+        // Zicond（条件ゼロ化）
+        ("czero_eqz", "R", "0000111 ..... ..... 101 ..... 0110011", "czero.eqz {rd}, {rs1}, {rs2}", "alu"),
+        ("czero_nez", "R", "0000111 ..... ..... 111 ..... 0110011", "czero.nez {rd}, {rs1}, {rs2}", "alu"),
         // OP-32
         ("addw", "R", "0000000 ..... ..... 000 ..... 0111011", "addw {rd}, {rs1}, {rs2}", "alu"),
         ("subw", "R", "0100000 ..... ..... 000 ..... 0111011", "subw {rd}, {rs1}, {rs2}", "alu"),
@@ -535,6 +538,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         let mut reqs = Vec::new();
         if matches!(*timing, "mult" | "div") {
             reqs.push("m");
+        }
+        if name.starts_with("czero_") {
+            reqs.push("zicond");
         }
         if *timing == "atomic" {
             reqs.push("a");

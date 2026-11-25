@@ -371,9 +371,22 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     let sig = build.join(format!("{artifact}.sig"));
     let sail = bin(&["sail_riscv_sim", "/opt/sail-riscv/bin/sail_riscv_sim"])
         .ok_or("sail_riscv_sim がない（TOOL-SAIL-RISCV）")?;
+    // qemu-RVI20U64 はプロファイル要件外の Zicond を切っているが、
+    // Sail 0.16 自体は実装している。参照実行だけが落ちないよう、
+    // この拡張のテストでは作業領域の写しで有効化する。
+    let mut sail_json = std::fs::read_to_string(qemu_dir().join("sail.json"))
+        .map_err(|e| format!("read sail.json: {e}"))?;
+    if test_rel.contains("/Zicond/") {
+        sail_json = sail_json.replace(
+            "\"Zicond\": {\n      \"supported\": false",
+            "\"Zicond\": {\n      \"supported\": true",
+        );
+    }
+    let sail_cfg = work.join("sail.json");
+    std::fs::write(&sail_cfg, sail_json).map_err(|e| format!("write {sail_cfg:?}: {e}"))?;
     let mut cmd = Command::new(sail);
     cmd.arg("--config")
-        .arg(qemu_dir().join("sail.json"))
+        .arg(&sail_cfg)
         .arg(format!("--test-signature={}", sig.display()))
         .arg("--signature-granularity")
         .arg("8")
@@ -397,11 +410,26 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     })?;
 
     let mut semi = run_riscv::SemiRv::new("", false);
+    let sel = if test_rel.contains("/Zicond/") {
+        Some(
+            polyisa_isadl::select::resolve(
+                polyisa_guest_riscv::MODEL_DEFS,
+                polyisa_guest_riscv::FEATURE_DEFS,
+                polyisa_guest_riscv::FEAT_BITS,
+                "rv64gc",
+                &["zicond"],
+                &[],
+            )
+            .map_err(|e| format!("cpu select: {e}"))?,
+        )
+    } else {
+        None
+    };
     let argv: &[String] = &[];
     let path = final_elf
         .to_str()
         .ok_or_else(|| format!("{} が UTF-8 ではない", final_elf.display()))?;
-    match run_riscv::run_elf_handler_mmode(path, argv, None, &mut semi) {
+    match run_riscv::run_elf_handler_mmode(path, argv, sel.as_ref(), &mut semi) {
         Ok(0) => Ok(()),
         Ok(code) => Err(format!("{name}: ACT が失敗コード {code} で終了")),
         Err(e) => Err(format!("{name}: {e}")),
@@ -501,6 +529,11 @@ fn act4_rv64zmmul_suite() {
 #[test]
 fn act4_rv64zcd_suite() {
     suite("rv64i/Zcd");
+}
+
+#[test]
+fn act4_rv64zicond_suite() {
+    suite("rv64i/Zicond");
 }
 
 #[test]

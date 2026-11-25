@@ -434,6 +434,26 @@ pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+pub fn czero_eqz<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let cond = read(b, rs2);
+    let zero = const_w64(b, 0);
+    let is_zero = b.cmp(Cmp::Eq, cond, zero);
+    let s = b.select(is_zero, zero, x);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn czero_nez<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let cond = read(b, rs2);
+    let zero = const_w64(b, 0);
+    let nonzero = b.cmp(Cmp::Ne, cond, zero);
+    let s = b.select(nonzero, zero, x);
+    write(b, rd, s);
+    Ok(())
+}
+
 pub fn srl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     let x = read(b, rs1);
     let m = const_w64(b, 63);
