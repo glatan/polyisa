@@ -4,7 +4,7 @@
 
 VAX-11/780〜NVAX（MicroVAX サブセットを含む）のユーザーモード命令群（整数・論理・bitfield・分岐、`CALLS`/`CALLG`/`RET`、`PUSHR`/`POPR`、インターロックキュー、中断可能文字列命令、`CHM*`、F/D/G/H 浮動小数点と `POLY*`/`EMOD*`、パック十進・数値文字列・`EDITPC`、`INDEX`/`PROBER`/`PROBEW`）を `guests/vax` で実装している。
 
-- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`ka650`、`nvax`、`vax11_730`、`vax11_750`、`vax11_785`（計 8 モデル）。11/730–11/785 は詳細な実装群差が一次資料の確認待ちで、現状は 11/780 と同じ構成の器。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
+- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`ka650`、`nvax`、`vax11_730`、`vax11_750`、`vax11_785`、`vax8200`、`vax8300`、`vax8500`（計 11 モデル）。VAX Hardware Handbook 1986 で確認: 11/730–11/785 はいずれもフル VAX でサブセットはなく、差は G/H 形式の実現経路（11/730 はマイクロコード標準、他は KE780/KU750 オプション）なので、全オプション搭載形を取るモデルでは同一構成で正しい。8200/8300/8500 は ARM 付録 B の「全命令・互換モードなし」の群。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
 - **挙動パラメータ**：`emul_dispatch`（`hook` / `scb`）、`dv_hw`（KA660 での十進オーバーフロー扱い）。
 - **タイミング**：VAX-11/780 の EBOX マイクロサイクル（200 ns）単位の専用モデル `timing::Vax780` を持つ（未較正の `approx_uncalibrated`）。
 
