@@ -13100,6 +13100,66 @@ fn run_x87_fsqrt_negative_sets_invalid_flag() {
 }
 
 #[test]
+fn run_x87_fdiv_honors_fcw_precision_control() {
+    fn once(fcw: u16) -> u64 {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), 0xC000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0))
+    }
+    // 1/3 を PC=24/53/64 ビットで丸める。下位はゼロへ揃う。
+    assert_eq!(once(0x007F), 0xAAAA_AB00_0000_0000);
+    assert_eq!(once(0x027F), 0xAAAA_AAAA_AAAA_A800);
+    assert_eq!(once(0x037F), 0xAAAA_AAAA_AAAA_AAAB);
+}
+
+#[test]
+fn run_x87_denormal_operand_sets_denormal_flag() {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // 指数 0・仮数非零は denormal。現在の算術近似では零として
+    // 扱うが、denormal-operand 例外は記録する。
+    env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), 1);
+    env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3FFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 1), 0);
+    assert_eq!(fsw & 0x8080, 0);
+}
+
+#[test]
 fn run_x87_mul_sets_overflow_and_underflow_flags() {
     fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16) -> (u64, u16, u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
@@ -13211,9 +13271,9 @@ fn run_x87_fdiv_honors_fcw_rounding_mode() {
     }
     // RNE/+inf 方向は末尾 +1、truncate/-inf 方向は切り捨て。
     assert_eq!(once(0x037F), (0xAAAA_AAAA_AAAA_AAAB, 0x3FFD));
-    assert_eq!(once(0x087F), (0xAAAA_AAAA_AAAA_AAAB, 0x3FFD));
-    assert_eq!(once(0x0C7F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
-    assert_eq!(once(0x047F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
+    assert_eq!(once(0x0B7F), (0xAAAA_AAAA_AAAA_AAAB, 0x3FFD));
+    assert_eq!(once(0x0F7F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
+    assert_eq!(once(0x077F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
 }
 
 #[test]
@@ -13245,8 +13305,8 @@ fn run_x87_fadd_honors_fcw_rounding_mode() {
     }
     // tie-to-even と truncate は 1.0、+inf 方向は 1+2^-63。
     assert_eq!(once(0x037F), 0x8000_0000_0000_0000);
-    assert_eq!(once(0x0C7F), 0x8000_0000_0000_0000);
-    assert_eq!(once(0x087F), 0x8000_0000_0000_0001);
+    assert_eq!(once(0x0F7F), 0x8000_0000_0000_0000);
+    assert_eq!(once(0x0B7F), 0x8000_0000_0000_0001);
 }
 
 #[test]
@@ -13279,8 +13339,8 @@ fn run_x87_fmul_honors_fcw_rounding_mode() {
     }
     // RNE/truncate は +2 ulp、+inf 方向だけ +3 ulp。
     assert_eq!(once(0x037F), 0x8000_0000_0000_0002);
-    assert_eq!(once(0x0C7F), 0x8000_0000_0000_0002);
-    assert_eq!(once(0x087F), 0x8000_0000_0000_0003);
+    assert_eq!(once(0x0F7F), 0x8000_0000_0000_0002);
+    assert_eq!(once(0x0B7F), 0x8000_0000_0000_0003);
 }
 
 #[test]

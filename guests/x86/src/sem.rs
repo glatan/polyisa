@@ -14742,6 +14742,91 @@ pub(crate) fn x87_round_up<B: Backend>(
     bit_or(b, up, ceil_up)
 }
 
+/// FCW.PC が単精度または倍精度のとき、有限の 80 ビット結果を
+/// その仮数幅へ丸める。PC=01 は reserved なので拡張精度として扱う。
+/// 既に 64 ビットへ丸めた結果へ適用するため、丸め境界が重なる
+/// 稀な入力では double rounding の近似が残る。
+pub(crate) fn x87_apply_precision<B: Backend>(
+    b: &mut B,
+    sig_in: B::V<W64>,
+    exp_in: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let exp64 = b.zext::<W16, W64>(exp_in);
+    let mag = b.and::<W64>(exp64, mask15);
+    let s15 = b.konst::<W64>(15);
+    let sign = b.shr_l::<W64>(exp64, s15);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, mag, zero);
+    let sig_zero = b.cmp::<W64>(Cmp::Eq, sig_in, zero);
+    let input_zero = bit_or(b, exp_zero, sig_zero);
+    let input_special = b.cmp::<W64>(Cmp::Eq, mag, special);
+    let non_finite = bit_or(b, input_zero, input_special);
+
+    let fcw = b.get(fcw_ref());
+    let fcw64 = b.zext::<W16, W64>(fcw);
+    let s8 = b.konst::<W64>(8);
+    let pc_sh = b.shr_l::<W64>(fcw64, s8);
+    let three = b.konst::<W64>(3);
+    let pc = b.and::<W64>(pc_sh, three);
+    let two = b.konst::<W64>(2);
+    let pc24 = b.cmp::<W64>(Cmp::Eq, pc, zero);
+    let pc53 = b.cmp::<W64>(Cmp::Eq, pc, two);
+    let pc_active0 = bit_or(b, pc24, pc53);
+    let finite = bit_not(b, non_finite);
+    let active = bit_and(b, pc_active0, finite);
+
+    let k40 = b.konst::<W64>(40);
+    let k11 = b.konst::<W64>(11);
+    let drop_pc = b.select::<W64>(pc24, k40, k11);
+    let drop = b.select::<W64>(active, drop_pc, one);
+    let sh_round = b.sub::<W64>(drop, one);
+    let one_sh = b.shl::<W64>(one, drop);
+    let inc = one_sh;
+    let low_mask = b.sub::<W64>(inc, one);
+    let low = b.and::<W64>(sig_in, low_mask);
+    let round_val = b.shr_l::<W64>(sig_in, sh_round);
+    let round_bit = b.and::<W64>(round_val, one);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one);
+    let round_one = b.shl::<W64>(one, sh_round);
+    let sticky_mask = b.sub::<W64>(round_one, one);
+    let sticky_bits = b.and::<W64>(sig_in, sticky_mask);
+    let sticky = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero);
+    let kept_val = b.shr_l::<W64>(sig_in, drop);
+    let lsb = b.and::<W64>(kept_val, one);
+    let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
+    let round_up0 = x87_round_up(b, sign, round_set, sticky, lsb_set);
+    let do_up = bit_and(b, round_up0, active);
+    let low_nz = b.cmp::<W64>(Cmp::Ne, low, zero);
+    let inexact = bit_and(b, low_nz, active);
+    x87_exception_flag(b, inexact, 1 << 5);
+
+    let max64 = b.konst::<W64>(u64::MAX);
+    let inv_mask = b.xor::<W64>(max64, low_mask);
+    let base = b.and::<W64>(sig_in, inv_mask);
+    let sig_plus = b.add::<W64>(base, inc);
+    let carry0 = b.cmp::<W64>(Cmp::LtU, sig_plus, base);
+    let carry = bit_and(b, carry0, do_up);
+    let sig_round = b.select::<W64>(do_up, sig_plus, base);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sig_norm = b.select::<W64>(carry, int_bit, sig_round);
+    let mag_plus = b.add::<W64>(mag, one);
+    let mag_round = b.select::<W64>(carry, mag_plus, mag);
+    let mag_ovf = b.cmp::<W64>(Cmp::GeU, mag_round, special);
+    let ovf = bit_and(b, mag_ovf, active);
+    x87_exception_flag(b, ovf, 1 << 3);
+    let sig_pc0 = b.select::<W64>(ovf, int_bit, sig_norm);
+    let mag_pc0 = b.select::<W64>(ovf, special, mag_round);
+    let sig_pc = b.select::<W64>(active, sig_pc0, sig_in);
+    let mag_pc = b.select::<W64>(active, mag_pc0, mag);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let packed = b.or::<W64>(mag_pc, sign_bit);
+    let exp64_out = b.select::<W64>(active, packed, exp64);
+    (sig_pc, b.trunc::<W64, W16>(exp64_out))
+}
+
 /// 正規化済み 80 ビット同士の乗算。FCW.RC に従って丸め、ゼロと無限大を特別扱いする。
 pub(crate) fn mul_ext<B: Backend>(
     b: &mut B,
@@ -14775,6 +14860,12 @@ pub(crate) fn mul_ext<B: Backend>(
     let z_b_n = b.select::<W64>(z_b, one64, zero64);
     let z_or = b.or::<W64>(z_a_n, z_b_n);
     let is_zero = b.cmp::<W64>(Cmp::Ne, z_or, zero64);
+    let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero64);
+    let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero64);
+    let den_a = bit_and(b, z_a, sig_a_nz);
+    let den_b = bit_and(b, z_b, sig_b_nz);
+    let denormal_in = bit_or(b, den_a, den_b);
+    x87_exception_flag(b, denormal_in, 1 << 1);
     let lo = b.mul::<W64>(sig_a, sig_b);
     let hi = b.mulhu::<W64>(sig_a, sig_b);
     let s63 = b.konst::<W64>(63);
@@ -14864,7 +14955,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let sig_out = b.select::<W64>(is_special, special_sig, sig_fin);
     let exp_word64 = b.or::<W64>(exp_mag, sign_bit);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
-    (sig_out, exp_word)
+    x87_apply_precision(b, sig_out, exp_word)
 }
 
 pub(crate) fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
@@ -14984,6 +15075,12 @@ pub(crate) fn add_ext<B: Backend>(
     let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
     let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
     let any_sp = bit_or(b, sp_a, sp_b);
+    let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero);
+    let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero);
+    let den_a = bit_and(b, z_a, sig_a_nz);
+    let den_b = bit_and(b, z_b, sig_b_nz);
+    let denormal_in = bit_or(b, den_a, den_b);
+    x87_exception_flag(b, denormal_in, 1 << 1);
 
     let exp_gt = b.cmp::<W64>(Cmp::GtU, ea, eb);
     let exp_eq = b.cmp::<W64>(Cmp::Eq, ea, eb);
@@ -15161,7 +15258,7 @@ pub(crate) fn add_ext<B: Backend>(
     let sign_bit = b.shl::<W64>(sign_final, s15);
     let packed = b.or::<W64>(exp_final, sign_bit);
     let exp_word = b.trunc::<W64, W16>(packed);
-    (sig_final, exp_word)
+    x87_apply_precision(b, sig_final, exp_word)
 }
 
 /// ST(slot_sel) に 80 ビット値を書く。スロット番号は値ドメイン。
@@ -15221,6 +15318,12 @@ pub(crate) fn div_ext<B: Backend>(
     let fb_z = bit_not(b, fb_nz);
     let inf_a = bit_and(b, sp_a, fa_z);
     let inf_b = bit_and(b, sp_b, fb_z);
+    let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero);
+    let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero);
+    let den_a = bit_and(b, z_a, sig_a_nz);
+    let den_b = bit_and(b, z_b, sig_b_nz);
+    let denormal_in = bit_or(b, den_a, den_b);
+    x87_exception_flag(b, denormal_in, 1 << 1);
 
     // 通常経路: q = (sig_a << 64) / sig_b ∈ [2^63, 2^65)。
     let num = {
@@ -15333,7 +15436,8 @@ pub(crate) fn div_ext<B: Backend>(
     let sign_bit = b.shl::<W64>(sign_r, s15);
     let sign_sel = b.select::<W64>(bad, zero, sign_bit);
     let e_word = b.or::<W64>(e_out, sign_sel);
-    (s_out, b.trunc::<W64, W16>(e_word))
+    let exp_word = b.trunc::<W64, W16>(e_word);
+    x87_apply_precision(b, s_out, exp_word)
 }
 
 /// FADD ST(0), ST(i) (D8 C0+i)。ST(0) に和を書き、スタックは戻さない。seq 0x4d097d 対応.
