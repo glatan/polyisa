@@ -4819,12 +4819,26 @@ fn build_map_apx(m: &mut Model) {
             v.push(MapItem::Insn(byte, it));
         }
     }
-    // SETcc（map4 では 40+cc、pp=F2）。ND=0 は byte だけを書き、
-    // ND=1 は ZU でレジスタ全体を 0/1 にする。vvvv は未使用固定。
     let cc_names = [
         "jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns", "jp", "jnp", "jl",
         "jge", "jle", "jg",
     ];
+    // CMOVcc/CFCMOVcc（map4 では 40+cc、pp=NP/66）。ND/NF が
+    // NDD・条件付きフォールト抑制・条件付きストアを選ぶ。
+    // 意味論は MapDec の ndd/nf で分岐する。SETcc と同じ番号だが
+    // pp が F2 とそれ以外で分かれる。
+    for (k, cc) in cc_names.iter().enumerate() {
+        let mut it = px(
+            &format!("cmov{cc}_gv_ev"),
+            &[Reg(V), Ea(V)],
+            "cmovcc {g}, {e}",
+            "alu",
+        );
+        it.nf_ok = true;
+        v.push(MapItem::Insn(0x40 + k as u8, it));
+    }
+    // SETcc（map4 では 40+cc、pp=F2）。ND=0 は byte だけを書き、
+    // ND=1 は ZU でレジスタ全体を 0/1 にする。vvvv は未使用固定。
     for (k, cc) in cc_names.iter().enumerate() {
         let mut it = px(
             &format!("set{cc}_eb"),

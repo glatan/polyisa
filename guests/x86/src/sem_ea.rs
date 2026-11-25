@@ -1967,6 +1967,93 @@ pub fn setcc<B: Backend>(b: &mut B, n: u8, rm: &Rm<B::V<W64>>, d: &MapDec) -> Fl
     wr_w::<B, W8>(b, rm, d, v)
 }
 
+/// APX の CMOVcc/CFCMOVcc。NDD 形は `ndd = cc ? r/m : reg`。
+/// NF は新宛先ではなくフォールト抑制・条件付きストアの選択子。
+fn cmov_apx<B: Backend>(
+    b: &mut B,
+    n: u8,
+    w: u8,
+    dst: Gpr,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    match w {
+        16 => cmov_apx_w::<B, W16>(b, n, dst, rm, d),
+        32 => cmov_apx_w::<B, W32>(b, n, dst, rm, d),
+        _ => cmov_apx_w::<B, W64>(b, n, dst, rm, d),
+    }
+}
+
+fn cmov_apx_w<B: Backend, W: Hw>(
+    b: &mut B,
+    n: u8,
+    dst: Gpr,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    let take = cc(b, n);
+    if d.ndd {
+        let ndd = Gpr(d.vex_v);
+        let src1 = grd_w::<B, W>(b, dst, d);
+        if d.nf {
+            // CFCMOV ndd,reg,r/m。偽では reg を返し、メモリは読まない。
+            return b.if_then_else(
+                take,
+                |b| {
+                    let v = rd_w::<B, W>(b, rm, d)?;
+                    put_ndd::<B, W>(b, ndd, v);
+                    Ok(())
+                },
+                |b| {
+                    put_ndd::<B, W>(b, ndd, src1);
+                    Ok(())
+                },
+            );
+        }
+        // NDD CMOV。メモリは条件が偽でも読む。
+        let src2 = rd_w::<B, W>(b, rm, d)?;
+        let v = b.select::<W>(take, src2, src1);
+        put_ndd::<B, W>(b, ndd, v);
+        return Ok(());
+    }
+    if !d.nf {
+        // CFCMOV reg,r/m。真なら r/m、偽なら 0。メモリは真のときだけ読む。
+        return b.if_then_else(
+            take,
+            |b| {
+                let v = rd_w::<B, W>(b, rm, d)?;
+                put_ndd::<B, W>(b, dst, v);
+                Ok(())
+            },
+            |b| {
+                let z = b.konst::<W>(W::from_u128(0));
+                put_ndd::<B, W>(b, dst, z);
+                Ok(())
+            },
+        );
+    }
+    // CFCMOV r/m,reg（条件付きストア）。真なら r/m へ reg を書き、
+    // 偽ではレジスタ宛先を 0 にし、メモリ宛先は触れない。
+    let src = grd_w::<B, W>(b, dst, d);
+    b.if_then_else(
+        take,
+        |b| match rm {
+            Rm::Reg(g) => {
+                put_ndd::<B, W>(b, *g, src);
+                Ok(())
+            }
+            Rm::Mem { .. } => wr_w::<B, W>(b, rm, d, src),
+        },
+        |b| {
+            if let Rm::Reg(g) = rm {
+                let z = b.konst::<W>(W::from_u128(0));
+                put_ndd::<B, W>(b, *g, z);
+            }
+            Ok(())
+        },
+    )
+}
+
 /// CMOVcc G,E（取らなければ何もしない）。
 pub fn cmov<B: Backend>(
     b: &mut B,
@@ -1976,6 +2063,9 @@ pub fn cmov<B: Backend>(
     rm: &Rm<B::V<W64>>,
     d: &MapDec,
 ) -> Flow<B> {
+    if d.evex && d.vex_map == 4 {
+        return cmov_apx(b, n, w, dst, rm, d);
+    }
     let take = cc(b, n);
     match w {
         16 => {

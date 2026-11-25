@@ -24195,6 +24195,91 @@ fn run64_apx() {
 }
 
 #[test]
+fn run64_apx_cfcmov() {
+    // CMOV/CFCMOV: NDD の選択、ND=0 のゼロ化、条件付きストア、
+    // 偽条件でのメモリアクセス抑制を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x1234_5678u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        // r25=1、r26=2。r25 を 0x2000 に作り直す。
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25
+        0xD5, 0x19, 0xF7, 0xD9, // negq %r25 → 1
+        0xD5, 0x19, 0xF7, 0xD2, // notq %r26
+        0xD5, 0x19, 0xF7, 0xDA, // negq %r26 → 1
+        0xD5, 0x19, 0xFF, 0xC2, // incq %r26 → 2
+        0x48, 0xB8, 0x01, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2001
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25 → -2
+        0xD5, 0x19, 0x01, 0xC1, // addq %rax,%r25 → 0x1fff
+        0xD5, 0x19, 0xFF, 0xC1, // incq %r25 → 0x2000
+        // NDD CMOV（NF=0）。ZF=1 なら r/m、ZF=0 なら reg を選ぶ。
+        0x45, 0x31, 0xD2, // xor r10d,r10d → ZF=1
+        0x62, 0x4C, 0x3C, 0x10, 0x44, 0xD1, // cmovz r24,r26,r25 → 0x2000
+        0x45, 0xFF, 0xC2, // inc r10d → ZF=0
+        0x62, 0x4C, 0x3C, 0x10, 0x44, 0xD1, // cmovz r24,r26,r25 → 2
+        // CFCMOV ND=0,NF=0。偽なら宛先 reg（r26）を 0 にする。
+        0x62, 0x4C, 0x7C, 0x08, 0x44, 0xD1, // cfcmovz r26,r25 → r26=0
+        // 条件付きストアのレジスタ形。偽なら r/m（r25）を 0 にする。
+        0x62, 0x4C, 0x7C, 0x0C, 0x44, 0xD1, // cfcmovz r25,r26 → r25=0
+        // r25 を 0x2000 へ戻し、真の CFCMOV ではメモリを読む。
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25 → -1
+        0xD5, 0x19, 0x01, 0xC1, // addq %rax,%r25 → 0x2000
+        // r16=0 を指すメモリ形は、偽条件では読み書きともに抑止される。
+        0x45, 0xFF, 0xC2, // inc r10d → ZF=0
+        0x62, 0x4C, 0x3C, 0x14, 0x44, 0x00, // cfcmovz r24,r16,[r16]
+        0x62, 0x4C, 0x7C, 0x08, 0x44, 0x00, // cfcmovz r16,[r16]
+        0x62, 0x4C, 0x7C, 0x0C, 0x44, 0x00, // cfcmovz [r16],r16
+        // 真のメモリ形は最後に実行し、NDD に読み値を残す。
+        0x45, 0x31, 0xD2, // xor r10d,r10d → ZF=1
+        0x62, 0x4C, 0x3C, 0x14, 0x44, 0x01, // cfcmovz r24,r16,[r25] → 0x12345678
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    let x2dbg = core::mem::offset_of!(polyisa_guest_x86::CpuState, x2);
+    eprintln!(
+        "out={out:?} r25={:x}",
+        u64::from_le_bytes(
+            env.backend.state[x2dbg + 72..x2dbg + 80]
+                .try_into()
+                .unwrap()
+        )
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let x2 = core::mem::offset_of!(polyisa_guest_x86::CpuState, x2);
+    let egpr = |i: usize| {
+        u64::from_le_bytes(
+            env.backend.state[x2 + i * 8..x2 + (i + 1) * 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    // r24 は最後の真メモリ読みで 0x12345678。r26/r25 は偽条件で
+    // 0 になった後、r25 だけ 0x2000 へ戻る。
+    assert_eq!(egpr(8), 0x1234_5678, "cfcmov memory load");
+    assert_eq!(egpr(10), 0, "cfcmov false zero");
+    assert_eq!(egpr(9), 0x2000, "r25 restored");
+}
+
+#[test]
 fn run64_amx() {
     // AMX（B4b）: LDTILECFG→TILELOADD→TDPBSSD→TILESTORED の一通り。
     let feats = polyisa_guest_x86::model_feats("x86_64")
