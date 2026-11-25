@@ -38,7 +38,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cf_isa_a", &[][..]),
         ("cf_isa_b", &["cf_isa_a"][..]),
         ("cf_isa_c", &["cf_isa_b"][..]),
-        ("m68020", &["m68010"][..]),
+        // CPU32 が削る群を粒状に分ける（CPU32RM §1.1.6）。68020
+        // 本体は両方を含む。
+        ("bitfield", &[][..]),
+        ("cas", &[][..]),
+        ("m68020", &["m68010", "bitfield", "cas"][..]),
         ("m68030", &["m68020"][..]),
         ("m68040", &["m68030"][..]),
         ("m68060", &["m68040"][..]),
@@ -86,19 +90,21 @@ pub fn build_model() -> polyisa_isadl::Model {
     // CPU モデル。親チェーンで機能を累積し、世代差は params で上書きする。
     // 各世代で未実装の命令は世代機能への `when` 述語で表す、
     // 68060 のように後代で削られた命令は remove_features で表す。
-    for (name, parent, add, params) in [
-        ("generic", "", &["m68000"][..], &[][..]),
-        ("i68000", "generic", &[][..], &[][..]),
+    for (name, parent, add, remove, params) in [
+        ("generic", "", &["m68000"][..], &[][..], &[][..]),
+        ("i68000", "generic", &[][..], &[][..], &[][..]),
         (
             "i68010",
             "i68000",
             &["m68010"][..],
+            &[][..],
             &[("mvfrsr_priv", "true")][..],
         ),
         (
             "i68020",
             "i68010",
             &["m68020"][..],
+            &[][..],
             &[
                 ("mvfrsr_priv", "true"),
                 ("odd_access", "allow"),
@@ -107,18 +113,20 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("bdisp32", "true"),
             ][..],
         ),
-        ("i68030", "i68020", &["m68030"][..], &[][..]),
-        ("i68040", "i68030", &["m68040"][..], &[][..]),
-        ("i68060", "i68040", &["m68060"][..], &[][..]),
-        // CPU32 は 68020 系の縮減に固有命令を足した系統で、
-        // いずれの世代モデルからも派生できないため独立の根とする。
+        ("i68030", "i68020", &["m68030"][..], &[][..], &[][..]),
+        ("i68040", "i68030", &["m68040"][..], &[][..], &[][..]),
+        ("i68060", "i68040", &["m68060"][..], &[][..], &[][..]),
+        // CPU32 は 68020 系から BF 系（ビットフィールド）と CAS/
+        // CAS2 を削り、LPSTOP・TBL 系を足した系統（CPU32RM
+        // §1.1.6 で verbatim 確認。CALLM/RTM・cp 系・PACK/UNPK
+        // も削られるが未実装）。LPSTOP・TBL は未実装で cpu32
+        // 旗はカバレッジ表にゼロ件で見える。
         // ColdFire は命令集合が m68k の部分集合でかつ独自拡張を
-        // 持ち、版は ISA_A/B/C の旗で表す。いずれも命令差の実装は
-        // これからで、現状は構成を名付ける器。
-        ("cpu32", "", &["m68000", "cpu32"][..], &[][..]),
-        ("cfv2", "", &["cf_isa_a"][..], &[][..]),
-        ("cfv3", "", &["cf_isa_b"][..], &[][..]),
-        ("cfv4", "", &["cf_isa_c"][..], &[][..]),
+        // 持ち、版は ISA_A/B/C の旗で表す。命令差の実装はこれから。
+        ("cpu32", "i68020", &["cpu32"][..], &["bitfield", "cas"][..], &[][..]),
+        ("cfv2", "", &["cf_isa_a"][..], &[][..], &[][..]),
+        ("cfv3", "", &["cf_isa_b"][..], &[][..], &[][..]),
+        ("cfv4", "", &["cf_isa_c"][..], &[][..], &[][..]),
     ] {
         m.models.push(ModelDef {
         timing: None,
@@ -129,7 +137,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),
-            remove_features: Vec::new(),
+            remove_features: remove.iter().map(|s| s.to_string()).collect(),
             ident: vec![],
         });
     }
@@ -419,7 +427,9 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: if name.starts_with("bf") || name.ends_with('l') && name.len() == 4 {
+            when: if name.starts_with("bf") {
+                Pred::Flag("bitfield".to_string())
+            } else if name.ends_with('l') && name.len() == 4 {
                 Pred::Flag("m68020".to_string())
             } else {
                 Pred::True
@@ -1008,9 +1018,11 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: if name.starts_with("bf")
-                || matches!(*name, "extb_l" | "mull" | "divl" | "casb" | "casw" | "casl")
-            {
+            when: if name.starts_with("bf") {
+                Pred::Flag("bitfield".to_string())
+            } else if matches!(*name, "casb" | "casw" | "casl" | "cas2") {
+                Pred::Flag("cas".to_string())
+            } else if matches!(*name, "extb_l" | "mull" | "divl") {
                 Pred::Flag("m68020".to_string())
             } else {
                 Pred::True
