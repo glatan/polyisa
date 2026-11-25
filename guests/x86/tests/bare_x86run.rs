@@ -13100,6 +13100,43 @@ fn run_x87_fsqrt_negative_sets_invalid_flag() {
 }
 
 #[test]
+fn run_x87_fdiv_honors_fcw_rounding_mode() {
+    fn once(fcw: u16) -> (u64, u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // ST0=1.0、ST1=3.0。1/3 の末尾は繰り上がる。
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), 0xC000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // RNE/+inf 方向は末尾 +1、truncate/-inf 方向は切り捨て。
+    assert_eq!(once(0x037F), (0xAAAA_AAAA_AAAA_AAAB, 0x3FFD));
+    assert_eq!(once(0x087F), (0xAAAA_AAAA_AAAA_AAAB, 0x3FFD));
+    assert_eq!(once(0x0C7F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
+    assert_eq!(once(0x047F), (0xAAAA_AAAA_AAAA_AAAA, 0x3FFD));
+}
+
+#[test]
 fn run_x87_fadd_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> u64 {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
