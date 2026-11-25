@@ -13100,6 +13100,73 @@ fn run_x87_fsqrt_negative_sets_invalid_flag() {
 }
 
 #[test]
+fn run_x87_fadd_honors_fcw_rounding_mode() {
+    fn once(fcw: u16) -> u64 {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // 1.0 + 2^-64 は 1 と 1+2^-63 のちょうど中間。
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3FBF);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0))
+    }
+    // tie-to-even と truncate は 1.0、+inf 方向は 1+2^-63。
+    assert_eq!(once(0x037F), 0x8000_0000_0000_0000);
+    assert_eq!(once(0x0C7F), 0x8000_0000_0000_0000);
+    assert_eq!(once(0x087F), 0x8000_0000_0000_0001);
+}
+
+#[test]
+fn run_x87_fmul_honors_fcw_rounding_mode() {
+    fn once(fcw: u16) -> u64 {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // 両側とも 1+2^-63。積は 1+2^-62+2^-126 で、
+        // 末尾の 2^-126 が丸め対象になる。
+        for slot in 0..2usize {
+            env.backend.set(
+                polyisa_guest_x86::sem::st_sig_ref(slot),
+                0x8000_0000_0000_0001,
+            );
+            env.backend
+                .set(polyisa_guest_x86::sem::st_exp_ref(slot), 0x3FFF);
+        }
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0))
+    }
+    // RNE/truncate は +2 ulp、+inf 方向だけ +3 ulp。
+    assert_eq!(once(0x037F), 0x8000_0000_0000_0002);
+    assert_eq!(once(0x0C7F), 0x8000_0000_0000_0002);
+    assert_eq!(once(0x087F), 0x8000_0000_0000_0003);
+}
+
+#[test]
 fn run_x87_fmul_propagates_infinity_and_nan_rules() {
     fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());

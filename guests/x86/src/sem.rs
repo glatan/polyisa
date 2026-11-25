@@ -14706,7 +14706,43 @@ pub(crate) fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>,
     (sig, exp)
 }
 
-/// 正規化済み 80 ビット同士の乗算。最近接偶数へ丸め、ゼロと無限大だけ特別扱いする。
+/// x87 の FCW.RC に従って、仮数を 1 ulp 繰り上げるか決める。
+/// `round_set` は捨てる部分の最上位、`sticky` は残りの非零、
+/// `lsb_set` は切り捨て結果の最下位。sign は 0/1。
+pub(crate) fn x87_round_up<B: Backend>(
+    b: &mut B,
+    sign: B::V<W64>,
+    round_set: B::B,
+    sticky: B::B,
+    lsb_set: B::B,
+) -> B::B {
+    let fcw = b.get(fcw_ref());
+    let fcw64 = b.zext::<W16, W64>(fcw);
+    let s10 = b.konst::<W64>(10);
+    let rc_sh = b.shr_l::<W64>(fcw64, s10);
+    let three = b.konst::<W64>(3);
+    let rc = b.and::<W64>(rc_sh, three);
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let two = b.konst::<W64>(2);
+    let nearest = b.cmp::<W64>(Cmp::Eq, rc, zero);
+    let floor = b.cmp::<W64>(Cmp::Eq, rc, one);
+    let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
+    let any = bit_or(b, round_set, sticky);
+    let tie_or_lsb = bit_or(b, sticky, lsb_set);
+    let nearest_half = bit_and(b, nearest, round_set);
+    let nearest_up = bit_and(b, nearest_half, tie_or_lsb);
+    let negative = b.cmp::<W64>(Cmp::Eq, sign, one);
+    let positive = bit_not(b, negative);
+    let floor_mag = bit_and(b, floor, negative);
+    let floor_up = bit_and(b, floor_mag, any);
+    let ceil_mag = bit_and(b, ceil, positive);
+    let ceil_up = bit_and(b, ceil_mag, any);
+    let up = bit_or(b, nearest_up, floor_up);
+    bit_or(b, up, ceil_up)
+}
+
+/// 正規化済み 80 ビット同士の乗算。FCW.RC に従って丸め、ゼロと無限大を特別扱いする。
 pub(crate) fn mul_ext<B: Backend>(
     b: &mut B,
     sig_a: B::V<W64>,
@@ -14760,11 +14796,9 @@ pub(crate) fn mul_ext<B: Backend>(
     let sticky_bits = b.select::<W64>(ge, st_wide, st_narrow);
     let sticky = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero64);
     let lsb = b.and::<W64>(sig_raw, one64);
-    let sticky_n = b.select::<W64>(sticky, one64, zero64);
-    let tie = b.or::<W64>(sticky_n, lsb);
+    let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one64);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one64);
-    let up_n = b.select::<W64>(round_set, tie, zero64);
-    let do_up = b.cmp::<W64>(Cmp::Ne, up_n, zero64);
+    let do_up = x87_round_up(b, sign, round_set, sticky, lsb_set);
     let sig_plus = b.add::<W64>(sig_raw, one64);
     let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
     let max64 = b.konst::<W64>(u64::MAX);
@@ -15046,8 +15080,7 @@ pub(crate) fn add_ext<B: Backend>(
     let lsb = b.and::<W64>(hi_n, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one);
-    let tie = bit_or(b, sticky_f, lsb_set);
-    let round_up = bit_and(b, round_set, tie);
+    let round_up = x87_round_up(b, sign_big, round_set, sticky_f, lsb_set);
     let exp_live = b.cmp::<W64>(Cmp::Ne, exp_n, zero);
     let do_up = bit_and(b, round_up, exp_live);
     let hi_up = b.add::<W64>(hi_n, one);
