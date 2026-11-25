@@ -14671,6 +14671,27 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+/// x87 の例外フラグを sticky に立てる。対応する FCW マスクが
+/// 外れているときは ES(bit7) と B(bit15) も立てる。#MF の遅延
+/// 配送そのものはまだモデル化しない。
+pub(crate) fn x87_exception_flag<B: Backend>(b: &mut B, occur: B::B, bit: u16) {
+    let old = b.get(fsw_ref());
+    let z16 = b.konst::<W16>(0);
+    let bv = b.konst::<W16>(bit);
+    let add = b.select::<W16>(occur, bv, z16);
+    let flagged = b.or::<W16>(old, add);
+    let cw = b.get(fcw_ref());
+    let cb = b.konst::<W16>(bit);
+    let masked = b.and::<W16>(cw, cb);
+    let masked_nz = b.cmp::<W16>(Cmp::Ne, masked, z16);
+    let masked_off = bit_not(b, masked_nz);
+    let unmasked = bit_and(b, occur, masked_off);
+    let es_b = b.konst::<W16>(0x8080);
+    let summary = b.select::<W16>(unmasked, es_b, z16);
+    let nv = b.or::<W16>(flagged, summary);
+    b.set(fsw_ref(), nv);
+}
+
 pub(crate) fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>) {
     let mut sig = b.konst::<W64>(0);
     let mut exp = b.konst::<W16>(0);
@@ -14785,6 +14806,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let inf_a_zb = bit_and(b, inf_a, z_b);
     let inf_b_za = bit_and(b, inf_b, z_a);
     let invalid_inf_zero = bit_or(b, inf_a_zb, inf_b_za);
+    x87_exception_flag(b, invalid_inf_zero, 1);
     let nan_in = bit_or(b, nan_a, nan_b);
     let result_nan = bit_or(b, nan_in, invalid_inf_zero);
     let inf_in = bit_or(b, inf_a, inf_b);
@@ -15069,6 +15091,7 @@ pub(crate) fn add_ext<B: Backend>(
     let signs_differ = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
     let both_sp = bit_and(b, sp_a, sp_b);
     let inf_cancel = bit_and(b, both_sp, signs_differ);
+    x87_exception_flag(b, inf_cancel, 1);
     let nan_either = bit_or(b, nan_a, nan_b);
     let any_nan = bit_or(b, nan_either, inf_cancel);
     let sp_sig = b.select::<W64>(any_nan, nan_sig, int_bit);
@@ -15178,6 +15201,17 @@ pub(crate) fn div_ext<B: Backend>(
     let any_nan = bit_or(b, nan_a, nan_b);
     let inf_inf = bit_and(b, inf_a, inf_b);
     let z_z = bit_and(b, z_a, z_b);
+    let invalid_div = bit_or(b, inf_inf, z_z);
+    x87_exception_flag(b, invalid_div, 1);
+    // 有限非零の 0 除算は zero-divide。0/0 は invalid、
+    // inf/0 は規則上 inf で zero-divide ではない。
+    let not_za = bit_not(b, z_a);
+    let not_infa = bit_not(b, inf_a);
+    let not_nana = bit_not(b, nan_a);
+    let fin_nz_a = bit_and(b, not_za, not_infa);
+    let fin_nz_a = bit_and(b, fin_nz_a, not_nana);
+    let zero_div = bit_and(b, z_b, fin_nz_a);
+    x87_exception_flag(b, zero_div, 1 << 2);
     let bad = bit_or(b, any_nan, inf_inf);
     let bad = bit_or(b, bad, z_z);
     let res_inf = bit_or(b, inf_a, z_b);

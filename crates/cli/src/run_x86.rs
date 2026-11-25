@@ -5303,8 +5303,7 @@ fn dispatch_map<B: Backend>(
         Insn::X87db4 => {
             if d.modrm >= 0xC0 {
                 match d.modrm & 7 {
-                    // FCLEX は例外状態未モデルで実質 NOP。
-                    2 => Ok(()),
+                    2 => sem_ea::fclex(b),
                     3 => sem_ea::finit(b),
                     _ => return Ok(false),
                 }

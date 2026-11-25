@@ -12963,13 +12963,87 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_fdiv_zero_sets_zero_divide_flag() {
+    // 1.0 / +0.0 = +inf で ZE(bit2) が立つ。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x8000_0000_0000_0000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x7FFF
+    );
+    assert_ne!(env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 4, 0);
+}
+
+#[test]
+fn run_x87_fclex_clears_exception_state() {
+    // DB E2 = fnclex。例外フラグ・SF/ES/B を落とし、条件コードは残す。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fsw_ref(), 0xFFFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDB, 0xE2])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fsw_ref()), 0x7F00);
+}
+
+#[test]
+fn run_x87_fsqrt_negative_sets_invalid_flag() {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0xBFFF); // -1.0
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xFA]) // fsqrt
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let fsw = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & 1, 0, "IE");
+    assert_eq!(fsw & 0x8080, 0, "masked exception does not set ES/B");
+}
+
+#[test]
 fn run_x87_fmul_propagates_infinity_and_nan_rules() {
-    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16) {
+    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
         env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp0);
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), sig1);
@@ -12984,20 +13058,25 @@ fn run_x87_fmul_propagates_infinity_and_nan_rules() {
         (
             env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
             env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
         )
     }
     let two = (0x8000_0000_0000_0000, 0x4000);
     let inf = (0x8000_0000_0000_0000, 0x7FFF);
-    assert_eq!(once(two.0, two.1, inf.0, inf.1), inf, "+inf * 2");
+    assert_eq!(
+        once(two.0, two.1, inf.0, inf.1),
+        (inf.0, inf.1, 0),
+        "+inf * 2"
+    );
     assert_eq!(
         once(two.0, two.1, inf.0, inf.1 | 0x8000),
-        (inf.0, 0xFFFF),
+        (inf.0, 0xFFFF, 0),
         "-inf * 2"
     );
     assert_eq!(
         once(inf.0, inf.1, 0, 0),
-        (0xC000_0000_0000_0000, 0x7FFF),
-        "inf * 0 is NaN"
+        (0xC000_0000_0000_0000, 0x7FFF, 1),
+        "inf * 0 is NaN and sets IE"
     );
 }
 

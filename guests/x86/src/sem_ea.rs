@@ -9954,6 +9954,29 @@ pub fn fld_const<B: Backend>(b: &mut B, which: u8) -> Flow<B> {
 pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
+    // 負の非零・非 NaN 入力は invalid operation。結果 NaN は
+    // 既存の host f64 経路に任せ、ここでは例外フラグだけ立てる。
+    let e64 = b.zext::<W16, W64>(exp);
+    let z64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let s15 = b.konst::<W64>(15);
+    let sign = b.shr_l::<W64>(e64, s15);
+    let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(e64, mask15);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
+    let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, z64);
+    let is_zero = sem::bit_and(b, exp_zero, sig_zero);
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac = b.and::<W64>(sig, frac_mask);
+    let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, z64);
+    let sp = b.cmp::<W64>(Cmp::Eq, ea, mask15);
+    let is_nan = sem::bit_and(b, sp, frac_nz);
+    let nonzero = sem::bit_not(b, is_zero);
+    let not_nan = sem::bit_not(b, is_nan);
+    let neg_nonzero = sem::bit_and(b, neg, nonzero);
+    let invalid = sem::bit_and(b, neg_nonzero, not_nan);
+    sem::x87_exception_flag(b, invalid, 1);
     let v = sem::f80_to_f64(b, sig, exp);
     let f = b.trunc::<W64, polyisa_sem::F64>(v);
     let r = b.fsqrt::<polyisa_sem::F64>(f);
@@ -10023,6 +10046,16 @@ pub fn fdecstp<B: Backend>(b: &mut B, inc: bool) -> Flow<B> {
     };
     let new_top = b.and::<W16>(moved, seven);
     b.set(sem::top_ref(), new_top);
+    Ok(())
+}
+
+/// FCLEX/FNCLEX。例外フラグ・SF・ES・B をクリアする。
+/// 条件コードと TOP は保持する。
+pub fn fclex<B: Backend>(b: &mut B) -> Flow<B> {
+    let old = b.get(sem::fsw_ref());
+    let keep = b.konst::<W16>(!0x80FFu16);
+    let nv = b.and::<W16>(old, keep);
+    b.set(sem::fsw_ref(), nv);
     Ok(())
 }
 
