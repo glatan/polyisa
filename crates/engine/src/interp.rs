@@ -541,6 +541,10 @@ impl Backend for InterpBackend {
         f
     }
 
+    fn fp_accrue(&mut self, flags: u8) {
+        self.fp_flags |= flags;
+    }
+
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T> {
         from_u128::<T>(F::to_u128(a))
     }

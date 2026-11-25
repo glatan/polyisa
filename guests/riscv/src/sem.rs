@@ -2952,6 +2952,196 @@ pub fn ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
     env_exit(b, polyisa_sem::ExceptionKind::Break, pc)
 }
 
+fn bool01<B: Backend>(b: &mut B, c: B::B) -> B::V<W32> {
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    b.select(c, one, zero)
+}
+
+fn bool_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let xv = bool01(b, x);
+    let yv = bool01(b, y);
+    let both = b.and(xv, yv);
+    let zero = b.konst::<W32>(0);
+    b.cmp(Cmp::Ne, both, zero)
+}
+
+fn read_bf16_checked<B: Backend>(b: &mut B, r: Fpr) -> B::V<F16> {
+    let w: B::V<W64> = b.get(r.state());
+    let low = b.trunc::<W64, F16>(w);
+    let shift = b.konst::<W64>(16);
+    let hi64 = b.shr_l(w, shift);
+    let hi = b.trunc::<W64, W64>(hi64);
+    let all1 = b.konst::<W64>(0xffff_ffff_ffff);
+    let boxed = b.cmp(Cmp::Eq, hi, all1);
+    let canon = b.konst::<F16>(0x7fc0);
+    b.select(boxed, low, canon)
+}
+
+// Zfbfmin の形式変換。BF16 も F16 と同じ 16 ビット容器で保持する。
+
+fn bf16_from_f32_bits<B: Backend>(
+    b: &mut B,
+    bits: B::V<W32>,
+    rm: u8,
+) -> Result<B::V<F16>, B::Exit> {
+    let one32 = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let sign_shift = b.konst::<W32>(31);
+    let sign0 = b.shr_l(bits, sign_shift);
+    let sign = b.and(sign0, one32);
+    let exp_shift = b.konst::<W32>(23);
+    let exp0 = b.shr_l(bits, exp_shift);
+    let ff32 = b.konst::<W32>(0xff);
+    let exp = b.and(exp0, ff32);
+    let frac_mask = b.konst::<W32>(0x7f_ffff);
+    let frac = b.and(bits, frac_mask);
+    let exp255 = b.konst::<W32>(0xff);
+    let is255 = b.cmp(Cmp::Eq, exp, exp255);
+    let nonzero_frac = b.cmp(Cmp::Ne, frac, zero);
+    let frac_nonzero_val = b.select(nonzero_frac, one32, zero);
+    let nan_val = b.select(is255, frac_nonzero_val, zero);
+    let is_nan = b.cmp(Cmp::Ne, nan_val, zero);
+    // NaN は BF16 の正準 NaN にする。
+    let canon = b.konst::<W32>(0x7fc0);
+
+    let sign16_shift = b.konst::<W32>(15);
+    let sign16 = b.shl(sign, sign16_shift);
+    let exp16_shift = b.konst::<W32>(7);
+    let mant_shift = b.konst::<W32>(16);
+    let mant = b.shr_l(frac, mant_shift);
+    let guard_shift = b.konst::<W32>(15);
+    let guard0 = b.shr_l(frac, guard_shift);
+    let guard = b.and(guard0, one32);
+    let sticky_mask = b.konst::<W32>(0x7fff);
+    let sticky_bits = b.and(frac, sticky_mask);
+    let low16_mask = b.konst::<W32>(0xffff);
+    let low16 = b.and(frac, low16_mask);
+    let any_nz = b.cmp(Cmp::Ne, low16, zero);
+    let lsb = b.and(mant, one32);
+    let guard_nz = b.cmp(Cmp::Ne, guard, zero);
+    let sign_nz = b.cmp(Cmp::Ne, sign, zero);
+    let not_sign = b.cmp(Cmp::Eq, sign, zero);
+
+    // rm は実行時レジスタではなく意味論引数なので、ここでは制御を
+    // 分けて真理値演算の合成を避ける。
+    let inc = match rm {
+        // RTZ
+        1 => zero,
+        // RDN: 負で捨てる桁があれば繰り上げる。
+        2 => {
+            let v = b.select(any_nz, one32, zero);
+            b.select(sign_nz, v, zero)
+        }
+        // RUP: 正で捨てる桁があれば繰り上げる。
+        3 => {
+            let v = b.select(any_nz, one32, zero);
+            b.select(not_sign, v, zero)
+        }
+        // RMM: guard が立っていれば繰り上げる。
+        4 => b.select(guard_nz, one32, zero),
+        // RNE: guard があり、sticky または奇数 LSB があれば繰り上げる。
+        _ => {
+            let rest_bits = b.or(sticky_bits, lsb);
+            let rest_nz = b.cmp(Cmp::Ne, rest_bits, zero);
+            let rest = b.select(rest_nz, one32, zero);
+            b.select(guard_nz, rest, zero)
+        }
+    };
+    let mant_rounded0 = b.add(mant, inc);
+    let mant_mask = b.konst::<W32>(0x7f);
+    let carry_shift = b.konst::<W32>(7);
+    let carry = b.shr_l(mant_rounded0, carry_shift);
+    let mant_rounded = b.and(mant_rounded0, mant_mask);
+    let exp_rounded = b.add(exp, carry);
+    let exp_out = b.shl(exp_rounded, exp16_shift);
+    let finite0 = b.or(sign16, exp_out);
+    let finite = b.or(finite0, mant_rounded);
+    // 入力 Inf または丸めで指数が 0xff へ達したら Inf。
+    let exp_inf = b.cmp(Cmp::Eq, exp_rounded, exp255);
+    let inf_bits = b.konst::<W32>(0x7f80);
+    let inf0 = b.or(sign16, inf_bits);
+    let finite_or_inf = b.select(exp_inf, inf0, finite);
+    let out = b.select(is_nan, canon, finite_or_inf);
+
+    // sNaN は NV。有限入力で桁落ちがあれば NX。非正規化結果では UF、
+    // 無限大へのあふれでは OF も立つ。NaN 入力には NX/UF/OF を立てない。
+    let qbit_shift = b.konst::<W32>(22);
+    let qbit0 = b.shr_l(frac, qbit_shift);
+    let qbit = b.and(qbit0, one32);
+    let qzero = b.cmp(Cmp::Eq, qbit, zero);
+    let is_snan = bool_and(b, is_nan, qzero);
+    b.if_then(is_snan, |b| {
+        b.fp_accrue(0x10);
+        Ok(())
+    })?;
+
+    let input_finite = b.cmp(Cmp::LtU, exp, exp255);
+    let finite_inexact = bool_and(b, input_finite, any_nz);
+    b.if_then(finite_inexact, |b| {
+        b.fp_accrue(0x01);
+        Ok(())
+    })?;
+    let exp0_out = b.cmp(Cmp::Eq, exp_rounded, zero);
+    let underflow = bool_and(b, finite_inexact, exp0_out);
+    b.if_then(underflow, |b| {
+        b.fp_accrue(0x02);
+        Ok(())
+    })?;
+    let overflow0 = bool_and(b, input_finite, exp_inf);
+    let overflow = bool_and(b, overflow0, finite_inexact);
+    b.if_then(overflow, |b| {
+        b.fp_accrue(0x04);
+        Ok(())
+    })?;
+    Ok(b.trunc::<W32, F16>(out))
+}
+
+pub fn fcvt_s_bf16<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, _rm: u8) -> Flow<B> {
+    // BF16 と単精度は指数幅が同じで、BF16 は上位 16 ビットだけを持つ。
+    // 拡張は下位 16 ビットを 0 で埋める。NaN は正準 NaN にし、
+    // SNaN では NV を立てる。
+    let x = read_bf16_checked(b, rs1);
+    let w16 = b.trunc::<F16, W16>(x);
+    let w32raw = b.zext::<W16, W32>(w16);
+    let exp_shift = b.konst::<W32>(7);
+    let exp0 = b.shr_l(w32raw, exp_shift);
+    let ff32 = b.konst::<W32>(0xff);
+    let exp = b.and(exp0, ff32);
+    let frac_mask = b.konst::<W32>(0x7f);
+    let frac = b.and(w32raw, frac_mask);
+    let exp255 = b.konst::<W32>(0xff);
+    let zero = b.konst::<W32>(0);
+    let is255 = b.cmp(Cmp::Eq, exp, exp255);
+    let nonzero_frac = b.cmp(Cmp::Ne, frac, zero);
+    let is_nan = bool_and(b, is255, nonzero_frac);
+    let qbit = b.konst::<W32>(0x40);
+    let qbits = b.and(frac, qbit);
+    let qzero = b.cmp(Cmp::Eq, qbits, zero);
+    let is_snan = bool_and(b, is_nan, qzero);
+    let canon = b.konst::<W32>(0x7fc0);
+    let out16 = b.select(is_nan, canon, w32raw);
+    b.if_then(is_snan, |b| {
+        b.fp_accrue(0x10);
+        Ok(())
+    })?;
+    let sh = b.konst::<W32>(16);
+    let bits = b.shl(out16, sh);
+    let f = b.trunc::<W32, F32>(bits);
+    write_f(b, rd, f);
+    accrue_fp(b);
+    Ok(())
+}
+
+pub fn fcvt_bf16_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let bits = b.trunc::<F32, W32>(x);
+    let out = bf16_from_f32_bits(b, bits, rm)?;
+    write_h(b, rd, out);
+    accrue_fp(b);
+    Ok(())
+}
+
 // Zfhmin。半精度は 64 ビットレジスタへ NaN ボックスして保持する。
 
 fn read_h<B: Backend>(b: &mut B, r: Fpr) -> B::V<F16> {

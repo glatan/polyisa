@@ -351,6 +351,8 @@ pub trait Backend {
     }
     /// 蓄積した浮動小数点例外フラグを取り出す。読み出しでクリアする。
     fn fp_flags(&mut self) -> u8;
+    /// 浮動小数点例外フラグを追加する。
+    fn fp_accrue(&mut self, flags: u8);
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn sext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn trunc<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

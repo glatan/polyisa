@@ -384,6 +384,7 @@ impl Backend for IrBackend {
     fn fp_flags(&mut self) -> u8 {
         0
     }
+    fn fp_accrue(&mut self, _flags: u8) {}
     fn zext<F: Width, T: Width>(&mut self, a: IrVal) -> IrVal {
         self.ext::<F, T>(Ext::Zext, a)
     }

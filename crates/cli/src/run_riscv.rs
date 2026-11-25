@@ -1621,6 +1621,14 @@ fn step_rv_inner(
         // F 単精度。
         Insn::Flh => env.step(|b| sem::flh(b, fd, rs1, imm_i(word))),
         Insn::Fsh => env.step(|b| sem::fsh(b, rs1, fs2, imm_s(word))),
+        Insn::FcvtSBf16 => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_s_bf16(b, fd, fs1, rm))
+        }
+        Insn::FcvtBf16S => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fcvt_bf16_s(b, fd, fs1, rm))
+        }
         Insn::FcvtSH => {
             let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
             env.step(|b| sem::fcvt_s_h(b, fd, fs1, rm))

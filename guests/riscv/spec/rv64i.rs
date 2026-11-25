@@ -62,6 +62,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zicbop", &[][..], &[][..]),
         ("zicboz", &[][..], &[][..]),
         ("zfhmin", &[][..], &[][..]),
+        ("zfbfmin", &[][..], &[][..]),
         ("v", &[][..], &[][..]),
         ("zvfhmin", &["v"][..], &[][..]),
         ("zvbb", &["v"][..], &[][..]),
@@ -614,6 +615,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fcvt_h_s", "R", "0100010 00000 ..... ... ..... 1010011", "fcvt.h.s {rd}, {rs1}", "fcvt"),
         ("fcvt_d_h", "R", "0100001 00010 ..... ... ..... 1010011", "fcvt.d.h {rd}, {rs1}", "fcvt"),
         ("fcvt_h_d", "R", "0100010 00001 ..... ... ..... 1010011", "fcvt.h.d {rd}, {rs1}", "fcvt"),
+        ("fcvt_s_bf16", "R", "0100000 00110 ..... ... ..... 1010011", "fcvt.s.bf16 {rd}, {rs1}", "fcvt"),
+        ("fcvt_bf16_s", "R", "0100010 01000 ..... ... ..... 1010011", "fcvt.bf16.s {rd}, {rs1}", "fcvt"),
         ("fmv_x_h", "R", "1110010 00000 ..... 000 ..... 1010011", "fmv.x.h {rd}, {rs1}", "fsj"),
         ("fmv_h_x", "R", "1111010 00000 ..... 000 ..... 1010011", "fmv.h.x {rd}, {rs1}", "fsj"),
         // F（単精度浮動小数点。fmt=00。rm は RNE 固定で無視する）
@@ -776,6 +779,9 @@ pub fn build_model() -> polyisa_isadl::Model {
             "flh" | "fsh" | "fcvt_s_h" | "fcvt_h_s" | "fcvt_d_h" | "fcvt_h_d" | "fmv_x_h" | "fmv_h_x"
         ) {
             reqs.push("zfhmin");
+        }
+        if matches!(*name, "fcvt_s_bf16" | "fcvt_bf16_s") {
+            reqs.push("zfbfmin");
         }
         if matches!(*name, "aes64es" | "aes64esm") {
             reqs.push("zkne");
@@ -990,6 +996,16 @@ pub fn build_model() -> polyisa_isadl::Model {
     // モデルで解決する（ADR-0006）。
     // Ref: SPEC-RISCV-UNPRIV (20250508).
     for insn in m.insns.iter_mut() {
+        if matches!(insn.name.as_str(), "flh" | "fsh" | "fmv_x_h" | "fmv_h_x") {
+            // FLH/FSH/FMV.H は Zfhmin と Zfbfmin の両方に含まれる。
+            insn.when = Pred::All(vec![
+                Pred::Any(vec![
+                    Pred::Flag("zfhmin".to_string()),
+                    Pred::Flag("zfbfmin".to_string()),
+                ]),
+                Pred::Flag("f".to_string()),
+            ]);
+        }
         if insn.name == "aes64ks2" || insn.name.starts_with("aes64ks1i") {
             // 鍵スケジュール命令は Zkne/Zknd のどちら側にも属する。
             insn.when = Pred::Any(vec![
