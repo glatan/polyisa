@@ -45,6 +45,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // PMA 系（Ziccif 等）・データ独立レイテンシ（Zkt）のように
         // 命令の可否に関わらないものは旗に立てない。
         ("zihintpause", &[][..], &[][..]),
+        ("zihintntl", &[][..], &[][..]),
+        ("zicntr", &[][..], &[][..]),
         ("zicbom", &[][..], &[][..]),
         ("zicbop", &[][..], &[][..]),
         ("zicboz", &[][..], &[][..]),

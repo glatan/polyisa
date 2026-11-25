@@ -193,6 +193,25 @@ pub(crate) fn step_rv(
     rv32: bool,
     feats: u128,
 ) -> Result<(), Outcome> {
+    let r = step_rv_inner(env, sys, rv32, feats);
+    if r.is_ok() {
+        // カウンタ CSR の最小近似。instret は退役数そのもので、
+        // cycle/time は命令ごとに進む単調な時計として扱う。
+        for csr in [0xc00usize, 0xc01, 0xc02] {
+            let rref = StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, csr) + csr * 8);
+            let v: u64 = env.backend.get(rref);
+            env.backend.set(rref, v.wrapping_add(1));
+        }
+    }
+    r
+}
+
+fn step_rv_inner(
+    env: &mut BareEnv,
+    sys: &mut impl EcallHandler,
+    rv32: bool,
+    feats: u128,
+) -> Result<(), Outcome> {
     // 16 ビット単位でフェッチする（C 拡張のため）。32 ビット命令は
     // 下位 2 ビットが 0b11 である。
     let mut h = [0u8; 2];

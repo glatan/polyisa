@@ -389,8 +389,21 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zbs/")
         || test_rel.contains("/Zimop/")
         || test_rel.contains("/Zcmop/")
+        || test_rel.contains("/Zihintntl/")
+        || test_rel.contains("/Zihintpause/")
+        || test_rel.contains("/Zicntr/")
     {
-        for ext in ["Zcb", "Zba", "Zbb", "Zbc", "Zbs", "Zimop", "Zcmop"] {
+        for ext in [
+            "Zcb",
+            "Zba",
+            "Zbb",
+            "Zbc",
+            "Zbs",
+            "Zimop",
+            "Zcmop",
+            "Zihintntl",
+            "Zihintpause",
+        ] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
                 sail_json = sail_json.replace(
                     "    \"Zicond\": {",
@@ -442,8 +455,20 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zbs/")
         || test_rel.contains("/Zimop/")
         || test_rel.contains("/Zcmop/")
+        || test_rel.contains("/Zihintntl/")
+        || test_rel.contains("/Zihintpause/")
     {
-        &["zcb", "zba", "zbb", "zbc", "zbs", "zimop", "zcmop"]
+        &[
+            "zcb",
+            "zba",
+            "zbb",
+            "zbc",
+            "zbs",
+            "zimop",
+            "zcmop",
+            "zihintntl",
+            "zihintpause",
+        ]
     } else {
         &[]
     };
@@ -606,6 +631,21 @@ fn act4_rv64zimop_suite() {
 #[test]
 fn act4_rv64zcmop_suite() {
     suite("rv64i/Zcmop");
+}
+
+#[test]
+fn act4_rv64zihintntl_suite() {
+    suite("rv64i/Zihintntl");
+}
+
+#[test]
+fn act4_rv64zihintpause_suite() {
+    suite("rv64i/Zihintpause");
+}
+
+#[test]
+fn act4_rv64zicntr_suite() {
+    suite("rv64i/Zicntr");
 }
 
 #[test]

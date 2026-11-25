@@ -30,7 +30,7 @@ RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モ�
   - 整数除算の可変レイテンシ（6–68 サイクル）は `div_latency()` 規約を定義済みだが、意味論からの `hint` 送出が未接続のため代表値 6 固定。`fdiv`/`fsqrt`/`fcvt`/`fmv.d`・CSR・分岐誤予測（4 固定）も代表値で近似している。
   - `sifive_u74` は `zba`/`zbb` 機能ビットを宣言しているが、両拡張の命令記述と意味論は未実装。
 - **GDB レジスタ表**：FPU レジスタは `fcsr` のみ掲載し、`fflags`/`frm` の個別項目は省略している（XML で regnum を明示しているため GDB 動作に支障はない）。
-- **適合テストスイート**：`heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を広く実行する。`heavy_conformance_riscv_tests` は riscv-arch-test（ACT4）の RV64I/M/F/D/Zca/Zcd/Zaamo/Zalrsc/Zicsr/Zifencei/Zicclsm/Zmmul/Zicond/Zcb/Zba/Zbb/Zbc/Zbs/Zimop/Zcmop 459 件を実行する。Zfa、Zfh 系、特権拡張などはまだ通していない（[GAP-0010](../known-issues.md)）。
+- **適合テストスイート**：`heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を広く実行する。`heavy_conformance_riscv_tests` は riscv-arch-test（ACT4）の RV64I/M/F/D/Zca/Zcd/Zaamo/Zalrsc/Zicsr/Zifencei/Zicclsm/Zmmul/Zicond/Zcb/Zba/Zbb/Zbc/Zbs/Zimop/Zcmop/Zihintntl/Zihintpause/Zicntr 470 件を実行する。Zfa、Zfh 系、特権拡張などはまだ通していない（[GAP-0010](../known-issues.md)）。
 - **ACT4 ハーネス**：ACT4 は Sail リファレンスモデルで生成した期待 signature を自己検査 ELF へ埋め込む。polyisa のハーネスは、qemu-RVI20U64 の linker script と Sail 設定を使い、Sail 0.16 で signature を生成し、Clang と rust-lld で自己検査 ELF を作り、M モードで始まる semihosting 実行系で合否を判定する。ACT の全体フレームワーク（Ruby/UDB と Python/uv）には依存せず、`rvtest_config.h` は代表テストに必要な最小構成である。
 - **ACT4 の装置差**：qemu-RVI20U64 の rvmodel には PC16550 UART の初期化と console 出力があるが、polyisa はこの UART を持たない。ハーネスは入出力マクロだけを no-op に置き換え、合否は semihosting の終了コードで判定する。終了規約と memory layout は変えないため、signature の配置には影響しない。期待 signature を壊した negative test で、不一致が失敗コード 1 として観測できることを確認している。
 
