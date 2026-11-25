@@ -80,13 +80,19 @@ pub fn build_model() -> polyisa_isadl::Model {
     for (name, parent, add) in [
         ("armv8_0a", "", &["fp", "asimd"][..]),
         ("armv8_1a", "armv8_0a", &["lse"][..]),
-        ("armv8_2a", "armv8_1a", &["fp16", "dotprod"][..]),
-        // ARMv8.2 世代の実機。ドット積は v8.2 ではオプションで、
-        // 構成依存の分は -dotprod で落とす近似。MIDR の識別情報
-        // 配線は未整備。
+        // ドット積（SDOT/UDOT）は v8.4 の命令で v8.2/v8.3 では
+        // オプション（ARM ASL1 の SDOT 記述）。版プロファイルには
+        // 入れず、実装する実機側で足す。
+        ("armv8_2a", "armv8_1a", &["fp16"][..]),
+        // ARMv8.2 世代の実機。A55 はドット積がオプション構成
+        // （TRM「optionally implements」—— 搭載構成は +dotprod
+        // で足す）、A75 は標準実装（TRM「only implements the
+        // UDOT and SDOT instructions」）。N1 は A76 系で実装。
+        // 両コアとも v8.3 の LDAPR と RAS 拡張を持つが、対応する
+        // 旗は未宣言。MIDR の識別情報配線は未整備。
         ("cortex_a55", "armv8_2a", &[][..]),
-        ("cortex_a75", "armv8_2a", &[][..]),
-        ("neoverse_n1", "armv8_2a", &[][..]),
+        ("cortex_a75", "armv8_2a", &["dotprod"][..]),
+        ("neoverse_n1", "armv8_2a", &["dotprod"][..]),
     ] {
         m.models.push(polyisa_isadl::model::ModelDef {
             timing: None,
