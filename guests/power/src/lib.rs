@@ -73,3 +73,60 @@ impl Default for CpuState {
 
 // 生成コード（Insn enum・decode・disasm・モデル表）。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feature_gates_fp_altivec_vsx_decode() {
+        let power6 = model_feats("power6");
+        assert_ne!(power6 & FEAT_FP, 0);
+        assert_ne!(power6 & FEAT_ALTIVEC, 0);
+        assert_eq!(power6 & FEAT_VSX, 0);
+
+        // 主オペコードは bits[31:26]。整数命令は機能なしでも残る。
+        let addi = 14u32 << 26;
+        let x4 = 4u32 << 26;
+        let lfs = 48u32 << 26;
+        let x59 = 59u32 << 26;
+        let x60 = 60u32 << 26;
+        let x63 = 63u32 << 26;
+        assert_eq!(decode_model_ex(addi as u128, 32, true, 0), Some(Insn::Addi));
+
+        assert_eq!(
+            decode_model_ex(x4 as u128, 32, true, power6),
+            Some(Insn::X4)
+        );
+        assert_eq!(
+            decode_model_ex(lfs as u128, 32, true, power6),
+            Some(Insn::Lfs)
+        );
+        assert_eq!(
+            decode_model_ex(x59 as u128, 32, true, power6),
+            Some(Insn::X59)
+        );
+        assert_eq!(
+            decode_model_ex(x63 as u128, 32, true, power6),
+            Some(Insn::X63)
+        );
+        assert_eq!(decode_model_ex(x60 as u128, 32, true, power6), None);
+
+        let generic = model_feats("generic");
+        assert_eq!(
+            decode_model_ex(x60 as u128, 32, true, generic),
+            Some(Insn::X60)
+        );
+
+        // POWER6 から個別に fp/altivec を落とすと対応する符号化は
+        // デコードしない。粗分類の混合群は最小機能でゲートする。
+        let no_fp = power6 & !FEAT_FP;
+        assert_eq!(decode_model_ex(lfs as u128, 32, true, no_fp), None);
+        assert_eq!(decode_model_ex(x59 as u128, 32, true, no_fp), None);
+        assert_eq!(decode_model_ex(x63 as u128, 32, true, no_fp), None);
+        assert_eq!(decode_model_ex(x4 as u128, 32, true, no_fp), Some(Insn::X4));
+
+        let no_altivec = power6 & !FEAT_ALTIVEC;
+        assert_eq!(decode_model_ex(x4 as u128, 32, true, no_altivec), None);
+    }
+}

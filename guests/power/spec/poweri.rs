@@ -23,8 +23,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 機能と CPU モデル。ppc64le ユーザーモードの必須集合を generic に持つ。
-    // ISA 版の旗は宣言と世代モデルへの対応づけまでで、命令の when への
-    // 接続は残っている（カバレッジ表でモデル参照あり・ゲートなしと見える）。
+    // fp/altivec/vsx は命令の when に接続する。ISA 版の旗は宣言と世代
+    // モデルへの対応づけまでで、命令の when への接続は残っている。
     // 厳密には POWER9 は ISA 3.0B で、ISA 3.1 はトランザクショナルメモリを
     // 削除しており版は完全な累積関係ではないが、接続時の設計課題とする。
     // Gap: GAP-0101
@@ -146,11 +146,24 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     for (name, op, timing) in insns {
         let pattern = format!("{op:06b} {}", ".".repeat(26));
+        // 主オペコードの粗分類では個別命令まで分かれないため、混合群は
+        // その群を使うための最小の機能でゲートする。x59/x63 には FP と
+        // 後の拡張の命令が混ざるが fp を要求し、x4 は VMX/VSX 混合のため
+        // altivec を要求する。厳密な命令ごとの版差は粗分類の分解後に接続する。
+        let feature = match (*name, *timing) {
+            ("x4", _) => Some("altivec"),
+            ("x60" | "x61", _) => Some("vsx"),
+            (_, "fp") => Some("fp"),
+            ("lfs" | "lfsu" | "lfd" | "lfdu" | "stfs" | "stfsu" | "stfd" | "stfdu", _) => {
+                Some("fp")
+            }
+            _ => None,
+        };
         m.insns.push(Insn {
             name: name.to_string(),
             format: "FN".to_string(),
             pattern: Pattern::parse(&pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: feature.map_or(Pred::True, |f| Pred::Flag(f.to_string())),
             wheres: vec![],
             syntax: name.to_string(),
             timing: timing.to_string(),

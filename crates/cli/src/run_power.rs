@@ -16,7 +16,7 @@ use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::Ctrl;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_power::sem::{self, Gpr};
-use polyisa_guest_power::{Insn, decode_model_ex};
+use polyisa_guest_power::{DEFAULT_FEATS, Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException};
 
@@ -36,7 +36,10 @@ impl PowerModel {
     /// ppc64le ELFv2 の既定モデル。
     #[must_use]
     pub const fn powerpc64le() -> Self {
-        Self { feats: 0, le: true }
+        Self {
+            feats: DEFAULT_FEATS,
+            le: true,
+        }
     }
 }
 
@@ -543,7 +546,7 @@ fn run_elf_power_impl(
     env.backend.set(Gpr(12).state(), entry);
     sys.exe_path = path.to_string();
     sys.init_brk(image_end);
-    let feats = sel.map_or(0, |s| s.feats);
+    let feats = sel.map_or(DEFAULT_FEATS, |s| s.feats);
     let model = PowerModel { feats, le };
     let growth = Some(StackGrowth {
         top,
