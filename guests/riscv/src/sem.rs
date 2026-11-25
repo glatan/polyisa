@@ -434,6 +434,18 @@ pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// MOP は再定義されない限り rd へ 0 を書く。
+pub fn mop<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let z = const_w64(b, 0);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// 圧縮 MOP は再定義されない限り何もしない。
+pub fn c_mop<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
 // Zba/Zbb/Zbc/Zbs。RV64 形の意味論。RV32 形は対応する符号化と
 // 32 ビット包み込みを別途そろえる。
 
