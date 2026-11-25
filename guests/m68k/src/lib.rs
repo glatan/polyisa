@@ -120,8 +120,19 @@ mod tests {
         // 親チェーンで世代機能が累積する。
         assert_eq!(
             model_feats("i68060"),
-            FEAT_M68000 | FEAT_M68010 | FEAT_M68020 | FEAT_M68030 | FEAT_M68040 | FEAT_M68060
+            FEAT_M68000
+                | FEAT_M68010
+                | FEAT_M68020
+                | FEAT_M68030
+                | FEAT_M68040
+                | FEAT_M68060
+                | FEAT_BITFIELD
+                | FEAT_CAS
         );
+        // cpu32 は 68020 系から bitfield と cas を削る。
+        assert_eq!(model_feats("cpu32") & FEAT_BITFIELD, 0);
+        assert_eq!(model_feats("cpu32") & FEAT_CAS, 0);
+        assert_ne!(model_feats("cpu32") & FEAT_M68020, 0);
         // 挙動パラメータは世代ごとに上書きされる。
         let p000 = model_params("i68000");
         assert_eq!(p000.odd_access, 0);
