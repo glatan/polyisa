@@ -40,6 +40,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zbb", &[][..], &[][..]),
         ("zbc", &["zbkc"][..], &[][..]),
         ("zbkc", &[][..], &[][..]),
+        ("zbkb", &[][..], &[][..]),
         ("zbkx", &[][..], &[][..]),
         ("zknh", &[][..], &[][..]),
         ("zksh", &[][..], &[][..]),
@@ -470,6 +471,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("rev8", "R", "0110101 11000 ..... 101 ..... 0010011", "rev8 {rd}, {rs1}", "alu"),
         ("sext_b", "R", "0110000 00100 ..... 001 ..... 0010011", "sext.b {rd}, {rs1}", "alu"),
         ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
+        ("pack", "R", "0000100 ..... ..... 100 ..... 0110011", "pack {rd}, {rs1}, {rs2}", "alu"),
+        ("packh", "R", "0000100 ..... ..... 111 ..... 0110011", "packh {rd}, {rs1}, {rs2}", "alu"),
+        ("packw", "R", "0000100 ..... ..... 100 ..... 0111011", "packw {rd}, {rs1}, {rs2}", "alu"),
+        ("brev8", "I", "011010000111 ..... 101 ..... 0010011", "brev8 {rd}, {rs1}", "alu"),
         ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
         // Zbc（キャリーレス乗算）
         ("aes64ds", "R", "0011101 ..... ..... 000 ..... 0110011", "aes64ds {rd}, {rs1}, {rs2}", "alu"),
@@ -798,6 +803,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         if name.starts_with("sha256") || name.starts_with("sha512") {
             reqs.push("zknh");
         }
+        if matches!(*name, "pack" | "packh" | "packw" | "brev8") {
+            reqs.push("zbkb");
+        }
         if matches!(*name, "xperm4" | "xperm8") {
             reqs.push("zbkx");
         }
@@ -996,6 +1004,30 @@ pub fn build_model() -> polyisa_isadl::Model {
     // モデルで解決する（ADR-0006）。
     // Ref: SPEC-RISCV-UNPRIV (20250508).
     for insn in m.insns.iter_mut() {
+        if insn.name == "packw" || insn.name == "zext_h" {
+            // zext.h は packw の rs2=x0 と同じ符号化なので、rs2 の
+            // 値で排他にする。
+            let (op, value) = if insn.name == "packw" {
+                (WhereOp::Ne, 0)
+            } else {
+                (WhereOp::Eq, 0)
+            };
+            insn.wheres = vec![WhereClause {
+                field: "rs2".to_string(),
+                op,
+                rhs: WhereRhs::Lit(value),
+            }];
+        }
+        if matches!(
+            insn.name.as_str(),
+            "andn" | "orn" | "xnor" | "rol" | "rolw" | "ror" | "rorw" | "rori" | "roriw" | "rev8" | "zext_h"
+        ) {
+            // これらは Zbb と Zbkb の両方に含まれる。
+            insn.when = Pred::Any(vec![
+                Pred::Flag("zbb".to_string()),
+                Pred::Flag("zbkb".to_string()),
+            ]);
+        }
         if matches!(insn.name.as_str(), "flh" | "fsh" | "fmv_x_h" | "fmv_h_x") {
             // FLH/FSH/FMV.H は Zfhmin と Zfbfmin の両方に含まれる。
             insn.when = Pred::All(vec![

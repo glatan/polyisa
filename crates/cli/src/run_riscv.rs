@@ -559,6 +559,10 @@ fn step_rv_inner(
                 env.step(|b| sem::xperm8(b, rd, rs1, rs2))
             }
         }
+        Insn::Pack => env.step(|b| sem::pack(b, rd, rs1, rs2)),
+        Insn::Packh => env.step(|b| sem::packh(b, rd, rs1, rs2)),
+        Insn::Packw => env.step(|b| sem::packw(b, rd, rs1, rs2)),
+        Insn::Brev8 => env.step(|b| sem::brev8(b, rd, rs1)),
         Insn::Clmul => {
             if rv32 {
                 return Err(Outcome::Unimplemented {

@@ -672,6 +672,69 @@ pub fn xnor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+pub fn pack<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let mask = const_w64(b, 0xffff_ffff);
+    let lo = b.and(x, mask);
+    let hi0 = b.and(y, mask);
+    let hi = shl64(b, hi0, 32);
+    let out = b.or(lo, hi);
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn packh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let mask = const_w64(b, 0xff);
+    let lo = b.and(x, mask);
+    let hi0 = b.and(y, mask);
+    let hi = shl64(b, hi0, 8);
+    let out = b.or(lo, hi);
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn packw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let y64 = read(b, rs2);
+    let x = b.trunc::<W64, W32>(x64);
+    let y = b.trunc::<W64, W32>(y64);
+    let mask = b.konst::<W32>(0xffff);
+    let lo = b.and(x, mask);
+    let hi0 = b.and(y, mask);
+    let sh = b.konst::<W32>(16);
+    let hi = b.shl(hi0, sh);
+    let out = b.or(lo, hi);
+    write_w(b, rd, out);
+    Ok(())
+}
+
+pub fn brev8<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x0 = read(b, rs1);
+    let m55 = const_w64(b, 0x5555_5555_5555_5555);
+    let m33 = const_w64(b, 0x3333_3333_3333_3333);
+    let m0f = const_w64(b, 0x0f0f_0f0f_0f0f_0f0f);
+    let a0 = b.and(x0, m55);
+    let a1 = shl64(b, a0, 1);
+    let a2 = shr64(b, x0, 1);
+    let a3 = b.and(a2, m55);
+    let x1 = b.or(a1, a3);
+    let c0 = b.and(x1, m33);
+    let c1 = shl64(b, c0, 2);
+    let c2 = shr64(b, x1, 2);
+    let c3 = b.and(c2, m33);
+    let x2 = b.or(c1, c3);
+    let d0 = b.and(x2, m0f);
+    let d1 = shl64(b, d0, 4);
+    let d2 = shr64(b, x2, 4);
+    let d3 = b.and(d2, m0f);
+    let out = b.or(d1, d3);
+    write(b, rd, out);
+    Ok(())
+}
+
 fn count64<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u32) -> Flow<B> {
     let x = read(b, rs1);
     let s = match kind {

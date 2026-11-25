@@ -407,6 +407,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zibi/")
         || test_rel.contains("/Zabha/")
         || test_rel.contains("/Zacas/")
+        || test_rel.contains("/Zbkb/")
         || test_rel.contains("/Zbkc/")
         || test_rel.contains("/Zbkx/")
         || test_rel.contains("/Zknh/")
@@ -435,6 +436,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zibi",
             "Zabha",
             "Zacas",
+            "Zbkb",
             "Zbkc",
             "Zbkx",
             "Zknh",
@@ -510,6 +512,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zibi/")
         || test_rel.contains("/Zabha/")
         || test_rel.contains("/Zacas/")
+        || test_rel.contains("/Zbkb/")
         || test_rel.contains("/Zbkc/")
         || test_rel.contains("/Zbkx/")
         || test_rel.contains("/Zknh/")
@@ -525,6 +528,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zba",
             "zbb",
             "zbc",
+            "zbkb",
             "zbkx",
             "zknh",
             "zksh",
@@ -764,6 +768,11 @@ fn act4_rv64zacas_suite() {
 #[test]
 fn act4_rv64zbkc_suite() {
     suite("rv64i/Zbkc");
+}
+
+#[test]
+fn act4_rv64zbkb_suite() {
+    suite("rv64i/Zbkb");
 }
 
 #[test]
