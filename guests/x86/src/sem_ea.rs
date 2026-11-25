@@ -11779,29 +11779,191 @@ pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// FPREM/FPREM1。q = ST(0)/ST(1) を trunc(FPREM) または最近値(FPREM1) で
-/// 整数化し、ST(0) = ST(0) - q*ST(1)。倍精度経由の近似。
-/// C2=0（完全減算）で商の下位 3 ビットを C3=Q1・C1=Q0・C0=Q2 に写す。
+/// FPREM/FPREM1。指数差が 64 未満なら剰余を完全に求め、
+/// 64 以上なら上位 63 ビット分だけ正確に減算して C2=1 とする。
+/// FPREM は商を trunc、FPREM1 は最近接偶数へ丸める。結果は exact。
 pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (s0, e0) = sem::read_st(b, top);
     let slot = st_slot(b, 1);
     let (s1, e1) = sem::read_st(b, slot);
+
+    // 非正規入力や特殊値に対する既存の倍精度近似。通常の有限入力では
+    // 下の整数経路が優先される。
     let b0 = sem::f80_to_f64(b, s0, e0);
     let b1 = sem::f80_to_f64(b, s1, e1);
     let f0 = b.trunc::<W64, polyisa_sem::F64>(b0);
     let f1 = b.trunc::<W64, polyisa_sem::F64>(b1);
-    let q = b.fdiv::<polyisa_sem::F64>(f0, f1);
+    let qf64 = b.fdiv::<polyisa_sem::F64>(f0, f1);
     let rm: u8 = if prem1 { 0 } else { 1 };
-    let qi = b.fcvt_s64::<polyisa_sem::F64>(q, rm);
-    let qf = b.fcvt_from_s64::<polyisa_sem::F64>(qi, 0);
-    let prod = b.fmul::<polyisa_sem::F64>(qf, f1);
-    let r = b.fsub::<polyisa_sem::F64>(f0, prod);
-    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
-    let (sr, er) = sem::f64_to_ext(b, r64);
-    sem::write_st(b, top, sr, er);
-    // Q ビット: C0=Q2, C1=Q0, C3=Q1。C2=0（完全減算近似）。
-    let qi16 = b.trunc::<W64, W16>(qi);
+    let qi_f = b.fcvt_s64::<polyisa_sem::F64>(qf64, rm);
+    let qff = b.fcvt_from_s64::<polyisa_sem::F64>(qi_f, 0);
+    let prod = b.fmul::<polyisa_sem::F64>(qff, f1);
+    let rf = b.fsub::<polyisa_sem::F64>(f0, prod);
+    let r64 = b.trunc::<polyisa_sem::F64, W64>(rf);
+    let (sr_f, er_f) = sem::f64_to_ext(b, r64);
+
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let s63 = b.konst::<W64>(63);
+    let e064 = b.zext::<W16, W64>(e0);
+    let e164 = b.zext::<W16, W64>(e1);
+    let ea = b.and::<W64>(e064, mask15);
+    let eb = b.and::<W64>(e164, mask15);
+    let sign0 = b.shr_l::<W64>(e064, s15);
+    let sign1 = b.shr_l::<W64>(e164, s15);
+    let sp0 = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let sp1 = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let ez0 = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let ez1 = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let sz0 = b.cmp::<W64>(Cmp::Eq, s0, zero);
+    let sz1 = b.cmp::<W64>(Cmp::Eq, s1, zero);
+    let snz0 = sem::bit_not(b, sz0);
+    let snz1 = sem::bit_not(b, sz1);
+    let den0 = sem::bit_and(b, ez0, snz0);
+    let den1 = sem::bit_and(b, ez1, snz1);
+    let denormal_in = sem::bit_or(b, den0, den1);
+    sem::x87_exception_flag(b, denormal_in, 1 << 1);
+
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac0 = b.and::<W64>(s0, frac_mask);
+    let frac1 = b.and::<W64>(s1, frac_mask);
+    let f0nz = b.cmp::<W64>(Cmp::Ne, frac0, zero);
+    let f1nz = b.cmp::<W64>(Cmp::Ne, frac1, zero);
+    let nan0 = sem::bit_and(b, sp0, f0nz);
+    let nan1 = sem::bit_and(b, sp1, f1nz);
+    let f0zero = sem::bit_not(b, f0nz);
+    let f1zero = sem::bit_not(b, f1nz);
+    let inf0 = sem::bit_and(b, sp0, f0zero);
+    let inf1 = sem::bit_and(b, sp1, f1zero);
+    let zero0 = sem::bit_and(b, ez0, sz0);
+    let zero1 = sem::bit_and(b, ez1, sz1);
+    let invalid0 = sem::bit_or(b, inf0, zero1);
+    sem::x87_exception_flag(b, invalid0, 1);
+
+    // 正規化有限入力では、指数差に応じて整数の筆算だけで求める。
+    let ez0n = sem::bit_not(b, ez0);
+    let ez1n = sem::bit_not(b, ez1);
+    let sp0n = sem::bit_not(b, sp0);
+    let sp1n = sem::bit_not(b, sp1);
+    let n0a = sem::bit_and(b, ez0n, sp0n);
+    let n1a = sem::bit_and(b, ez1n, sp1n);
+    let normal_inputs = sem::bit_and(b, n0a, n1a);
+
+    let diff = b.sub::<W64>(ea, eb);
+    let dneg = b.cmp::<W64>(Cmp::LtS, diff, zero);
+    let k64lim = b.konst::<W64>(64);
+    let partial = b.cmp::<W64>(Cmp::GeS, diff, k64lim);
+    let partial_n = sem::bit_not(b, partial);
+    let dneg_n = sem::bit_not(b, dneg);
+    let dpos = sem::bit_and(b, partial_n, dneg_n);
+    let shift_c = b.select::<W64>(dpos, diff, zero);
+
+    // 完全減算: floor((sig0 << D) / sig1)。FPREM1 は剰余と
+    // 半分の比較から商を最近接偶数へ丸める。
+    let sig0z = b.zext::<W64, W128>(s0);
+    let sig1z = b.zext::<W64, W128>(s1);
+    let one128 = b.konst::<W128>(1);
+    let den_safe = b.select::<W128>(sz1, one128, sig1z);
+    let shift_c128 = b.zext::<W64, W128>(shift_c);
+    let num_c = b.shl::<W128>(sig0z, shift_c128);
+    let quot_c128 = b.udiv::<W128>(num_c, den_safe);
+    let rem_c128 = b.urem::<W128>(num_c, den_safe);
+    let quot_floor = b.trunc::<W128, W64>(quot_c128);
+    let rem_floor = b.trunc::<W128, W64>(rem_c128);
+    let false_b = b.cmp::<W64>(Cmp::Ne, zero, zero);
+    let (qmag_c, rem_mag_c, signflip) = if prem1 {
+        let rem2 = b.shl::<W128>(rem_c128, one128);
+        let gt_half = b.cmp::<W128>(Cmp::GtU, rem2, den_safe);
+        let eq_half = b.cmp::<W128>(Cmp::Eq, rem2, den_safe);
+        let qlow = b.and::<W64>(quot_floor, one);
+        let floor_odd = b.cmp::<W64>(Cmp::Eq, qlow, one);
+        let tie_up = sem::bit_and(b, eq_half, floor_odd);
+        let roundup = sem::bit_or(b, gt_half, tie_up);
+        let upv = b.select::<W64>(roundup, one, zero);
+        let qround = b.add::<W64>(quot_floor, upv);
+        let deficit = b.sub::<W64>(s1, rem_floor);
+        let remmag = b.select::<W64>(roundup, deficit, rem_floor);
+        (qround, remmag, roundup)
+    } else {
+        (quot_floor, rem_floor, false_b)
+    };
+
+    // 部分減算: x/y = ((sig0 << 63) / sig1) * 2^(D-63)。
+    // 上位商を引いた残りは除算の剰余 rem_p に 2^(D-63) を掛けたもの。
+    let k63_128 = b.konst::<W128>(63);
+    let num_p = b.shl::<W128>(sig0z, k63_128);
+    let quot_p128 = b.udiv::<W128>(num_p, den_safe);
+    let rem_p128 = b.urem::<W128>(num_p, den_safe);
+    let qmag_p = b.trunc::<W128, W64>(quot_p128);
+    let rem_mag_p = b.trunc::<W128, W64>(rem_p128);
+
+    // 完全経路の正規化。remainder = rem * 2^(eb-bias-63)。
+    let lz_c = sem::clz64(b, rem_mag_c);
+    let sig_c_norm = b.shl::<W64>(rem_mag_c, lz_c);
+    let eraw_c = b.sub::<W64>(eb, lz_c);
+    let erneg_c = b.cmp::<W64>(Cmp::LtS, eraw_c, zero);
+    let er_c_clamped = b.select::<W64>(erneg_c, zero, eraw_c);
+    let rem_c_zero = b.cmp::<W64>(Cmp::Eq, rem_mag_c, zero);
+    let sig_c_nonzero = b.select::<W64>(rem_c_zero, zero, sig_c_norm);
+    let er_c_nonzero = b.select::<W64>(rem_c_zero, zero, er_c_clamped);
+    // D<0 では商 0 なので被除数がそのまま残る。
+    let sig_c = b.select::<W64>(dneg, s0, sig_c_nonzero);
+    let er_c_mag = b.select::<W64>(dneg, ea, er_c_nonzero);
+
+    // 部分経路では rem_p が 2^(D-63) の重みを持つ。D=ea-eb
+    // なので、正規化で動く lz を引いた exponent は ea-63-lz。
+    let lz_p = sem::clz64(b, rem_mag_p);
+    let sig_p_norm = b.shl::<W64>(rem_mag_p, lz_p);
+    let eraw_p0 = b.sub::<W64>(ea, s63);
+    let eraw_p = b.sub::<W64>(eraw_p0, lz_p);
+    let erneg_p = b.cmp::<W64>(Cmp::LtS, eraw_p, zero);
+    let er_p_clamped = b.select::<W64>(erneg_p, zero, eraw_p);
+    let rem_p_zero = b.cmp::<W64>(Cmp::Eq, rem_mag_p, zero);
+    let sig_p = b.select::<W64>(rem_p_zero, zero, sig_p_norm);
+    let er_p_mag = b.select::<W64>(rem_p_zero, zero, er_p_clamped);
+
+    let sig_exact_mag = b.select::<W64>(partial, sig_p, sig_c);
+    let er_exact = b.select::<W64>(partial, er_p_mag, er_c_mag);
+    // FPREM1 で商を上げたときだけ剰余の符号が被除数と反転する。
+    // 零の剰余は被除数の符号を保つ。
+    let flipv = b.select::<W64>(signflip, one, zero);
+    let sign_flip = b.xor::<W64>(sign0, flipv);
+    let sign_exact = b.select::<W64>(rem_c_zero, sign0, sign_flip);
+    let sign_exact = b.select::<W64>(partial, sign0, sign_exact);
+    let sign_exact = b.select::<W64>(dneg, sign0, sign_exact);
+    let sign_bit = b.shl::<W64>(sign_exact, s15);
+    let er_packed = b.or::<W64>(er_exact, sign_bit);
+    let er_exact16 = b.trunc::<W64, W16>(er_packed);
+
+    // 特殊値の優先順位: NaN/invalid、無限 divisor または零 dividend では
+    // ST0 不変、通常有限では整数経路、残りは倍精度近似。
+    let any_nan = sem::bit_or(b, nan0, nan1);
+    let unchanged0 = sem::bit_or(b, inf1, zero0);
+    let use_nan = sem::bit_or(b, any_nan, invalid0);
+    let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let nan_exp64 = b.konst::<W64>(0x7fff);
+    let nan_exp = b.trunc::<W64, W16>(nan_exp64);
+    let sig_sel0 = b.select::<W64>(normal_inputs, sig_exact_mag, sr_f);
+    let er_sel0 = b.select::<W16>(normal_inputs, er_exact16, er_f);
+    let sig_sel1 = b.select::<W64>(unchanged0, s0, sig_sel0);
+    let er_sel1 = b.select::<W16>(unchanged0, e0, er_sel0);
+    let sig_out = b.select::<W64>(use_nan, nan_sig, sig_sel1);
+    let er_out = b.select::<W16>(use_nan, nan_exp, er_sel1);
+    sem::write_st(b, top, sig_out, er_out);
+
+    // 商の符号を反映した低 3 ビット。完全時は C0=Q2/C3=Q1/C1=Q0、
+    // 部分時は C2=1、C0=C3=0 で C1 だけ商の bit0。
+    let qmag_cp = b.select::<W64>(partial, qmag_p, qmag_c);
+    let qmag_all = b.select::<W64>(dneg, zero, qmag_cp);
+    let qxor = b.xor::<W64>(sign0, sign1);
+    let qnegf = b.cmp::<W64>(Cmp::Ne, qxor, zero);
+    let qneg = b.sub::<W64>(zero, qmag_all);
+    let qsigned = b.select::<W64>(qnegf, qneg, qmag_all);
+    let qi16 = b.trunc::<W64, W16>(qsigned);
     let z16 = b.konst::<W16>(0);
     let one16 = b.konst::<W16>(1);
     let two16 = b.konst::<W16>(2);
@@ -11810,20 +11972,27 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let q1v = b.and::<W16>(qi16, two16);
     let q2v = b.and::<W16>(qi16, four16);
     let q0f = b.cmp::<W16>(Cmp::Ne, q0v, z16);
-    let q1f = b.cmp::<W16>(Cmp::Ne, q1v, z16);
-    let q2f = b.cmp::<W16>(Cmp::Ne, q2v, z16);
+    let q1f0 = b.cmp::<W16>(Cmp::Ne, q1v, z16);
+    let q2f0 = b.cmp::<W16>(Cmp::Ne, q2v, z16);
+    let complete = sem::bit_not(b, partial);
+    let q1f = sem::bit_and(b, q1f0, complete);
+    let q2f = sem::bit_and(b, q2f0, complete);
     let old: B::V<W16> = b.get(sem::fsw_ref());
     let keep = b.konst::<W16>(!X87_CC_MASK);
     let cleared = b.and::<W16>(old, keep);
     let kc0 = b.konst::<W16>(X87_C0);
     let kc1 = b.konst::<W16>(X87_C1);
+    let kc2 = b.konst::<W16>(X87_C2);
     let kc3 = b.konst::<W16>(X87_C3);
     let c0 = b.select::<W16>(q2f, kc0, z16);
     let c1 = b.select::<W16>(q0f, kc1, z16);
+    let c2 = b.select::<W16>(partial, kc2, z16);
     let c3 = b.select::<W16>(q1f, kc3, z16);
     let c01 = b.or::<W16>(c0, c1);
-    let cbits = b.or::<W16>(c01, c3);
-    let nv = b.or::<W16>(cleared, cbits);
+    let c23 = b.or::<W16>(c2, c3);
+    let cbits = b.or::<W16>(c01, c23);
+    let exact_cc = b.or::<W16>(cleared, cbits);
+    let nv = b.select::<W16>(normal_inputs, exact_cc, old);
     b.set(sem::fsw_ref(), nv);
     Ok(())
 }

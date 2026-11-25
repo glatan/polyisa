@@ -17621,6 +17621,92 @@ fn run_x87_trig_out_of_range_does_not_push() {
 }
 
 #[test]
+fn run_x87_fprem_exact_complete_and_partial_reduction() {
+    fn setup_fprem() -> BareEnv {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env
+    }
+    // 7/2: trunc 商 3、剰余 +1。Q=3 なので C1=Q0 と C3=Q1。
+    let mut env = setup_fprem();
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0xE000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x4001);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xF8]) // fprem
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x8000_0000_0000_0000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x3FFF
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & 0x0400, 0, "C2 must be clear");
+    assert_ne!(fsw & 0x0200, 0, "C1=Q0");
+    assert_ne!(fsw & 0x4000, 0, "C3=Q1");
+    assert_eq!(fsw & 0x0100, 0, "C0=Q2");
+
+    // 指数差 69 の 2^70+256 を 3 で割る。1 回目は部分剰余 128、
+    // C2=1。もう 1 回で完全剰余 2 になる。
+    let mut env = setup_fprem();
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0002);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x4045);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0xC000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xF8, 0xD9, 0xF8])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0))
+        ),
+        (0x8000_0000_0000_0000, 0x4006),
+        "partial remainder must be 128.0"
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & 0x0400, 0, "first reduction is partial");
+    let out = run_x86::run_mode(&mut env, 0x1002, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    assert_eq!(
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0))
+        ),
+        (0x8000_0000_0000_0000, 0x4000),
+        "second reduction must be 2.0"
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & 0x0400, 0, "second reduction completes");
+    assert_eq!(fsw & 0x0300, 0, "Q0/Q2 are clear for quotient 42");
+    assert_ne!(fsw & 0x4000, 0, "Q1 is set for quotient 42");
+}
+
+#[test]
 fn run_a2_fscale_fxtract_fprem() {
     // fscale: 3.0 * 2^2 = 12.0。fxtract: 8.0 → 指数 3.0 / 仮数 1.0。
     // fprem: 7 mod 2 = 1.0（trunc）。fprem1: 3.5→RNE 4 → 7-8 = -1.0。

@@ -14984,7 +14984,7 @@ pub(crate) fn bit_not<B: Backend>(b: &mut B, x: B::B) -> B::B {
 }
 
 /// 0 のとき 64。上位から見て最初の 1 までのゼロの数。
-fn clz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
+pub(crate) fn clz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
     let zero = b.konst::<W64>(0);
     let n32 = b.konst::<W64>(32);
     let n16 = b.konst::<W64>(16);
