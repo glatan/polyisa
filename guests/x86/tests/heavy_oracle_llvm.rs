@@ -50,6 +50,10 @@ fn insn_mnemonic(i: polyisa_guest_x86::Insn) -> String {
     let name = format!("{i:?}");
     // x86min の `en_` 系列は `EnSyscall` のような名になる。
     // 次が大文字のときだけ剥がす（`Enter` を壊さない）。
+    if name == "RepXstore" {
+        // REP はオラクル側で接頭辞として剥がすので、比較名は本体に揃える。
+        return "xstore".into();
+    }
     let name =
         if name.len() > 2 && name.starts_with("En") && name.as_bytes()[2].is_ascii_uppercase() {
             &name[2..]
@@ -233,6 +237,10 @@ fn same_mnemonic(ours: &str, llvm: &str) -> bool {
     }
     // 別名判定は元形と接尾辞除去形の両方に適用する。
     let is = |x: &str| llvm == x || lbase == x;
+    // VIA PadLock RNG は XSTORE/XSTORERNG の2名がある。
+    if ours == "xstore" && is("xstorerng") {
+        return true;
+    }
     // 我々の j 接頭辞（setjle / cmovjae / xchg 名）。
     if let Some(rest) = ours.strip_prefix("setj")
         && is(&format!("set{rest}"))
@@ -436,8 +444,15 @@ fn run_pass(llvm_mc: &str, triple: &str, modes: u32, feats: u128, mode: &str) ->
         match (ours, oracle) {
             (None, Oracle::Invalid) => {}
             (None, Oracle::Insn(mn, enc)) => {
+                // llvm-mc は必須でない 66/F2/F3 を落として解読することがある。
+                // 接頭辞を除いた形が同じ命令として解読できるなら、polyisa 側の
+                // 拒否は受理規則の差であって命令未実装ではない。
+                let stripped = strip_pfx(cand);
+                let oracle_lenient = stripped.len() < cand.len()
+                    && polyisa_decode(stripped, modes, feats)
+                        .is_some_and(|(n, _)| same_mnemonic(&n, mn));
                 let e = format!("{h}: oracle {mn} len {}", enc.len());
-                if !known(&key, "missing", mode) {
+                if !oracle_lenient && !known(&key, "missing", mode) {
                     diff.missing.push(e);
                 }
             }
@@ -766,6 +781,20 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("d1", "spurious", "*"),
     ("d2", "spurious", "*"),
     ("d3", "spurious", "*"), // shift /6（sal 別名、llvm は拒否）
+    // UD0 と INT1 は HW/XED 側に存在するが llvm-mc の受理が狭い。
+    // UD0・WBINVD・ヒント NOP の 66/F2/F3 は無視される接頭辞として
+    // 受理する（XED 実測）ため、オラクル拒否分を loose 差分とする。
+    ("f1", "spurious", "*"),
+    ("0f ff", "spurious", "*"),
+    ("66 0f ff", "spurious", "*"),
+    ("f2 0f ff", "spurious", "*"),
+    ("f3 0f ff", "spurious", "*"),
+    ("66 0f 09", "spurious", "*"),
+    ("f2 0f 09", "spurious", "*"),
+    ("66 0f 1e", "spurious", "*"),
+    ("f2 0f 1e", "spurious", "*"),
+    // UDB は新しい 64 ビット専用の #UD 命令で、llvm-mc は未受理。
+    ("d6", "spurious", "x86-64"),
     // ---- x87 mod=11 副表（GAP-0037b: 未定義スロットを受理、別名も差）----
     ("d9", "spurious", "*"),
     ("da", "spurious", "*"),
@@ -803,6 +832,24 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("67", "*", "*"),
     // 0f 1f の canonical 正規化
     ("0f 1f", "*", "*"),
+    // 64 ビット near Jcc の 66 は Intel では無視され rel32 のままだが、
+    // llvm-mc は AMD 流の rel16 側で長さを返す。
+    ("66 0f 80", "len", "x86-64"),
+    ("66 0f 81", "len", "x86-64"),
+    ("66 0f 82", "len", "x86-64"),
+    ("66 0f 83", "len", "x86-64"),
+    ("66 0f 84", "len", "x86-64"),
+    ("66 0f 85", "len", "x86-64"),
+    ("66 0f 86", "len", "x86-64"),
+    ("66 0f 87", "len", "x86-64"),
+    ("66 0f 88", "len", "x86-64"),
+    ("66 0f 89", "len", "x86-64"),
+    ("66 0f 8a", "len", "x86-64"),
+    ("66 0f 8b", "len", "x86-64"),
+    ("66 0f 8c", "len", "x86-64"),
+    ("66 0f 8d", "len", "x86-64"),
+    ("66 0f 8e", "len", "x86-64"),
+    ("66 0f 8f", "len", "x86-64"),
     // ---- x86-64 固有 ----
     // 0x40-0x4F ヘッドは REX。llvm は効果のない REX を encoding
     // から落とし、列挙経路は剥がし後の空間として inc/dec を返す。

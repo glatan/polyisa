@@ -1176,7 +1176,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // MXCSR の読み書きは SSE 付随。
         "ldmxcsr" | "stmxcsr" => &["sse"],
         // i486 で追加された命令（i386 との区別は i486 旗で表す）。
-        "bswap" | "xadd" | "cmpxchg" | "invd" | "wbinvd" | "invlpg" => &["i486"],
+        "bswap" | "xadd" | "cmpxchg" | "invd" | "wbinvd" | "wbnoinvd" | "invlpg" => &["i486"],
         // SMM 外では実行時 #UD だが、RSM 自体は 386SL/486 系の
         // 命令なので 286 以前へは出さない。
         "rsm" => &["i486"],

@@ -3567,7 +3567,7 @@ fn dispatch_map<B: Backend>(
         Insn::Rdpmc => sem_ea::rdpmc(b),
         // 特権キャッシュ制御はユーザーモードでは #GP。実モードは
         // CPL0 相当なので、キャッシュを持たない近似で no-op。
-        Insn::Invd | Insn::Wbinvd | Insn::InvlpgMb => {
+        Insn::Invd | Insn::Wbinvd | Insn::Wbnoinvd | Insn::InvlpgMb => {
             if mode == 16 {
                 sem_ea::nop(b)
             } else {

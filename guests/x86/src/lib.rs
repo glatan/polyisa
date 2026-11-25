@@ -2296,6 +2296,19 @@ mod tests {
             assert!(decode_map(&[0x0F, op], m16, sel("i386")).is_none());
             assert!(decode_map(&[0x0F, op], m16, sel("i486")).is_some());
         }
+        // F3 0F 09 は WBNOINVD、無印・66・F2 は WBINVD。
+        assert_eq!(
+            decode_map(&[0xF3, 0x0F, 0x09], m16, sel("i486")).map(|d| d.insn),
+            Some(Insn::Wbnoinvd)
+        );
+        for pfx in [&[][..], &[0x66][..], &[0xF2][..]] {
+            let mut b = pfx.to_vec();
+            b.extend([0x0F, 0x09]);
+            assert_eq!(
+                decode_map(&b, m16, sel("i486")).map(|d| d.insn),
+                Some(Insn::Wbinvd)
+            );
+        }
         assert!(decode_map(&[0x0F, 0x01, 0x38], m16, sel("i386")).is_none());
         assert!(decode_map(&[0x0F, 0x01, 0x38], m16, sel("i486")).is_some());
         // XSTORE は enabled ビット付きの VIA/Zhaoxin PadLock RNG

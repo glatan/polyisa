@@ -1252,7 +1252,10 @@ pub fn build_maps(m: &mut Model) {
         // オペランドなし特権命令。接頭辞はすべて無視される
         // （XED 実測で 66/F2/F3 形も受理）。
         MapItem::Insn(0x08, mi("invd", &[], None, PfxSel::Any, Pred::True, "invd", "system")),
-        MapItem::Insn(0x09, mi("wbinvd", &[], None, PfxSel::Any, Pred::True, "wbinvd", "system")),
+        // F3 付きは WBNOINVD。F3 以外の接頭辞付きを含む残りは
+        // WBINVD として受理する（XED 実測の寛容さを維持）。
+        MapItem::Insn(0x09, mi("wbnoinvd", &[], None, PfxSel::PF3, Pred::True, "wbnoinvd", "system")),
+        MapItem::Insn(0x09, mi("wbinvd", &[], None, PfxSel::NoF3, Pred::True, "wbinvd", "system")),
         MapItem::Insn(0x30, mi("wrmsr", &[], None, PfxSel::Any, Pred::True, "wrmsr", "system")),
         MapItem::Insn(0x32, mi("rdmsr", &[], None, PfxSel::Any, Pred::True, "rdmsr", "system")),
         MapItem::Insn(0x33, mi("rdpmc", &[], None, PfxSel::Any, Pred::True, "rdpmc", "system")),
