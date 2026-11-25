@@ -483,6 +483,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         // レジスタを持つ（mm_trap・stack_limit の項）。FP11 は
         // オプション。分離 I/D は KT11-C にない。11/50・11/55 は
         // メモリ速度違いで命令面の差が見えないため空の派生。
+        // halt_vec=vec004 は付録 B 項目 43 の記載どおり（11/45 は
+        // vec004 の群）。vec004 はデフォルトと同値だが、項目 43 に
+        // 言及のある機種なので明示する。なお 11/05–11/40 系は MMU
+        // なしの標準構成ではモードビットを持たず非カーネルモードに
+        // 入れないため、非カーネル HALT の帰結である halt_vec は
+        // 空問い（vacuous）—— 値はデフォルトのままで実効しない。
         (
             "pdp11_45",
             "",
@@ -495,6 +501,8 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("mm_trap", "true"),
                 ("dual_regset", "true"),
                 ("stack_limit", "reg"),
+                ("jmp_reg_trap", "vec004"),
+                ("halt_vec", "vec004"),
             ][..],
         ),
         ("pdp11_50", "pdp11_45", &[][..], &[][..]),
