@@ -5550,21 +5550,21 @@ mod tests {
         // 対応=3（x87+SSE。amx_tile なしの既定モデル）、許可=3。
         env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 3);
         env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 3);
-        assert_eq!(prctl(&mut env, 0x1031, 0x100), 0); // GET_XCOMP_SUPP
+        assert_eq!(prctl(&mut env, 0x1021, 0x100), 0); // GET_XCOMP_SUPP
         assert_eq!(rd8(&mut env, 0x100), 3);
-        assert_eq!(prctl(&mut env, 0x1021, 0x108), 0); // GET_XCOMP_PERM
+        assert_eq!(prctl(&mut env, 0x1022, 0x108), 0); // GET_XCOMP_PERM
         assert_eq!(rd8(&mut env, 0x108), 3);
         // 未対応の XTILEDATA(18)/APX(19) は EOPNOTSUPP、上限超は EINVAL。
-        assert_eq!(prctl(&mut env, 0x1022, 18), neg_errno64(EOPNOTSUPP));
-        assert_eq!(prctl(&mut env, 0x1022, 19), neg_errno64(EOPNOTSUPP));
-        assert_eq!(prctl(&mut env, 0x1022, 20), neg_errno64(EINVAL));
+        assert_eq!(prctl(&mut env, 0x1023, 18), neg_errno64(EOPNOTSUPP));
+        assert_eq!(prctl(&mut env, 0x1023, 19), neg_errno64(EOPNOTSUPP));
+        assert_eq!(prctl(&mut env, 0x1023, 20), neg_errno64(EINVAL));
         // amx_tile 相当の対応マスクにすると要求が通る。
         env.backend
             .set(polyisa_guest_x86::sem::xcomp_supp_ref(), 0x6_0003);
         // XTILECFG(17) なしの XTILEDATA は EINVAL。
-        assert_eq!(prctl(&mut env, 0x1022, 18), neg_errno64(EINVAL));
-        assert_eq!(prctl(&mut env, 0x1022, 17), 0);
-        assert_eq!(prctl(&mut env, 0x1022, 18), 0);
+        assert_eq!(prctl(&mut env, 0x1023, 18), neg_errno64(EINVAL));
+        assert_eq!(prctl(&mut env, 0x1023, 17), 0);
+        assert_eq!(prctl(&mut env, 0x1023, 18), 0);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref()),
             0x6_0003
@@ -5575,7 +5575,7 @@ mod tests {
             0x6_0000
         );
         // 書き込み先が未写像なら EFAULT。
-        assert_eq!(prctl(&mut env, 0x1031, 0x1_0000_0000), neg_errno64(EFAULT));
+        assert_eq!(prctl(&mut env, 0x1021, 0x1_0000_0000), neg_errno64(EFAULT));
     }
 
     #[test]

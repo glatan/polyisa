@@ -1646,9 +1646,9 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // XCOMP 系（AMX 等の動的拡張状態の許可）。対応マスクと
     // 許可マスクは CpuState の `xcomp_supp`/`xcomp_perm` にある。
     // Ref: SRC-LINUX (7.3) arch/x86/kernel/fpu/xstate.c.
-    const ARCH_GET_XCOMP_PERM: u64 = 0x1021;
-    const ARCH_REQ_XCOMP_PERM: u64 = 0x1022;
-    const ARCH_GET_XCOMP_SUPP: u64 = 0x1031;
+    const ARCH_GET_XCOMP_SUPP: u64 = 0x1021;
+    const ARCH_GET_XCOMP_PERM: u64 = 0x1022;
+    const ARCH_REQ_XCOMP_PERM: u64 = 0x1023;
     /// 動的に許可が要る成分の先頭（XTILECFG 以降）。これより
     /// 小さい成分は静的で、要求なしに使える。
     const XFEATURE_FIRST_DYNAMIC: u64 = 16;

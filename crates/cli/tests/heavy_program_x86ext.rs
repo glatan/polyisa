@@ -61,18 +61,18 @@ void _start(void) {
     }
     // arch_prctl XCOMP。supp / perm。
     u64 supp = 0, perm = 0, r;
-    r = sys3(158, 0x1031, (long)&supp, 0); // ARCH_GET_XCOMP_SUPP
+    r = sys3(158, 0x1021, (long)&supp, 0); // ARCH_GET_XCOMP_SUPP
     lit("xcomp_supp="); phex(supp); lit(" r="); pnum(r); lit("\n");
-    r = sys3(158, 0x1021, (long)&perm, 0); // ARCH_GET_XCOMP_PERM
+    r = sys3(158, 0x1022, (long)&perm, 0); // ARCH_GET_XCOMP_PERM
     lit("xcomp_perm="); phex(perm); lit(" r="); pnum(r); lit("\n");
     // XGETBV: XTILE 許可前の XCR0。
     u32 x0 = 0, x1 = 0;
     asm volatile("xgetbv" : "=a"(x0), "=d"(x1) : "c"(0) : "memory");
     lit("xcr0="); phex(x0); lit("\n");
     // XTILECFG(17) → XTILEDATA(18) の許可。
-    r = sys3(158, 0x1022, 17, 0);
+    r = sys3(158, 0x1023, 17, 0);
     lit("req17="); pnum(r); lit("\n");
-    r = sys3(158, 0x1022, 18, 0);
+    r = sys3(158, 0x1023, 18, 0);
     lit("req18="); pnum(r); lit("\n");
     asm volatile("xgetbv" : "=a"(x0), "=d"(x1) : "c"(0) : "memory");
     lit("xcr0_after="); phex(x0); lit("\n");
@@ -202,17 +202,18 @@ fn x86ext_xsave_amx_vsyscall() {
     .unwrap_or_else(|e| panic!("run: {e}"));
     let captured_out = captured.borrow().clone();
     let out = String::from_utf8_lossy(&captured_out);
-    // CPUID leaf D.0 の EBX は有効 XCR0=7 に対応する 832B、ECX は
-    // 対応成分全体の最大 11008B。supp は XTILECFG|XTILEDATA を含む。
+    // x86_64_v4 では AVX-512 成分も初期 XCR0 に入る。CPUID leaf D.0
+    // の EBX は有効 XCR0=0xe7 に対応する 2688B、ECX は対応成分全体の
+    // 最大 11008B。supp は XTILECFG|XTILEDATA を含む。
     let expect = concat!(
         "x86ext\n",
-        "cpuidD ebx=832 ecx=11008\n",
-        "xcomp_supp=0x60007 r=0\n",
-        "xcomp_perm=0x7 r=0\n",
-        "xcr0=0x7\n",
+        "cpuidD ebx=2688 ecx=11008\n",
+        "xcomp_supp=0x600e7 r=0\n",
+        "xcomp_perm=0xe7 r=0\n",
+        "xcr0=0xe7\n",
         "req17=0\n",
         "req18=0\n",
-        "xcr0_after=0x60007\n",
+        "xcr0_after=0x600e7\n",
         "xsave_rt=1\n",
         "amx=8,10,24,26\n",
         "vsys_gtod=946688400\n",
