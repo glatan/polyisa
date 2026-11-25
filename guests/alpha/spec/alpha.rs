@@ -48,15 +48,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         });
     }
 
-    // CPU モデル。21164PC（PCA56、EV56）が BWX と MVI を、21264
-    // （EV6）以降が FIX と CIX を足す（SPEC-ALPHA-ARM Appendix の
-    // AMASK 対応）。
+    // CPU モデル（SPEC-ALPHA-ARM Appendix の AMASK 対応）。EV56
+    // （21164A）が BWX を、21164PC（PCA56）が MVI を足す。21264
+    // （EV6）は BWX・MVI を含み FIX を足し、CIX は EV67（21264A）
+    // から入る。
     for (name, parent, add) in [
         ("21064", "", &[][..]),
         ("21164", "21064", &["ev5"][..]),
-        ("21164pc", "21164", &["ev56", "bwx", "mvi"][..]),
-        ("21264", "21164", &["ev56", "bwx", "fix", "cix", "mvi"][..]),
-        ("21264a", "21264", &[][..]),
+        ("21164a", "21164", &["ev56", "bwx"][..]),
+        ("21164pc", "21164a", &["mvi"][..]),
+        ("21264", "21164pc", &["fix"][..]),
+        ("21264a", "21264", &["cix"][..]),
         ("21364", "21264a", &["ev7"][..]),
     ] {
         m.models.push(ModelDef {

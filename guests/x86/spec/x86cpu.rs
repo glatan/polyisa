@@ -214,6 +214,15 @@ fn intel<'a>(fam: &'a str, model: &'a str, step: &'a str) -> Vec<(&'static str, 
     ]
 }
 
+fn amd<'a>(fam: &'a str, model: &'a str, step: &'a str) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("cpuid.vendor", "AuthenticAMD"),
+        ("cpuid.family", fam),
+        ("cpuid.model", model),
+        ("cpuid.stepping", step),
+    ]
+}
+
 fn model(
     m: &mut Model,
     name: &str,
@@ -493,17 +502,22 @@ fn declare_models(m: &mut Model) {
     // 継承するが、それらの値は 386EX の SST 実測に基づく近似で、
     // 他世代で同じとは検証されていない。
     model(m, "i486", "i386", &["cpuid", "i486"], &[], &[], id486);
-    let mut idp5 = intel("5", "4", "4");
+    // P54C（model 2）は MMX を持たない。MMX は P55C（pentium_mmx）で入る。
+    let mut idp5 = intel("5", "2", "5");
     idp5.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
     model(
         m,
         "pentium",
         "i486",
-        &["vme", "de", "pse", "tsc", "msr", "cx8", "mce", "apic", "mmx"],
+        &["vme", "de", "pse", "tsc", "msr", "cx8", "mce", "apic"],
         &[],
         &[],
         idp5,
     );
+    // P55C（model 4）。コアは P54C 系で、MMX を足した構成。
+    let mut idp5m = intel("5", "4", "3");
+    idp5m.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
+    model(m, "pentium_mmx", "pentium", &["mmx"], &[], &[], idp5m);
     let mut idp6 = intel("6", "1", "9");
     idp6.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0")]);
     model(
@@ -515,18 +529,235 @@ fn declare_models(m: &mut Model) {
         &[],
         idp6,
     );
+    // Pentium II（Deschutes、model 5）。P6 に MMX・FXSR・SEP・CLFLUSH を足す。
+    // PAT は Pentium III からなので入れない。
+    let mut idp2 = intel("6", "5", "2");
+    idp2.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0")]);
+    model(
+        m,
+        "pentium_ii",
+        "pentium_pro",
+        &["mmx", "fxsr", "sep", "clfsh"],
+        &[],
+        &[],
+        idp2,
+    );
     // Katmai（model 7）は PSN リーフを持つので最大ベーシックリーフは 3。
     let mut idp3 = intel("6", "7", "3");
     idp3.extend([("cpuid.max_basic", "3"), ("cpuid.max_ext", "0")]);
+    model(m, "pentium_iii", "pentium_ii", &["sse", "pat"], &[], &[], idp3);
+    // Willamette（family 15）。PSN リーフは Pentium III 限りなので
+    // 最大ベーシックリーフは 2 に戻る。拡張リーフはブランド文字列まで。
+    let mut idp4 = intel("15", "1", "4");
+    idp4.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0x80000004")]);
+    model(m, "pentium4", "pentium_iii", &["sse2", "htt"], &[], &[], idp4);
+    let mut idpre = intel("15", "3", "4");
+    idpre.extend([("cpuid.max_basic", "2"), ("cpuid.max_ext", "0x80000004")]);
     model(
         m,
-        "pentium_iii",
-        "pentium_pro",
-        &["fxsr", "sse", "sep", "pat"],
+        "pentium4_prescott",
+        "pentium4",
+        &["sse3", "monitor", "tm2", "eist"],
         &[],
         &[],
-        idp3,
+        idpre,
     );
+    // Conroe（family 6 model 15）。P6 系へ戻り HT は外れる。
+    // 挙動パラメータは i386 系の近似値を継承したまま（世代別の実測は未整備）。
+    let mut idc2 = intel("6", "15", "11");
+    idc2.extend([("cpuid.max_basic", "0xa"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "core2",
+        "pentium4_prescott",
+        &["lm", "nx", "ssse3", "cx16", "vmx"],
+        &["htt"],
+        &[],
+        idc2,
+    );
+    let mut idpen = intel("6", "23", "6");
+    idpen.extend([("cpuid.max_basic", "0xa"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "penryn", "core2", &["sse4_1"], &[], &[], idpen);
+    let mut idneh = intel("6", "26", "5");
+    idneh.extend([("cpuid.max_basic", "0xb"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "nehalem", "penryn", &["sse4_2", "popcnt"], &[], &[], idneh);
+    let mut idwsm = intel("6", "37", "2");
+    idwsm.extend([("cpuid.max_basic", "0xb"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "westmere",
+        "nehalem",
+        &["pclmulqdq", "aesni"],
+        &[],
+        &[],
+        idwsm,
+    );
+    // AVX は xsave を含意する。リーフ 0xD まで届くようになる。
+    let mut idsnb = intel("6", "42", "7");
+    idsnb.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "sandy_bridge", "westmere", &["avx", "pcid"], &[], &[], idsnb);
+    let mut idivb = intel("6", "58", "9");
+    idivb.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "ivy_bridge",
+        "sandy_bridge",
+        &["f16c", "rdrnd", "fsgsbase", "erms", "smep"],
+        &[],
+        &[],
+        idivb,
+    );
+    let mut idhsw = intel("6", "60", "3");
+    idhsw.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "haswell",
+        "ivy_bridge",
+        &["avx2", "bmi1", "bmi2", "fma", "movbe", "invpcid"],
+        &[],
+        &[],
+        idhsw,
+    );
+    let mut idbdw = intel("6", "61", "4");
+    idbdw.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "broadwell",
+        "haswell",
+        &["adx", "rdseed", "smap"],
+        &[],
+        &[],
+        idbdw,
+    );
+    // AMD。K6 はローカル APIC を持たない。3DNow! 系は K6-2 から、
+    // 整数 SSE 相当の MMX 拡張と CMOV・PAT は K7（Athlon）から。
+    let mut idk6 = amd("5", "6", "1");
+    idk6.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000005")]);
+    model(m, "k6", "pentium", &["mmx"], &["apic"], &[], idk6);
+    let mut idk62 = amd("5", "8", "12");
+    idk62.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000006")]);
+    model(m, "k6_2", "k6", &["apic", "dnow"], &[], &[], idk62);
+    let mut idk7 = amd("6", "2", "1");
+    idk7.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "athlon",
+        "k6_2",
+        &["cmov", "mtrr", "pat", "fxsr", "mmxext", "syscall"],
+        &[],
+        &[],
+        idk7,
+    );
+    // Palomino 系。SSE と 3DNow! 拡張（dnowext）が入る。
+    let mut idaxp = amd("6", "8", "1");
+    idaxp.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "athlon_xp", "athlon", &["sse", "dnowext"], &[], &[], idaxp);
+    // K8（ClawHammer 系）。long mode と NX、SSE2、CMPXCHG16B。
+    let mut idk8 = amd("15", "4", "0");
+    idk8.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "athlon64",
+        "athlon_xp",
+        &["lm", "nx", "sse2", "cx16", "clfsh", "lahf_lm"],
+        &[],
+        &[],
+        idk8,
+    );
+    // K10（Barcelona 系）。SSE3・SSE4a・misaligned SSE・ABM（lzcnt）・POPCNT・SVM。
+    let mut idk10 = amd("16", "2", "3");
+    idk10.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "phenom",
+        "athlon64",
+        &["sse3", "sse4a", "misalignsse", "lzcnt", "popcnt", "svm"],
+        &[],
+        &[],
+        idk10,
+    );
+    let mut idk105 = amd("16", "4", "2");
+    idk105.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0x80000008")]);
+    model(m, "phenom_ii", "phenom", &[], &[], &[], idk105);
+    // Bulldozer は 3DNow! 系を廃し、XOP・FMA4・TBM の AMD 拡張を入れた。
+    let mut idbd = amd("21", "1", "2");
+    idbd.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x8000001e")]);
+    model(
+        m,
+        "bulldozer",
+        "phenom_ii",
+        &[
+            "ssse3", "sse4_1", "sse4_2", "avx", "aesni", "pclmulqdq", "xop", "fma4", "tbm",
+        ],
+        &["dnow", "dnowext"],
+        &[],
+        idbd,
+    );
+    // Piledriver は FMA3・F16C・BMI1 を足す。
+    let mut idpd = amd("21", "2", "0");
+    idpd.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x8000001e")]);
+    model(
+        m,
+        "piledriver",
+        "bulldozer",
+        &["fma", "f16c", "bmi1"],
+        &[],
+        &[],
+        idpd,
+    );
+    // Zen は XOP・FMA4・TBM を廃し、AVX2・BMI2・SHA 系へ移る。
+    let mut idz1 = amd("23", "1", "1");
+    idz1.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x8000001f")]);
+    model(
+        m,
+        "zen",
+        "piledriver",
+        &[
+            "avx2", "bmi2", "sha", "rdseed", "adx", "smap", "clflushopt", "clzero", "movbe",
+        ],
+        &["xop", "fma4", "tbm"],
+        &[],
+        idz1,
+    );
+    let mut idz2 = amd("23", "49", "0");
+    idz2.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x8000001f")]);
+    model(m, "zen2", "zen", &["rdpid", "clwb"], &[], &[], idz2);
+    let mut idz3 = amd("25", "33", "0");
+    idz3.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000021")]);
+    model(
+        m,
+        "zen3",
+        "zen2",
+        &["pku", "vaes", "vpclmulqdq"],
+        &[],
+        &[],
+        idz3,
+    );
+    // Zen 4 は AVX-512（256 ビット実行）を入れる。各サブ拡張は avx512f を含意する。
+    let mut idz4 = amd("25", "97", "2");
+    idz4.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000021")]);
+    model(
+        m,
+        "zen4",
+        "zen3",
+        &[
+            "avx512vl",
+            "avx512dq",
+            "avx512bw",
+            "avx512cd",
+            "avx512vbmi",
+            "avx512vbmi2",
+            "avx512vnni",
+            "avx512bitalg",
+            "avx512vpopcntdq",
+        ],
+        &[],
+        &[],
+        idz4,
+    );
+    let mut idz5 = amd("26", "2", "0");
+    idz5.extend([("cpuid.max_basic", "0xd"), ("cpuid.max_ext", "0x80000021")]);
+    model(m, "zen5", "zen4", &[], &[], &[], idz5);
     // 既存の既定名との互換（段階4の `generic32`）。i386 の旗だけを持つ。
     model(m, "generic32", "", &["i386"], &[], &[], vec![]);
 }

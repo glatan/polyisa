@@ -9,10 +9,10 @@
 | ISA | モデル数 | 機能数 | CLI 実行 | 対応 OS | JIT | タイミング | GDB | テスト層 | 詳細 |
 |---|---|---|---|---|---|---|---|---|---|
 | aarch64 | 2 | 4 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [aarch64.md](guests/aarch64.md) |
-| alpha | 6 | 7 | ELF | Linux | — | — | — | bare・abi・program | [alpha.md](guests/alpha.md) |
+| alpha | 7 | 7 | ELF | Linux | — | — | — | bare・abi・program | [alpha.md](guests/alpha.md) |
 | arm | 2 | 1 | ELF | Linux・Semihosting | 対応 | — | — | bare・oracle・abi・program・jit | [arm.md](guests/arm.md) |
 | hexagon | 3 | 20 | ELF | Linux | — | — | — | bare・oracle・abi・program | [hexagon.md](guests/hexagon.md) |
-| ia64 | 2 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
+| ia64 | 3 | 9 | ELF | Linux | — | — | — | bare・abi・program | [ia64.md](guests/ia64.md) |
 | loongarch | 4 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [loongarch.md](guests/loongarch.md) |
 | m68k | 7 | 6 | ELF（`cpus`未掲載） | Linux | — | 専用モデル（検証あり） | — | bare・conformance・abi・program・timing | [m68k.md](guests/m68k.md) |
 | mips | 5 | 5 | ELF | Linux | — | 専用モデル（検証あり） | — | bare・abi・program・timing | [mips.md](guests/mips.md) |
@@ -26,7 +26,7 @@
 | superh | 11 | 9 | ELF | Linux | — | — | — | bare・abi・program | [superh.md](guests/superh.md) |
 | vax | 4 | 7 | a.out | 4.3BSD | — | 専用モデル（未較正） | — | bare・program | [vax.md](guests/vax.md) |
 | wasm | 1 | 1 | Wasm（`cpus`未掲載） | WASI | — | — | — | bare・conformance・program・diff | [wasm.md](guests/wasm.md) |
-| x86 | 13 | 143 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
+| x86 | 39 | 143 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
 
 ## OS パーソナリティ（Linux）
 
