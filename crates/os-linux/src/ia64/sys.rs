@@ -8,13 +8,12 @@
 //! 供給する（IP フックでなく命令列を置く選択: ia64 のゲートは
 //! 固定領域の実行コードで、br.call/br.ret b6 の規約をそのまま
 //! 再現できる。via_epc は epc の特権移行だけを差し替えて
-//! via_break と同じ形に畳む近似 — Gap: GAP-0068）。
+//! via_break と同じ形に畳む近似）。
 //! 番号は r15−`NR_BASE`、引数は現在フレームの out0–out5
 //! （`sem::out_get`。epc 呼出では br.call で sol=0 になった新
 //! フレームの先頭に呼出側の引数が写るので、両経路で同じ
 //! 読み方が成立する）。結果は r8・r10。単一プロセス・単一
 //! スレッド模型（fork/clone/execve/pipe 系は ENOSYS
-//! — Gap: GAP-0068）。
 //! Ref: SRC-LINUX-66 — kernel/entry.S, kernel/gate.S, syscall.tbl.
 
 use std::io::{Read, Seek, SeekFrom, Write as _};
@@ -46,7 +45,7 @@ pub struct Ia64Io {
 
 /// IA-64 Linux の syscall 状態機械。r15−NR_BASE=表番号、
 /// out0–out5=引数、r8/r10=戻り値。
-// Gap: GAP-0068 — 単一プロセス模型の意図的な簡略化（fork/execve
+// 単一プロセス模型の意図的な簡略化（fork/execve
 // なし、signal はスタブ、statfs は合成値、pipe は ENOSYS）。
 pub struct Linux {
     /// 標準出力・標準エラーの捕獲。
@@ -1189,7 +1188,7 @@ impl Linux {
     }
 
     /// `mremap`。MREMAP_MAYMOVE 付きだけ新領域へ複写して畳む
-    /// （インプレース伸長はモデルに無い — Gap: GAP-0068）。
+    /// （インプレース伸長はモデルに無い）。
     fn sys_mremap(
         &mut self,
         env: &mut BareEnv,
@@ -2112,7 +2111,7 @@ impl Linux {
         let b = &mut env.backend;
         // 範囲検査は `n = r15 - NR_BASE` が 0..NR_SYSCALLS。epc
         // 入口の `tnat.nz p10` に倣い r15 が NaT なら EINVAL
-        // （break 経路にも同じ近似を適用 — Gap: GAP-0068）。
+        // （break 経路にも同じ近似を適用）。
         if sem::nat_get(b, 15) {
             Self::ret(b, Err(errno::EINVAL));
             return TrapOutcome::Handled;
@@ -2213,7 +2212,7 @@ impl TrapHandler for Linux {
 /// __kernel_syscall_via_epc は epc の特権移行で syscall 本体を
 /// 呼ぶが、ユーザに観測される規約（r15/out 引数・r8/r10 戻り・
 /// b6 経由の復帰）は同一なので同じバンドルに畳む
-/// （Gap: GAP-0068）。`gate::SIGTRAMP` は位置の予約のみで、
+/// 。`gate::SIGTRAMP` は位置の予約のみで、
 /// 中身はシグナル配送の実装時に置く。`gate::ADDR` 側は
 /// AT_SYSINFO_EHDR が指す ELF ヘッダページの置き場として
 /// 読み出し専用に開ける（中身はローダ側が供給する）。

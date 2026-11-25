@@ -5,7 +5,7 @@
 //!
 //! バイナリはリポジトリに含めない。ファイルが無いときは失敗する。
 
-// Gap: GAP-0022（`heavy_program_i386_applet_probe` で全アプレットを走査し、整数命令の
+// （`heavy_program_i386_applet_probe` で全アプレットを走査し、整数命令の
 // 欠落は解消済み。残りの未到達は x87 FPU と実行時間制限のみ）
 
 use std::path::{Path, PathBuf};

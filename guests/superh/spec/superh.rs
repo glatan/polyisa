@@ -677,7 +677,6 @@ pub fn build_model() -> polyisa_isadl::Model {
     // SH-2E の FPU 部分集合は公開一次資料が手元にないため、
     // 単精度命令を `fpu` 一旗で近似する（SH-2E は FSQRT 等を持たない
     // 可能性がある）。
-    // Gap: GAP-0059
     for (name, format, pattern, syntax, timing) in [
         ("fadd", "FFF", "1111........0000", "fadd {m}, {n}", "fp"),
         ("fsub", "FFF", "1111........0001", "fsub {m}, {n}", "fp"),

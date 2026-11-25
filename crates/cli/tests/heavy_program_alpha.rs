@@ -16,7 +16,7 @@
 //! 存在しないパスの ENOENT 返却を通る。
 //!
 //! 既知の外れ値:
-//! - getdents64 は `.`/`..` を合成しない（GAP-0046）。
+//! - getdents64 は `.`/`..` を合成しない。
 //!   `ls -a` のピン留め出力はドットエントリを含まない。
 //! - 解釈実行なので対象は小さい入力に絞る。
 
@@ -107,7 +107,7 @@ fn alpha_distro_commands_static() {
 }
 
 /// getdents64 の fd ごとの走査位置とソート出力を固定値と照合する。
-/// `.`/`..` は合成しない（GAP-0046）ので `ls -a` も `a\nb\n` になる。
+/// `.`/`..` は合成しないので `ls -a` も `a\nb\n` になる。
 #[test]
 fn alpha_ls_options_and_dents() {
     let dir = std::env::temp_dir().join("polyisa-heavy-alpha-ls");

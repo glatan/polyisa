@@ -24,7 +24,7 @@
 //! 直接振り分ける）。カーネルのユーザ到達入口は 0xb0（LWS）、
 //! 0xe0（set_thread_pointer）、0x100（syscall）の 3 つで、
 //! 0x00-0xaf・0xb8-0xdf・0xf0-0xff は `break 0,0`（KILL_INSN）
-//! の埋め草、0x104 以降はカーネル内部コード（GAP-0056）。
+//! の埋め草、0x104 以降はカーネル内部コード。
 //! 0xe0 は内蔵処理で
 //! `cr27 = r26` して `r31` へ戻り、それ以外はオフセットを
 //! `code` に載せて `TrapHandler::handle_trap` へ渡す（Handled
@@ -254,7 +254,7 @@ fn gateway(env: &mut BareEnv, sys: &mut impl TrapHandler, addr: u64) -> Result<(
             Ok(())
         }
         // それ以外はオフセットをそのまま code に載せて OS 側へ。
-        // Gap: GAP-0056 — 3 入口（0xb0/0xe0/0x100）以外のオフセットは
+        // 3 入口（0xb0/0xe0/0x100）以外のオフセットは
         // カーネルの KILL_INSN 領域・内部コードだが、パーソナリティの
         // Unimplemented に畳む近似（Linux では実行中断）。
         _ => {

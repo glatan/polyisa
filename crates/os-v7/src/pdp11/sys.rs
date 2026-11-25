@@ -12,7 +12,7 @@
 //! テンプレはデータ空間にある —— 分離 I/D では D 空間側の語だが
 //! VA=PA なので同じ読み方になる。
 //! Ref: SPEC-UNIX-V7.
-// Gap: GAP-0088 — 単一プロセス・root 模型の意図的な簡略化
+// 単一プロセス・root 模型の意図的な簡略化
 // （fork なし・シグナル配送なし・特権系は EPERM）。
 
 use std::collections::HashMap;

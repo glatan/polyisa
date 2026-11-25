@@ -11,7 +11,7 @@
 //! 一括反映する（`.new` オペランドはこの一時値を読む）。
 //! 対象は Linux ユーザモードの V73 系（配布物要件）と V79
 //! （主正本の最新版）。HVX は `hvx` 旗で有効化する代表部分
-//! 集合（vmem/vALU/q 論理の主形。残りは docs/gaps.md の語彙
+//! 集合（vmem/vALU/q 論理の主形。残りは docs/guests/hexagon.md の語彙
 //! 棚卸し）。複数ハードウェアスレッドの交互実行は `threads`
 //! のコアモデルが束ねる。
 //! 出典は SPEC-HEXAGON-PRM V79 (80-N2040-60 Rev AB)。

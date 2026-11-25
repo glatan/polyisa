@@ -908,7 +908,6 @@ pub fn classify_8088(d: &MapDec, byts: &[u8], taken: bool, cl: u8) -> Option<Ins
     let rm = d.modrm & 7;
     let mem = d.has_modrm && mod_ != 3;
     // v1 はバスアクセスなし・フラッシュなしの形のみ厳密検証する。
-    // Gap: GAP-0039
     if mem {
         return None;
     }

@@ -7,7 +7,7 @@
 //! 値をモデル別に pin する。段階13で追加した拡張命令の意味論は
 //! `bare_x86run`（run64_xop / run64_apx / run64_amx / run64_avx10 /
 //! run64_sse4a 等）にあり、ここには置かない。x87 の世代差は
-//! GAP-0035 の未実装の範囲。
+//! の未実装の範囲。
 
 use polyisa_cli::run_x86::{self, Outcome, TrapHandler, TrapOutcome};
 use polyisa_engine::bare::BareEnv;

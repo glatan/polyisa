@@ -9,7 +9,7 @@
 //! riscv の ebreak 入口は cli の `EcallHandler` 適合層が
 //! `Semi::call` を呼ぶ（二系統の trap 経路は GAP-0024）。
 //!
-//! 意図的な簡略化（GAP-0090）:
+//! 意図的な簡略化:
 //! - SYS_SYSTEM はホストのシェルへ渡さず常に失敗 (-1)。
 //! - CLOCK/ELAPSED は時計なしの 0、TICKFREQ は 100 固定。
 //! - `root` を与えるとファイル系演算のパスはその下に閉じ込める。
@@ -77,7 +77,6 @@ pub enum WordSize {
 }
 
 /// semihosting の状態機械。
-// Gap: GAP-0090
 pub struct Semi {
     /// 標準入出力の capture。
     pub io: SemiIo,
@@ -539,7 +538,7 @@ impl Semi {
                     .unwrap_or(0);
                 Reply::Ret(t as i64)
             }
-            // ホストのシェルは呼ばない（GAP-0090）。
+            // ホストのシェルは呼ばない。
             sysno::SYSTEM => Reply::Ret(-1),
             sysno::ERRNO => Reply::Ret(self.errno),
             sysno::GET_CMDLINE => {

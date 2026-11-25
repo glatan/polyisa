@@ -11,7 +11,7 @@ polyisa-mem = { path = "../../crates/mem" }
 polyisa-sem = { path = "../../crates/sem" }
 polyisa-softfloat = { path = "../../crates/softfloat" }
 # 意味論は具体値インタプリタ（InterpBackend）上に書く近似。
-# 他ゲストの generic B: Backend 化は後続段階の課題（Gap: GAP-0067）。
+# 総称 B: Backend 化は未着手（docs/guests/openrisc.md）。
 polyisa-engine = { path = "../../crates/engine" }
 
 [build-dependencies]

@@ -1153,7 +1153,7 @@ fn f32_to_sreg<B: Backend>(b: &mut B, v: B::V<F32>) -> B::V<W64> {
 /// u8 として読めないため、リセット既定の最近接偶数に畳む
 /// （設計判断。Linux ユーザ空間では FPCR の dyn_rm が最近接の
 /// まま動くことがほぼ全てなので実害は小さい）。
-// Gap: GAP-0050（/d は FPCR を読めず最近接偶数に畳む）。
+// /d は FPCR を読めず最近接偶数に畳む。
 // Ref: SPEC-ALPHA-ARM §4.7.9 Table 4-12.
 fn fp_rm(fpfn: u32) -> u8 {
     match (fpfn >> 6) & 3 {

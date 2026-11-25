@@ -7,7 +7,7 @@
 //! が伴い、ここが `pending` で織り込む。`l.sys` は例外ベクタ
 //! 0xc00 の Trap を上げ、OS パーソナリティが拾う。
 //! 遅延スロット中の制御転送（DCTI 連鎖）は仕様上不定として
-//! 明示に止める（Gap: GAP-0066）。
+//! 明示に止める。
 //! Ref: SPEC-OPENRISC-1000 §5.3, §6, §16.4（CPUCFGR[ND]）.
 
 use polyisa_engine::bare::BareEnv;
@@ -25,7 +25,6 @@ const STEP_LIMIT: u64 = 256_000_000;
 /// musl ldso は brk 発行前に elf 画像直後のページを触るため
 /// （BIN-DISTRO-OR1K の memset 観測）、[elf 末端, スタック窓) を
 /// まとめて遅延割付する近似を採る。
-/// Gap: GAP-0065
 #[derive(Clone, Copy)]
 pub struct StackGrowth {
     /// 遅延割付の上限（スタック頂）。
@@ -149,7 +148,6 @@ fn step_openrisc(
             // 割付する（実カーネルは未写像フェッチで SIGSEGV だが、
             // 本モデルは窓内をヒープ/スタック近似でデマンドページ
             // する）。
-            // Gap: GAP-0065
             if let Some(sg) = stack {
                 let page = pc & !0xfff;
                 if pc >= sg.limit
@@ -187,7 +185,6 @@ fn step_openrisc(
             if taken {
                 if pending.is_some() {
                     // 遅延スロット内の制御転送は仕様上不定。
-                    // Gap: GAP-0066
                     return Err(Outcome::Unimplemented {
                         pc,
                         word: u128::from(word),

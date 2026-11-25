@@ -4979,7 +4979,6 @@ fn dispatch_map<B: Backend>(
             if d.modrm >= 0xC0 {
                 match d.modrm & 7 {
                     // 0-3: F2XM1/FYL2X/FPTAN/FPATAN は softfloat 超越関数なし。
-                    // Gap: GAP-0038
                     4 => sem_ea::fxtract_st(b),
                     5 => sem_ea::fprem_st(b, true),
                     6 => sem_ea::fdecstp(b, false),
@@ -4995,7 +4994,6 @@ fn dispatch_map<B: Backend>(
                 match d.modrm & 7 {
                     0 => sem_ea::fprem_st(b, false),
                     // 1: FYL2XP1、3: FSINCOS、6/7: FSIN/FCOS は超越関数なし。
-                    // Gap: GAP-0038
                     2 => sem_ea::fsqrt_st(b),
                     4 => sem_ea::frndint_st(b),
                     5 => sem_ea::fscale_st(b),

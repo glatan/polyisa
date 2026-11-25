@@ -13,7 +13,6 @@
 //! 「出力が決定的で、fork/clone・スレッド・ネットワークを
 //! 踏まない」アプレットに限る。現状の既知の外れ値:
 //! - `sh`/`ash` は clone が ENOSYS のため `-c` が走らない
-//!   （GAP-0062）。
 //! - `uname -m` は合成 utsname の固定値 "loongarch64" を出す。
 //!   実機は "loongarch64"（`uname` のマシン名は CONFIG 由来で
 //!   同じ綴り）と一致する。

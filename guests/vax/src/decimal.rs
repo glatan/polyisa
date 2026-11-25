@@ -25,7 +25,6 @@
 //!   editpc だけパターン演算子 1 個 = 1 ステップの部分実行を実装
 //!   （状態は r0-r5 と NZVC に全部載る）。算術系は 1 ステップで
 //!   完結させる近似（GAP 記録）。
-//! Gap: GAP-0078
 //! Ref: SPEC-VAX-ARM（データ型・十進文字列命令・例外の章）.
 
 use polyisa_decimal::PackedDec;
@@ -56,7 +55,6 @@ fn check_len(len: u32) -> Result<(), InterpExit> {
 /// 0-15、符号は {B,D} だけ負。不正ニブルは UNPREDICTABLE の
 /// 決定的な選択 —— CVTSP/CVTTP 以外は検査しない規則）。
 fn read_packed(b: &mut InterpBackend, addr: u32, len: u32) -> Result<PackedDec, InterpExit> {
-    // Gap: GAP-0078
     let n = pbytes(len) as usize;
     let mut raw = vec![0u8; n];
     for (i, byte) in raw.iter_mut().enumerate() {

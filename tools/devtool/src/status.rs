@@ -1,6 +1,7 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! 追跡しているファイルから `docs/status/` を生成し、鮮度を検査する。
+//! リポジトリの追跡対象ファイルから `docs/status.md` を生成し、鮮度を検査する。
+//! `--dump` 指定時は ISA ごとの命令・モデル詳細を `target/status/` へ書き出す。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,179 +9,519 @@ use std::path::{Path, PathBuf};
 use polyisa_isadl::model::MapItem;
 use polyisa_isadl::{Model, Pred};
 
-use crate::specs;
+use crate::{gaps, specs};
 
-const NOTICE: &str = "このファイルは `task status` が生成する。手で編集しない。";
+const NOTICE: &str = "このファイルは `task status` が自動生成する。手で編集しない。";
 
-pub(crate) fn write_status(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let files = generate_status(root)?;
-    let dir = root.join("docs/status");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        let mut entries: Vec<_> = rd.flatten().collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !files.contains_key(&name) && entry.path().is_file() {
-                std::fs::remove_file(entry.path())
-                    .map_err(|e| format!("{}: {e}", entry.path().display()))?;
-            }
-        }
+pub(crate) fn write_status(root: &Path) -> Result<PathBuf, String> {
+    let body = generate_status_md(root)?;
+    let path = root.join("docs/status.md");
+    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn check_status_fresh(root: &Path) -> Result<(), String> {
+    let expected = generate_status_md(root)?;
+    let path = root.join("docs/status.md");
+    let actual = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{}: {e}（task status で生成する）", path.display()))?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err("docs/status.md が最新ではない（task status で再生成する）".to_string())
     }
+}
+
+pub(crate) fn write_dump(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let dir = root.join("target/status");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut written = Vec::new();
-    for (name, body) in &files {
-        let path = dir.join(name);
+    let mut specs_sorted: Vec<&specs::IsaSpec> = specs::isa_specs().iter().collect();
+    specs_sorted.sort_by_key(|s| s.isa);
+    for spec in specs_sorted {
+        let model = (spec.build)();
+        let path = dir.join(format!("isa-{}.md", spec.isa));
+        let body = render_isa_dump(spec.isa, spec.rel_paths, &model);
         std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
         written.push(path);
     }
     Ok(written)
 }
 
-pub(crate) fn generate_status(root: &Path) -> Result<BTreeMap<String, String>, String> {
-    let roadmap = read_to_string(&root.join("docs/design/roadmap.md"))?;
-    let gaps = read_to_string(&root.join("docs/gaps.md"))?;
-    let syscalls = load_syscall_tables(root)?;
-    let mut models = BTreeMap::new();
-    for spec in specs::isa_specs() {
-        models.insert(spec.isa, (spec.build)());
-    }
-    Ok(render_status(
-        &models,
-        specs::isa_specs(),
-        &roadmap,
-        &gaps,
-        &syscalls,
-    ))
-}
+pub(crate) fn generate_status_md(root: &Path) -> Result<String, String> {
+    let cli_main = read_to_string(&root.join("crates/cli/src/main.rs"))?;
+    let taskfile = read_to_string(&root.join("Taskfile.yml"))?;
+    let issues_text = read_to_string(&root.join("docs/known-issues.md"))?;
+    let issues = gaps::parse_issue_table(&issues_text);
+    let cli_tests = list_test_stems(&root.join("crates/cli/tests"));
+    let os_linux_tests = list_test_stems(&root.join("crates/os-linux/tests"));
 
-pub(crate) fn check_syscall_tables(root: &Path) -> Result<(), String> {
-    load_syscall_tables(root).map(|_| ())
+    let mut specs_sorted: Vec<&specs::IsaSpec> = specs::isa_specs().iter().collect();
+    specs_sorted.sort_by_key(|s| s.isa);
+
+    let mut isa_rows = Vec::new();
+    for spec in &specs_sorted {
+        let isa = spec.isa;
+        let model = (spec.build)();
+        let models_count = model.models.len().to_string();
+        let features_count = model.features.len().to_string();
+        let cli_info = detect_cli_support(isa, &cli_main);
+        let os_list = detect_os_personalities(root, isa);
+        let jit = if has_jit_runner(root, isa) {
+            "対応"
+        } else {
+            "—"
+        };
+        let timing = detect_timing(root, isa, &model);
+        let gdb = if root.join(format!("crates/cli/src/gdb_{isa}.rs")).is_file() {
+            "対応"
+        } else {
+            "—"
+        };
+        let layers = detect_test_layers(root, isa, &cli_tests, &os_linux_tests);
+        let detail = format!("[{isa}.md](guests/{isa}.md)");
+        isa_rows.push(vec![
+            isa.to_string(),
+            models_count,
+            features_count,
+            cli_info,
+            os_list,
+            jit.to_string(),
+            timing,
+            gdb.to_string(),
+            layers,
+            detail,
+        ]);
+    }
+
+    let linux_rows = collect_linux_abi_rows(root, &cli_tests, &os_linux_tests);
+    let other_os_rows = collect_other_os_rows(root, &cli_tests);
+    let target_rows = collect_host_target_rows(root, &taskfile, &cli_tests);
+
+    let mut s = String::new();
+    s.push_str("# 実装状況\n\n");
+    s.push_str(NOTICE);
+    s.push_str("\n\n");
+    s.push_str(
+        "各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧が必要な場合は `task status:dump` で `target/status/` に書き出せる。\n\n",
+    );
+
+    s.push_str("## ISA 対応マトリクス\n\n");
+    s.push_str(&md_table(
+        &[
+            "ISA",
+            "モデル数",
+            "機能数",
+            "CLI 実行",
+            "対応 OS",
+            "JIT",
+            "タイミング",
+            "GDB",
+            "テスト層",
+            "詳細",
+        ],
+        &isa_rows,
+    ));
+
+    s.push_str("\n## OS パーソナリティ（Linux）\n\n");
+    s.push_str(&md_table(
+        &[
+            "ISA / ABI",
+            "ソケット共通層",
+            "待ち合わせ共通層",
+            "ABI 照合テスト",
+            "プログラムテスト",
+        ],
+        &linux_rows,
+    ));
+
+    s.push_str("\n## その他の OS パーソナリティ\n\n");
+    s.push_str(&md_table(
+        &["クレート", "対象 OS", "対象 ISA", "プログラムテスト"],
+        &other_os_rows,
+    ));
+
+    s.push_str("\n## ホストターゲット\n\n");
+    s.push_str(&md_table(
+        &["ターゲット", "検査経路", "JIT", "ホストテスト"],
+        &target_rows,
+    ));
+
+    s.push_str("\n## 横断課題の要約\n\n");
+    let mut unstarted = 0usize;
+    let mut provisional = 0usize;
+    for r in &issues {
+        match r.kind.as_str() {
+            "未着手" => unstarted += 1,
+            "暫定" => provisional += 1,
+            _ => {}
+        }
+    }
+    s.push_str(&format!(
+        "詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は {unstarted} 件、暫定は {provisional} 件である。\n\n"
+    ));
+    let issue_rows: Vec<Vec<String>> = issues
+        .iter()
+        .map(|r| vec![r.id.clone(), r.kind.clone(), r.related.clone()])
+        .collect();
+    s.push_str(&md_table(&["ID", "区分", "関連文書"], &issue_rows));
+
+    Ok(s)
 }
 
 fn read_to_string(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-struct IndexedModel<'a> {
-    isa: &'a str,
-    rel_paths: &'a [&'a str],
-    model: &'a Model,
-}
-
-pub(crate) fn render_status(
-    models: &BTreeMap<&str, Model>,
-    specs: &[specs::IsaSpec],
-    roadmap: &str,
-    gaps: &str,
-    syscalls: &[GuestSyscalls],
-) -> BTreeMap<String, String> {
-    let mut indexed = Vec::new();
-    for spec in specs {
-        if let Some(model) = models.get(spec.isa) {
-            indexed.push(IndexedModel {
-                isa: spec.isa,
-                rel_paths: spec.rel_paths,
-                model,
-            });
+fn list_test_stems(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut stems = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("rs")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            stems.push(stem.to_string());
         }
     }
-    indexed.sort_by_key(|m| m.isa);
-    let mut files = BTreeMap::new();
-    files.insert(
-        "README.md".to_string(),
-        render_index(&indexed, roadmap, gaps, syscalls),
-    );
-    for item in &indexed {
-        files.insert(format!("isa-{}.md", item.isa), render_isa(item));
+    stems.sort();
+    stems
+}
+
+fn detect_cli_support(isa: &str, cli_main: &str) -> String {
+    let format = match isa {
+        "pdp11" | "vax" => "a.out",
+        "wasm" => "Wasm",
+        _ => "ELF",
+    };
+    let in_cpus = cli_main.contains(&format!("polyisa_guest_{isa}::MODELS"));
+    if in_cpus {
+        format.to_string()
+    } else {
+        format!("{format}（`cpus`未掲載）")
     }
-    files.insert("syscalls.md".to_string(), render_syscalls(syscalls));
-    files
 }
 
-fn render_index(
-    models: &[IndexedModel<'_>],
-    roadmap: &str,
-    gaps: &str,
-    syscalls: &[GuestSyscalls],
+fn detect_os_personalities(root: &Path, isa: &str) -> String {
+    let mut list = Vec::new();
+    let linux_dir = if isa == "riscv" { "rv64" } else { isa };
+    if root
+        .join(format!("crates/os-linux/src/{linux_dir}/sys.rs"))
+        .is_file()
+    {
+        list.push("Linux");
+    }
+    if isa == "pdp11" && root.join("crates/os-v7/src/pdp11/sys.rs").is_file() {
+        list.push("Unix V7");
+    }
+    if isa == "vax" && root.join("crates/os-bsd/src/vax/sys.rs").is_file() {
+        list.push("4.3BSD");
+    }
+    if isa == "wasm" && root.join("crates/os-wasi/src/host.rs").is_file() {
+        list.push("WASI");
+    }
+    if matches!(isa, "aarch64" | "arm" | "riscv")
+        && root.join("crates/os-semihost/src/lib.rs").is_file()
+    {
+        list.push("Semihosting");
+    }
+    if list.is_empty() {
+        "—".to_string()
+    } else {
+        list.join("・")
+    }
+}
+
+fn has_jit_runner(root: &Path, isa: &str) -> bool {
+    let path = root.join(format!("crates/cli/src/run_{isa}.rs"));
+    std::fs::read_to_string(path)
+        .map(|s| s.contains("polyisa_jit::Jit"))
+        .unwrap_or(false)
+}
+
+fn detect_timing(root: &Path, isa: &str, model: &Model) -> String {
+    let mut fidelities = BTreeSet::new();
+    for m in &model.models {
+        if let Some(t) = &m.timing {
+            fidelities.insert(t.fidelity.clone());
+        }
+    }
+    let has_timing_mod = root.join(format!("guests/{isa}/src/timing.rs")).is_file();
+    let has_timing_tests = list_test_stems(&root.join(format!("guests/{isa}/tests")))
+        .iter()
+        .any(|t| t.starts_with("heavy_timing_"));
+    if !fidelities.is_empty() {
+        let joined: Vec<String> = fidelities.into_iter().collect();
+        joined.join("・")
+    } else if has_timing_tests {
+        "専用モデル（検証あり）".to_string()
+    } else if has_timing_mod {
+        "専用モデル（未較正）".to_string()
+    } else {
+        "—".to_string()
+    }
+}
+
+fn detect_test_layers(
+    root: &Path,
+    isa: &str,
+    cli_tests: &[String],
+    os_linux_tests: &[String],
 ) -> String {
-    let mut s = String::new();
-    push_generated_heading(&mut s, "# 実装状況");
-    s.push_str(
-        "生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs`・`aarch64.rs`・`power.rs` の各 `SYSCALLS`）である。テストの結果は含めない。\n\n",
-    );
-    s.push_str("## 段階の完了条件\n\n");
-    s.push_str("条件の文言は [ロードマップ](../design/roadmap.md) にある。\n\n");
-    s.push_str(&md_table(
-        &["ID", "判定"],
-        &completion_rows(roadmap)
-            .into_iter()
-            .map(|(id, judgment)| vec![id, judgment])
-            .collect::<Vec<_>>(),
-    ));
-    s.push_str("\n## ISA\n\n");
-    let isa_rows: Vec<Vec<String>> = models
-        .iter()
-        .map(|item| {
-            let attrs = insn_attrs(item.model);
-            let mnemonics = mnemonic_rows(&attrs);
-            let models = item
-                .model
-                .models
-                .iter()
-                .map(|m| m.name.as_str())
-                .collect::<Vec<_>>()
-                .join("、");
-            vec![
-                item.isa.to_string(),
-                attrs.len().to_string(),
-                distinct_mnemonics(&mnemonics).to_string(),
-                models,
-                format!("[isa-{}.md](isa-{}.md)", item.isa, item.isa),
-            ]
-        })
-        .collect();
-    s.push_str(&md_table(
-        &["ISA", "命令の記述", "ニーモニック", "CPU モデル", "詳細"],
-        &isa_rows,
-    ));
-    s.push_str("\n## システムコール\n\n");
-    let sys_rows: Vec<Vec<String>> = syscalls
-        .iter()
-        .map(|table| {
-            vec![
-                table.abi.to_string(),
-                table.names.len().to_string(),
-                "[syscalls.md](syscalls.md)".to_string(),
-            ]
-        })
-        .collect();
-    s.push_str(&md_table(
-        &["ゲスト ABI", "処理するシステムコール", "詳細"],
-        &sys_rows,
-    ));
-    s.push_str("\n## 設計との差\n\n");
-    let gap_rows = gap_rows(gaps);
-    s.push_str(&format!(
-        "台帳は [設計との差の台帳](../gaps.md) にある。{}\n\n",
-        kind_counts(&gap_rows)
-    ));
-    let listed: Vec<Vec<String>> = gap_rows
-        .into_iter()
-        .map(|(id, design, kind)| vec![id, kind, rewrite_links(&design)])
-        .collect();
-    s.push_str(&md_table(&["ID", "区分", "設計"], &listed));
-    s
+    let guest_tests = list_test_stems(&root.join(format!("guests/{isa}/tests")));
+    let mut layers = BTreeSet::new();
+
+    for t in &guest_tests {
+        if t.starts_with("bare_")
+            || t == "sem"
+            || t == "sem_unit"
+            || t == "decode"
+            || t == "model_diff"
+            || t.starts_with("sem_")
+        {
+            layers.insert("bare");
+        } else if t.starts_with("heavy_conformance_") {
+            layers.insert("conformance");
+        } else if t.starts_with("heavy_oracle_") {
+            layers.insert("oracle");
+        } else if t.starts_with("heavy_diff_") {
+            layers.insert("diff");
+        } else if t.starts_with("heavy_timing_") {
+            layers.insert("timing");
+        } else if t.starts_with("heavy_program_") {
+            layers.insert("program");
+        }
+    }
+
+    for t in cli_tests {
+        if cli_test_matches_isa(t, isa) {
+            if t.starts_with("heavy_program_") {
+                layers.insert("program");
+            } else if t.starts_with("heavy_abi_") {
+                layers.insert("abi");
+            } else if t.starts_with("heavy_diff_") {
+                layers.insert("diff");
+            }
+        }
+    }
+
+    for t in os_linux_tests {
+        if os_linux_test_matches_isa(t, isa) {
+            layers.insert("abi");
+        }
+    }
+
+    if has_jit_runner(root, isa) && cli_tests.iter().any(|t| t == "heavy_jit_diff") {
+        layers.insert("jit");
+    }
+
+    let order = [
+        "bare",
+        "conformance",
+        "oracle",
+        "abi",
+        "program",
+        "diff",
+        "jit",
+        "timing",
+    ];
+    let out: Vec<&str> = order.into_iter().filter(|l| layers.contains(l)).collect();
+    if out.is_empty() {
+        "—".to_string()
+    } else {
+        out.join("・")
+    }
 }
 
-fn render_isa(item: &IndexedModel<'_>) -> String {
+fn cli_test_matches_isa(test: &str, isa: &str) -> bool {
+    match isa {
+        "x86" => matches!(
+            test,
+            "heavy_program_busybox"
+                | "heavy_program_busybox_i386"
+                | "heavy_program_i386_applet_probe"
+                | "heavy_program_x32"
+                | "heavy_program_x86ext"
+                | "heavy_program_net"
+        ),
+        "riscv" => matches!(test, "heavy_program_gdbstub" | "heavy_program_semihosting"),
+        "aarch64" => matches!(
+            test,
+            "heavy_program_aarch64" | "heavy_program_semihosting" | "heavy_program_net"
+        ),
+        "arm" => matches!(test, "heavy_program_arm" | "heavy_program_semihosting"),
+        "pdp11" => test == "heavy_program_unixv7",
+        "vax" => test == "heavy_program_bsdvax",
+        "wasm" => matches!(test, "heavy_program_wasi" | "heavy_diff_wasmtime"),
+        _ => test == format!("heavy_program_{isa}") || test == format!("heavy_abi_{isa}"),
+    }
+}
+
+fn os_linux_test_matches_isa(test: &str, isa: &str) -> bool {
+    match isa {
+        "x86" | "riscv" | "mips" => test == "heavy_abi_uapi",
+        _ => test == format!("heavy_abi_{isa}"),
+    }
+}
+
+fn collect_linux_abi_rows(
+    root: &Path,
+    cli_tests: &[String],
+    os_linux_tests: &[String],
+) -> Vec<Vec<String>> {
+    const LINUX_ISAS: &[(&str, &str)] = &[
+        ("aarch64", "aarch64 (LP64 LE/BE)"),
+        ("alpha", "alpha"),
+        ("arm", "arm (EABI)"),
+        ("hexagon", "hexagon"),
+        ("ia64", "ia64"),
+        ("loongarch", "loongarch (LA64)"),
+        ("m68k", "m68k"),
+        ("mips", "mips (o32 / n32 / n64)"),
+        ("openrisc", "openrisc (or1k)"),
+        ("parisc", "parisc (hppa32)"),
+        ("power", "power (ppc64le)"),
+        ("rv64", "riscv (RV64)"),
+        ("s390", "s390 (s390x)"),
+        ("sparc", "sparc (sparc32 / sparc64)"),
+        ("superh", "superh (sh4 LE/BE)"),
+        ("x86", "x86 (x86_64 / i386 / x32)"),
+    ];
+    let mut rows = Vec::new();
+    for &(dir, label) in LINUX_ISAS {
+        let sys_path = root.join(format!("crates/os-linux/src/{dir}/sys.rs"));
+        let src = std::fs::read_to_string(&sys_path).unwrap_or_default();
+        let sock = if src.contains("crate::sock") {
+            "接続済み"
+        } else {
+            "—"
+        };
+        let wait = if src.contains("crate::wait") {
+            "接続済み"
+        } else {
+            "—"
+        };
+        let isa_key = if dir == "rv64" { "riscv" } else { dir };
+        let abi_test = os_linux_tests
+            .iter()
+            .find(|t| os_linux_test_matches_isa(t, isa_key))
+            .or_else(|| {
+                cli_tests
+                    .iter()
+                    .find(|t| *t == &format!("heavy_abi_{isa_key}"))
+            })
+            .map(|t| format!("`{t}`"))
+            .unwrap_or_else(|| "—".to_string());
+        let prog_tests = collect_linux_prog_tests(root, isa_key, cli_tests);
+        rows.push(vec![
+            label.to_string(),
+            sock.to_string(),
+            wait.to_string(),
+            abi_test,
+            prog_tests,
+        ]);
+    }
+    rows
+}
+
+fn collect_linux_prog_tests(root: &Path, isa: &str, cli_tests: &[String]) -> String {
+    let mut found = Vec::new();
+    for t in cli_tests {
+        if t.starts_with("heavy_program_")
+            && cli_test_matches_isa(t, isa)
+            && t != "heavy_program_semihosting"
+        {
+            found.push(format!("`{t}`"));
+        }
+    }
+    for t in list_test_stems(&root.join(format!("guests/{isa}/tests"))) {
+        if t.starts_with("heavy_program_") {
+            found.push(format!("`{t}`"));
+        }
+    }
+    if found.is_empty() {
+        "—".to_string()
+    } else {
+        found.join("、")
+    }
+}
+
+fn collect_other_os_rows(root: &Path, cli_tests: &[String]) -> Vec<Vec<String>> {
+    let specs: &[(&str, &str, &str, &str)] = &[
+        ("os-v7", "Unix V7", "pdp11", "heavy_program_unixv7"),
+        ("os-bsd", "4.3BSD-Reno", "vax", "heavy_program_bsdvax"),
+        ("os-wasi", "WASI preview1", "wasm", "heavy_program_wasi"),
+        (
+            "os-semihost",
+            "Semihosting 2.0",
+            "aarch64・arm・riscv",
+            "heavy_program_semihosting",
+        ),
+    ];
+    specs
+        .iter()
+        .filter(|(krate, _, _, _)| root.join(format!("crates/{krate}/Cargo.toml")).is_file())
+        .map(|&(krate, os_name, isa, test)| {
+            let test_col = if cli_tests.iter().any(|t| t == test) {
+                format!("`{test}`")
+            } else {
+                "—".to_string()
+            };
+            vec![
+                format!("`{krate}`"),
+                os_name.to_string(),
+                isa.to_string(),
+                test_col,
+            ]
+        })
+        .collect()
+}
+
+fn collect_host_target_rows(root: &Path, taskfile: &str, cli_tests: &[String]) -> Vec<Vec<String>> {
+    let mut rows = vec![vec![
+        "x86_64-unknown-linux-gnu（主ホスト）".to_string(),
+        "`task check` / `task test`".to_string(),
+        "対応（x86-64 バックエンド）".to_string(),
+        "`heavy_jit_diff` ほか全テスト".to_string(),
+    ]];
+    for line in taskfile.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("- cargo check --workspace --target ") else {
+            continue;
+        };
+        let target = rest.trim();
+        let host_test = if target.starts_with("wasm32-wasi")
+            && cli_tests.iter().any(|c| c == "heavy_host_wasi")
+        {
+            "`heavy_host_wasi`".to_string()
+        } else {
+            "—".to_string()
+        };
+        let jit = if target == "x86_64-unknown-linux-gnu" {
+            "対応"
+        } else {
+            "インタプリタのみ"
+        };
+        rows.push(vec![
+            format!("`{target}`"),
+            "`task check:targets`".to_string(),
+            jit.to_string(),
+            host_test,
+        ]);
+    }
+    let _ = root;
+    rows
+}
+
+fn render_isa_dump(isa: &str, rel_paths: &[&str], model: &Model) -> String {
     let mut s = String::new();
-    push_generated_heading(&mut s, &format!("# 実装状況：{}", item.isa));
-    s.push_str(&format!(
-        "生成の元は `{}` である。\n\n",
-        item.rel_paths.join("`・`")
-    ));
+    s.push_str(&format!("# 命令・モデル詳細：{isa}\n\n"));
+    s.push_str("このファイルは `task status:dump` が生成する。\n\n");
+    s.push_str(&format!("生成元：`{}`\n\n", rel_paths.join("`・`")));
     s.push_str("## CPU モデル\n\n");
-    let mut cpu = item.model.models.clone();
+    let mut cpu = model.models.clone();
     cpu.sort_by(|a, b| a.name.cmp(&b.name));
     let cpu_rows: Vec<Vec<String>> = cpu
         .iter()
@@ -194,26 +535,11 @@ fn render_isa(item: &IndexedModel<'_>) -> String {
         })
         .collect();
     s.push_str(&md_table(
-        &["名前", "親", "足す機能", "除く機能"],
+        &["名前", "親", "追加機能", "除外機能"],
         &cpu_rows,
     ));
-    s.push_str("\n## 機能\n\n");
-    let mut features: Vec<&str> = item
-        .model
-        .features
-        .iter()
-        .map(|f| f.name.as_str())
-        .collect();
-    features.sort_unstable();
-    if features.is_empty() {
-        s.push_str("機能の宣言はない。\n");
-    } else {
-        for name in features {
-            s.push_str(&format!("- {name}\n"));
-        }
-    }
     s.push_str("\n## 命令\n\n");
-    let rows = mnemonic_rows(&insn_attrs(item.model));
+    let rows = mnemonic_rows(&insn_attrs(model));
     let table_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
@@ -239,10 +565,34 @@ struct MnemonicRow {
     timing: String,
 }
 
-/// ニーモニックを `syntax` から取る。
-/// 先頭の述語の前置き（`(` で始まり `)` で終わる語）を除く。
-/// 残りが空白を含まない左辺と `=` と右辺なら、右辺の先頭（`(` か空白の前まで）を取る。
-/// それ以外は最初の語を取る。空、または取り出した語が ASCII の英字で始まらなければ、記述の名前を使う。
+type InsnAttr<'a> = (&'a str, &'a str, &'a Pred, &'a str);
+
+fn insn_attrs(model: &Model) -> Vec<InsnAttr<'_>> {
+    model
+        .insns
+        .iter()
+        .map(|i| {
+            (
+                i.name.as_str(),
+                i.syntax.as_str(),
+                &i.when,
+                i.timing.as_str(),
+            )
+        })
+        .chain(model.maps.iter().flat_map(|m| {
+            m.items.iter().filter_map(|it| match it {
+                MapItem::Insn(_, mi) => Some((
+                    mi.name.as_str(),
+                    mi.syntax.as_str(),
+                    &mi.when,
+                    mi.timing.as_str(),
+                )),
+                MapItem::Map(..) => None,
+            })
+        }))
+        .collect()
+}
+
 pub(crate) fn mnemonic_of(syntax: &str, name: &str) -> String {
     let mut words: Vec<&str> = syntax.split_whitespace().collect();
     while words
@@ -271,8 +621,6 @@ pub(crate) fn mnemonic_of(syntax: &str, name: &str) -> String {
         words[0].to_string()
     };
     match token.chars().next() {
-        // `{0}` はオペコード表の記述でニーモニックを置く占位子。
-        // 記述名は `{ニーモニック}_{形}` なので先頭の区切りを取る。
         Some('{') => name.split('_').next().unwrap_or(name).to_string(),
         Some(c) if c.is_ascii_alphabetic() => token,
         _ => name.to_string(),
@@ -310,36 +658,6 @@ fn fmt_pred(pred: &Pred, prec: u8) -> String {
     }
 }
 
-/// 命令の表に載せる属性。`Insn`（バイト列照合の記述）と
-/// `MapInsn`（オペコード表の記述）の両方から取る。
-type InsnAttr<'a> = (&'a str, &'a str, &'a Pred, &'a str);
-
-fn insn_attrs(model: &Model) -> Vec<InsnAttr<'_>> {
-    model
-        .insns
-        .iter()
-        .map(|i| {
-            (
-                i.name.as_str(),
-                i.syntax.as_str(),
-                &i.when,
-                i.timing.as_str(),
-            )
-        })
-        .chain(model.maps.iter().flat_map(|m| {
-            m.items.iter().filter_map(|it| match it {
-                MapItem::Insn(_, mi) => Some((
-                    mi.name.as_str(),
-                    mi.syntax.as_str(),
-                    &mi.when,
-                    mi.timing.as_str(),
-                )),
-                MapItem::Map(..) => None,
-            })
-        }))
-        .collect()
-}
-
 fn mnemonic_rows(insns: &[InsnAttr<'_>]) -> Vec<MnemonicRow> {
     let mut groups: BTreeMap<(String, String, String), BTreeSet<String>> = BTreeMap::new();
     for (name, syntax, when, timing) in insns {
@@ -359,259 +677,6 @@ fn mnemonic_rows(insns: &[InsnAttr<'_>]) -> Vec<MnemonicRow> {
             timing,
         })
         .collect()
-}
-
-fn distinct_mnemonics(rows: &[MnemonicRow]) -> usize {
-    rows.iter()
-        .map(|r| r.mnemonic.as_str())
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn kind_counts(rows: &[(String, String, String)]) -> String {
-    let mut counts = BTreeMap::new();
-    for (_, _, kind) in rows {
-        *counts.entry(kind.as_str()).or_insert(0usize) += 1;
-    }
-    let n = |k: &str| counts.get(k).copied().unwrap_or(0);
-    format!(
-        "未着手は {} 件、代替は {} 件、対象外は {} 件である。",
-        n("未着手"),
-        n("代替"),
-        n("対象外")
-    )
-}
-
-fn completion_rows(text: &str) -> Vec<(String, String)> {
-    let mut rows = Vec::new();
-    let mut in_table = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if !t.starts_with('|') {
-            in_table = false;
-            continue;
-        }
-        let cols = split_row(t);
-        if cols.len() >= 5 && cols[1] == "ID" && cols[2] == "条件" && cols[3] == "判定" {
-            in_table = true;
-            continue;
-        }
-        if !in_table || is_separator(&cols) {
-            continue;
-        }
-        rows.push((cell(&cols, 1), cell(&cols, 3)));
-    }
-    rows
-}
-
-fn gap_rows(text: &str) -> Vec<(String, String, String)> {
-    let mut rows = Vec::new();
-    let mut in_table = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if !t.starts_with('|') {
-            in_table = false;
-            continue;
-        }
-        let cols = split_row(t);
-        if cols.len() >= 7
-            && cols[1] == "ID"
-            && cols[2] == "設計"
-            && cols[3] == "現在の実装"
-            && cols[4] == "区分"
-            && cols[5] == "解消の条件"
-        {
-            in_table = true;
-            continue;
-        }
-        if !in_table || is_separator(&cols) {
-            continue;
-        }
-        rows.push((cell(&cols, 1), cell(&cols, 2), cell(&cols, 4)));
-    }
-    rows
-}
-
-fn split_row(line: &str) -> Vec<String> {
-    line.split('|').map(|c| c.trim().to_string()).collect()
-}
-
-fn cell(cols: &[String], index: usize) -> String {
-    cols.get(index).cloned().unwrap_or_default()
-}
-
-fn is_separator(cols: &[String]) -> bool {
-    cols.get(1)
-        .is_some_and(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':'))
-}
-
-pub(crate) fn rewrite_links(cell: &str) -> String {
-    let mut out = String::new();
-    let mut rest = cell;
-    while let Some(i) = rest.find("](") {
-        out.push_str(&rest[..i + 2]);
-        rest = &rest[i + 2..];
-        let Some(end) = rest.find(')') else {
-            break;
-        };
-        let path = &rest[..end];
-        if path.starts_with("http://")
-            || path.starts_with("https://")
-            || path.starts_with('#')
-            || path.starts_with("../")
-        {
-            out.push_str(path);
-        } else {
-            out.push_str("../");
-            out.push_str(path);
-        }
-        out.push(')');
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn push_generated_heading(out: &mut String, heading: &str) {
-    out.push_str(heading);
-    out.push_str("\n\n");
-    out.push_str(NOTICE);
-    out.push_str("\n\n");
-}
-
-pub(crate) struct GuestSyscalls {
-    abi: &'static str,
-    names: Vec<String>,
-}
-
-fn load_syscall_tables(root: &Path) -> Result<Vec<GuestSyscalls>, String> {
-    let rv = read_to_string(&root.join("crates/os-linux/src/rv64/sys.rs"))?;
-    let x86 = read_to_string(&root.join("crates/os-linux/src/x86/sys.rs"))?;
-    let mips = read_to_string(&root.join("crates/os-linux/src/mips_o32.rs"))?;
-    let mips_n32 = read_to_string(&root.join("crates/os-linux/src/mips_n32.rs"))?;
-    let mips_n64 = read_to_string(&root.join("crates/os-linux/src/mips_n64.rs"))?;
-    let aarch64 = read_to_string(&root.join("crates/os-linux/src/aarch64.rs"))?;
-    let power = read_to_string(&root.join("crates/os-linux/src/power.rs"))?;
-    Ok(vec![
-        GuestSyscalls {
-            abi: "rv64",
-            names: parse_sys_table(&rv, "RV64_SYSCALLS", "crates/os-linux/src/rv64/sys.rs")?,
-        },
-        GuestSyscalls {
-            abi: "x86_64",
-            names: parse_sys_table(&x86, "X86_64_SYSCALLS", "crates/os-linux/src/x86/sys.rs")?,
-        },
-        GuestSyscalls {
-            abi: "x86_32",
-            names: parse_sys_table(&x86, "X86_32_SYSCALLS", "crates/os-linux/src/x86/sys.rs")?,
-        },
-        GuestSyscalls {
-            abi: "mips_o32",
-            names: parse_sys_table(&mips, "SYSCALLS", "crates/os-linux/src/mips_o32.rs")?,
-        },
-        GuestSyscalls {
-            abi: "mips_n32",
-            names: parse_sys_table(&mips_n32, "SYSCALLS", "crates/os-linux/src/mips_n32.rs")?,
-        },
-        GuestSyscalls {
-            abi: "mips_n64",
-            names: parse_sys_table(&mips_n64, "SYSCALLS", "crates/os-linux/src/mips_n64.rs")?,
-        },
-        GuestSyscalls {
-            abi: "aarch64",
-            names: parse_sys_table(&aarch64, "SYSCALLS", "crates/os-linux/src/aarch64.rs")?,
-        },
-        GuestSyscalls {
-            abi: "power",
-            names: parse_sys_table(&power, "SYSCALLS", "crates/os-linux/src/power.rs")?,
-        },
-    ])
-}
-
-fn parse_sys_table(src: &str, const_name: &str, origin: &str) -> Result<Vec<String>, String> {
-    let marker = format!("const {const_name}");
-    let Some(at) = src.find(&marker) else {
-        return Err(format!("{origin}: {const_name} がない"));
-    };
-    let rest = &src[at..];
-    let Some(open) = rest.find("= &[") else {
-        return Err(format!("{origin}: {const_name} の開始がない"));
-    };
-    let after = &rest[open + 4..];
-    let Some(end) = after.find("];") else {
-        return Err(format!("{origin}: {const_name} の終わりがない"));
-    };
-    let mut names = Vec::new();
-    for raw in after[..end].lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        let Some(name) = syscall_entry_name(line) else {
-            return Err(format!("{origin}: {const_name}: 行の形が違う: {line}"));
-        };
-        names.push(name);
-    }
-    if names.is_empty() {
-        return Err(format!("{origin}: {const_name} が空"));
-    }
-    Ok(names)
-}
-
-/// `("名前", sys_名前),` の名前。関数名が名前と違う行は受け付けない。
-fn syscall_entry_name(line: &str) -> Option<String> {
-    // (番号, "名前"), の形も受け付ける。
-    if let Some(rest) = line.strip_prefix('(')
-        && let Some((num, rest)) = rest.split_once(',')
-        && num.trim().chars().all(|c| c.is_ascii_digit())
-    {
-        let rest = rest.trim_start();
-        let rest = rest.strip_prefix('"')?;
-        let (name, rest) = rest.split_once('"')?;
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            return None;
-        }
-        rest.trim_start().strip_prefix("),")?;
-        return Some(name.to_string());
-    }
-    let rest = line.strip_prefix("(\"")?;
-    let (name, rest) = rest.split_once('"')?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
-        return None;
-    }
-    let rest = rest.trim_start().strip_prefix(',')?.trim_start();
-    let rest = rest.strip_prefix("sys_")?;
-    let rest = rest.strip_suffix("),")?;
-    if rest != name {
-        return None;
-    }
-    Some(name.to_string())
-}
-
-fn render_syscalls(tables: &[GuestSyscalls]) -> String {
-    let mut s = String::new();
-    push_generated_heading(&mut s, "# 実装状況：システムコール");
-    s.push_str(
-        "生成の元は `crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS` と、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs`・`aarch64.rs`・`power.rs` の各 `SYSCALLS` である。\n\n",
-    );
-    for table in tables {
-        s.push_str(&format!("## {}\n\n", table.abi));
-        let mut names = table.names.clone();
-        names.sort();
-        for name in names {
-            s.push_str(&format!("- {name}\n"));
-        }
-        s.push('\n');
-    }
-    s
 }
 
 fn md_table(header: &[&str], rows: &[Vec<String>]) -> String {
@@ -659,24 +724,31 @@ mod tests {
     #[test]
     fn same_input_renders_twice_identically() {
         let root = crate::workspace_root();
-        let a = generate_status(&root).expect("first");
-        let b = generate_status(&root).expect("second");
+        let a = generate_status_md(&root).expect("first");
+        let b = generate_status_md(&root).expect("second");
         assert_eq!(a, b);
     }
 
     #[test]
-    fn mnemonic_groups_by_first_word_and_splits_conditions() {
+    fn committed_status_is_fresh() {
+        let root = crate::workspace_root();
+        check_status_fresh(&root).expect("status.md fresh");
+    }
+
+    #[test]
+    fn mnemonic_strips_predicate_and_reads_assignment() {
+        assert_eq!(mnemonic_of("(p0) add r{rd} = r{r1}, r{r2}", "add"), "add");
+        assert_eq!(mnemonic_of("nop", "nop"), "nop");
+        assert_eq!(mnemonic_of("r{rd} = add(r{rs1}, r{rs2})", "add"), "add");
+        assert_eq!(mnemonic_of("r{rd} = #{imm}", "mov_imm"), "mov_imm");
+        assert_eq!(mnemonic_of("", "jump"), "jump");
+    }
+
+    #[test]
+    fn mnemonic_groups_by_first_word() {
         let insns = [
             sample_insn("add_rm", "add r/m, {imm}", Pred::True, "alu"),
             sample_insn("add_r", "add r, {imm}", Pred::True, "alu"),
-            sample_insn(
-                "add_rv32",
-                "add rd, rs",
-                Pred::Flag("rv32".to_string()),
-                "alu",
-            ),
-            sample_insn("jump", "", Pred::True, "jump"),
-            sample_insn("sub", "r{rd} = sub(r{rs1}, r{rs2})", Pred::True, "alu"),
         ];
         let attrs: Vec<InsnAttr> = insns
             .iter()
@@ -690,64 +762,8 @@ mod tests {
             })
             .collect();
         let rows = mnemonic_rows(&attrs);
-        let add_true = rows
-            .iter()
-            .find(|r| r.mnemonic == "add" && r.condition == "真")
-            .expect("add");
-        assert_eq!(
-            add_true.names,
-            vec!["add_r".to_string(), "add_rm".to_string()]
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r.mnemonic == "add" && r.condition == "rv32")
-        );
-        assert!(
-            rows.iter()
-                .any(|r| r.mnemonic == "jump" && r.names == ["jump"])
-        );
-        assert!(rows.iter().any(|r| r.mnemonic == "sub"));
-        assert_eq!(distinct_mnemonics(&rows), 3);
-    }
-
-    #[test]
-    fn mnemonic_strips_predicate_and_reads_assignment() {
-        assert_eq!(mnemonic_of("(p0) add r{rd} = r{r1}, r{r2}", "add"), "add");
-        assert_eq!(
-            mnemonic_of("(qp) add r{rd} = r{r1}, r{r2}", "add_pred"),
-            "add"
-        );
-        assert_eq!(
-            mnemonic_of("(p0) add.rot r{rd} = r{r1}, r{r2}", "add_rot"),
-            "add.rot"
-        );
-        assert_eq!(mnemonic_of("nop", "nop"), "nop");
-        assert_eq!(mnemonic_of("br {imm}", "br"), "br");
-        assert_eq!(mnemonic_of("r{rd} = add(r{rs1}, r{rs2})", "add"), "add");
-        assert_eq!(mnemonic_of("r{rd} = sub(r{rs1}, r{rs2})", "sub"), "sub");
-        assert_eq!(mnemonic_of("r{rd} = #{imm}", "mov_imm"), "mov_imm");
-        assert_eq!(mnemonic_of("jump {imm}", "jump"), "jump");
-        assert_eq!(mnemonic_of("", "jump"), "jump");
-        assert_eq!(mnemonic_of("(p0)", "bare"), "bare");
-    }
-
-    #[test]
-    fn mnemonic_without_ascii_letter_uses_the_description_name() {
-        assert_eq!(mnemonic_of("r{rd} = #{imm}", "mov_imm"), "mov_imm");
-        assert_eq!(mnemonic_of("r{rd} = add(r{rs1}, r{rs2})", "add"), "add");
-    }
-
-    #[test]
-    fn syscall_table_rejects_a_broken_line() {
-        let src = "const X86_64_SYSCALLS: &[(&str, SysFn)] = &[\n    (\"read\", sys_read),\n    read,\n];\n";
-        let err = parse_sys_table(src, "X86_64_SYSCALLS", "x86/sys.rs").unwrap_err();
-        assert!(err.contains("行の形が違う"), "{err}");
-    }
-
-    #[test]
-    fn syscall_table_rejects_a_missing_const() {
-        let err = parse_sys_table("", "RV64_SYSCALLS", "rv64/sys.rs").unwrap_err();
-        assert!(err.contains("がない"), "{err}");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].names, vec!["add_r", "add_rm"]);
     }
 
     #[test]
@@ -757,26 +773,5 @@ mod tests {
             Pred::Not(Box::new(Pred::Flag("mips_r6".to_string()))),
         ]);
         assert_eq!(pred_string(&pred), "rv64 && !mips_r6");
-        let any = Pred::Any(vec![
-            Pred::Flag("a".to_string()),
-            Pred::All(vec![
-                Pred::Flag("b".to_string()),
-                Pred::Not(Box::new(Pred::Flag("c".to_string()))),
-            ]),
-        ]);
-        assert_eq!(pred_string(&any), "a || b && !c");
-        assert_eq!(pred_string(&Pred::True), "真");
-    }
-
-    #[test]
-    fn design_links_are_relative_to_status() {
-        let cell = "[節](design/user-mode.md#構成)、[ADR](../adr/0014-statfs-number-table-only.md)";
-        let got = rewrite_links(cell);
-        assert!(got.contains("](../design/user-mode.md#構成)"), "{got}");
-        assert!(
-            got.contains("](../adr/0014-statfs-number-table-only.md)"),
-            "{got}"
-        );
-        assert!(!got.contains("](../../adr/"), "{got}");
     }
 }

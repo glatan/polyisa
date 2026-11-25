@@ -476,7 +476,6 @@ fn run_pass(llvm_mc: &str, triple: &str, modes: u32, feats: u128, mode: &str) ->
 }
 
 /// 既知の差分。(head hex, 種別)。head はオペコードバイト列。
-/// Gap: GAP-0037。
 /// 差分の理由は `KNOWN_WHY` に一覧する。`mnemonic` は表を通った
 /// 個別名の違いだけを許す。
 fn known(head: &str, kind: &str, mode: &str) -> bool {
@@ -524,7 +523,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("0f a7", "missing", "*"), // VIA 拡張（B3）
     ("0f aa", "missing", "*"), // rsm（A4）
     ("0f ae", "missing", "*"), // fxsave 等（C1）
-    // lss/lfs/lgs（D2 で実装）。mod=11 形を受理するのは GAP-0037(a)
+    // lss/lfs/lgs（D2 で実装）。mod=11 形を受理するのは(a)
     // と同じく mod 制約の未宣言が原因（strict）。
     ("0f b2", "spurious", "*"),
     ("0f b4", "spurious", "*"),

@@ -139,7 +139,6 @@ fn gate(word: u32) -> Option<u128> {
 /// いずれも命令先頭（OS 側の補完が命令を再評価して終端へ進める
 /// 契約）。実機が配送前に行う指定子評価と例外フレームのスタック
 /// 積みはこの裸モデルの範囲外。
-// Gap: GAP-0079
 // Ref: SPEC-VAX-ARM（サブセット化の章）, SPEC-VAX-MICROVAX §3.9.
 fn unimpl_insn(
     env: &mut BareEnv,

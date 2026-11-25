@@ -755,7 +755,6 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         | "cvttps2dq" | "cvtdq2pd" | "cvtpd2dq" | "cvttpd2dq" | "movq2dq" | "movdq2q" => {
             &["sse2"]
         }
-        // Gap: GAP-0035
         // x87 本体は機能ゲートしない。FPU の無い 8088 では ESC 命令は
         // #UD でなく無視されるので、デコード不能にすると実モードが壊れる。
         // `fisttp`/`fcmov` 等の拡張エンコーディングも同じ ESC スロット

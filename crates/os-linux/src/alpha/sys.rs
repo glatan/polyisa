@@ -60,7 +60,7 @@ pub struct AlphaIo {
 }
 
 /// Alpha Linux の syscall 状態機械。v0=番号、a0–a5=引数。
-// Gap: GAP-0046 — 単一プロセス模型の意図的な簡略化（fork なし、
+// 単一プロセス模型の意図的な簡略化（fork なし、
 // osf_select は ENOSYS、nanosleep はスタブ、statfs は合成値）。
 pub struct Linux {
     /// 標準入出力の capture。

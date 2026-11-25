@@ -23,7 +23,7 @@
 //! fd 管理・dirfd 対応パス解決・stat/stat64/statx・getdents64・
 //! ファイル操作全般を alpha/sys.rs の型に写す。fork/clone/
 //! execve/wait4 などプロセス生成系は単一プロセスモデルのため
-//! ENOSYS（GAP-0058）。
+//! ENOSYS。
 
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -68,7 +68,7 @@ struct FdMeta {
 }
 
 /// PA-RISC Linux の syscall 状態機械。`r20`=番号、`r26`–`r21`=引数。
-// Gap: GAP-0058 — 単一プロセス模型の意図的な簡略化（fork/exec なし、
+// 単一プロセス模型の意図的な簡略化（fork/exec なし、
 // nanosleep はスタブ、statfs は合成値、シグナル配送なし）。
 pub struct Linux {
     /// 標準入出力の capture。テストが読む。
@@ -943,7 +943,7 @@ impl Linux {
     /// `fcntl`/`fcntl64`。カーネルの `do_fcntl` が受理するコマンドを
     /// 実装する（`long err = -EINVAL` の既定値どおり、未知コマンドは
     /// EINVAL）。フラグ系は `fd_meta` が追跡する f_flags/cloexec を
-    /// 読み書きする（ホストファイルへは反映しない — GAP-0058）。
+    /// 読み書きする（ホストファイルへは反映しない —）。
     // Ref: SRC-LINUX (7.3) — fs/fcntl.c `do_fcntl`。
     fn sys_fcntl(&mut self, env: &mut BareEnv, fd: u32, cmd: u32, arg: u64) -> Result<u64, u32> {
         use crate::parisc::fcntl as fc;
@@ -1812,7 +1812,7 @@ impl Linux {
     /// FIFO/SOCK/mode 0 を受理し、DIR は EPERM、不明型は EINVAL。
     /// FIFO/SOCK はホストの mknod で実ノードを作る。CHR/BLK は
     /// CAP_MKNOD 相当で許可するが、非 root ホストで作れないときは
-    /// 通常ファイルを置く近似（GAP-0058）。
+    /// 通常ファイルを置く近似。
     // Ref: SRC-LINUX (7.3) — fs/namei.c may_mknod/vfs_mknod。
     fn sys_mknod(
         &mut self,
@@ -2619,7 +2619,7 @@ impl Linux {
                     None => bad(errno::EBADF),
                 }
             }
-            // chown-family: 所有者変更は単一 root 模型（GAP-0058）で
+            // chown-family: 所有者変更は単一 root 模型で
             // no-op だが、カーネルが chown_common で lookup するのと
             // 同じく対象の存在を検査する（パスは ENOENT、fd は EBADF）。
             nr::CHOWN => res(self.sys_path_op(env, AT_FDCWD, args[0], |p| {
@@ -2908,7 +2908,7 @@ impl Linux {
                 env, args[0], args[1], args[2], args[3],
             )),
             nr::SIGPROCMASK => res(self.sys_sigprocmask(env, args[0], args[1], args[2])),
-            // 単一プロセス・配送なし模型（GAP-0058）では pending
+            // 単一プロセス・配送なし模型では pending
             // は常に空。blocked マスク（sig_mask）ではなく pending
             // sigset を返す。
             nr::RT_SIGPENDING => {
@@ -3080,7 +3080,7 @@ impl Linux {
             nr::GETXATTR | nr::LGETXATTR | nr::FGETXATTR | nr::LISTXATTR | nr::LLISTXATTR
             | nr::FLISTXATTR => bad(errno::EOPNOTSUPP),
             // 単一プロセス/単一スレッドモデルのためプロセス生成・
-            // exec・wait 系は未対応（GAP-0058）。ptrace も同じ扱い。
+            // exec・wait 系は未対応。ptrace も同じ扱い。
             nr::FORK
             | nr::VFORK
             | nr::CLONE
@@ -3157,7 +3157,7 @@ impl Linux {
             Disp::Exit(c) => return TrapOutcome::Exit(c),
             Disp::Unimpl => {
                 // 未実装は既定で ENOSYS を返して続ける（設計:
-                // docs/design/user-mode.md の「未実装のシステムコール」）。
+                // docs/architecture/os-layer.md の「未実装のシステムコール」）。
                 if !self.reported.contains(&n) {
                     self.reported.push(n);
                     eprintln!(
@@ -3759,7 +3759,7 @@ mod tests {
     }
 
     /// getdents64（linux_dirent64、BE）: reclen は 8 整列、末尾に
-    /// 達したら 0。`.`/`..` は合成しない（GAP-0058）。
+    /// 達したら 0。`.`/`..` は合成しない。
     #[test]
     fn getdents64_records_be() {
         let dir = std::env::temp_dir().join("polyisa-parisc-dents");
@@ -3883,7 +3883,7 @@ mod tests {
         assert_eq!(sys.get32(&mut env, 0x4004), Some(1024));
     }
 
-    /// fork/clone/execve/wait4 は ENOSYS（GAP-0058）。
+    /// fork/clone/execve/wait4 は ENOSYS。
     #[test]
     fn process_syscalls_are_enosys() {
         let mut sys = Linux::new();

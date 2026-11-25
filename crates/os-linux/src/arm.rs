@@ -10,7 +10,7 @@
 // Ref: SRC-LINUX (7.3).
 
 /// ARM の Linux syscall 処理。`guest-arm` 機能で有効になる。
-/// 設計の依存規則（`docs/design/workspace.md` の「依存規則」）が
+/// 設計の依存規則（`docs/architecture/workspace.md` の「依存規則」）が
 /// `os-linux` の `guests/*` 依存を機能フラグ付きで認めている。
 #[cfg(feature = "guest-arm")]
 pub mod sys;

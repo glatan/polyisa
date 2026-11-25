@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! 命令意味論の語彙。バックエンドトレイト、値の型、退出の型。
 //!
-//! 詳しくは [命令意味論](../../docs/design/semantics.md) を見る。
+//! 詳しくは [命令意味論](../../docs/architecture/execution.md) を見る。
 
 #![forbid(unsafe_code)]
 

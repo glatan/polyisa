@@ -4,7 +4,7 @@
 //!
 //! 値は U74-MC コアの資料から写した（Ref: SPEC-SIFIVE-U74）。
 //! レイテンシは発行から結果が使えるまでのサイクル数。可変域は代表値に
-//! 畳んでおり（GAP-0097）、較正待ちの仮値は `TODO(calibrate)` で示す。
+//! 畳んでおり、較正待ちの仮値は `TODO(calibrate)` で示す。
 
 use polyisa_timing::branch::{Btb, DirPred, Predictor, Ras};
 use polyisa_timing::cache::{CacheHierarchy, CacheLevel, Repl, WriteKind};
@@ -61,7 +61,7 @@ pub const U74_CLASSES: &[IoClass] = &[
         hint_latency: false,
     },
     // ストアはバッファ化され 1 サイクル。
-    // Gap: GAP-0096 ストアパイプ衝突の 5 サイクル・未完了フィル 1 本は畳む。
+    // ストアパイプ衝突の 5 サイクル・未完了フィル 1 本は畳む。
     IoClass {
         class: "store",
         issue: 1,
@@ -176,7 +176,7 @@ pub const U74_CLASSES: &[IoClass] = &[
     },
     // CSR は M2 で実行し読みは 1 サイクル。多くの CSR 書き込みは
     // パイプラインフラッシュで 7 サイクルかかるため全 CSR に畳む近似。
-    // Gap: GAP-0097 読みだけの CSR もフラッシュ扱い、単独発行は
+    // 読みだけの CSR もフラッシュ扱い、単独発行は
     // フラッシュ分で近似し先行ペアの禁止はモデルにない。
     // Ref: SPEC-SIFIVE-U74 §4.3.
     IoClass {
@@ -271,7 +271,7 @@ pub const U74_CLASSES: &[IoClass] = &[
         hint_latency: false,
     },
     // fcvt 系は 2–4（単精度）・2–6（倍精度）で代表 4。
-    // Gap: GAP-0097 変換先ごとの差は畳む。
+    // 変換先ごとの差は畳む。
     // Ref: SPEC-SIFIVE-U74 App. D Table 187/188.
     IoClass {
         class: "fcvt",
@@ -286,7 +286,7 @@ pub const U74_CLASSES: &[IoClass] = &[
         hint_latency: false,
     },
     // fdiv.s は 9–36（リピート 8–33）。代表はレンジ中央の近似。
-    // Gap: GAP-0097 可変域を固定代表値に畳む。
+    // 可変域を固定代表値に畳む。
     // Ref: SPEC-SIFIVE-U74 App. D Table 187.
     IoClass {
         class: "fdiv_s",
@@ -376,7 +376,7 @@ pub fn sifive_u74() -> InOrderModel {
         hit_latency: 1,
     };
     // L1 D$: 32KiB・4way・64B ライン・PLRU・ライトバック。
-    // Gap: GAP-0094 ヒットは word/dword で 2・より小さい単位で 3 だが、
+    // ヒットは word/dword で 2・より小さい単位で 3 だが、
     // `CacheLevel` は単一値しか持てないため 2 を採る。
     const L1D: CacheLevel = CacheLevel {
         name: "u74_l1d",

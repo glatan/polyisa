@@ -169,7 +169,6 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             Err(InterpExit::Exception(e)) => {
                 // 拡張語フェッチの失敗も同じ規則 —— inc モデルは
                 // 失敗した語の次を積む（項目 28 の粒度は近似）。
-                // Gap: GAP-0086
                 let stacked = if nxm_inc {
                     pc.wrapping_add(2 * (i + 1))
                 } else {

@@ -10,7 +10,7 @@
 // Ref: SRC-LINUX (7.3).
 
 /// m68k の Linux syscall 処理。`guest-m68k` 機能で有効になる。
-/// 設計の依存規則（`docs/design/workspace.md` の「依存規則」）が
+/// 設計の依存規則（`docs/architecture/workspace.md` の「依存規則」）が
 /// `os-linux` の `guests/*` 依存を機能フラグ付きで認めている。
 #[cfg(feature = "guest-m68k")]
 pub mod sys;

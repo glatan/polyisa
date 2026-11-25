@@ -492,7 +492,7 @@ const ACC_SC: Access = Access {
 pub const TRAP_BND: u64 = 5;
 
 /// CSR 読み出し。idx >= 512 の未割当て番号は 0 を返す
-/// （配列近似。Gap: GAP-0063）。
+/// （配列近似。）。
 fn csr_load<B: Backend>(b: &mut B, idx: u64) -> B::V<W64> {
     let i64v = k(b, idx);
     let idx32 = b.trunc::<W64, W32>(i64v);
@@ -507,7 +507,7 @@ fn csr_load<B: Backend>(b: &mut B, idx: u64) -> B::V<W64> {
 }
 
 /// CSR 書き込み。idx >= 512 の未割当て番号は捨てる
-/// （配列近似。Gap: GAP-0063）。
+/// （配列近似。）。
 fn csr_store<B: Backend>(b: &mut B, idx: u64, v: B::V<W64>) -> Result<(), B::Exit> {
     let i64v = k(b, idx);
     let idx32 = b.trunc::<W64, W32>(i64v);
@@ -622,7 +622,7 @@ fn fset32<B: Backend>(b: &mut B, i: u64, v: B::V<W32>) {
 /// `fp_flags` を FCSR0 の Cause[28:24]・Flags[20:16] に反映する。
 /// backend のフラグ並び（NV,DZ,OF,UF,NX）は LoongArch の VZOUI と
 /// 同じ順なのでそのまま写せる。Enables が立っていても
-/// FP 例外トラップにはしない近似。Gap: GAP-0063.
+/// FP 例外トラップにはしない近似。
 /// Ref: SPEC-LOONGARCH-RM §3.1.4（FCSR0 定義）.
 fn fpo_end<B: Backend>(b: &mut B) {
     let fl = u64::from(b.fp_flags());
@@ -774,7 +774,7 @@ fn fmag<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>, gt: bool) -> B:
 
 /// FSCALEB 近似。`a * 2^n`（`n` は `nbits` の符号付き整数）。
 /// 2^n を浮動小数点ビットとして組み立てて `fmul` に流す。
-/// 非正規化途中結果は近似（Gap: GAP-0063）。
+/// 非正規化途中結果は近似。
 /// Ref: SPEC-LOONGARCH-RM §3.2.1.7.
 fn fscaleb_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>, nbits: B::V<F>) -> B::V<F> {
     let (eb, mb, bias) = if F::BITS == 64 {
@@ -806,7 +806,7 @@ fn fscaleb_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>, nbits: B::V<F>) -> B::
 
 /// FLOGB。`logB(x)` の IEEE 754 規則（±0→-inf、±inf→+inf、
 /// NaN→NaN、非正規化数は正規化後の指数）をビット操作で畳む。
-/// logB(±0) の divByZero フラグは立てない近似（Gap: GAP-0063）。
+/// logB(±0) の divByZero フラグは立てない近似。
 /// Ref: SPEC-LOONGARCH-RM §3.2.1.7.
 fn flogb_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
     let (eb, mb, bias) = if F::BITS == 64 {
@@ -927,7 +927,7 @@ fn frint_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>, rm: u8) -> B::V<F> {
 
 /// FCMP.cond の 22 条件を評価し 0/1 を返す。`cond` は命令語の
 /// 5 ビット値。S/C の区別（signaling）による例外は畳まない近似
-/// （Gap: GAP-0063）。Ref: SPEC-LOONGARCH-RM §3.2.2.1（Table 9）.
+/// 。Ref: SPEC-LOONGARCH-RM §3.2.2.1（Table 9）.
 fn fcmp_res<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>, cond: u64) -> B::V<W64> {
     let one = k(b, 1);
     let zero = k(b, 0);
@@ -1178,7 +1178,7 @@ fn vldi_value(imm13: u64) -> Option<u64> {
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
 /// `la64` は LA64 モデルで動いているか。戻り値 `Ok(true)` は
 /// 実行済み（PC の進めは実行ループ側）。全 `Insn` 変種を網羅する
-/// （match の網羅性で検査）。特権・近似系は GAP-0063 を参照。
+/// （match の網羅性で検査）。特権・近似系は を参照。
 // Ref: SPEC-LOONGARCH-RM §2, §3, §4.
 #[allow(clippy::too_many_lines)]
 pub fn exec<B: Backend>(
@@ -1924,7 +1924,7 @@ pub fn exec<B: Backend>(
             rset(b, ops[0], okv);
         }
         // llacq/screl は FR2 形（ea = GR[rj]）。単一スレッドでは
-        // acquire/release の区別は効かない。Gap: GAP-0063.
+        // acquire/release の区別は効かない。
         Insn::LlacqW => {
             let ea = rget(b, ops[1]);
             let v = b.load_reserved::<W32>(ea, ACC_LL)?;
@@ -1956,7 +1956,7 @@ pub fn exec<B: Backend>(
             rset(b, ops[0], r);
         }
         // preld/preldx はプリフェッチヒント。キャッシュを持たない
-        // モデルでは効果なしの no-op。Gap: GAP-0063.
+        // モデルでは効果なしの no-op。
         Insn::Preld | Insn::Preldx => {}
         // ---- bound check 付き load/store（LA6）----
         // Ref: SPEC-LOONGARCH-RM §2.2.3.4（BCE）.
@@ -2042,7 +2042,7 @@ pub fn exec<B: Backend>(
         }
         // ---- AM*（read-modify-write。単一スレッド近似。
         // _db はデータバリアを兼ねるが単一スレッドでは効果なし。
-        // Gap: GAP-0063）----
+        //）----
         // Ref: SPEC-LOONGARCH-RM §2.2.7.1/§2.2.7.2.
         Insn::AmaddW | Insn::AmaddDbW => {
             am_w(b, &ops, |b, x, y| b.add::<W32>(x, y))?;
@@ -2261,11 +2261,11 @@ pub fn exec<B: Backend>(
         }
         Insn::Dbar | Insn::Ibar => {
             // シングルスレッド模型ではフェンスは no-op。
-            // Gap: GAP-0063（マルチスレッドの順序付けは未対応）。
+            // マルチスレッドの順序付けは未対応。
         }
         // ---- カウンタ ----
         // rd ← StableCounter、rj ← Counter ID。Counter ID は
-        // モデルしないため 0 を返す。Gap: GAP-0063.
+        // モデルしないため 0 を返す。
         // Ref: SPEC-LOONGARCH-RM §2.2.10.4.
         Insn::RdtimelW => {
             let c = b.get(cnt_ref());
@@ -2305,7 +2305,7 @@ pub fn exec<B: Backend>(
         // ---- CSR 読み書き（LA8）----
         // csr[ idx ] は 512 エントリの配列近似。idx >= 512 の
         // 未割当て番号は読み 0・書き捨て。特権レベルの検査は
-        // しない。Gap: GAP-0063.
+        // しない。
         // Ref: SPEC-LOONGARCH-RM §4.1.7.
         Insn::Csrrd => {
             // ops = [rd, rj(=0), csr14]。
@@ -2335,7 +2335,6 @@ pub fn exec<B: Backend>(
         Insn::Ertn => {
             // pc ← CSR.ERA、CRMD[2:0]（PLV・IE）← PRMD[2:0]
             // （PPLV・PIE）。割込・ネストの配送はモデルしない。
-            // Gap: GAP-0063.
             // Ref: SPEC-LOONGARCH-RM §4.1.7.
             let idx = k(b, csr::ERA as u64);
             let idx32 = b.trunc::<W64, W32>(idx);
@@ -2357,7 +2356,7 @@ pub fn exec<B: Backend>(
         // ---- 特権・システム近似（LA8）----
         // MMU/TLB・キャッシュ・IOCSR・省電力をモデルしないため、
         // TLB 操作・CACOP・IOCSR・IDLE・INVTLB・LDDIR/LDPTE は
-        // 表層のみの no-op 近似。Gap: GAP-0063.
+        // 表層のみの no-op 近似。
         Insn::Tlbclr
         | Insn::Tlbfill
         | Insn::Tlbflush
@@ -2369,16 +2368,15 @@ pub fn exec<B: Backend>(
         | Insn::Ldpte => {}
         Insn::Idle => {
             // 割込待ち。単一スレッド・割込なしの模型では
-            // 直ちに復帰する no-op。Gap: GAP-0063.
+            // 直ちに復帰する no-op。
         }
         Insn::Lddir => {
             // ページテーブル走査は MMU 未モデルのため rd ← 0。
-            // Gap: GAP-0063.
             let zero = k(b, 0);
             rset(b, ops[0], zero);
         }
         Insn::IocsrrdB | Insn::IocsrrdH | Insn::IocsrrdW | Insn::IocsrrdD => {
-            // IOCSR 空間はモデルしないので 0 を返す。Gap: GAP-0063.
+            // IOCSR 空間はモデルしないので 0 を返す。
             let zero = k(b, 0);
             rset(b, ops[0], zero);
         }
@@ -2386,7 +2384,6 @@ pub fn exec<B: Backend>(
         Insn::Dbcl => {
             // デバッグ例外入口。デバッグモードを持たないため
             // 例外として発火させ、code = TRAP_DBG_BASE | code15。
-            // Gap: GAP-0063.
             return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_DBG_BASE | ops[0]));
         }
         // ---- スカラ FP 算術（LA9。丸めは FCSR.RM に従う）----
@@ -2497,7 +2494,7 @@ pub fn exec<B: Backend>(
         Insn::FmovS => funa32(b, &ops, |_b, x| x),
         Insn::FmovD => funa64(b, &ops, |_b, x| x),
         // FSQRT・FRECIP/FRSQRT・近似系。近似命令（FRECIPE/
-        // FRSQRTE）は正確演算で代替（Gap: GAP-0063）。
+        // FRSQRTE）は正確演算で代替。
         // Ref: §3.2.1.9-§3.2.1.10.
         Insn::FsqrtS | Insn::FrsqrtS | Insn::FrsqrteS => {
             with_la_rm(b, |b, rm| {
@@ -2875,7 +2872,7 @@ pub fn exec<B: Backend>(
         }
         // ---- LSX の部分集合（LA13）----
         // Ref: SPEC-LOONGARCH-RM Vol.2.
-        // Gap: GAP-0063（VLD/VST の 16 バイト整列規則は
+        // （VLD/VST の 16 バイト整列規則は
         // 検査しない非整列アクセス近似）。
         Insn::Vld => {
             let ea = ldst_ea(b, &ops);
@@ -3104,7 +3101,7 @@ pub fn exec<B: Backend>(
             // si13 全体が展開指定。各 .d 要素は同じ 64 ビット値
             // （`VR[vd].D[i] = Set_Value(i13)`）。
             let Some(d) = vldi_value(ops[1]) else {
-                // mode 13–15 は INE 例外。Gap: GAP-0063
+                // mode 13–15 は INE 例外。
                 // （ILL に畳む）。
                 return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL));
             };

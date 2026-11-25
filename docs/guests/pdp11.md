@@ -1,0 +1,28 @@
+# PDP-11
+
+## 概要と対応範囲
+
+PDP-11/03（LSI-11）〜J-11 の 12 モデルと、EIS・FIS・FP11・CIS・MMU（分離 I/D を含む）の各オプションを `guests/pdp11` で実装している。PDP-11 Architecture Handbook（1983）付録 B のモデル間差分表の観測可能な項目を機能フラグと挙動パラメータへ反映している。
+
+- **CPU モデル**：`pdp11_03`、`pdp11_04`、`pdp11_23`、`pdp11_24`、`pdp11_34`、`pdp11_44`、`pdp11_60`、`pdp11_70`、`pdp11_73`、`pdp11_83`、`pdp11_93`、`t11`（計 12 モデル）。
+
+## 対応する OS・ABI と実行環境
+
+- **Unix V7（`os-v7::pdp11`）**：a.out（0407・0410・0411 分離 I/D、`trap` 規約）。`polyisa run --cpu pdp11:pdp11_70 <a.out>` で実行できる（簡略化の一覧は [OS 層](../architecture/os-layer.md) を参照）。
+
+## 実装の構造と特記事項
+
+16 ビット固定長命令語と語内指定子（mode 3bit + reg 3bit）の拡張語消費を `guests/pdp11/src/specifier.rs` が担う。分離 I/D 空間は `mem` 層を拡張せず、ゲスト側の `mmu::xlate`（モード×I/D×8 ページの APR 集合）で仮想アドレスから単一物理 `AddressSpace` へ変換する構成を採っている。FP11・FIS は `softfloat::decfp`、CIS は `decimal` を使用する。
+
+## 既知の簡略化と未対応範囲
+
+- **特権・バス・モデル細則**：`TSTSET`/`WRTLCK` は単一スレッド連続アクセス、`RESET` は no-op、`HALT` はカーネルモードで `Unimplemented`（非カーネルではベクタ 4 トラップ）。11/04 の `RTT` 差分および付録 B のバス・コンソール・診断系項目は未実装。
+- **MMU・abort 回復の近似**：`MMR0<8>`（宛先再配置）と `MMR3<5>`（UNIBUS 写像）は保持のみ。スタック制限はイエローゾーンのみモデルし、赤ゾーンは `Unimplemented` 扱い。`MMR1` の巻き戻し回復（`mmu::reg_unwind`）はオート増減・`MFPI`/`MTPI`/`JSR`/`RTS`/`RTI` の記録範囲に限る。多重遅延トラップの優先度調停は未モデル。
+- **FP11 / FIS / CIS の近似**：`DIV` の不定域は決定的選択。FIS・FP11（FP11-A〜FPJ11 族内差分、`FID`・`FIUV`・`MODF`・指数ずらし端境）は単一系として実装しており実機マイクロコードとの全面照合は未実施。CIS は中断可能文字列命令を 1 ステップ＝1 単位、十進算術を 1 ステップ完結とし、予約表現型番・非数字ニブルは決定的値へ正規化している。
+- **タイミング**：専用タイミングモデルは持たず、`timing_classes` の汎用分類のみ（未較正）。
+- **CLI `cpus`**：`polyisa cpus` の一覧出力には未登録。
+
+## 検証手段
+
+- **OS なし・単体**：`bare_pdp11`（140 件）、`model_diff`（付録 B モデル差分 22 件）＋ lib 単体テスト
+- **プログラム**：`heavy_program_unixv7`（Unix V7 配布物バイナリ）

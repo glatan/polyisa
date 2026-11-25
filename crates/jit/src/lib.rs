@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! JIT。意味論を IR に記録し、x86-64 の機械語にして実行する。
 //!
-//! 設計は docs/design/jit.md。インタプリタはオラクルとして残り、
+//! 設計は docs/architecture/execution.md。インタプリタはオラクルとして残り、
 //! JIT の実行はブロックの境界ごとに同じ CPU 状態・メモリを与える
 //! ことを差分試験 `heavy_jit_diff` が確かめる。
 //!
@@ -14,13 +14,13 @@
 //!                                                  ──> optimize ──> compile
 //! ```
 
-// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// unsafe 許可クレート（docs/architecture/workspace.md「`unsafe` の扱い」）。
 // 生成した機械語を実行するため。
 #![allow(unsafe_code)]
 
 pub mod ctx;
 // ホストのバックエンドはホストの ISA ごとのモジュールに閉じる
-// （docs/design/host.md）。生成コードは sysv64 呼出し規約で `rt`
+// （docs/architecture/host.md）。生成コードは sysv64 呼出し規約で `rt`
 // の関数を呼ぶので、x86-64 の Unix 系ホストだけが機械語を持てる。
 #[cfg(all(unix, target_arch = "x86_64"))]
 mod rt;

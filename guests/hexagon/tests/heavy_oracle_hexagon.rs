@@ -12,7 +12,7 @@
 //! 汎用名、j4/dx 部分集合レジスタの生符号、implicit な
 //! r29/r30 表示）は正規化側で吸収する。
 //!
-//! 既知の未対応語彙は GAP-0074（df/sf 変換・演算群）だけを
+//! 既知の未対応語彙は（df/sf 変換・演算群）だけを
 //! 形状一致で許容する。
 
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ const FEATS: u128 = FEAT_V5
     | FEAT_V71
     | FEAT_V73;
 
-/// GAP-0074: 倍精度/単精度 FP の未対応語彙。llvm 形状テキスト
+///: 倍精度/単精度 FP の未対応語彙。llvm 形状テキスト
 /// に現れる接頭/包含パターン（形状正規化済みの小文字形）。
 const GAP_FP: &[&str] = &[
     "df", "sf", "convert_", "dfmpy", "dfadd", "dfsub", "dfmin", "dfmax", "dfclass",
@@ -557,7 +557,7 @@ fn main_loop(report_path: Option<&str>) {
         if poly.is_empty() {
             for s in &row.subs {
                 let sh = shape_of(s);
-                // GAP-0074: FP 語彙のみ許容。
+                //: FP 語彙のみ許容。
                 if GAP_FP.iter().any(|k| sh.to_lowercase().contains(k)) {
                     gap_fp += 1;
                 } else {

@@ -131,7 +131,7 @@ impl SysCtx {
     }
 }
 
-/// socket 系。[ユーザーモード](../../../docs/design/user-mode.md) の
+/// socket 系。[ユーザーモード](../../../docs/architecture/os-layer.md) の
 /// 「Linux のシステムコールの実装の段階」の段階 5（ネットワークと待ち合わせ）までの
 /// 暫定で常に EPERM。失敗形のアプレット合わせに使う。
 pub fn sys_socket(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

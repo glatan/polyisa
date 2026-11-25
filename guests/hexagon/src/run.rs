@@ -29,7 +29,7 @@ use polyisa_sem::{Backend as _, ExceptionKind};
 use crate::{Insn, decode_model_ex, extract_ops, packet, sem};
 
 /// ページフォルト駆動の lazymap 窓（Linux の GROWSDOWN・ヒープ
-/// 事前張りの近似 — GAP-0073）。`[lo, hi)` 内の未写像アクセスは
+/// 事前張りの近似 —）。`[lo, hi)` 内の未写像アクセスは
 /// ページを遅延割付してパケットをやり直す。
 #[derive(Clone, Copy)]
 pub struct Growth {
@@ -221,7 +221,7 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
 
 /// `step` の lazymap 窓付き。窓 `[g.lo, g.hi)` 内の未写像への
 /// データ・フェッチアクセスはページを遅延割付してパケットを
-/// やり直す（Linux の GROWSDOWN・ヒープ近似 — GAP-0073）。
+/// やり直す（Linux の GROWSDOWN・ヒープ近似 —）。
 pub fn step_growth(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,

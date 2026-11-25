@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! ISADL からのコード生成。検査済みモデルを受け、Rust の源を文字列で返す。
 //!
-//! 詳しくは [ISA 記述言語](../../../docs/design/isa-description.md) の「生成物」を見る。
+//! 詳しくは [ISA 記述言語](../../../docs/architecture/isadl.md) の「生成物」を見る。
 //! この骨格は線形のデコーダと単純な逆アセンブラを生成する。
 //! 決定木への最適化と `build.rs` への組み込みは後の段階で足す。
 

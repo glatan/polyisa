@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! 実行エンジン。インタプリタのバックエンド、ブロック管理、実行ループ。
 //!
-//! 詳しくは [実行エンジン](../../docs/design/execution-engine.md) を見る。
+//! 詳しくは [実行エンジン](../../docs/architecture/execution.md) を見る。
 
-// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// unsafe 許可クレート（docs/architecture/workspace.md「`unsafe` の扱い」）。
 // バックエンドが CPU 状態のフィールドへオフセットでアクセスするため。
 #![allow(unsafe_code)]
 

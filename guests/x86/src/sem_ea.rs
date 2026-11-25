@@ -10731,7 +10731,7 @@ pub fn ftst_st<B: Backend>(b: &mut B) -> Flow<B> {
     fcom_ext(b, zs, ze, false)
 }
 
-/// FXAM。ST(0) を分類して C0=符号、C1-C3=クラスを書く。Gap: GAP-0038
+/// FXAM。ST(0) を分類して C0=符号、C1-C3=クラスを書く。
 /// クラス: 0=未対応(unnormal) 1=NaN 2=正規 3=無限 4=ゼロ 5=空 6=非正規。
 /// モデルはタグを持たず sig==0 && exp==0 をゼロと空で区別できないため、
 /// 両方 0 のスロットは Zero(4) に分類する。
@@ -10805,7 +10805,6 @@ pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
 
 /// FPREM/FPREM1。q = ST(0)/ST(1) を trunc(FPREM) または最近値(FPREM1) で
 /// 整数化し、ST(0) = ST(0) - q*ST(1)。倍精度経由の近似。
-/// Gap: GAP-0038
 /// C2=0（完全減算）で商の下位 3 ビットを C3=Q1・C1=Q0・C0=Q2 に写す。
 pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
@@ -10854,7 +10853,6 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
 }
 
 /// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。仮数は変えず指数に整数を加える。
-/// Gap: GAP-0038
 /// 結果が上限を超えると無限、下限を割ると仮数右シフトの非正規数（近似）。
 pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
@@ -10907,7 +10905,6 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
 
 /// FXTRACT。ST(0) を指数・仮数に分け、結果は ST(0)=仮数（指数 0x3fff、
 /// 符号保持）、ST(1)=指数（実数化）。±0/±inf/NaN の各クラス結果は近似。
-/// Gap: GAP-0038
 pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
@@ -10981,7 +10978,7 @@ fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W6
 }
 
 /// FRSTOR/FLDENV 共通の環境読み出し。FCW・FSW（C ビット+TOP）を戻す。
-/// FTW はタグ未モデルのため読み飛ばす。Gap: GAP-0038
+/// FTW はタグ未モデルのため読み飛ばす。
 fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64>)>) -> Flow<B> {
     let fcw = decode::mem_load::<B, W16>(b, a, wseg)?;
     b.set(sem::fcw_ref(), fcw);
@@ -11009,7 +11006,6 @@ pub fn fldenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
 }
 
 /// FNSTENV m28。環境を書き出し、全浮動小数点例外をマスクする（FCW|=0x3f）。
-/// Gap: GAP-0038
 pub fn fnstenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
@@ -11512,7 +11508,6 @@ pub fn dpp<B: Backend>(
 
 /// ROUNDPS/ROUNDPD。全レーンを imm[1:0] の丸めモードで整数丸めする。
 /// MXCSR の例外マスク・フラグ反映と imm[3] の MXCSR 参照は未対応。
-/// Gap: GAP-0036
 fn round_rm(imm: u8) -> u8 {
     match imm & 3 {
         1 => RM_RDN,
@@ -11825,7 +11820,6 @@ pub fn pxstr<B: Backend>(
     let mut res1 = k0::<B, W32>(b);
     for i in 0..16u32 {
         // imm[1:0]（要素の幅と符号）はバイト・符号なしのみを仮定する。
-        // Gap: GAP-0036
         let r = str_agg(b, (imm >> 2) & 3, i, a, c, len_a, len_c);
         let __h5 = b.konst::<W32>(i);
         let sh = b.shl::<W32>(r, __h5);
@@ -12133,7 +12127,7 @@ pub fn fxsave_area<B: Backend>(
     cstore::<B, W16>(b, a2, wseg, fswv, w87)?;
     // FTW（簡約形、1 ビット/物理スロット）: 空でなければ 1。
     // 空判定は `x87_env_store` と同じ sig/exp 由来の近似で、
-    // +0.0 のような値のある空判定の誤りは GAP-0038 の枠組み。
+    // +0.0 のような値のある空判定の誤りは の枠組み。
     // 予約の上位バイト（+5）は 0 で書く。
     let mut ftw = b.konst::<W8>(0);
     for i in 0..8u16 {

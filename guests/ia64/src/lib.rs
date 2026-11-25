@@ -188,8 +188,8 @@ impl Default for CpuState {
             ccv: 0,
             // fpsr の電源投入時値（SDM）: traps{5:0}=0x28（o,i
             // 例外無効）・sf0{9:10}=z,o 旗。ユーザモードの FP 例外
-            // フォールト自体はまだ配線していない（docs/gaps.md
-            // GAP-0068）が、traps/td ビットは建築どおり保持し
+            // フォールト自体はまだ配線していない（docs/guests/ia64.md
+            //）が、traps/td ビットは建築どおり保持し
             // fchkf の判定に使う。
             fpsr: 0x0009_8028,
             rsc: 0,

@@ -7,11 +7,11 @@
 //!
 //! 単一プロセス・単一スレッド模型: clone/execve/パイプ/
 //! シグナル配送は未実装（ENOSYS または登録のみ受理）。or1k_atomic
-//! （番号 244）は未実装として止める（Gap: GAP-0064）。ゲストは
+//! （番号 244）は未実装として止める。ゲストは
 //! ビッグエンディアンなのでポインタ・iovec・stat の語は BE で
 //! 読み書きする。stat は asm-generic `struct stat64`（time32 の
 //! 104 バイト）。ファイル mmap2 は pgoff 単位の offset を使った
-//! MAP_PRIVATE 事前読み近似（共有・書き戻しなし — Gap: GAP-0064）。
+//! MAP_PRIVATE 事前読み近似（共有・書き戻しなし）。
 //! Ref: SRC-LINUX-OPENRISC-UAPI; SPEC-OPENRISC-1000 §6.1.
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -77,7 +77,6 @@ pub struct Linux {
     /// getdents64 の fd 毎の読み出し位置（エントリ番号）。
     dir_off: std::collections::BTreeMap<u32, usize>,
     /// rt_sigprocmask が保持する blocked マスク（配送しない近似 —
-    /// Gap: GAP-0064）。
     sig_mask: u64,
     /// fd 待ちの時計起点。初回の待ちで立ち上げ、呼び出し間で共有。
     wait_start: Option<std::time::Instant>,
@@ -119,7 +118,6 @@ impl Linux {
 
     /// syscall のバッファアクセスが伸ばし得るスタック窓
     /// （窓内の未写像ページを遅延割付する近似）。
-    /// Gap: GAP-0065
     pub fn set_stack_window(&mut self, lo: u64, hi: u64) {
         self.stack_lo = lo;
         self.stack_hi = hi;
@@ -236,7 +234,7 @@ impl Linux {
 
     /// ゲストパスをホストパスに写す（root 内閉じ込め）。dirfd は
     /// AT_FDCWD(-100) か `remember_path` で覚えたディレクトリ fd
-    /// （superh/loongarch と同じ近似 — Gap: GAP-0064 の dirfd 近似）。
+    /// （superh/loongarch と同じ近似 の dirfd 近似）。
     /// root 配下にノードが無い `/dev/*` はホストの devtmpfs へ通す。
     fn host_path(&self, dirfd: u64, path: &str) -> Option<String> {
         const AT_FDCWD: u64 = (-100i64) as u64;
@@ -386,7 +384,7 @@ impl Linux {
         };
         // asm-generic の O_*: ACCMODE=3, CREAT=0o100, EXCL=0o200,
         // TRUNC=0o1000, APPEND=0o2000。残りのフラグ（O_DIRECTORY・
-        // O_NOFOLLOW・O_CLOEXEC・O_SYNC 系）は無視する（Gap: GAP-0064）。
+        // O_NOFOLLOW・O_CLOEXEC・O_SYNC 系）は無視する。
         let accmode = flags & 3;
         let mut opt = std::fs::OpenOptions::new();
         opt.read(accmode != 1)
@@ -461,7 +459,6 @@ impl Linux {
     /// `fstatat64(dirfd, path, stat64*, flags)`。
     /// AT_SYMLINK_NOFOLLOW(0x100) で最終要素のリンク解釈を止める。
     /// AT_EMPTY_PATH+空パス は dirfd 自身を stat する近似
-    /// （Gap: GAP-0064）。
     fn sys_fstatat(
         &mut self,
         env: &mut BareEnv,
@@ -519,7 +516,7 @@ impl Linux {
     /// `mmap2(addr, len, prot, flags, fd, pgoff)`。pgoff は
     /// 4KiB ページ単位（asm-generic `sys_mmap2`）。
     /// file-backed は内容を事前読みする近似（共有・後続 write の
-    /// 反映はない — Gap: GAP-0064）。
+    /// 反映はない）。
     /// Ref: SRC-LINUX — include/uapi/asm-generic/mman-common.h,
     /// mm/mmap.c（sys_mmap2）.
     ///
@@ -652,7 +649,7 @@ impl Linux {
 
     /// `prlimit64(pid, res, new, old)`。old に rlimit64（u64×2）
     /// の合成値を書く。new は受理のみ（単一プロセス近似 — Gap:
-    /// GAP-0064）。resource >= RLIM_NLIMITS(16) は EINVAL。
+    ///）。resource >= RLIM_NLIMITS(16) は EINVAL。
     fn sys_prlimit64(&mut self, env: &mut BareEnv, res: u64, old: u64) -> Result<u64, u64> {
         const RLIM_NLIMITS: u64 = 16;
         const RLIM64_INFINITY: u64 = u64::MAX;
@@ -667,7 +664,7 @@ impl Linux {
     }
 
     /// `rt_sigaction(sig, act, oldact, sigsetsize)`。配送しない
-    /// 近似（Gap: GAP-0064）。oldact には SIG_DFL 相当の
+    /// 近似。oldact には SIG_DFL 相当の
     /// asm-generic `struct sigaction`（{handler u32, flags u32,
     /// restorer u32, mask u64} = 20B）のゼロを書く。sigsetsize は
     /// 8 固定でなければ EINVAL。
@@ -683,7 +680,7 @@ impl Linux {
 
     /// `rt_sigprocmask(how, set, oldset, sigsetsize)`。
     /// SIG_BLOCK=0/UNBLOCK=1/SETMASK=2。blocked マスクは保持する
-    /// が配送はしない（Gap: GAP-0064）。
+    /// が配送はしない。
     fn sys_rt_sigprocmask(
         &mut self,
         env: &mut BareEnv,
@@ -958,7 +955,6 @@ impl Linux {
             nr::GETRANDOM => {
                 let mut buf = vec![0u8; (a[1] as usize).min(256)];
                 // 決定論的なダミー乱数（暗論的強度は不要の検査用 —
-                // Gap: GAP-0064）。
                 for (i, b) in buf.iter_mut().enumerate() {
                     *b = (i as u8).wrapping_mul(73).wrapping_add(41);
                 }
@@ -1002,7 +998,6 @@ impl TrapHandler for Linux {
         if nr_ == nr::OR1K_ATOMIC {
             // or1k 専用の原子的操作 syscall。単一スレッド模型のため
             // l.lwa/l.swa で代替すべきもの。未実装として報告する
-            // （Gap: GAP-0064）。
             return TrapOutcome::Unimplemented;
         }
         let r = self.dispatch(env, nr_, a);

@@ -14,9 +14,9 @@
 //! getdents64・存在しないパスの ENOENT 返却を通る。
 //!
 //! 既知の外れ値:
-//! - getdents64 は `.`/`..` を合成しない（GAP-0058）。
+//! - getdents64 は `.`/`..` を合成しない。
 //!   `ls -a` のピン留め出力はドットエントリを含まない。
-//! - fork/clone/execve/wait4 は ENOSYS（GAP-0058）。
+//! - fork/clone/execve/wait4 は ENOSYS。
 //! - 解釈実行なので対象は小さい入力に絞る。
 
 use std::path::{Path, PathBuf};
@@ -106,7 +106,7 @@ fn parisc_distro_commands_static() {
 }
 
 /// getdents64 の fd ごとの走査位置とソート出力を固定値と照合する。
-/// `.`/`..` は合成しない（GAP-0058）ので `ls -a` も `a\nb\n` になる。
+/// `.`/`..` は合成しないので `ls -a` も `a\nb\n` になる。
 #[test]
 fn parisc_ls_options_and_dents() {
     let dir = std::env::temp_dir().join("polyisa-heavy-parisc-ls");

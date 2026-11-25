@@ -11,7 +11,7 @@
 //! 等の定数）を使う。macOS 等では accept4 と型フラグがないので、
 //! そのホストを対象にするときは fcntl による段階適用に書き換える。
 
-// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// unsafe 許可クレート（docs/architecture/workspace.md「`unsafe` の扱い」）。
 
 use std::io;
 #[cfg(unix)]

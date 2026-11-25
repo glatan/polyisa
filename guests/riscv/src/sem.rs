@@ -221,7 +221,7 @@ pub fn lwu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
 }
 
 // ストア。書き込みの前に `probe` で全範囲の可否を確かめ、
-// 例外時は状態を変えずに退出する（[命令意味論](../../../docs/design/semantics.md)）。
+// 例外時は状態を変えずに退出する（[命令意味論](../../../docs/architecture/execution.md)）。
 
 pub fn sb<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let raw = read(b, rs2);

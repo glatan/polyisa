@@ -11,7 +11,7 @@
 //! - `l.sys` は例外ベクタ 0xc00、`l.trap` は 0xe00 の
 //!   `ExceptionKind::Trap` を上げ、OS パーソナリティに委ねる。
 //! - 予約カスタム命令（l.cust1-8・lf.cust1.*）と特権専用の
-//!   l.rfe は未実装として止める（Gap: GAP-0066）。
+//!   l.rfe は未実装として止める。
 //! - l.ld/l.sd（ORBIS64）は宣言のみの機能で、実行時は未実装。
 //! Ref: SPEC-OPENRISC-1000 §5.3（ORBIS32）, §5.4（ORFPX32/64）,
 //! §5.5（ORFPX64A32）, §6（例外）.
@@ -211,7 +211,6 @@ fn s32(b: &mut InterpBackend, a: u64, v: u64) -> Result<(), InterpExit> {
 }
 
 /// SPR の読み出し。未実装グループは 0 を返す。
-/// Gap: GAP-0066
 /// Ref: SPEC-OPENRISC-1000 §4.3 表 4-1, §4.4 表 4-2.
 pub fn spr_read(b: &InterpBackend, adr: u16) -> u64 {
     use spr::*;
@@ -247,7 +246,6 @@ pub fn spr_read(b: &InterpBackend, adr: u16) -> u64 {
 /// SPR の書き込み。SR はユーザ可書ビットのみ、FPCSR は全ビット、
 /// 読み取り専用の構成レジスタ（VR/UPR/CPUCFGR 等）は無視する。
 /// 特権 SPR への書き込み制限はユーザモデルの近似。
-/// Gap: GAP-0066
 pub fn spr_write(b: &mut InterpBackend, adr: u16, v: u64) {
     use spr::*;
     let v = v & 0xffff_ffff;
@@ -618,7 +616,6 @@ pub fn exec(
         }
         // l.lwa/l.swa は予約機構に載せるが、単一スレッド模型の
         // ため l.swa は常に成功する（競合による失敗は発生しない）。
-        // Gap: GAP-0066
         Insn::LLwa => {
             let a = rget(b, g(1)).wrapping_add(sext(g(2), 16)) & 0xffff_ffff;
             let v = u64::from(b.load_reserved::<W32>(a, ATOMIC)?);

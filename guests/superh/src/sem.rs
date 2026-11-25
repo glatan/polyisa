@@ -35,7 +35,6 @@
 //!   FPUL との `fsts`/`flds`/`float`/`ftrc`。FPSCR.SZ の対転送、
 //!   FPSCR.FR の FR/XF 切替、FSCA/FSRRA/FIPR/FTRV/FRCHG/FPCHG/
 //!   FSCHG/FCNVDS/FCNVSD も実装済み。特殊関数は数値近似
-//!   （Gap: GAP-0059）。
 //!
 //! 遅延スロットの扱い: SH の遅延分岐は `bra`/`bsr`/`jmp`/`jsr`/
 //! `rts`/`braf`/`bsrf`/`bf.s`/`bt.s` で、スロット（`pc+2`）は常に
@@ -636,7 +635,7 @@ fn sext(v: u64, bits: u32) -> i64 {
 }
 
 /// MAC（mach:macl の 64 ビット）に `p`（W64）を足す。
-/// S ビットの飽和は段階18 の範囲外（Gap: GAP-0059）。
+/// S ビットの飽和は段階18 の範囲外。
 fn mac_add<B: Backend>(b: &mut B, p: B::V<W64>) {
     let hi = b.get(mach_ref());
     let lo = b.get(macl_ref());
@@ -1298,7 +1297,7 @@ pub fn exec<B: Backend>(
         }
         Insn::MacW => {
             // MAC += sext16(mem16[Rm]) * sext16(mem16[Rn]);
-            // Rm+=2, Rn+=2。S ビットの飽和は近似（Gap: GAP-0059）。
+            // Rm+=2, Rn+=2。S ビットの飽和は近似。
             let a = rget(b, ops[1]);
             let xv = load_s(b, a, 2, false, endian)?;
             let x0 = and_n(b, xv, 0xffff);
@@ -2058,7 +2057,6 @@ pub fn exec<B: Backend>(
             // 近似とする（バンクファイル全体・IBNR/BO/BE・割込の
             // 自動退避はモデルしない）。
             // Ref: SPEC-SUPERH-SH2A §6.3.17/§6.3.35, §7.4.2.
-            // Gap: GAP-0061
             let a = rget(b, ops[0]);
             let b7 = shr_n(b, a, 7);
             let bank = and_n(b, b7, 0x1ff);
@@ -2465,7 +2463,7 @@ pub fn exec<B: Backend>(
             // fsca fpul,DRn — FPUL[15:0] を角度（1 周=65536）として
             // FR[2*n3]=sin、FR[2*n3+1]=cos（二つの単精度）。
             // Ref: SPEC-SUPERH-SH4 §10（FSCA）。
-            // sin/cos は範囲折り畳み＋minimax 近似（Gap: GAP-0059 —
+            // sin/cos は範囲折り畳み＋minimax 近似（
             // 専用ユニットの精度・速度は近似的）。
             let x = b.get(fpul_ref());
             let a = and_n(b, x, 0xffff);
@@ -2542,7 +2540,7 @@ pub fn exec<B: Backend>(
 
 /// FSCA の sin/cos（θ ∈ [0, 2π)）。`backend` の実数演算だけで構成する:
 /// θ を [-π/2, π/2] に折り畳んで cephes 系の minimax 多項式で近似する。
-/// （専用ユニットの精密さではなく数値近似 — Gap: GAP-0059）
+/// （専用ユニットの精密さではなく数値近似）
 // Ref: SPEC-SUPERH-SH4 §10.
 fn fsca_sincos<B: Backend>(b: &mut B, th: B::V<F32>) -> (B::V<F32>, B::V<F32>) {
     // 定数群（f32 ビット列）。
@@ -2562,7 +2560,7 @@ fn fsca_sincos<B: Backend>(b: &mut B, th: B::V<F32>) -> (B::V<F32>, B::V<F32>) {
     let x_hi = b.fsub::<F32>(th, h2pi);
     let x = if_then_f(b, q0, |_| th, |b| if_then_f(b, q1, |_| x_mid, |_| x_hi));
     // sin の minimax: x + x³·(c1 + x²(c2 + x²(c3 + x²c4)))
-    // （cephes — 係数は SPEC-SUPERH ではなく汎用の近似式。Gap: GAP-0059）
+    // （cephes — 係数は SPEC-SUPERH ではなく汎用の近似式。）
     let c1 = kf(b, 0xbe2a_aaab); // -0.16666667
     let c2 = kf(b, 0x3c08_89cd); // 0.00833216
     let c3 = kf(b, 0xb94c_cce7); // -0.00019515296

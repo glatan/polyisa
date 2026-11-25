@@ -23,10 +23,9 @@
 //!
 //! 対象モデルは `vax11_780`（FPA なし。G/H 形式の命令も
 //! 表にある値をそのまま採る）。MicroVAX 系・NVAX の時間は
-//! 持たない。範囲の記録は GAP-0080。
+//! 持たない。範囲の記録は。
 //! Ref: SPEC-VAX-ARM, SPEC-VAX-MICROVAX, MEAS-VAX-USENET,
 //! MEAS-VAX-EMERCLARK.
-// Gap: GAP-0080
 
 use polyisa_timing::{Fidelity, InstrEvent, TimingModel, VirtualTime};
 
@@ -55,7 +54,6 @@ pub struct Rt {
 /// 指定子の評価コスト（μc）。拡張バイトのフェッチ・ポインタの
 /// 間接読み出し・指数乗算・自動増減の更新を含み、オペランドの
 /// データアクセス自体は含まない。実測値の差分から当てはめた近似。
-// Gap: GAP-0080
 fn spec_eval(s: &Spec) -> u64 {
     match s {
         Spec::Lit(_) | Spec::Reg(_) | Spec::RegDef(_) => 0,
@@ -78,7 +76,6 @@ fn spec_eval(s: &Spec) -> u64 {
 /// （4 バイトごとに 1 メモリアクセスとする近似）で決まる。
 /// `.a`/`.b` はデータアクセスを持たず、`.v` はフィールドの基底
 /// 読み出しとして読み出し側を数える。
-// Gap: GAP-0080
 fn data_acc(ty: specifier::OpTy) -> u64 {
     // 4 バイト単位のメモリアクセス回数。
     let acc = u64::from(ty.width.bytes().div_ceil(4)) * 2;
@@ -112,7 +109,6 @@ fn opnd_cost(op: &Opnd, ty: specifier::OpTy) -> u64 {
 /// 値は 780 実測（μs × 5）のアンカーと、表にない命令のクラス近似。
 /// `rt.units` は反復命令の処理単位数、`rt.first` は初期化コストの
 /// 支払い、`rt.taken` は条件分岐の成立。
-// Gap: GAP-0080
 fn body(insn: Insn, rt: &Rt) -> u64 {
     let u = rt.units;
     let setup = u64::from(rt.first);

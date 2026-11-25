@@ -64,12 +64,17 @@ tasks:
       vars: [ISA]
 
   status:
-    desc: "実装状況を docs/status/ に生成する"
+    desc: "実装状況を docs/status.md に生成する"
     cmds:
       - cargo run -q -p polyisa-devtool -- status
 
+  status:dump:
+    desc: "ISA ごとの命令・モデル詳細を target/status/ に書き出す"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- status --dump
+
   bench:
-    desc: "性能の計測（汎用意味論と直接実装の比較。判定は結果を見て行い、記録は ADR-0012）"
+    desc: "性能の計測（汎用意味論と直接実装の比較。背景は docs/architecture/execution.md）"
     cmds:
       - cargo test --release -p polyisa-engine --test bench_generic_direct -- --nocapture
 

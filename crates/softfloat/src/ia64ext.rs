@@ -926,7 +926,7 @@ impl Ia64Ext {
 
     /// 拡張精度メモリ形式（80 ビット。{符号1,指数15} + 仮数 64）
     /// への変換。レジスタ側は場の再バイアスで近似する（範囲外は
-    /// 飽和。docs/gaps.md GAP-0068）。
+    /// 飽和。docs/guests/ia64.md）。
     #[must_use]
     pub fn to_ext80(self) -> (u16, u64) {
         let (neg, e, m) = self.decode();
@@ -959,7 +959,7 @@ impl Ia64Ext {
     /// frcpa（1/f3 の逆数近似）の値と条件述語。
     /// 近似の規則に従い、計算不能な組み合わせでは述語 0 を返す。
     /// 逆数自体は正しい丸めで求める（建築の近似誤差の上限を大きく
-    /// 下回る。テーブル方式との差は docs/gaps.md GAP-0068）。
+    /// 下回る。テーブル方式との差は docs/guests/ia64.md）。
     #[must_use]
     pub fn frcpa(self, other: Self) -> (bool, Self) {
         let (a, b) = (self, other);
@@ -985,7 +985,7 @@ impl Ia64Ext {
 
     /// frsqrta（1/sqrt(f3) の近似）の値と条件述語。
     /// 平方根・逆数は F64 域で求める（同じく近似誤差の上限以下。
-    /// docs/gaps.md GAP-0068）。
+    /// docs/guests/ia64.md）。
     #[must_use]
     pub fn frsqrta(self) -> (bool, Self) {
         let a = self;

@@ -10,7 +10,7 @@
 //!
 //! 引数規約は `vax` モジュールの文書のとおり。
 //! Ref: SPEC-BSD-43.
-// Gap: GAP-0088 と同じ近似（単一プロセス・root 模型）を取る ——
+// と同じ近似（単一プロセス・root 模型）を取る ——
 // BSD 側の行は OS6 で別途立てる。
 
 use std::collections::HashMap;
@@ -82,7 +82,7 @@ pub struct Bsd {
     pid: u32,
     /// `umask` の現値。
     umask: u32,
-    /// シグナルマスク（配送経路はない —— GAP-0089）。
+    /// シグナルマスク（配送経路はない ——）。
     sigmask: u32,
     /// ハンドラ表（ssig/sigvec が記録するだけで呼ばれない）。
     sigh: [SigEnt; 32],
@@ -436,7 +436,6 @@ impl Bsd {
     }
 
     // ---- syscall 実体 ----
-    // Gap: GAP-0089
 
     fn sys_read(&mut self, env: &mut BareEnv, fd: u32, buf: u32, n: u32) -> Disp {
         let n = usize::try_from(n).unwrap_or(0);

@@ -7,7 +7,7 @@
 //! 判定（10%超の調査・ADR）は結果を見て行う。このテスト自体は
 //! 時間の長短で合否を変えない（決定的な検証ではない）.
 //!
-//! 結果の記録と受入れ判断は [ADR-0012](../../docs/adr/0012-generic-backend-overhead.md)
+//! 結果の記録と受入れ判断は [ADR-0012](../../docs/architecture/execution.md)
 //! にある。数値を変えたらそちらも更新する.
 
 use polyisa_engine::interp::InterpBackend;

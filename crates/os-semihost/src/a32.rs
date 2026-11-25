@@ -38,7 +38,7 @@ impl DerefMut for SemiA32 {
 
 impl TrapHandler for SemiA32 {
     /// HEAPINFO の heap_base として像の末尾を報告する。
-    /// heap_limit・stack 系の 3 語は時計同様 0 のまま（GAP-0090）。
+    /// heap_limit・stack 系の 3 語は時計同様 0 のまま。
     fn init_brk(&mut self, image_end: u64) {
         self.0.heap_info[0] = image_end;
     }

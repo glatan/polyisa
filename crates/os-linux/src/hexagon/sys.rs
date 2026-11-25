@@ -11,7 +11,7 @@
 //!
 //! 単一プロセス・単一スレッド模型: clone/execve/wait/パイプ/
 //! シグナル配送は未実装（ENOSYS または登録のみ受理 —
-//! Gap: GAP-0073）。リトルエンディアンのみ。
+//!）。リトルエンディアンのみ。
 //! 信頼できないゲストバイナリには使わないこと。
 //! Ref: SRC-LINUX-HEXAGON-UAPI.
 
@@ -94,7 +94,6 @@ pub struct Linux {
     /// getdents64 の fd 毎の読み出し位置（エントリ番号）。
     dir_pos: std::collections::BTreeMap<u32, u64>,
     /// rt_sigprocmask が保持する blocked マスク（配送しない近似 —
-    /// Gap: GAP-0073）。
     sig_mask: u64,
     /// umask の保持値。
     umask: u32,
@@ -147,7 +146,6 @@ impl Linux {
 
     /// syscall のバッファアクセスが伸ばし得るスタック窓を設定する。
     /// ローダが `Growth` に渡す `[limit, top)` と同じ範囲。
-    /// Gap: GAP-0073
     pub fn set_stack_window(&mut self, lo: u64, hi: u64) {
         self.stack_lo = lo;
         self.stack_hi = hi;
@@ -283,7 +281,7 @@ impl Linux {
     /// ゲストパスをホストパスへ写す。dirfd は AT_FDCWD(-100)
     /// か `remember_path` で覚えたディレクトリ fd。
     /// 最終要素のシンボリックリンクは辿らない。root 配下にノードが
-    /// 無い `/dev/*` はホストの devtmpfs へ通す（Gap: GAP-0073）。
+    /// 無い `/dev/*` はホストの devtmpfs へ通す。
     fn host_path(&self, dirfd: u64, path: &str) -> Option<String> {
         // dirfd は 32 ビットレジスタ値（AT_FDCWD=-100 は 0xffffff9c
         // として届く）。u32 に落として比較する。
@@ -321,7 +319,7 @@ impl Linux {
             }
             return Some(r);
         }
-        // dirfd 相対: 先に連結してから辿る（最小近似 — Gap: GAP-0073）。
+        // dirfd 相対: 先に連結してから辿る（最小近似）。
         let p = self.host_path(dirfd, path)?;
         if self.guest_root.is_empty() {
             return Some(p);
@@ -461,7 +459,7 @@ impl Linux {
         // NOFOLLOW=0o400000, NOATIME=0o1000000, CLOEXEC=0o2000000。
         // O_DIRECTORY=0o200000 は開いたあとがディレクトリで
         // なければ ENOTDIR。残りのフラグ（O_NOFOLLOW・O_CLOEXEC・
-        // O_SYNC 系・O_LARGEFILE）は無視する（Gap: GAP-0073）。
+        // O_SYNC 系・O_LARGEFILE）は無視する。
         // Ref: SRC-LINUX — include/uapi/asm-generic/fcntl.h。
         let accmode = flags & 3;
         let mut opt = std::fs::OpenOptions::new();
@@ -541,7 +539,6 @@ impl Linux {
     /// `fstatat64(dirfd, path, stat64*, flags)`。
     /// AT_SYMLINK_NOFOLLOW(0x100) で最終要素のリンク解釈を止める。
     /// AT_EMPTY_PATH+空パス は dirfd 自身を stat する近似
-    /// （Gap: GAP-0073）。
     fn sys_fstatat(
         &mut self,
         env: &mut BareEnv,
@@ -572,7 +569,7 @@ impl Linux {
     }
 
     /// `statx`（asm-generic の `struct statx`、256 バイト）。
-    /// btime/mnt_id/attributes は未提供（Gap: GAP-0073）。
+    /// btime/mnt_id/attributes は未提供。
     /// Ref: SRC-LINUX — include/uapi/linux/stat.h.
     fn sys_statx(
         &mut self,
@@ -671,7 +668,7 @@ impl Linux {
     /// `mmap2(addr, len, prot, flags, fd, pgoff)`。pgoff は
     /// 4KiB ページ単位（asm-generic `sys_mmap2` → hexagon では
     /// `sys_mmap_pgoff`）。file-backed は内容を事前読みする近似
-    /// （共有・後続 write の反映はない — Gap: GAP-0073）。
+    /// （共有・後続 write の反映はない）。
     /// Ref: SRC-LINUX — mm/mmap.c（sys_mmap2）,
     /// kernel/syscalltab.c（sys_mmap2→sys_mmap_pgoff）.
     fn sys_mmap2(&mut self, env: &mut BareEnv, a: [u64; 6]) -> Result<u64, u64> {
@@ -778,7 +775,7 @@ impl Linux {
     }
 
     /// `mprotect`。写像済みの範囲だけ権限を更新する（部分的に
-    /// 未写像の範囲は無視する近似 — Gap: GAP-0073）。
+    /// 未写像の範囲は無視する近似）。
     fn sys_mprotect(
         &mut self,
         env: &mut BareEnv,
@@ -1171,7 +1168,7 @@ impl Linux {
     }
 
     /// `mknodat`。通常ファイルだけ実際に作る（それ以外のノードは
-    /// 受理のみ — Gap: GAP-0073）。
+    /// 受理のみ）。
     fn sys_mknodat(
         &mut self,
         env: &mut BareEnv,
@@ -1239,7 +1236,7 @@ impl Linux {
     }
 
     /// `utimensat`（time32 timespec×2）。times が NULL なら現在
-    /// 時刻、mtime だけ std で近似する（Gap: GAP-0073）。
+    /// 時刻、mtime だけ std で近似する。
     fn sys_utimensat(
         &mut self,
         env: &mut BareEnv,
@@ -1277,7 +1274,7 @@ impl Linux {
 
     /// `prlimit64(pid, res, new, old)`。old に rlimit64（u64×2）
     /// の合成値を書く。new は受理のみ（単一プロセス近似 — Gap:
-    /// GAP-0073）。resource >= RLIM_NLIMITS(16) は EINVAL。
+    ///）。resource >= RLIM_NLIMITS(16) は EINVAL。
     fn sys_prlimit64(
         &mut self,
         env: &mut BareEnv,
@@ -1291,7 +1288,7 @@ impl Linux {
             return Err(errno::EINVAL);
         }
         if new != 0 {
-            // 書き込みは受理のみ（反映しない近似 — Gap: GAP-0073）。
+            // 書き込みは受理のみ（反映しない近似）。
         }
         if old != 0 {
             self.put_u64(env, old, RLIM64_INFINITY)?;
@@ -1310,7 +1307,7 @@ impl Linux {
         Ok(0)
     }
 
-    /// `setrlimit`。受理のみ（単一プロセス近似 — Gap: GAP-0073）。
+    /// `setrlimit`。受理のみ（単一プロセス近似）。
     fn sys_setrlimit(&mut self, res: u64) -> Result<u64, u64> {
         if res >= 16 {
             return Err(errno::EINVAL);
@@ -1319,7 +1316,7 @@ impl Linux {
     }
 
     /// `rt_sigaction(sig, act, oldact, sigsetsize)`。配送しない
-    /// 近似（Gap: GAP-0073）。oldact には SIG_DFL 相当の
+    /// 近似。oldact には SIG_DFL 相当の
     /// asm-generic `struct sigaction`（{handler u32, flags u32,
     /// restorer u32, mask u64} = 20B）のゼロを書く。sigsetsize は
     /// 8 固定でなければ EINVAL。
@@ -1335,7 +1332,7 @@ impl Linux {
 
     /// `rt_sigprocmask(how, set, oldset, sigsetsize)`。
     /// SIG_BLOCK=0/UNBLOCK=1/SETMASK=2。blocked マスクは保持する
-    /// が配送はしない（Gap: GAP-0073）。
+    /// が配送はしない。
     fn sys_rt_sigprocmask(
         &mut self,
         env: &mut BareEnv,
@@ -1432,7 +1429,6 @@ impl Linux {
     }
 
     /// `nanosleep`（time32）。短い要求だけ実際に眠る近似
-    /// （Gap: GAP-0073）。
     fn sys_nanosleep(&mut self, env: &mut BareEnv, req: u64, _rem: u64) -> Result<u64, u64> {
         let sec = u64::from(self.mem_u32(env, req));
         let nsec = self.mem_u32(env, req + 4);
@@ -1459,7 +1455,7 @@ impl Linux {
     /// loads u32[3]@4, totalram@16, freeram@20, sharedram@24,
     /// bufferram@28, totalswap@32, freeswap@36, procs u16@40,
     /// pad@42, totalhigh@44, freehigh@48, mem_unit@52, _f@56）。
-    /// 合成値（total/free 1 GiB 風 — Gap: GAP-0073）。
+    /// 合成値（total/free 1 GiB 風）。
     fn sys_sysinfo(&mut self, env: &mut BareEnv, addr: u64) -> Result<u64, u64> {
         let mut b = [0u8; 64];
         let w32 = |v: u32, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
@@ -1531,7 +1527,6 @@ impl Linux {
 
     /// `getrandom`。決定論的な疑似乱数（xorshift）で埋める。
     /// 暗号学的品質は持たない。テスト決定性のための合成値
-    /// （Gap: GAP-0073）。
     fn sys_getrandom(
         &mut self,
         env: &mut BareEnv,
@@ -1645,7 +1640,6 @@ impl Linux {
 
     /// `copy_file_range`（busybox cp/dd の近似: 事前に読んで
     /// 書き出す。fd 位置は off* を使わない場合にだけ進める —
-    /// Gap: GAP-0073）。
     fn sys_copy_file_range(
         &mut self,
         env: &mut BareEnv,
@@ -1708,7 +1702,7 @@ impl Linux {
     }
 
     /// `faccessat`/`faccessat2`。実在確認だけ（モードの検査は
-    /// しない近似 — Gap: GAP-0073）。AT_EMPTY_PATH+空パスは fd
+    /// しない近似）。AT_EMPTY_PATH+空パスは fd
     /// の存在で代える。
     fn sys_faccessat(
         &mut self,
@@ -1934,7 +1928,6 @@ impl Linux {
             }
             // personality・sched 系・シグナル枠組み・メモリ通知・
             // 同期系は受理のみ（配送・反映はしない近似 —
-            // Gap: GAP-0073）。
             nr::PERSONALITY => Ok(0),
             nr::SIGALTSTACK
             | nr::RT_SIGPENDING
@@ -1968,7 +1961,7 @@ impl Linux {
             nr::GETPGID | nr::GETSID => Ok(self.pid),
             nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => Ok(0),
             // futex は単一スレッド模型で競合しない。ENOSYS（or1k と
-            // 同じ近似 — Gap: GAP-0073）。
+            // 同じ近似）。
             nr::FUTEX | nr::FUTEX_TIME64 => Err(errno::ENOSYS),
             _ => Err(errno::ENOSYS),
         }

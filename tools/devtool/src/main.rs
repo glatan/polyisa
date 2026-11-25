@@ -18,13 +18,13 @@ fn main() {
         "doctor" => cmd_doctor(),
         "testdata:fetch" => cmd_testdata_fetch(),
         "hooks:install" => cmd_hooks_install(),
-        "status" => cmd_status(),
+        "status" => cmd_status(args.next().as_deref()),
         "test:plan" => cmd_test_plan(args.next().as_deref()),
         "isagen:dump" => cmd_isagen_dump(args.next()),
         _ => {
             eprintln!("unknown subcommand: {cmd}");
             eprintln!(
-                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump|test:plan>"
+                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|isagen:dump|test:plan>"
             );
             1
         }
@@ -34,7 +34,7 @@ fn main() {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump|test:plan>"
+        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|isagen:dump|test:plan>"
     );
     std::process::exit(2);
 }
@@ -53,17 +53,34 @@ fn workspace_root() -> std::path::PathBuf {
     }
 }
 
-fn cmd_status() -> i32 {
-    match status::write_status(&workspace_root()) {
-        Ok(paths) => {
-            for path in paths {
-                println!("{}", path.display());
+fn cmd_status(arg: Option<&str>) -> i32 {
+    let root = workspace_root();
+    if arg == Some("--dump") {
+        match status::write_dump(&root) {
+            Ok(paths) => {
+                for path in paths {
+                    println!("{}", path.display());
+                }
+                0
             }
-            0
+            Err(e) => {
+                eprintln!("status --dump: {e}");
+                1
+            }
         }
-        Err(e) => {
-            eprintln!("status: {e}");
-            1
+    } else if let Some(other) = arg {
+        eprintln!("status: 不明な引数 {other}");
+        2
+    } else {
+        match status::write_status(&root) {
+            Ok(path) => {
+                println!("{}", path.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("status: {e}");
+                1
+            }
         }
     }
 }
@@ -137,20 +154,16 @@ fn cmd_check() -> i32 {
         failed = true;
     }
     let root = workspace_root();
-    if let Err(e) = gaps::check_gaps(&root) {
-        eprintln!("check: 設計との差の台帳: {e}");
-        failed = true;
-    }
-    if let Err(e) = gaps::check_completion(&root) {
-        eprintln!("check: 完了条件: {e}");
+    if let Err(e) = gaps::check_issues(&root) {
+        eprintln!("check: 横断課題一覧: {e}");
         failed = true;
     }
     if let Err(e) = specs::check_spec_table(&root) {
         eprintln!("check: spec の表: {e}");
         failed = true;
     }
-    if let Err(e) = status::check_syscall_tables(&root) {
-        eprintln!("check: システムコールの表: {e}");
+    if let Err(e) = status::check_status_fresh(&root) {
+        eprintln!("check: 実装状況: {e}");
         failed = true;
     }
     if failed {
@@ -401,7 +414,7 @@ fn check_no_external_crates() -> Result<(), String> {
     }
 }
 
-/// クレート間の依存規則を検査する。許可表は `docs/design/workspace.md` の「依存規則」による。
+/// クレート間の依存規則を検査する。許可表は `docs/architecture/workspace.md` の「依存規則」による。
 // Gap: GAP-0012
 fn check_dep_rules() -> Result<(), String> {
     let violations = dep_violations(&workspace_root());
@@ -798,8 +811,7 @@ fn is_register_id(id: &str) -> bool {
     PREFIXES.iter().any(|p| id.starts_with(p))
 }
 
-/// 依存してよい相手の表。`docs/design/workspace.md` の「依存規則」による。
-/// 殻の段階では `cli` を最小の依存に絞っている（全依存は後の段階で戻す）。
+/// 依存してよい相手の表。`docs/architecture/workspace.md` の「依存規則」による。
 fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
     Some(match pkg {
         "polyisa-bits" => &[],

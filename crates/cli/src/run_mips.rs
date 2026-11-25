@@ -4,7 +4,7 @@
 //!
 //! 繰り返しと退出の判定は `engine::run::run` に置き、ここでは 1 ステップぶんの
 //! フェッチ・解読・意味論を `step` として提供する（ADR-0016、GAP-0007）。
-//! syscall の処理は `os-linux` の `mips::sys::Linux` に委譲する（GAP-0001）。
+//! syscall の処理は `os-linux` の `mips::sys::Linux` に委譲する。
 //!
 //! 分岐とジャンプは `npc` だけを書き換え、スロットの命令を実行してから `commit` する。
 //! スロット内の例外は `in_delay_slot` を立てて戻す。R3000 のロード遅延は
@@ -1964,7 +1964,7 @@ mod tests {
     #[test]
     fn o32_unknown_number_returns_enosys_and_continues() {
         // 未実装の番号は ENOSYS（a3=1）を返して実行を続ける。
-        // 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
+        // 設計: `docs/architecture/os-layer.md` の「未実装のシステムコール」。
         let mut env = env_at(0x1000);
         poke(&mut env, 0x1000, 0x2402_0063);
         poke(&mut env, 0x1004, 0x0000_000c);

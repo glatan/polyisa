@@ -456,7 +456,7 @@ impl Linux {
             opt.truncate(true);
         }
         // O_NOFOLLOW・O_PATH・O_DIRECTORY は最小実装では捨てる。
-        // Gap: GAP-0062（O_* 全集と *at フラグの整備は後の段階）。
+        // O_* 全集と *at フラグの整備は後の段階。
         match opt.open(&full) {
             Ok(f) => {
                 let fd = self.fds.alloc(polyisa_kernel::FdTarget::File(f));
@@ -901,7 +901,7 @@ impl Linux {
 
     /// `utimensat`。times が NULL なら現在時刻、配列なら
     /// atime/mtime を mtime だけ std で近似する。
-    /// Gap: GAP-0062（atime 側の反映はしない）。
+    /// atime 側の反映はしない。
     fn sys_utimensat(
         &mut self,
         env: &mut BareEnv,
@@ -1070,7 +1070,7 @@ impl Linux {
                     &self.cwd,
                     guest_path,
                 )?;
-                // `host_path` と同じ devtmpfs 近似（GAP-0062）。
+                // `host_path` と同じ devtmpfs 近似。
                 if !self.guest_root.is_empty()
                     && guest_path.starts_with("/dev/")
                     && !std::path::Path::new(&r).exists()
@@ -1316,7 +1316,7 @@ impl Linux {
 
     /// `getrandom`。決定論的な疑似乱数（xorshift）で埋める。
     /// 暗号学的品質は持たない。テスト決定性のための合成値。
-    /// Gap: GAP-0062（合成値の扱い）。
+    /// 合成値の扱い。
     fn sys_getrandom(
         &mut self,
         env: &mut BareEnv,

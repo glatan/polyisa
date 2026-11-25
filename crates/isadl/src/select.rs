@@ -4,7 +4,7 @@
 //!
 //! 入力は isagen が生成した定数の表（`MODEL_DEFS`、`FEATURE_DEFS`、
 //! `FEAT_BITS`）で、ISA ごとに同じ形を持つ。解決の規則は
-//! [CPU モデルとバージョンの表現](../../../docs/design/cpu-models.md)
+//! [CPU モデルとバージョンの表現](../../../docs/architecture/cpu-models.md)
 //! に従う。親をたどって機能を足し引きし、`implies` で閉包してから
 //! `conflicts` を検査する。
 

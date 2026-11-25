@@ -3152,7 +3152,7 @@ fn bswap64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
 /// 0xe0,0xe2,0xf0,0xf1,0xf8,0xf9} に絞る。これらの ASI 割当は
 /// V9 では実装依存領域（ASI 表の impl. dep. 行）で、ブロック転送の
 /// 意味は一次資料に根拠のない設計判断。
-// Gap: GAP-0049（実装依存 ASI の意味は一次資料に根拠なし）。
+// 実装依存 ASI の意味は一次資料に根拠なし。
 /// Ref: SPEC-SPARC-V9 §Address Space Identifiers (ASI 表).
 fn is_blk_asi<B: Backend>(b: &mut B, asi: B::V<W64>) -> B::B {
     let one = b.konst::<W64>(1);

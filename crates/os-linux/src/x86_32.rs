@@ -78,7 +78,6 @@ pub const UMASK: u64 = 60;
 pub const FTRUNCATE: u64 = 93;
 pub const RENAME: u64 = 38;
 pub const SYMLINK: u64 = 83;
-// Gap: GAP-0004
 // statfs 系。busybox の `df` が呼ぶ。statfs/fstatfs (99/100) と
 // 64 系 (268/269) を持つ。GETGROUPS=80 と区別する.
 // Ref: SRC-LINUX (7.3).

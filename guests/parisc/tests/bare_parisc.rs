@@ -1206,7 +1206,7 @@ fn exec_mtsm_traps_as_privileged() {
 // ---- 絶対番地ロード/ストア・probe・break・diag（段階17・PR6）----
 // ldaw/ldda/ldawx/lddax/stda は絶対番地かつ特権命令だが、本モデルは
 // 特権遷移を持たないので Level 0 記述どおり通常ロード/ストアに
-// 畳む（GAP-0055）。probe も access-right メタデータのない
+// 畳む。probe も access-right メタデータのない
 // フラットメモリ近似（マップ済み＋要求許可なら 1）で検査する。
 // Ref: SPEC-PARISC-11 §5-45/§5-39/§5-51/§5-154..§5-157,
 // SPEC-PARISC-20 §7-78/§7-87/§7-138/§7-113/§7-114.
@@ -1425,7 +1425,7 @@ fn exec_probe_read_write() {
     env.backend.mem.map(VirtAddr(0x4000), 1, Perms::R).unwrap();
     // prober (r6),r3,r9: RW ページは読み可 → 1。
     // r3 の下位 2 ビットは検査対象特権だがフラットモデルでは結果に
-    // 影響しない（GAP-0055）。
+    // 影響しない。
     set_gpr(&mut env, 6, 0x2000);
     set_gpr(&mut env, 3, 0xffff_fffd);
     step(&mut env, 0x04c3_1189);

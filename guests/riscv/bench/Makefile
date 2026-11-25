@@ -11,7 +11,7 @@
 #   LLD=ld.lld      lld（rust-lld でもよい）
 #
 # 実機計測は bench_mark[] への書き込みを区間の目印にして、perf stat や
-# rdcycle 計測で区間のサイクルを取る。結果の記録は docs/meas/u74.md を見る。
+# rdcycle 計測で区間のサイクルを取る。結果の記録は docs/guides/calibration.md を見る。
 
 CLANG ?= clang
 LLD ?= ld.lld

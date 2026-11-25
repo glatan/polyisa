@@ -72,7 +72,7 @@ pub mod mmr0 {
     /// <7>: 命令完了。abort ではなく trap で割ったとき立つ。
     pub const IC: u16 = 0o200;
     /// <8>: メンテナンス/宛先モード（保持のみ。宛先だけを再配置
-    /// する規則はモデルしない —— Gap: GAP-0085）。
+    /// する規則はモデルしない —）。
     pub const MAINT: u16 = 0o400;
     /// <9>: メモリ管理トラップの許可。
     pub const TENB: u16 = 0o1000;
@@ -396,7 +396,6 @@ pub fn stk_below(b: &mut InterpBackend) -> bool {
 /// オート増減・プッシュ後のイエローゾーン検査（スタックが限界を
 /// 割ったら vector 004 を命令完了時に予約する。赤ゾーン ——
 /// 配送のスタック自体が死ぬ状況 —— はモデルしない
-/// （Gap: GAP-0085）。
 fn stk_check(b: &mut InterpBackend) {
     if stk_below(b) {
         pend(b, tv::BUS);
@@ -459,7 +458,7 @@ pub mod ops {
 /// `mode` は PSW 値（kernel=0・supervisor=1・user=3。予約の 2 は
 /// nonresident abort）。`sp` == D で MMR3 の該当桁が立つときだけ
 /// D 空間の APR を選ぶ。
-// Gap: GAP-0085（I/D 分離の代表形・保守側の近似 —— 宛先モード・
+// （I/D 分離の代表形・保守側の近似 —— 宛先モード・
 // 赤ゾーン・MMR1 巻き戻しはモデルしない）。
 fn xlate(
     b: &mut InterpBackend,
@@ -486,7 +485,6 @@ fn xlate(
     // F-11 ではカーネル、他モデルでは MM トラップ。abort は
     // vector 250 の fault で届ける —— 実機の「トラップ」との
     // fault/trap 差は積む PC の近似として残す。
-    // Gap: GAP-0086
     let enc = b.param::<ModeEncParam>();
     let mode = match mode {
         psw::SUPERVISOR if enc != MODE_ENC_KSU => {

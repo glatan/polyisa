@@ -114,7 +114,7 @@ fn svc<H: ?Sized + TrapHandler>(
 /// 本実装は対象命令の位置を単一 pc として渡す簡易構成のため、分岐は
 /// 仕様と一致するが LARL 系オペランドと BAS/BRAS 系のリンク値は
 /// 仕様と差が出る（設計判断・既知差分）。
-// Gap: GAP-0048（LARL 系オペランド中間値とリンク値の基準位置）。
+// LARL 系オペランド中間値とリンク値の基準位置。
 // Ref: SPEC-S390-ZARCH-POP — EXECUTE。
 #[allow(clippy::too_many_arguments)]
 fn step_ex(

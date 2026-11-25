@@ -902,7 +902,7 @@ fn exec_test(b: &mut InterpBackend, k: (TKind, bool, CTy), ops: &[u64]) -> Resul
 // FPSR（ar.fpsr）の sf0-sf3 は {traps 6 ビット, 予約 1, 旗 6,
 // 制御 7} を 13 ビットずつ持ち、旗は演算ごとに OR で畳む。
 // トラップ有効ビットが立ってもフォールトしない近似
-// （ユーザモードの FP 例外処理は OS 面。docs/gaps.md GAP-0068）。
+// （ユーザモードの FP 例外処理は OS 面。docs/guests/ia64.md）。
 // Ref: SPEC-IA64-SDM (Rev 2.3) Vol1 5 章・Vol3 FP 節。
 
 /// FR f_i の器の先頭オフセット（16 バイト格納。{sig, {exp,sign}}）。
@@ -1006,7 +1006,7 @@ fn sf_ctrl(b: &InterpBackend, n: u32) -> SfCtrl {
     let wre = sf & 2 != 0;
     let ftz = sf & 1 != 0;
     // pc: 0=単精度・2=倍精度・3=レジスタ。pc=1 は予約で
-    // レジスタ形式に畳む近似（docs/gaps.md GAP-0068）。
+    // レジスタ形式に畳む近似（docs/guests/ia64.md）。
     let (sig, emin, emax) = match pc {
         0 => (24, -126, 127),
         2 => (53, -1022, 1023),
@@ -1624,7 +1624,7 @@ const DWR: Access = Access {
     kind: AccessKind::DataWrite,
 };
 
-/// Gap: GAP-0068 — ALAT の有効エントリ数。`CpuState::alat` は
+/// ALAT の有効エントリ数。`CpuState::alat` は
 /// エントリ i の対として `alat[i]`（読み出しアドレス）と
 /// `alat[16+i]`（タグ）を使う。タグ = 目的 GR 番号 {6:0} に
 /// アクセスサイズの log2 を {10:8} で足す。建築上のエントリ数は

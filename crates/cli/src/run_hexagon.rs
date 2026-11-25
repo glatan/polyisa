@@ -56,7 +56,6 @@ pub fn run(
 
 /// `run` の lazymap 窓付き。`growth` の `[lo, hi)` 内の未写像
 /// アクセスはページを遅延割付する（スタック・ヒープ近似）。
-/// Gap: GAP-0073
 fn run_growth(
     env: &mut BareEnv,
     entry: u64,

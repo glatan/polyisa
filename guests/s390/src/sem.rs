@@ -9,7 +9,7 @@
 //!
 //! 文字列命令（MVCL/MVCLE/CLCL/CLCLE/MVST/CLST 等）は 1 ステップに
 //! 一定バイト数だけ進め、未完なら `jump(pc)` で再実行する。これは
-//! docs/design/semantics.md の反復命令の規約に従う。
+//! docs/architecture/execution.md の反復命令の規約に従う。
 //!
 //! 出典は SPEC-S390-ZARCH-POP（SA22-7832）と SPEC-S390-ESA390-POP。
 //! DFP・HFP・10 進演算は範囲外で Unimplemented に落とす（GAP。

@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 /// x86 のシステムコール実装。`guest-x86` 機能で有効になる。
-/// 設計の依存規則（`docs/design/workspace.md` の「依存規則」）が
+/// 設計の依存規則（`docs/architecture/workspace.md` の「依存規則」）が
 /// `os-linux` の `guests/*` 依存を機能フラグ付きで認めている。
 /// 番号表は ABI 名のモジュール（`x86_64`・`x86_32`）に、実装はこのモジュールに置く
 /// （x86-32 と x86-64 の両 ABI を一つの実装で扱う）。
@@ -122,7 +122,7 @@ pub mod sock;
 pub mod wait;
 
 /// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
-/// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
+/// 設計: `docs/architecture/os-layer.md` の「未実装のシステムコール」。
 pub const ENOSYS: u32 = 38;
 
 /// ゲストの ABI。システムコール番号の表を選ぶときに使う。

@@ -691,7 +691,7 @@ fn fis_f_get(b: &mut InterpBackend, a: u16) -> Result<VaxFF, InterpExit> {
 /// 0 除算 → V=1・N=1・C=1・Z=0。成功時は N=結果<0・Z=結果=0・
 /// V=0・C=0。
 // Ref: SPEC-PDP11-ARCH83（付録 C）.
-// Gap: GAP-0082（指数 0 を零へ畳む選択・decfp VaxF の借用）
+// 指数 0 を零へ畳む選択・decfp VaxF の借用
 fn fis_exec(b: &mut InterpBackend, n: u8, insn: Insn) -> Result<(), InterpExit> {
     let r = r_get(b, n);
     let a = fis_f_get(b, r.wrapping_add(4))?;
@@ -791,7 +791,6 @@ mod fps {
     pub const FC: u16 = 0;
     /// STFPS で読み出せない予約桁（13・12・4）— LDFPS で消す
     /// （実機では桁自体が存在しない —— 0 として読む形で代替）。
-    // Gap: GAP-0083
     pub const NOREC: u16 = 0o30020;
 }
 
@@ -958,7 +957,7 @@ fn fp_opnd<const E: u32, const M: u32>(
 /// FP 例外の登録と割込み配送。FER=1・FEC=code・FEA=pc0 を立て、
 /// FID が消えていれば vector 244 へ trap（積む PC は次の命令）。
 /// FID でも FER/FEC/FEA は更新される（ARCH83 6章 FPS/FEC/FEA）。
-// Gap: GAP-0083（FID の抑止を全例外型で一様に適用する選択）
+// FID の抑止を全例外型で一様に適用する選択
 fn fp_exc(b: &mut InterpBackend, pc0: u16, code: u16) -> Result<(), InterpExit> {
     fps_put(b, fps_get(b) | 1 << fps::FER);
     set16(b, fec_ref(), code);
@@ -1025,7 +1024,7 @@ fn fp_iuv_pre<const E: u32, const M: u32>(
 
 /// 実行後の FIUV 検査（TST/ABS/NEG —— ARCH83 の FP11 の形。
 /// FPJ11 は実行前に移したモデル差）。
-// Gap: GAP-0083（FIUV 検査位置のモデル差は単一系で再現）
+// FIUV 検査位置のモデル差は単一系で再現
 fn fp_iuv_post<const E: u32, const M: u32>(
     b: &mut InterpBackend,
     pc0: u16,
@@ -1849,7 +1848,7 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
             // C = 積が符号付き 16 ビットに収まらない。
             psw_flag_set(b, psw::C, !(-0x8000..0x8000).contains(&prod));
         }
-        // Gap: GAP-0082（奇数 R・例外経路の不定域は決定的選択）
+        // 奇数 R・例外経路の不定域は決定的選択
         Insn::Div => {
             let n = ops_frd(u128::from(f.word)).reg as u8;
             let s = eval_op(b, f, pc0, 0)?;
@@ -1919,7 +1918,7 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // 1 語 push/pop する —— SP は書き込み可能メモリを指す必要
         // がある（付録 C 注記・付録 B 項目 22）。中断の規則
         // （BR 要求で命令をやり直す）は裸実行では割込みが起きない。
-        // Gap: GAP-0082（中断規則は push/pop のみ再現）
+        // 中断規則は push/pop のみ再現
         Insn::Fadd | Insn::Fsub | Insn::Fmul | Insn::Fdiv => {
             let n = ops_ff(u128::from(f.word)).freg as u8;
             let scratch = matches!(f.insn, Insn::Fmul | Insn::Fdiv);
@@ -2273,7 +2272,6 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // TSTSET: R0 ← (dst)、(dst) ← (dst) ∨ 1 の読み書き不可分
         // （バスロック —— 単一スレッド近似）。N・Z は読み出した値、
         // V=0、C=旧 dst の bit0。モード 0 は vector 010 に fault。
-        // Gap: GAP-0081
         Insn::Tstset => {
             let d = eval_op(b, f, pc0, 0)?;
             if let Loc::Reg(_) = d {
@@ -2289,7 +2287,6 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // WRTLCK: (dst) ← R0 の書き込みロック（読み側の語は捨てる。
         // 単一スレッド近似）。N・Z は R0 の値、V=0、C 不変。モード 0 は
         // vector 010 に fault。
-        // Gap: GAP-0081
         Insn::Wrtlck => {
             let d = eval_op(b, f, pc0, 0)?;
             if let Loc::Reg(_) = d {
@@ -2302,7 +2299,6 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // RESET: システムバスへ INIT を出す（カーネルモード。他のモード
         // では NOP —— KDJ11-E UG）。バス装置を持たない裸モデルでは
         // 効果が起きないので NOP として決定的に振る舞う。
-        // Gap: GAP-0081
         Insn::Reset => {}
         Insn::Bpt => return Err(trap(tv::BPT)),
         Insn::Iot => return Err(trap(tv::IOT)),
@@ -2318,7 +2314,6 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
                 // 非カーネルの HALT はモデルでトラップ先が分かれる
                 // （付録 B 項目 43）。powerup（T-11）は起動ベクタを
                 // 持たない裸モデルでは終端に畳む。
-                // Gap: GAP-0086
                 return match b.param::<HaltVecParam>() {
                     HALT_VEC_VEC004 => Err(trap(tv::BUS)),
                     HALT_VEC_POWERUP => Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
@@ -2339,7 +2334,6 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         // LSI-11 の保守命令 00021x（付録 B 項目 33）。マイクロコード
         // 内部の診断動作で建築状態への効果は正本に未規定 —— NOP と
         // する決定的近似。
-        // Gap: GAP-0086
         Insn::Maint => {}
         // CIS（PD11 —— 076nnn。記述子形と in-line 形の文字列・
         // 数値・パック文字列命令）。中断可能な命令は cis.rs 側で

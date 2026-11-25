@@ -158,7 +158,6 @@ impl Sr {
 /// 完了強制」は FP パイプラインをモデル化していないため
 /// 恒等的に不要（Status レジスタの T ビットを立てる値の
 /// ロードも未定義だが検査しない）。
-// Gap: GAP-0053
 fn fpr_get_w<B: Backend>(b: &mut B, r64: u64) -> B::V<W64> {
     let d = b.get(Fpr((r64 & 31) as u8).state());
     if r64 & 32 != 0 {
@@ -233,7 +232,6 @@ pub const FPSR_RM: u64 = 0x0000_0600_0000_0000;
 /// 「T=1 で次の FP 命令が完了強制トラップ」の起動はモデル化
 /// しない（例外配送経路がない。倍長 fstd fr0 で T←0 だけは
 /// SPEC-PARISC-11 §6-11 の T フィールド規定どおり行う）。
-// Gap: GAP-0057
 pub const FPSR_T: u64 = 1 << 38;
 /// denormal を 0 扱いする高速モード。本モデルは「D ビットを
 /// 持たない実装」として常に D=0 の意味論（フルの denormal
@@ -243,7 +241,6 @@ pub const FPSR_D: u64 = 1 << 37;
 /// 例外の発生はフラグ集約のみで、enable が立っていても
 /// 遅延トラップは起こさない（シグナル/トラップ経路がない
 /// 設計判断）。
-// Gap: GAP-0057
 pub const FPSR_ENA: u64 = 0x0000_001f_0000_0000;
 
 /// FPSR にビットを立てる（例外フラグは「never set to 0 as a
@@ -289,7 +286,6 @@ fn pa_to_sf_rm(m: u8) -> u8 {
 /// softfloat の例外フラグ（RISC-V 配列）を FPSR フラグビット
 /// に写像する。enable を問わずフラグへ集約するだけで、
 /// トラップ配送はない。
-// Gap: GAP-0057
 fn fpsr_flags_of(f: u8) -> u64 {
     let mut v = 0;
     if f & polyisa_softfloat::FP_NV != 0 {
@@ -479,7 +475,6 @@ fn fp3_invalid<B: Backend>(
 /// f[0] 半分や例外レジスタ（1..3）は非ロード/ストア命令での
 /// 参照が undefined で、決定的に生値を読む。
 // Ref: SPEC-PARISC-11 §6-6 "Floating-Point Registers".
-// Gap: GAP-0053
 fn fp_src_w<B: Backend>(b: &mut B, r64: u64) -> B::V<W64> {
     if r64 == 0 { k(b, 0) } else { fpr_get_w(b, r64) }
 }
@@ -496,7 +491,6 @@ fn fp_src_d<B: Backend>(b: &mut B, r: u64) -> B::V<W64> {
 /// FP 宛先の書き込み（単精度）。非 load/store 命令でレジスタ 0
 /// のどちらの半分を指しても undefined なので、書き込みは破棄
 /// する（フロー制御に影響しない決定的な扱い）。
-// Gap: GAP-0053
 fn fp_dst_w<B: Backend>(b: &mut B, r64: u64, v: B::V<W64>) {
     if r64 & 31 != 0 {
         let v = and_n(b, v, 0xffff_ffff);
@@ -674,7 +668,7 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
             // オペランドのビット列から判定する。backend の
             // fp_flags() と OR するので interp の結果は変わら
             // ず、fp_flags()=0 の IR 経路でも既定 NaN 置換と
-            // V フラグが効く近似になる（GAP-0057）。
+            // V フラグが効く近似になる。
             let inv0 = if subop == 4 {
                 let sgn = fp_sign(b, f, a);
                 let mag = and_n(b, a, f.exp_mask() | f.frac_mask());
@@ -896,7 +890,7 @@ fn fp_top_reg(spec: u64) -> u64 {
 ///
 /// NaN→整数変換は spec 上 invalid（pa11 では unimplemented
 /// 例外だが配送経路がないため pa20 の invalid 意味に寄せる
-/// — GAP-0057）。結果は「最大整数」を配達（符号つきは正の
+/// —）。結果は「最大整数」を配達（符号つきは正の
 /// 最大、符号なしは全 1）。浮動小数点→浮動小数点の NaN は
 /// PA 規則で幅変換して静止化する。
 // Ref: SPEC-PARISC-11 §6-45..§6-48 FCNV*, §6-23（NaN/例外）、
@@ -2149,7 +2143,6 @@ const fn mask64w(w: u64) -> u64 {
 /// `pext = min(len-1, tpos)` からの再拡張で spec と同じ結果に
 /// なる）。固定形の `pos < len-1` は未定義だが、同じ式の結果を
 /// そのまま書く（切り詰めとして読める決定的な値）。
-// Gap: GAP-0053
 fn do_extr<B: Backend>(
     b: &mut B,
     r: B::V<W64>,
@@ -2201,7 +2194,6 @@ fn do_extr<B: Backend>(
 /// 切り詰めて最上端に置く（SPEC-PARISC-11 VDEP/VDEPI、
 /// SPEC-PARISC-20 DEPD/DEPDI の `tpos-len+1 < 0` 側）。
 /// 固定形の超過は未定義だが同じ式で決定的に評価する。
-// Gap: GAP-0053
 fn do_dep<B: Backend>(
     b: &mut B,
     old_t: B::V<W64>,
@@ -2510,7 +2502,6 @@ fn do_sub<B: Backend>(
         // が 0 未満）」の定義とも整合する。cin=1 では両読み一致。
         // Ref: SPEC-PARISC-11 §5 Table 5-3, SPEC-PARISC-20 付録D
         // Table D-3.
-        // Gap: GAP-0054
         arith_cond(b, cf, d, dest, cout, sv)
     } else {
         sub_cond(b, cf, d, dest, in1, in2, sv)
@@ -3106,7 +3097,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // ble では `SR[0] ← IASQ_Back` を書くが、本モデルは
             // IASQ/空間レジスタ選択を持たないので読まない
             // （PSW.C=0 の Level 0 近似）。
-            // Gap: GAP-0052
             let link = if insn == Insn::Ble { 31 } else { 0 };
             let disp = disp17(ops[1], ops[3]);
             let base = Gr(ops[0] as u8).get(b);
@@ -3445,7 +3435,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 // 扱いで既に実装済み。
                 // Ref: SPEC-PARISC-11 §5-45/§5-39 Level 0 注記,
                 // SPEC-PARISC-20 §7-78/§7-87.
-                // Gap: GAP-0055
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
@@ -3471,7 +3460,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 // なお実効番地の 16 バイト整列要求（§LDCWX
                 // "The address must be 16-byte aligned"）は検査
                 // しない簡約とする。
-                // Gap: GAP-0052
                 match size {
                     3 => {
                         let v: B::V<W64> = b.load_reserved(ea, ATOMIC_RW)?;
@@ -3539,7 +3527,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 // ロードに畳む。
                 // Ref: SPEC-PARISC-11 §5-39 Level 0 注記,
                 // SPEC-PARISC-20 §7-87.
-                // Gap: GAP-0055
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
@@ -3620,7 +3607,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // stda は 64 ビット（PA 2.0）。
             // Ref: SPEC-PARISC-11 §5-51 Level 0 注記,
             // SPEC-PARISC-20 §7-138.
-            // Gap: GAP-0055
             let (m, r) = (ma_to_m(ops[3]), ops[1]);
             let disp = im5(ops[4]);
             let zero = k(b, 0);
@@ -3644,7 +3630,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // GR[b] = (GR[b]+disp) & ~mask の更新で、B,M の EA は
             // 更新前の GR[b] そのもの。PSW.E=0（BE）側のみ実装
             // （hppa32 Linux は常に BE）。
-            // Gap: GAP-0053
             // Ref: SPEC-PARISC-11 §STBYS, SPEC-PARISC-20 §STDBY.
             let is_d = insn == Insn::Stdby;
             let wmask: u64 = if is_d { 7 } else { 3 };
@@ -3668,7 +3653,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // probe を使う（未写像は検出できるが書込許可自体の
             // 判定・dirty 記録は本メモリ抽象では表せない）。
             // Ref: SPEC-PARISC-20 §7-139 STDBY.
-            // Gap: GAP-0053
             if a == 1 {
                 let zero = k(b, 0);
                 let jz = b.cmp(Cmp::Eq, j, zero);
@@ -3709,7 +3693,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // ops = [b, x, sp, u, m, t]。u(,s)はワード=<<2・
             // ダブルワード=<<3 の事前スケール。m(,m)は EA=base の
             // 事後更新（b += dx）。cc は無視。
-            // Gap: GAP-0053
             // Ref: SPEC-PARISC-20 §FLDW/FSTW/FLDD/FSTD Operation.
             let is_d = matches!(insn, Insn::Flddx | Insn::FstdIdx);
             let x = Gr(ops[1] as u8).get(b);
@@ -4323,7 +4306,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // 両桁が一致しない符号化は spec が黙っているので、
             // 本モデルは fa 桁（ops[0]）をソースに取る決定的扱い。
             // Ref: SPEC-PARISC-20 §7-108/§7-109, 付録C Figure C-9.
-            // Gap: GAP-0053
             let r = Gr(ops[0] as u8).get(b);
             let mut acc = k(b, 0);
             for (i, c) in [ops[2], ops[3], ops[4], ops[5]].into_iter().enumerate() {
@@ -4469,7 +4451,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // する（結果 GR への書き込み自体は spec どおり）。
             // Ref: SPEC-PARISC-11 §5-154..§5-157 Operation,
             // SPEC-PARISC-20 §7-113/§7-114.
-            // Gap: GAP-0055
             let (rb, w, t) = (ops[0], ops[4], ops[5]);
             let ea = Gr(rb as u8).get(b);
             let acc = if w != 0 { DATA_WRITE } else { DATA_READ };

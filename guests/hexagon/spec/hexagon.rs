@@ -2342,7 +2342,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // PRM に存在しない。pause はタイミングヒント（solo 命令、
         // 建築状態を変えない）。brkpt/unpause/icinva/isync/
         // dcfetch/l2fetch は語彙外（復号不能=illegal）。
-        // Gap: GAP-0075（ヒント・フェンス・語彙外・特権の近似）
+        // ヒント・フェンス・語彙外・特権の近似
         // Ref: system instructions.
         (
             "trap0",
@@ -6588,14 +6588,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // ---- HX9: HVX 代表部分集合 ----
-    // Gap: GAP-0070 GAP-0071
     // 全部 `hvx` 旗でゲート（同旗がないモデルでは復号不能＝
     // illegal 命令例外となる）。実符号は参照アセンブラ
     // （V73 + hvx プロファイル）と照合済み。
     // - vmem: 整列 io 形（ld/st/:nt）・vmemu 非整列形・
     //   post-inc 即値/++Mu・Qv 述語付きストア（:nt 含む）。
     //   即値はベクトル幅単位（V73 系 128B）。tmp/scatter/
-    //   gather・reg-offset 系は語彙外（docs/gaps.md 参照）。
+    //   gather・reg-offset 系は語彙外（docs/guests/hexagon.md 参照）。
     // - ALU: vadd/vsub（b/h/w）、論理（vand/vor/vxor）、
     //   vavg/vnavg、vmin/vmax（b/ub/h/uh/w）、:sat 加減算、
     //   vmpy 系（bb/ub→h、hh/uh→w、+= 累積）、vcombine/vmov/

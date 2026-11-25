@@ -186,7 +186,6 @@ pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
 pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
 pub const PIPE2: u64 = 293;
 pub const PIPE: u64 = 22;
-// Gap: GAP-0004
 // statfs 系。busybox の `df` が呼ぶ。
 // Ref: SRC-LINUX (7.3).
 pub const STATFS: u64 = 137;

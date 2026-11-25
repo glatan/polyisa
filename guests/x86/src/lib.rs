@@ -38,7 +38,6 @@ pub struct CpuState {
     /// 汎用レジスタ 8本の下位32ビット。
     pub g: [u32; 8],
     /// 命令ポインタの下位32ビット（64ビット実行でも上位は不変とする試作）。
-    // Gap: GAP-0029
     pub eip: u32,
     /// フラグレジスタ（CF bit0、PF bit2、AF bit4、ZF bit6、SF bit7、OF bit11 を使う）。
     pub eflags: u32,

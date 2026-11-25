@@ -17,7 +17,7 @@
 //!   `SlotInsn` 列を返す。
 //! - `word_class`/`class_slots`: ICLASS → 許容スロットの手書き表
 //!   （PRM Table 10-6）。パケット組立規則は ISADL の命令宣言に
-//!   表せないため実行側の表として持つ（docs/gaps.md 参照）。
+//!   表せないため実行側の表として持つ（docs/guests/hexagon.md 参照）。
 //!
 //! Ref: SPEC-HEXAGON-PRM (V79) instruction encoding.
 
@@ -364,7 +364,7 @@ pub(crate) fn pred_prod_cand(len: u32, group: Option<Group>, word: u128) -> Opti
 }
 
 /// ICLASS → 命令クラス。
-/// Gap: GAP-0069（パケット組立規則は手書き表で持つ）
+/// パケット組立規則は手書き表で持つ
 /// Ref: SPEC-HEXAGON-PRM (V79) Table 10-6.
 pub fn word_class(word: u32) -> Option<Class> {
     Some(match iclass(word) {
@@ -373,7 +373,6 @@ pub fn word_class(word: u32) -> Option<Class> {
         // ベクトル演算系が同居する。HVX は slot 制約が緩い
         // Alu32 側に寄せる（実機の HVX スロット配置は語彙
         // 棚卸しの対象外）。
-        // Gap: GAP-0071
         1 => match (word >> 24) & 0xf {
             0 | 1 | 6 | 7 => Class::J,
             _ => Class::Alu32,
@@ -700,7 +699,7 @@ fn loop_setup_bad(len: u32, group: Option<Group>, word: u128) -> bool {
 
 /// 命令のフロー種別。`group` が `Some` のとき `word` は
 /// 13 ビット subinsn 語。
-/// Gap: GAP-0069（ICLASS 6 のフロー形・NVJ の一部は
+/// （ICLASS 6 のフロー形・NVJ の一部は
 /// 未分離）。
 fn flow_of(len: u32, group: Option<Group>, word: u128, class: Class) -> Flow {
     if len == 13 {

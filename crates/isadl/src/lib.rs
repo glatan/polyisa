@@ -4,7 +4,7 @@
 //! 組み立てる Rust DSL とする（ADR-0017）。`.isadl` テキストの構文解析は
 //! 実装せず、設計文書の文法はフロントエンドの設計として残る。
 //!
-//! 詳しくは [ISA 記述言語](../../../docs/design/isa-description.md) を見る。
+//! 詳しくは [ISA 記述言語](../../../docs/architecture/isadl.md) を見る。
 //! この骨格は、ビットパターンの照合、述語の評価、静的検査の核を提供する。
 
 #![forbid(unsafe_code)]

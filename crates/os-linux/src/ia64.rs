@@ -62,7 +62,7 @@ pub mod gate {
     /// `__kernel_syscall_via_break` の入口（CODE 先頭）。
     pub const SYSCALL_VIA_BREAK: u64 = CODE;
     /// `__kernel_sigtramp` の入口（位置の予約のみ。シグナル
-    /// 配送は未実装 — Gap: GAP-0068）。
+    /// 配送は未実装）。
     pub const SIGTRAMP: u64 = CODE + 0x100;
     /// `__kernel_syscall_via_epc` の入口。AT_SYSINFO が指す値。
     pub const SYSCALL_VIA_EPC: u64 = CODE + 0x200;

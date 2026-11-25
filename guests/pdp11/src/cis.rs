@@ -21,7 +21,7 @@
 //! 途中のバスエラーは記述子側の進行を残して fault し、ハンドラが
 //! 命令先頭へ戻せば続きから再開できる。
 // Ref: SPEC-PDP11-CIS（EK-KE44A-UG-002 附属 B）, SPEC-PDP11-ARCH83.
-// Gap: GAP-0084（予約領域の決定的選択と単位ステップ近似）。
+// 予約領域の決定的選択と単位ステップ近似。
 
 use polyisa_decimal::PackedDec;
 use polyisa_engine::interp::{InterpBackend, InterpExit};
@@ -174,7 +174,6 @@ fn ddsc_get(b: &mut InterpBackend, s: Slot) -> Result<DDsc, InterpExit> {
 /// は型 6-7 が定義域 —— 群外の型番を与えたときの挙動は正本の
 /// 予約領域なので、数値群では 0（符号付きゾーン）、パック群では
 /// 6（符号付きパック）へ畳む決定的な選択。
-// Gap: GAP-0084
 fn dty(ty: u8, packed: bool) -> u8 {
     if packed {
         if ty < 6 { 6 } else { ty }
@@ -221,7 +220,6 @@ fn cc_dec(b: &mut InterpBackend, v: &PackedDec, len: usize, ovf: bool) {
 
 /// 読んだ数字ニブルを 0-9 に飽和する（数字以外のニブルは正本の
 /// 予約領域 —— 読み値をクランプする決定的な選択）。
-// Gap: GAP-0084
 fn zdig(v: u8) -> u8 {
     (v & 0xf).min(9)
 }
@@ -230,7 +228,6 @@ fn zdig(v: u8) -> u8 {
 /// J-R=-1..9）に代替形（0-9=正・[ ? =+0・] ! : =-0）を足す。
 /// 予約バイトは数字を読み値・符号正に畳む決定的な選択。
 // Ref: SPEC-PDP11-CIS（2.4.2 の表）.
-// Gap: GAP-0084
 fn ovp_dec(v: u8) -> (u8, bool) {
     match v {
         0x7b | 0x5b | 0x3f => (0, false),
@@ -796,7 +793,7 @@ fn search(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit
             } else if obj.len == 0 {
                 // 空の obj は空でない src に照合する —— 正本の注記
                 // を採る（形式的記述は while obj.len!=0 で照合自体を
-                // 起こさない —— 両者の食い違いは GAP-0084 の選択）。
+                // 起こさない —— 両者の食い違いは の選択）。
                 result = Some(cur);
             } else if cur.len < obj.len {
                 result = Some(Cur {
@@ -956,7 +953,6 @@ fn dec_op(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit
             if divz {
                 // 0 除算: dst と N/Z は不定 —— dst を書かず
                 // N=Z=0・V=1・C=1 に決定的に畳む。
-                // Gap: GAP-0084
                 sem_flag(b, psw::N, false);
                 sem_flag(b, psw::Z, false);
                 sem_flag(b, psw::V, true);

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! SSA 形 IR の定義。値は `Id`、幅は `Wid`、操作は `Inst`。
 //!
-//! 形は docs/design/jit.md の「IR」に従う。ブロックは `ops` の
+//! 形は docs/architecture/execution.md の「IR」に従う。ブロックは `ops` の
 //! 直列で、制御が動く操作（`Jump`/`Branch`/`Exit`/`Unimpl`）は
 //! ブロックの「継続できなくなる点」として記録される。条件分岐は
 //! 子列を持つ `If` 1 ノードで表し、グラフの辺は持たない。

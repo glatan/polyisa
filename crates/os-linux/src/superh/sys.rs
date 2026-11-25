@@ -34,7 +34,6 @@ pub struct SuperhIo {
 
 /// SuperH Linux の syscall 状態機械。
 /// R3=番号、R4–R7・R0・R1=引数、R0=戻り値。
-// Gap: GAP-0060
 pub struct Linux {
     /// 標準出力・標準エラーの捕獲。テストが読む。
     pub io: SuperhIo,
@@ -638,7 +637,7 @@ impl Linux {
         let path = self.get_cstr(env, path_addr)?;
         if path.is_empty() {
             // 空パス: AT_EMPTY_PATH なら dirfd 自身。それ以外の空パスも
-            // dirfd の stat に寄せる近似（GAP-0060）。
+            // dirfd の stat に寄せる近似。
             return if dirfd >= 0 {
                 let _ = flags & AT_EMPTY_PATH;
                 Ok(StatTarget::Fd(dirfd as u32))
@@ -662,7 +661,6 @@ impl Linux {
 
     /// `getdents64`。linux_dirent64: u64 d_ino, u64 d_off, u16 d_reclen,
     /// u8 d_type, name\0。`.`/`..` は合成しない（parisc/alpha 先例）。
-    // Gap: GAP-0060
     fn sys_getdents64(
         &mut self,
         env: &mut BareEnv,
@@ -854,7 +852,7 @@ impl Linux {
 
     /// `mmap`/`mmap2`。`pgoff` はページ単位（呼び出し側が変換する）。
     /// 非 MAP_FIXED は自前の番地を割り当てる。file-backed は内容を
-    /// 事前読みする近似（共有・後続 write の反映はない — GAP-0060）。
+    /// 事前読みする近似（共有・後続 write の反映はない —）。
     #[allow(clippy::too_many_arguments)]
     fn sys_mmap(
         &mut self,
@@ -889,7 +887,7 @@ impl Linux {
             p |= Perms::X.0;
         }
         if fixed {
-            // MAP_FIXED は衝突していても置き換え（GAP-0060）。
+            // MAP_FIXED は衝突していても置き換え。
             env.backend.mem.unmap(VirtAddr(base), pages);
         }
         match env.backend.mem.map(VirtAddr(base), pages, Perms(p)) {
@@ -1000,7 +998,7 @@ impl Linux {
         Ok(0)
     }
 
-    /// `sysinfo`（32 ビット形式・64B）。値は合成（GAP-0060）。
+    /// `sysinfo`（32 ビット形式・64B）。値は合成。
     fn sys_sysinfo(&mut self, env: &mut BareEnv, addr: u64) -> Result<u64, u64> {
         let secs = self.mono_start.map(|s| s.elapsed().as_secs()).unwrap_or(0) as u32;
         let total = 512 * 1024 * 1024u32;
@@ -1022,7 +1020,7 @@ impl Linux {
         Ok(0)
     }
 
-    /// `statfs64`（88B）と `statfs`（64B）の共通部。値は合成（GAP-0060）。
+    /// `statfs64`（88B）と `statfs`（64B）の共通部。値は合成。
     fn sys_statfs(&mut self, env: &mut BareEnv, addr: u64, wide: bool) -> Result<u64, u64> {
         if wide {
             self.put32(env, addr, 0xEF53)?;
@@ -1062,7 +1060,7 @@ impl Linux {
     }
 
     /// `access`/`faccessat`/`faccessat2` の共通部（存在確認だけ。
-    /// mode ビットの検査はしない — GAP-0060）。
+    /// mode ビットの検査はしない —）。
     fn sys_access(&mut self, env: &mut BareEnv, dirfd: i64, path_addr: u64) -> Result<u64, u64> {
         const AT_FDCWD: i64 = -100;
         let path = self.get_cstr(env, path_addr)?;
@@ -1201,7 +1199,7 @@ impl Linux {
             N::OPENAT2 => {
                 // openat2(dirfd, path, how*, usize) — how の先頭語が
                 // flags。近似的に openat と同じ扱い（resolve フラグの
-                // 検査はしない — GAP-0060）。
+                // 検査はしない —）。
                 let flags = self.mem_u(env, a[2]) as u32;
                 self.sys_open(env, a[0] as i32 as i64, a[1], flags, 0)
             }
@@ -1742,7 +1740,7 @@ impl Linux {
             N::IOPRIO_SET => Ok(0),
             N::IOPRIO_GET => Ok(0),
             N::GETITIMER | N::SETITIMER | N::ALARM => Ok(0),
-            // ---- シグナル（受理するだけ。配送経路はない — GAP-0060）----
+            // ---- シグナル（受理するだけ。配送経路はない —）----
             N::SIGACTION
             | N::RT_SIGACTION
             | N::SIGPROCMASK

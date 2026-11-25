@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! ゲストメモリ。ソフトウェアページ表、ページフレーム、ソフトウェア TLB。
 //!
-//! 詳しくは [ゲストメモリ](../../docs/design/memory.md) を見る。
+//! 詳しくは [ゲストメモリ](../../docs/architecture/memory.md) を見る。
 
-// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// unsafe 許可クレート（docs/architecture/workspace.md「`unsafe` の扱い」）。
 // TLB 高速経路でページフレームのホストポインタを直接読み書きするため。
 #![allow(unsafe_code)]
 

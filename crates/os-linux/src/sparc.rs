@@ -19,7 +19,7 @@
 
 /// SPARC Linux の syscall 処理とウィンドウの退避・復元。
 /// `guest-sparc` 機能で有効になる。設計の依存規則
-/// （`docs/design/workspace.md` の「依存規則」）が `os-linux` の
+/// （`docs/architecture/workspace.md` の「依存規則」）が `os-linux` の
 /// `guests/*` 依存を機能フラグ付きで認めている。
 #[cfg(feature = "guest-sparc")]
 pub mod sys;

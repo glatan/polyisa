@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! 静的検査。コード生成の前に違反があれば失敗させる。
 //!
-//! 設計文書の検査項目（`docs/design/isa-description.md` の「静的検査」）のうち、
+//! 設計文書の検査項目（`docs/architecture/isadl.md` の「静的検査」）のうち、
 //! この骨格で判定できる範囲を実装する。決定木の構築と厳密な充足可能性は後の段階で足す。
 
 use super::model::{FieldKind, Model};

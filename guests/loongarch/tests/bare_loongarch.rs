@@ -1454,7 +1454,7 @@ fn exec_lsx_vldi_all_modes() {
         step_lsx(&mut env, enc(Insn::Vldi, &[0, imm]));
         assert_eq!(vr(&mut env, 0), d2(d), "vldi imm={imm:#x}");
     }
-    // mode 13–15 は INE → ILL 例外に畳む（GAP-0063）。
+    // mode 13–15 は INE → ILL 例外に畳む。
     for mode in 13u64..=15 {
         let mut env = env();
         let w = enc(Insn::Vldi, &[0, 0x1000 | (mode << 8)]);

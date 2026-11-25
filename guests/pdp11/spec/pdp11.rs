@@ -33,7 +33,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
     // 汎用タイミングの区切り（専用モデルは作らない —— PD2 の計画）。
-    // Gap: GAP-0087（未較正の汎用タイミング近似）
+    // 未較正の汎用タイミング近似
     for class in ["alu", "move", "branch", "fp", "cis", "system", "misc"] {
         m.timing_classes.push(class.to_string());
     }
@@ -93,8 +93,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 挙動パラメータ。付録 B のファミリ差分表（項目 1-52）で可観測な
-    // 差分はここか機能旗へ写す（棚卸しの全項目対応は docs/gaps.md
-    // GAP-0086 に記録。バスサイクル・割込み受理・RESET/停電系の
+    // 差分はここか機能旗へ写す（棚卸しの全項目対応は docs/guests/pdp11.md
+    // に記録。バスサイクル・割込み受理・RESET/停電系の
     // 項目は裸実行モデルでは不可観測なので対象外として残す）。
     // Ref: SPEC-PDP11-ARCH83（付録 B）.
     m.param(
@@ -371,7 +371,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   保守命令 00021x を持つ。モード桁・MMU・奇数アドレス
     //   トラップなし。
     // - pdp11_04: 素の KD11-D。SOB/MARK/SXT を持たず RTT は異なる
-    //   動作（GAP-0086）。PSW は 177776 に写像され T 桁も直接
+    //   動作。PSW は 177776 に写像され T 桁も直接
     //   書ける。MMU なし。
     // - pdp11_34: 2 モード MMU（18 ビット）・MTPS/MFPS・PSW 写像
     //   あり（付録 B 項目 18）。EIS はオプション。
@@ -379,7 +379,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   SPL・MFPT・CSM 標準。MTPS/MFPS・PSW 写像は 177776 直付け
     //   のみ（項目 18）。宣言は KE44-A CISP 装着形を表す（CIS は
     //   オプション —— 未装着形の宣言はモデルを分けるほどの差が
-    //   なく GAP-0086 に記す）。
+    //   なく に記す）。
     // - pdp11_60: EIS・MMU・FP11-E 標準（項目 8 —— 「F-floating
     //   instructions standard」）。
     // - pdp11_70: EIS・MMU・分離 I/D・スーパーバイザ・第2レジスタ

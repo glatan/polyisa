@@ -749,7 +749,6 @@ fn exec_bank_transfer() {
     // （bank=Rn[15:7], entry=Rn[6:2]）。モデルは bank0 の
     // R0_BANK–R7_BANK 相当のみで、範囲外は読めば 0・書き込みは
     // 捨てる。Ref: SPEC-SUPERH-SH2A §6.3.17/§6.3.35, §7.4.2.
-    // Gap: GAP-0061
     let mut env = bare();
     set_gpr(&mut env, 0, 0xcafe_f00d);
     set_gpr(&mut env, 5, 3 << 2); // bank0, entry3 → rbank[3]

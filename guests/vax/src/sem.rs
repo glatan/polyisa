@@ -757,7 +757,7 @@ pub(crate) fn eval_a(
 // N=0・Z=0・V=1・C=1 の失敗終了、<2:1> が残っていれば
 // 予約オペランド fault。
 // Ref: SPEC-VAX-ARM（キュー命令の節）.
-// Gap: GAP-0076 — 単一スレッド近似の記録。
+// 単一スレッド近似の記録。
 
 /// キュー命令の予約オペランド検査（8 バイト整列と項目!=ヘッダ）。
 fn q_check(entry: u32, hdr: u32) -> Result<(), InterpExit> {
@@ -1912,7 +1912,7 @@ fn poly_fault(b: &mut InterpBackend, opc: u16, pc0: u32, e: InterpExit) -> Inter
 /// で、Horner 反復 `tmp3 = arg*tmp3 + (tmp2)` を回す。中間精度は
 /// decfp の `poly_iter` が規定どおり扱う。中断・例外時のレジスタは
 /// 建築の退避形そのものを使うので、どの位置の例外でも継続可能。
-// Gap: GAP-0077 — 反復内の中断可能点の粒度はモデルの区切り。
+// 反復内の中断可能点の粒度はモデルの区切り。
 // Ref: SPEC-VAX-ARM（poly 命令の節）.
 fn poly<const E: u32, const M: u32>(
     b: &mut InterpBackend,
@@ -2599,7 +2599,7 @@ pub fn exec(
         // 属性は読み書き一体とみなす）。モード値の上限検査
         // （実機の TNV fault 経路）はモデルしない。
         // Ref: SPEC-VAX-ARM（probe の項）.
-        // Gap: GAP-0080 — ページ保護なし近似の記録。
+        // ページ保護なし近似の記録。
         Insn::Prober | Insn::Probew => {
             let s = eval(b, f, pos, 0)?;
             let _mode = read(b, &s, Width::B)?;
@@ -2798,7 +2798,7 @@ pub fn exec(
         // push で近似し、実際の切り替えは trap を受けた
         // パーソナリティの仕事にする。PRV_MOD には旧 CUR_MOD が
         // 残る。CC は変えない。
-        // Gap: GAP-0076 — 単一スタック近似。
+        // 単一スタック近似。
         Insn::Chmk | Insn::Chme | Insn::Chms | Insn::Chmu => {
             let req = match f.insn {
                 Insn::Chmk => 0,

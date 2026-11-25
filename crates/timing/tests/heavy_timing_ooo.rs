@@ -35,7 +35,7 @@ const P23: u32 = (1 << 2) | (1 << 3);
 const P4: u32 = 1 << 4;
 
 // Ref: MEAS-UOPS-INFO（レイテンシ・ポート使用）。ports は SKL の 8 ポートに対応する。
-// Gap: GAP-0098 div は 56 uops・複数ポートの実命令を「p0 を busy で占有する
+// div は 56 uops・複数ポートの実命令を「p0 を busy で占有する
 // 1 イベント」に畳む近似。
 const CLASSES: &[ClassUop] = &[
     ClassUop {
@@ -114,7 +114,7 @@ const CLASSES: &[ClassUop] = &[
 
 // Ref: MEAS-AGNER（SKL 章のキャッシュ表）。L1I/L1D 32KiB 8way 64B、
 // L2 256KiB 4way 1024 セット 64B。
-// Gap: GAP-0098 L2 の hit_latency は「L1 のタグ照査を抜けた先の追加応答」として
+// L2 の hit_latency は「L1 のタグ照査を抜けた先の追加応答」として
 // 10（合計 14）に較正した代表値。L1I の hit_latency は直列充填近似の代表値、
 // mem_latency 60 は未較正の仮値。
 const L1D: CacheLevel = CacheLevel {
@@ -153,7 +153,7 @@ fn params(pred: Predictor, mem: CacheHierarchy, icache: CacheHierarchy) -> OooPa
         lq: 72,
         sq: 56,
         retire_width: 8,
-        // Gap: GAP-0098 誤予測コストは mispredict 16＋i$ ヒットで実測 16–20 に
+        // 誤予測コストは mispredict 16＋i$ ヒットで実測 16–20 に
         // 収める較正値。正予測で「取る」分岐の帯域はポート制約の 0.5/clk のまま。
         mispredict: 16,
         fetch_bubble: 1,
