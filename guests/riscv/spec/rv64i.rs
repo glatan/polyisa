@@ -607,6 +607,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("amomax_d", "R", "10100.. ..... ..... 011 ..... 0101111", "amomax_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amominu_d", "R", "11000.. ..... ..... 011 ..... 0101111", "amominu_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amomaxu_d", "R", "11100.. ..... ..... 011 ..... 0101111", "amomaxu_d {rd}, {rs1}, {rs2}", "atomic"),
+        // Zfhmin（半精度の入出力・転送・形式変換。fmt=10）
+        ("flh", "I", "............ ..... 001 ..... 0000111", "flh {rd}, {imm}({rs1})", "fload"),
+        ("fsh", "S", "....... ..... ..... 001 ..... 0100111", "fsh {rs2}, {imm}({rs1})", "fstore"),
+        ("fcvt_s_h", "R", "0100000 00010 ..... ... ..... 1010011", "fcvt.s.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_s", "R", "0100010 00000 ..... ... ..... 1010011", "fcvt.h.s {rd}, {rs1}", "fcvt"),
+        ("fcvt_d_h", "R", "0100001 00010 ..... ... ..... 1010011", "fcvt.d.h {rd}, {rs1}", "fcvt"),
+        ("fcvt_h_d", "R", "0100010 00001 ..... ... ..... 1010011", "fcvt.h.d {rd}, {rs1}", "fcvt"),
+        ("fmv_x_h", "R", "1110010 00000 ..... 000 ..... 1010011", "fmv.x.h {rd}, {rs1}", "fsj"),
+        ("fmv_h_x", "R", "1111010 00000 ..... 000 ..... 1010011", "fmv.h.x {rd}, {rs1}", "fsj"),
         // F（単精度浮動小数点。fmt=00。rm は RNE 固定で無視する）
         ("flw", "I", "............ ..... 010 ..... 0000111", "flw {rd}, {imm}({rs1})", "fload"),
         ("fsw", "S", "....... ..... ..... 010 ..... 0100111", "fsw {rs2}, {imm}({rs1})", "fstore"),
@@ -761,6 +770,12 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "orc_b" | "rev8" | "sext_b" | "sext_h" | "zext_h"
         ) {
             reqs.push("zbb");
+        }
+        if matches!(
+            *name,
+            "flh" | "fsh" | "fcvt_s_h" | "fcvt_h_s" | "fcvt_d_h" | "fcvt_h_d" | "fmv_x_h" | "fmv_h_x"
+        ) {
+            reqs.push("zfhmin");
         }
         if matches!(*name, "aes64es" | "aes64esm") {
             reqs.push("zkne");

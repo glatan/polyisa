@@ -541,6 +541,12 @@ pub fn cvt_w<B: Concrete>(b: &mut B, op: Cvt, from: Wid, to: Wid, x: u128, rm: u
             (Wid::W32, Wid::W16) => {
                 B::v_to_u128::<F16>(b.fcvt_ff::<F32, F16>(B::v_from_u128::<F32>(x), rm))
             }
+            (Wid::W16, Wid::W64) => {
+                B::v_to_u128::<F64>(b.fcvt_ff::<F16, F64>(B::v_from_u128::<F16>(x), rm))
+            }
+            (Wid::W64, Wid::W16) => {
+                B::v_to_u128::<F16>(b.fcvt_ff::<F64, F16>(B::v_from_u128::<F64>(x), rm))
+            }
             (Wid::W32, Wid::W64) => {
                 B::v_to_u128::<F64>(b.fcvt_ff::<F32, F64>(B::v_from_u128::<F32>(x), rm))
             }

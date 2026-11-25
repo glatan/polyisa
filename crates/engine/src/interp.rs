@@ -509,6 +509,16 @@ impl Backend for InterpBackend {
                 self.fp_flags |= f;
                 u128::from(r.bits())
             }
+            (16, 64) => {
+                let (r, f) = SF16::from_bits(v as u64).to_f64(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            (64, 16) => {
+                let (r, f) = SF64::from_bits(v as u64).to_f16(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
             (32, 64) => {
                 let (r, f) = SF32::from_bits(v as u64).to_f64(rm);
                 self.fp_flags |= f;

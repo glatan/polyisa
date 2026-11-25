@@ -11,7 +11,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, F32, F64, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64,
+    Backend, Cmp, F16, F32, F64, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64,
 };
 
 use super::CpuState;
@@ -2950,6 +2950,95 @@ pub fn ecall<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
 /// EBREAK。デバッガが処理する退出を返す。
 pub fn ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
     env_exit(b, polyisa_sem::ExceptionKind::Break, pc)
+}
+
+// Zfhmin。半精度は 64 ビットレジスタへ NaN ボックスして保持する。
+
+fn read_h<B: Backend>(b: &mut B, r: Fpr) -> B::V<F16> {
+    let w: B::V<W64> = b.get(r.state());
+    b.trunc::<W64, F16>(w)
+}
+
+fn read_h_checked<B: Backend>(b: &mut B, r: Fpr) -> B::V<F16> {
+    let w: B::V<W64> = b.get(r.state());
+    let low = b.trunc::<W64, F16>(w);
+    let shift = b.konst::<W64>(16);
+    let hi64 = b.shr_l(w, shift);
+    let hi = b.trunc::<W64, W64>(hi64);
+    let all1 = b.konst::<W64>(0xffff_ffff_ffff);
+    let boxed = b.cmp(Cmp::Eq, hi, all1);
+    let canon = b.konst::<F16>(0x7e00);
+    b.select(boxed, low, canon)
+}
+
+fn write_h<B: Backend>(b: &mut B, rd: Fpr, v: B::V<F16>) {
+    let w = b.zext::<F16, W64>(v);
+    let top = b.konst::<W64>(0xffff_ffff_ffff_0000);
+    let boxed = b.or(w, top);
+    b.set(rd.state(), boxed);
+}
+
+pub fn flh<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr(b, rs1, oimm);
+    let v: B::V<W16> = b.load(addr, DATA_READ)?;
+    let h = b.trunc::<W16, F16>(v);
+    write_h(b, rd, h);
+    Ok(())
+}
+
+pub fn fsh<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    let v = read_h(b, rs2);
+    let w = b.trunc::<F16, W16>(v);
+    let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 2, DATA_WRITE)?;
+    b.store(addr, w, DATA_WRITE)?;
+    Ok(())
+}
+
+pub fn fmv_x_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_h(b, rs1);
+    let w = b.sext::<F16, W64>(x);
+    write(b, rd, w);
+    Ok(())
+}
+
+pub fn fmv_h_x<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, F16>(raw);
+    write_h(b, rd, x);
+    Ok(())
+}
+
+pub fn fcvt_s_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let s = b.fcvt_ff::<F16, F32>(x, rm);
+    write_f(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+pub fn fcvt_h_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let s = b.fcvt_ff::<F32, F16>(x, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+pub fn fcvt_d_h<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_h_checked(b, rs1);
+    let s = b.fcvt_ff::<F16, F64>(x, rm);
+    write_fd(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+pub fn fcvt_h_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_fd(b, rs1);
+    let s = b.fcvt_ff::<F64, F16>(x, rm);
+    write_h(b, rd, s);
+    accrue_fp(b);
+    Ok(())
 }
 
 // F（単精度浮動小数点）。丸めモードは引数 rm で受ける（rm=7/DYN は

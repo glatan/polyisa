@@ -1240,6 +1240,12 @@ impl F16 {
     pub fn to_f32(self, rm: Rm) -> (F32, u8) {
         convert(self, rm)
     }
+
+    /// 64 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f64(self, rm: Rm) -> (F64, u8) {
+        convert(self, rm)
+    }
 }
 
 impl F32 {
@@ -1357,6 +1363,12 @@ impl F64 {
     /// 32 ビット形式に変換する。
     #[must_use]
     pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        convert(self, rm)
+    }
+
+    /// 16 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f16(self, rm: Rm) -> (F16, u8) {
         convert(self, rm)
     }
 }
