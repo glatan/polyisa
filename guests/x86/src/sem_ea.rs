@@ -9720,6 +9720,45 @@ pub fn fist_m<B: Backend>(
     Ok(())
 }
 
+/// FISTTP 用の切り捨て変換。FISTTP は FCW の RC に関係なく
+/// 常に truncation なので、丸め制御だけを一時的に切り捨てへ
+/// 合わせて共通変換を使う。
+fn f80_to_i64_trunc<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+    let old = b.get(sem::fcw_ref());
+    let keep = b.konst::<W16>(!0x0c00u16);
+    let base = b.and::<W16>(old, keep);
+    let trunc = b.konst::<W16>(0x0c00);
+    let cw = b.or::<W16>(base, trunc);
+    b.set(sem::fcw_ref(), cw);
+    let v = sem::f80_to_i64(b, sig, exp);
+    b.set(sem::fcw_ref(), old);
+    v
+}
+
+/// FISTTP m16/m32/m64。常に切り捨てで整数化し、pop する。
+pub fn fisttp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let v = f80_to_i64_trunc(b, sig, exp);
+    if let Rm::Mem { a, wseg } = ea {
+        let a = *a;
+        match bits {
+            16 => {
+                let v16: B::V<W16> = b.trunc::<W64, W16>(v);
+                decode::mem_store::<B, W16>(b, a, *wseg, v16)?;
+            }
+            32 => {
+                let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+                decode::mem_store::<B, W32>(b, a, *wseg, v32)?;
+            }
+            _ => {
+                decode::mem_store::<B, W64>(b, a, *wseg, v)?;
+            }
+        }
+    }
+    sem::pop_st(b, top)
+}
+
 /// x87 のメモリ二項演算（fadd/fmul/fsub/fsubr/fdiv/fdivr）。
 /// `rev` で被演算子の順序を反転（fsubr/fdivr）。
 #[derive(Clone, Copy)]

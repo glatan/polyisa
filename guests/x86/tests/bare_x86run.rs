@@ -12963,6 +12963,43 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_fisttp_m64_truncates_independent_of_fcw() {
+    // DD 4C 24 30 = fisttpq 0x30(%rsp)。ST=1.5、FCW=nearest でも
+    // FISTTP は常に切り捨てて 1 を書く。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0xC000_0000_0000_0000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDD, 0x4C, 0x24, 0x30])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x037F);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut got = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2030), &mut got, acc)
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(got), 1);
+}
+
+#[test]
 fn run_fistp_m64_sibd_honors_rounding() {
     // DF 7C 24 30 = fistpq 0x30(%rsp)。RC に従って整数を書き、ST(0) を捨てる。
     // seq 0x4d0c31 は RC=ゼロ方向。

@@ -5283,7 +5283,7 @@ fn dispatch_map<B: Backend>(
             if d.modrm >= 0xC0 {
                 sem_ea::fcmov_cc(b, 5, d.modrm & 7)
             } else {
-                sem_ea::fist_m(b, &ea, 32, true)
+                sem_ea::fisttp_m(b, &ea, 32)
             }
         }
         Insn::FistM32 => {
@@ -5390,8 +5390,7 @@ fn dispatch_map<B: Backend>(
             if d.modrm >= 0xC0 {
                 return Ok(false);
             }
-            // FISTTP は常に切り捨てだが、現状は FCW 準拠の近似。
-            sem_ea::fist_m(b, &ea, 64, true)
+            sem_ea::fisttp_m(b, &ea, 64)
         }
         Insn::FstM64 => {
             if d.modrm >= 0xC0 {
@@ -5524,7 +5523,7 @@ fn dispatch_map<B: Backend>(
             if d.modrm >= 0xC0 {
                 return Ok(false);
             }
-            sem_ea::fist_m(b, &ea, 16, true)
+            sem_ea::fisttp_m(b, &ea, 16)
         }
         Insn::FistM16 => {
             if d.modrm >= 0xC0 {
