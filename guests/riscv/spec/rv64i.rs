@@ -40,6 +40,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zbb", &[][..], &[][..]),
         ("zbc", &["zbkc"][..], &[][..]),
         ("zbkc", &[][..], &[][..]),
+        ("zbkx", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -465,6 +466,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
         ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
         // Zbc（キャリーレス乗算）
+        ("xperm4", "R", "0010100 ..... ..... 010 ..... 0110011", "xperm4 {rd}, {rs1}, {rs2}", "alu"),
+        ("xperm8", "R", "0010100 ..... ..... 100 ..... 0110011", "xperm8 {rd}, {rs1}, {rs2}", "alu"),
         ("clmul", "R", "0000101 ..... ..... 001 ..... 0110011", "clmul {rd}, {rs1}, {rs2}", "alu"),
         ("clmulh", "R", "0000101 ..... ..... 011 ..... 0110011", "clmulh {rd}, {rs1}, {rs2}", "alu"),
         ("clmulr", "R", "0000101 ..... ..... 010 ..... 0110011", "clmulr {rd}, {rs1}, {rs2}", "alu"),
@@ -718,6 +721,9 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "orc_b" | "rev8" | "sext_b" | "sext_h" | "zext_h"
         ) {
             reqs.push("zbb");
+        }
+        if matches!(*name, "xperm4" | "xperm8") {
+            reqs.push("zbkx");
         }
         if matches!(*name, "clmul" | "clmulh") {
             reqs.push("zbkc");

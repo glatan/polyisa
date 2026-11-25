@@ -827,6 +827,100 @@ pub fn rev8<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
     Ok(())
 }
 
+fn xperm64<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs1: Gpr,
+    rs2: Gpr,
+    elem_bits: u64,
+    lanes: u64,
+) -> Flow<B> {
+    let lut = read(b, rs1);
+    let idxs = read(b, rs2);
+    let elem_mask = const_w64(b, (1u64 << elem_bits) - 1);
+    let count = const_w64(b, lanes);
+    let zero = const_w64(b, 0);
+    let bits = const_w64(b, elem_bits);
+    let mut out = zero;
+    for lane in 0..lanes {
+        let pos = lane * elem_bits;
+        let idx0 = shr64(b, idxs, pos);
+        // xperm8 の index 幅は 8 ビットなので、表の要素数を越えるものは 0 にする。
+        let idx_mask = if elem_bits == 8 {
+            const_w64(b, 0xff)
+        } else {
+            elem_mask
+        };
+        let idx = b.and(idx0, idx_mask);
+        let valid = b.cmp(Cmp::LtU, idx, count);
+        let shift = b.mul(idx, bits);
+        let raw = b.shr_l(lut, shift);
+        let elem0 = b.and(raw, elem_mask);
+        let elem = b.select(valid, elem0, zero);
+        let part = shl64(b, elem, pos);
+        out = b.or(out, part);
+    }
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn xperm4<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    xperm64(b, rd, rs1, rs2, 4, 16)
+}
+
+pub fn xperm8<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    xperm64(b, rd, rs1, rs2, 8, 8)
+}
+
+fn xperm32<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs1: Gpr,
+    rs2: Gpr,
+    elem_bits: u64,
+    lanes: u64,
+) -> Flow<B> {
+    let lut64 = read(b, rs1);
+    let lut32 = b.trunc::<W64, W32>(lut64);
+    let lut = b.zext::<W32, W64>(lut32);
+    let idx64 = read(b, rs2);
+    let idx32 = b.trunc::<W64, W32>(idx64);
+    let idxs = b.zext::<W32, W64>(idx32);
+    let elem_mask = const_w64(b, (1u64 << elem_bits) - 1);
+    let count = const_w64(b, lanes);
+    let zero = const_w64(b, 0);
+    let bits = const_w64(b, elem_bits);
+    let mut out = zero;
+    for lane in 0..lanes {
+        let pos = lane * elem_bits;
+        let idx0 = shr64(b, idxs, pos);
+        let idx_mask = if elem_bits == 8 {
+            const_w64(b, 0xff)
+        } else {
+            elem_mask
+        };
+        let idx = b.and(idx0, idx_mask);
+        let valid = b.cmp(Cmp::LtU, idx, count);
+        let shift = b.mul(idx, bits);
+        let raw = b.shr_l(lut, shift);
+        let elem0 = b.and(raw, elem_mask);
+        let elem = b.select(valid, elem0, zero);
+        let part = shl64(b, elem, pos);
+        out = b.or(out, part);
+    }
+    let out32 = b.trunc::<W64, W32>(out);
+    write_w(b, rd, out32);
+    Ok(())
+}
+
+pub fn xperm4_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    xperm32(b, rd, rs1, rs2, 4, 8)
+}
+
+pub fn xperm8_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    xperm32(b, rd, rs1, rs2, 8, 4)
+}
+
 pub fn sext_b<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
     let x64 = read(b, rs1);
     let x = b.trunc::<W64, W8>(x64);

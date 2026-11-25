@@ -510,6 +510,20 @@ fn step_rv_inner(
             }
             env.step(|b| sem::rorw(b, rd, rs1, rs2))
         }
+        Insn::Xperm4 => {
+            if rv32 {
+                env.step(|b| sem::xperm4_rv32(b, rd, rs1, rs2))
+            } else {
+                env.step(|b| sem::xperm4(b, rd, rs1, rs2))
+            }
+        }
+        Insn::Xperm8 => {
+            if rv32 {
+                env.step(|b| sem::xperm8_rv32(b, rd, rs1, rs2))
+            } else {
+                env.step(|b| sem::xperm8(b, rd, rs1, rs2))
+            }
+        }
         Insn::Clmul => {
             if rv32 {
                 return Err(Outcome::Unimplemented {
