@@ -7,9 +7,8 @@
 //! 命令列を、polyisa と Intel SDE の両方で実行して状態を比較する。
 //! heavy_diff_host（E2）がホスト CPU を直接叩くのに対し、こちらは
 //! `sde64 -future` の下で生成 ELF を走らせるため、REX2 の拡張 GPR
-//! （R16-R31）までカバーできる。map4 の NDD・昇格形は polyisa が
-//! decode のみ（意味論未実装）で SDE -future でも実行できないため
-//! 現コーパスには含まない。
+//! （R16-R31）までカバーできる。EVEX map4 の NDD/NF 昇格形も
+//! reg-direct 形に限ってコーパスへ入れる。
 //!
 //! 仕組み:
 //! - 乱択した命令列を1枚の静的 ELF（RWX の1セグメント）に焼く。
@@ -304,6 +303,45 @@ mod imp {
         ]
     }
 
+    /// EVEX map4 の 4 バイト接頭辞。`rxreg` は ModRM.reg に対応する
+    /// R/R4 拡張を持つレジスタ番号（グループ命令では 0）、`rm` は
+    /// ModRM.r/m、`ndd` は vvvv+V' の宛先レジスタ。mod=11 専用なので
+    /// X4 は 0（U=1）に固定する。pp は NP=0。
+    fn evex4(rxreg: u8, rm: u8, ndd: u8, w: bool, nf: bool, pp: u8) -> [u8; 4] {
+        let p0 = 0x40 // ~X（X=0）
+            | 0x04 // mm=4
+            | if rxreg & 8 == 0 { 0x80 } else { 0 } // ~R
+            | if rm & 8 == 0 { 0x20 } else { 0 } // ~B
+            | if rxreg & 16 == 0 { 0x10 } else { 0 } // ~R4
+            | if rm & 16 != 0 { 0x08 } else { 0 }; // B4
+        let p1 = ((w as u8) << 7)
+            | ((!ndd & 0x0F) << 3)
+            | 0x04 // U=1（X4=0）
+            | (pp & 3);
+        let p2 = 0x10 // ND=1（vvvv を新しい宛先にする）
+            | if nf { 0x04 } else { 0 }
+            | if ndd & 16 == 0 { 0x08 } else { 0 }; // ~V'
+        [0x62, p0, p1, p2]
+    }
+
+    /// APX NDD の `op r/m, reg` レジスタ直形。
+    /// 意味は `ndd = r/m OP reg`（CMOV 以外の ALU 昇格形）。
+    fn apx_rr(op: u8, ndd: u8, reg: u8, rm: u8, w: bool, nf: bool) -> Vec<u8> {
+        let mut v = evex4(reg, rm, ndd, w, nf, 0).to_vec();
+        v.push(op);
+        v.push(0xC0 | ((reg & 7) << 3) | (rm & 7));
+        v
+    }
+
+    /// APX NDD のグループ命令レジスタ直形。ModRM.reg は opcode
+    /// 拡張なので R/R4 拡張は 0 に固定する。
+    fn apx_group(op: u8, grp: u8, ndd: u8, rm: u8, w: bool, nf: bool) -> Vec<u8> {
+        let mut v = evex4(0, rm, ndd, w, nf, 0).to_vec();
+        v.push(op);
+        v.push(0xC0 | ((grp & 7) << 3) | (rm & 7));
+        v
+    }
+
     /// 命令ごとのフラグ比較マスク。`FLAG_MASK` のうち、その命令が
     /// 定義する旗だけを見る。
     const M_SHIFT: u64 = FLAG_MASK & !0x800; // OF 不定
@@ -316,7 +354,7 @@ mod imp {
         let a = reg(rng);
         let b = reg(rng);
         let w = rng.next().is_multiple_of(2);
-        match rng.next() % 12 {
+        match rng.next() % 16 {
             // ALU 2項（dst rm ← reg）。
             0..=4 => {
                 let op =
@@ -373,8 +411,38 @@ mod imp {
                     (v, m)
                 }
             }
-            // cmov / setcc（map1）か mov imm。
-            _ => {
+            // EVEX map4 の NDD/NF 2 項 ALU。ADC/SBB は NF を持たない。
+            12 => {
+                let (op, nf_ok) = [
+                    (0x01u8, true),
+                    (0x09, true),
+                    (0x11, false),
+                    (0x19, false),
+                    (0x21, true),
+                    (0x29, true),
+                    (0x31, true),
+                ][(rng.next() % 7) as usize];
+                let d = reg(rng);
+                let nf = nf_ok && rng.next().is_multiple_of(2);
+                (apx_rr(op, d, a, b, w, nf), if nf { 0 } else { FLAG_MASK })
+            }
+            // EVEX map4 の INC/DEC/NOT/NEG。NOT だけ NF なし。
+            13 => {
+                let (op, grp, nf_ok) = [
+                    (0xFFu8, 0u8, true),
+                    (0xFF, 1, true),
+                    (0xF7, 2, false),
+                    (0xF7, 3, true),
+                ][(rng.next() % 4) as usize];
+                let d = reg(rng);
+                let nf = nf_ok && rng.next().is_multiple_of(2);
+                (
+                    apx_group(op, grp, d, a, w, nf),
+                    if nf { 0 } else { FLAG_MASK },
+                )
+            }
+            // REX2 の cmov（map1）か mov imm。
+            11 => {
                 if rng.next().is_multiple_of(2) {
                     let cc = (rng.next() % 16) as u8;
                     (rrm2(0x40 | cc, a, b, w), FLAG_MASK)
@@ -383,6 +451,31 @@ mod imp {
                     let n = if w { 8 } else { 4 };
                     v.extend_from_slice(&rng.imm().to_le_bytes()[..n]);
                     (v, FLAG_MASK)
+                }
+            }
+            // CCMP/CTEST の NCI。常に真/偽の両側を固定バイトで入れ、
+            // dfv と実比較の双方をカバーする。被演算子は r25/r26 だが、
+            // 初期 ctx が乱択なので値はシードごとに変わる。
+            15 => {
+                let v = match rng.next() % 4 {
+                    0 => vec![0x62, 0x4C, 0x14, 0x0B, 0x39, 0xD1],
+                    1 => vec![0x62, 0x4C, 0x14, 0x0A, 0x39, 0xD1],
+                    2 => vec![0x62, 0x4C, 0x0C, 0x0B, 0xF7, 0xC1, 0x02, 0x00, 0x00, 0x00],
+                    _ => vec![0x62, 0x4C, 0x0C, 0x0A, 0xF7, 0xC1, 0x02, 0x00, 0x00, 0x00],
+                };
+                (v, FLAG_MASK | 0x10)
+            }
+            // EVEX map4 の IMUL または NDD CMOVcc。CFCMOV と
+            // メモリフォールト抑制は reg-direct コーパスの対象外。
+            _ => {
+                let d = reg(rng);
+                if rng.next().is_multiple_of(2) {
+                    let nf = rng.next().is_multiple_of(2);
+                    (apx_rr(0xAF, d, a, b, w, nf), if nf { 0 } else { M_MUL })
+                } else {
+                    let cc = (rng.next() % 16) as u8;
+                    let nf = rng.next().is_multiple_of(2);
+                    (apx_rr(0x40 | cc, d, a, b, w, nf), 0)
                 }
             }
         }
@@ -424,8 +517,6 @@ mod imp {
         let mut rng = Rng(seed);
         let mut insns: Vec<Vec<u8>> = Vec::with_capacity(STEPS);
         let mut masks: Vec<u64> = Vec::with_capacity(STEPS);
-        // map4 の NDD・昇格形は polyisa が decode のみ（意味論未実装）、
-        // SDE -future でも実行できないため、コーパスは REX2 のみ。
         while insns.len() < STEPS {
             let (v, m) = gen_insn(&mut rng);
             insns.push(v);
@@ -565,6 +656,50 @@ mod imp {
                     .unwrap_or(false)
             })
             .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn apx_corpus_polyisa_smoke() {
+        // SDE がない環境でも、生成した reg-direct 命令が polyisa で
+        // デコード・実行できることを確認する。値の正しさは SDE 差分が担う。
+        let mut rng = Rng(0xA94C_0001);
+        for i in 0..256 {
+            let (insn, _) = gen_insn(&mut rng);
+            let mut env = poly_env();
+            env.backend.set(sem::xcr0_ref(), 0x8_0003);
+            env.backend.mem.write(VirtAddr(CODE_VA), &insn).unwrap();
+            let out = run_x86::run_mode_ex(
+                &mut env,
+                CODE_VA as u32,
+                &mut NoTrap,
+                1,
+                true,
+                polyisa_guest_x86::DEFAULT_FEATS | polyisa_guest_x86::FEAT_APX,
+                &polyisa_guest_x86::DEFAULT_PARAMS,
+            );
+            assert!(
+                matches!(out, Outcome::StepLimit { .. }),
+                "generated insn {i} {}: {out:?}",
+                insn.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+        }
+    }
+
+    #[test]
+    fn apx_encoding_examples() {
+        // bare_x86run の既知バイト列と同じ map4 形を作れることを固定する。
+        assert_eq!(
+            apx_rr(0x29, 24, 26, 25, false, false),
+            vec![0x62, 0x4C, 0x3C, 0x10, 0x29, 0xD1]
+        );
+        assert_eq!(
+            apx_rr(0x29, 24, 26, 25, false, true),
+            vec![0x62, 0x4C, 0x3C, 0x14, 0x29, 0xD1]
+        );
+        assert_eq!(
+            apx_rr(0x44, 24, 26, 25, false, false),
+            vec![0x62, 0x4C, 0x3C, 0x10, 0x44, 0xD1]
+        );
     }
 
     pub fn run() {
