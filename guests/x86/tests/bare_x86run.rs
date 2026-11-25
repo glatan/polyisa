@@ -12994,6 +12994,70 @@ fn run_x87_fdiv_zero_sets_zero_divide_flag() {
 }
 
 #[test]
+fn run_x87_unmasked_exception_is_deferred_to_next_fp_insn() {
+    // FCW=0 で IE を unmasked にする。sqrt(-1) 自体は完了し、
+    // 次の fadd の先頭で #MF が起こる。BareEnv では OS 配送が
+    // ないため VM 境界の Unimplemented として観測する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0xBFFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xFA, 0xD8, 0xC0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert!(
+        matches!(out, Outcome::Unimplemented { pc: 0x1002, .. }),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn run_x87_fwait_checks_pending_exception() {
+    fn once(fcw: u16) -> Outcome {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::fsw_ref(), 1);
+        env.backend.mem.write(VirtAddr(0x1000), &[0x9B]).unwrap();
+        let mut sys = X64Exit;
+        run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true)
+    }
+    assert!(matches!(once(0), Outcome::Unimplemented { pc: 0x1000, .. }));
+    assert_eq!(once(1), Outcome::StepLimit { pc: 0x1001 });
+}
+
+#[test]
+fn run_x87_fnclex_is_not_blocked_by_pending_exception() {
+    // IE が unmasked で残っていても FNCLEX は no-wait 命令なので
+    // 実行でき、例外状態をクリアする。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0);
+    env.backend.set(polyisa_guest_x86::sem::fsw_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDB, 0xE2])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fsw_ref()), 0);
+}
+
+#[test]
 fn run_x87_fclex_clears_exception_state() {
     // DB E2 = fnclex。例外フラグ・SF/ES/B を落とし、条件コードは残す。
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());

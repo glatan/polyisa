@@ -11396,6 +11396,33 @@ pub fn rdssp<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> F
     Ok(())
 }
 
+/// マスクされていない x87 例外が残っているか。FCW/FSW の
+/// 下位 6 ビットを見る。ES/B は派生表示なので判定には使わない。
+pub fn x87_has_unmasked_pending<B: Backend>(b: &mut B) -> B::B {
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    let exc_mask = b.konst::<W16>(0x3f);
+    let fbits = b.and::<W16>(fsw, exc_mask);
+    let cbits = b.and::<W16>(fcw, exc_mask);
+    let not_c = b.not::<W16>(cbits);
+    let pending = b.and::<W16>(fbits, not_c);
+    let z16 = b.konst::<W16>(0);
+    b.cmp::<W16>(Cmp::Ne, pending, z16)
+}
+
+/// x87 浮動小数点例外（#MF 相当）。実際の配送は先行する
+/// unmasked exception が残った状態で次の x87 命令/FWAIT を
+/// 実行しようとしたときに起こる。
+pub fn fp_exception<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Fp,
+        code: 16,
+        addr: Some(u64::from(eip)),
+        in_delay_slot: false,
+    }))
+}
+
 /// 特権違反・保護違反（#GP(0)相当）。
 pub fn protection<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     use polyisa_sem::{ExceptionKind, GuestException};

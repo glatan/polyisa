@@ -2733,6 +2733,27 @@ fn dispatch_map<B: Backend>(
         // i286+FPU は落下して FPU 意味論を実行する。成功時に
         // 80287 へのバス転送プロトコルを emit する（末尾の npx 参照）。
     }
+    // マスクされていない x87 例外は、それを起こした命令ではなく
+    // 次の x87 命令で #MF となる。FNCLEX/FNINIT/FNST* などの
+    // no-wait 制御命令は例外を処理するため配送対象から外す。
+    if (0xD8..=0xDF).contains(&d.opcode) {
+        let rmreg = (d.modrm >> 3) & 7;
+        let no_wait = match d.opcode {
+            0xD9 => d.modrm == 0xD0 || (d.modrm < 0xC0 && matches!(rmreg, 6 | 7)),
+            0xDB => matches!(d.modrm, 0xE2 | 0xE3),
+            0xDD => d.modrm < 0xC0 && matches!(rmreg, 6 | 7),
+            0xDF => d.modrm == 0xE0,
+            _ => false,
+        };
+        if !no_wait {
+            let has_pending = sem_ea::x87_has_unmasked_pending(b);
+            if mode == 16 {
+                b.if_then(has_pending, |b| sem_ea::int_real(b, eip, 0, 16, sa, sseg))?;
+            } else {
+                b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))?;
+            }
+        }
+    }
     // 80286+80287 の ESC は実行成功時にポート F8/FC へ命令語と文脈
     // を転送する。オペランドの限界例外は転送に先行する（SST 80286
     // 実測でフォルト時はポートが無条件に書かれない）ので emit は
@@ -3656,7 +3677,14 @@ fn dispatch_map<B: Backend>(
         Insn::AddsubpsXvWv => sem_ea::addsub(b, 32, d, &ea),
         Insn::AddsubpdXvWv => sem_ea::addsub(b, 64, d, &ea),
         Insn::LddquXvMv => sem_ea::mov_x_w(b, d, &ea),
-        Insn::Fwait => sem_ea::nop(b),
+        Insn::Fwait => {
+            let has_pending = sem_ea::x87_has_unmasked_pending(b);
+            if mode == 16 {
+                b.if_then(has_pending, |b| sem_ea::int_real(b, eip, 0, 16, sa, sseg))
+            } else {
+                b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))
+            }
+        }
         Insn::InsEbDx => {
             sem_ea::str_op(b, sem_ea::Str::Ins, 8, d, eip, seg, seg_ss, es, mode == 16)
         }
