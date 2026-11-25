@@ -97,9 +97,22 @@ pub fn build_model() -> polyisa_isadl::Model {
     // CPU モデル。generic は V5 系のベースライン。v73 は Linux ABI
     // の配布物が要求する版（BIN-DISTRO-HEXAGON の e_flags 0x73）、
     // v79 は主正本の最新版。dx_* は文脈旗なのでモデルには含めない。
+    // 版モデルは版旗の含意連鎖で前版の機能を引く。t 付きの派生
+    // （v67t・v71t）は tinycore 構成の版で、構成差の一次資料確認が
+    // 済んでいないため未追加。
     for (name, parent, add) in [
         ("generic", "", &["v5"][..]),
+        ("v55", "generic", &["v55"][..]),
+        ("v60", "generic", &["v60"][..]),
+        ("v62", "generic", &["v62"][..]),
+        ("v65", "generic", &["v65"][..]),
+        ("v66", "generic", &["v66"][..]),
+        ("v67", "generic", &["v67"][..]),
+        ("v68", "generic", &["v68"][..]),
+        ("v69", "generic", &["v69"][..]),
+        ("v71", "generic", &["v71"][..]),
         ("v73", "generic", &["v73"][..]),
+        ("v75", "generic", &["v75"][..]),
         ("v79", "generic", &["v79"][..]),
     ] {
         m.models.push(ModelDef {

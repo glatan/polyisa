@@ -86,6 +86,33 @@ pub fn build_model() -> polyisa_isadl::Model {
         ident: vec![],
     });
 
+    // 基本プロファイル。整数系は Zicsr・Zifencei を含めない純粋な
+    // 拡張列とし、rv64imac・rv64gc は従来どおり CSR を含む構成と
+    // して残す（rv64gc が先頭で既定）。
+    // Ref: SPEC-RISCV-UNPRIV (20250508) の拡張命名。
+    for (name, parent, add) in [
+        ("rv32i", "", &["rv32"][..]),
+        ("rv32im", "rv32i", &["m"][..]),
+        ("rv32ima", "rv32im", &["a"][..]),
+        ("rv32imac", "rv32ima", &["c"][..]),
+        ("rv32gc", "rv32imac", &["f", "d", "zicsr", "zifencei"][..]),
+        ("rv64i", "", &["rv64"][..]),
+        ("rv64im", "rv64i", &["m"][..]),
+        ("rv64ima", "rv64im", &["a"][..]),
+        // SiFive E31。RV32IMAC に CSR 類を備えた実機構成。
+        ("sifive_e31", "rv32imac", &["zicsr", "zifencei"][..]),
+    ] {
+        m.models.push(polyisa_isadl::model::ModelDef {
+        timing: None,
+        params: vec![],
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: add.iter().map(|s| s.to_string()).collect(),
+            remove_features: Vec::new(),
+            ident: vec![],
+        });
+    }
+
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,

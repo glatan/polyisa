@@ -4,7 +4,7 @@
 
 VAX-11/780〜NVAX（MicroVAX サブセットを含む）のユーザーモード命令群（整数・論理・bitfield・分岐、`CALLS`/`CALLG`/`RET`、`PUSHR`/`POPR`、インターロックキュー、中断可能文字列命令、`CHM*`、F/D/G/H 浮動小数点と `POLY*`/`EMOD*`、パック十進・数値文字列・`EDITPC`、`INDEX`/`PROBER`/`PROBEW`）を `guests/vax` で実装している。
 
-- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`nvax`（計 4 モデル）。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
+- **CPU モデル**：`vax11_780`、`microvax2`、`ka660`、`ka650`、`nvax`（計 5 モデル）。サブセット機能フラグ（`decimal`・`hfp`・`string_ext`・`string_cmp`・`crc`・`editpc`・`compat`）で削られた命令は未実装補完経路へ渡る。
 - **挙動パラメータ**：`emul_dispatch`（`hook` / `scb`）、`dv_hw`（KA660 での十進オーバーフロー扱い）。
 - **タイミング**：VAX-11/780 の EBOX マイクロサイクル（200 ns）単位の専用モデル `timing::Vax780` を持つ（未較正の `approx_uncalibrated`）。
 

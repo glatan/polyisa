@@ -4,7 +4,7 @@
 
 RV32 / RV64 の I・M・A・F・D・C・Zicsr・Zifencei 拡張と、汎用モデルおよび SiFive U74 モデルを `guests/riscv` で実装している。
 
-- **CPU モデル**：`rv64gc`、`rv64imac`、`sifive_u74`（計 3 モデル）。
+- **CPU モデル**：`rv64gc`、`rv64imac`、`sifive_u74`、`rv32i`、`rv32im`、`rv32ima`、`rv32imac`、`rv32gc`、`rv64i`、`rv64im`、`rv64ima`、`sifive_e31`（計 12 モデル）。整数系プロファイル（`rv32i` 系・`rv64i` 系）は Zicsr・Zifencei を含めない純粋な拡張列。RVA プロファイル（`rva20u64` など）は必須拡張の旗が未宣言のため未追加。
 - **タイミング**：`sifive_u74` モデルが `timing::inorder`（デュアルイシュー・インオーダー）を使用する `approx_uncalibrated` 宣言を持つ（`guests/riscv/src/timing.rs`）。
 
 ## 対応する OS・ABI と実行環境

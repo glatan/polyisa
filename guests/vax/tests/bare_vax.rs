@@ -91,7 +91,7 @@ fn feature_flags() {
 
 #[test]
 fn cpu_models() {
-    for name in ["vax11_780", "microvax2", "ka660", "nvax"] {
+    for name in ["vax11_780", "microvax2", "ka660", "ka650", "nvax"] {
         assert!(MODELS.contains(&name), "{name}");
     }
     // フル VAX は全機能を持つ。
@@ -114,6 +114,9 @@ fn cpu_models() {
     // KA630 は string_cmp も補完対象。
     let ka630 = model_feats("microvax2");
     assert_eq!(ka630 & FEAT_STRING_CMP, 0);
+    // KA650 は実装群差の正本がないため KA660 と同型の近似。
+    let ka650 = model_feats("ka650");
+    assert_eq!(ka650, ka660);
     // NVAX は compat 以外を持つ。
     let nvax = model_feats("nvax");
     assert_ne!(nvax & FEAT_DECIMAL, 0);
@@ -122,8 +125,9 @@ fn cpu_models() {
 
 #[test]
 fn cpu_model_params() {
-    // KA660 は DV をハードが扱わない。それ以外は扱う。
+    // KA660 と同型の KA650 は DV をハードが扱わない。それ以外は扱う。
     assert!(!model_params("ka660").dv_hw);
+    assert!(!model_params("ka650").dv_hw);
     assert!(model_params("vax11_780").dv_hw);
     assert!(model_params("microvax2").dv_hw);
     // 補完経路の配送は既定で実行側のトラップハンドラ。

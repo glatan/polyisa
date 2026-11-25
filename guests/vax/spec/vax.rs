@@ -104,7 +104,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   の実装群の記述はない —— ARM 付録 B の後期 VAX（8200/
     //   8300/8500「全命令・互換モードなし」）と同型として宣言した
     //   近似（GAP 記録）。ka650（CVAX）系の実装群差も台帳に
-    //   正本がなく、宣言は ka660 形で代用する。
+    //   正本がないため、ka650 の宣言も ka660 形で近似する。
     // Ref: SPEC-VAX-ARM（付録 B）, SPEC-VAX-MICROVAX §3.7.
     let subset: &[&str] = &[
         "decimal",
@@ -120,6 +120,22 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("microvax2", "vax11_780", &[][..], subset, &[][..]),
         (
             "ka660",
+            "vax11_780",
+            &[][..],
+            &[
+                "decimal",
+                "hfp",
+                "string_ext",
+                "crc",
+                "editpc",
+                "compat",
+            ][..],
+            &[("dv_hw", "false")][..],
+        ),
+        // ka650（CVAX）の実装群差は台帳に正本がないため、KA660 と
+        // 同型で宣言した近似（nvax と同じ扱い。GAP 記録済み）。
+        (
+            "ka650",
             "vax11_780",
             &[][..],
             &[
