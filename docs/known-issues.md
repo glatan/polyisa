@@ -16,7 +16,7 @@
 |---|---|---|---|---|
 | GAP-0002 | [OS 層](architecture/os-layer.md) | 仮想ファイルシステムの完全な名前空間閉じ込めが全 ABI に揃っていない。x86 等の `openat` はホストパスへ直接アクセスし、`/proc/self/maps`・`/proc/cpuinfo`・`/dev` の統一合成もない | 暫定 | 仮想カーネル側でゲストルートと `/proc`・`/dev` の合成を統一実装し、全 Linux ABI から利用する |
 | GAP-0009 | [浮動小数点と十進演算](architecture/arithmetic.md) | Berkeley TestFloat のベクタを生成しておらず、`heavy_conformance_testfloat` は `.testdata/testfloat` がなければ成功で戻る。現状の検証はホスト演算との差分（`heavy_diff_host`）による | 暫定 | SRC-SOFTFLOAT3 から TestFloat ベクタを生成し、`heavy_conformance_testfloat` で比較する（TEST-TESTFLOAT） |
-| GAP-0010 | [テストガイド](guides/testing.md) | `heavy_conformance_riscv_tests` は `.testdata` のディレクトリ存在確認のみで、riscv-tests / riscv-arch-test 本体を実行するハーネスがない | 未着手 | riscv-tests および riscv-arch-test（ACT4 形式を含む）のユーザーモード対象を実行するハーネスを実装する |
+| GAP-0010 | [テストガイド](guides/testing.md) | `heavy_conformance_rv64ui` は riscv-tests の RV32/RV64 ユーザーモード対象を実行するが、`heavy_conformance_riscv_tests` は riscv-arch-test の存在確認に留まり、ACT4 形式を含む実行ハーネスがない | 暫定 | riscv-arch-test（ACT4 形式を含む）のユーザーモード対象を実行するハーネスを実装する |
 | GAP-0012 | [ワークスペース構成](architecture/workspace.md) | 依存規則の検査（`devtool`）が `cargo metadata` を使わず `Cargo.toml` の `[dependencies]` のみを読むため、`build-dependencies`（`isagen`）を検査していない | 暫定 | 検査を `build-dependencies` 対応に拡張するか、検査対象を `[dependencies]` 限定として仕様を確定する |
 | GAP-0021 | [テストガイド](guides/testing.md) | `task status` は ISA・OS・テストバイナリ有無を集計するが、命令単位でどのテスト層を通過したかの網羅集計は生成しない | 未着手 | `task status` または専用レポートで命令×テスト層の網羅状況を生成できるようにする |
 | GAP-0023 | [ISA 記述とコード生成](architecture/isadl.md) | `isagen` の生成物が一部未完。デコーダは線形比較（決定木・バイト表なし）、意味論ディスパッチは手書き `match`、`map` 経路で `disasm_word` が命令を返さず、属性表・レジスタ記述表・実行モード表を生成していない | 暫定 | 決定木／バイト表デコーダ、意味論ディスパッチ、`map` 経路逆アセンブル、属性・レジスタ・実行モード表の生成を実装する |

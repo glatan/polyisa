@@ -1,5 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Gap: GAP-0010
 //! riscv-tests と riscv-arch-test の適合実行（層5・conformance）。
 //!
 //! 手順は検証戦略の層5に従う。テストデータはリポジトリに含めず
