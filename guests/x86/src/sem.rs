@@ -14672,8 +14672,8 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
 }
 
 /// x87 の例外フラグを sticky に立てる。対応する FCW マスクが
-/// 外れているときは ES(bit7) と B(bit15) も立てる。#MF の遅延
-/// 配送そのものはまだモデル化しない。
+/// 外れているときは ES(bit7) と B(bit15) も立てる。#MF は
+/// 実行ループ側で次の FP 命令まで遅延配送する。
 pub(crate) fn x87_exception_flag<B: Backend>(b: &mut B, occur: B::B, bit: u16) {
     let old = b.get(fsw_ref());
     let z16 = b.konst::<W16>(0);
@@ -14798,6 +14798,12 @@ pub(crate) fn mul_ext<B: Backend>(
     let lsb = b.and::<W64>(sig_raw, one64);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one64);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one64);
+    let inexact_raw = bit_or(b, round_set, sticky);
+    let not_special = bit_not(b, is_special);
+    let not_zero_in = bit_not(b, is_zero);
+    let inexact_fin = bit_and(b, inexact_raw, not_special);
+    let inexact = bit_and(b, inexact_fin, not_zero_in);
+    x87_exception_flag(b, inexact, 1 << 5);
     let do_up = x87_round_up(b, sign, round_set, sticky, lsb_set);
     let sig_plus = b.add::<W64>(sig_raw, one64);
     let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
@@ -14818,6 +14824,11 @@ pub(crate) fn mul_ext<B: Backend>(
     let biased = b.sub::<W64>(exp_sum, bias);
     let ov_lim = b.konst::<W64>(16383 + 0x7fff);
     let over = b.cmp::<W64>(Cmp::GeU, exp_sum, ov_lim);
+    let finite_in = bit_and(b, not_special, not_zero_in);
+    let ovf_occur = bit_and(b, over, finite_in);
+    let unf_occur = bit_and(b, under, finite_in);
+    x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, unf_occur, 1 << 4);
     let exp_over = b.select::<W64>(over, special_exp, biased);
     let exp_num = b.select::<W64>(under, zero64, exp_over);
     let sig_under = b.select::<W64>(under, zero64, sig_norm);
@@ -15113,6 +15124,19 @@ pub(crate) fn add_ext<B: Backend>(
     let use_zero_raw = bit_or(b, use_ab, both_z);
     let not_sp = bit_not(b, any_sp);
     let use_zero = bit_and(b, use_zero_raw, not_sp);
+    let nonzero_path = bit_not(b, use_zero);
+    let finite_path = bit_and(b, not_sp, nonzero_path);
+    let not_cancel_zero = bit_not(b, both_zero);
+    let unf_raw = bit_and(b, exp_is_zero, not_cancel_zero);
+    let ovf_occur = bit_and(b, exp_ovf, finite_path);
+    let unf_occur = bit_and(b, unf_raw, finite_path);
+    x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, unf_occur, 1 << 4);
+    let inexact_raw = bit_or(b, round_set, sticky_f);
+    let not_zero_path = bit_not(b, use_zero);
+    let inexact_fin = bit_and(b, inexact_raw, not_sp);
+    let inexact = bit_and(b, inexact_fin, not_zero_path);
+    x87_exception_flag(b, inexact, 1 << 5);
     let sig_after_z = b.select::<W64>(use_zero, sig_zero_case, sig_mag);
     let exp_after_z = b.select::<W64>(use_zero, exp_zero_case, exp_mag);
     let sign_after_z = b.select::<W64>(use_zero, sign_zero_case, sign_num);
@@ -15236,6 +15260,15 @@ pub(crate) fn div_ext<B: Backend>(
     let sticky_ge = bit_and(b, q_ge, r_nz128);
     let sticky_lt = bit_and(b, q_ge_n, rem_nz);
     let sticky = bit_or(b, sticky_ge, sticky_lt);
+    let any_sp_in = bit_or(b, sp_a, sp_b);
+    let inexact_raw = bit_or(b, round_set, sticky);
+    let not_sp_in = bit_not(b, any_sp_in);
+    let not_za_in = bit_not(b, z_a);
+    let not_zb_in = bit_not(b, z_b);
+    let finite_in = bit_and(b, inexact_raw, not_sp_in);
+    let nonzero_a_in = bit_and(b, finite_in, not_za_in);
+    let inexact = bit_and(b, nonzero_a_in, not_zb_in);
+    x87_exception_flag(b, inexact, 1 << 5);
     let lsb = b.and::<W64>(sig_trunc, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let do_up = x87_round_up(b, sign_r, round_set, sticky, lsb_set);
@@ -15259,6 +15292,13 @@ pub(crate) fn div_ext<B: Backend>(
     let sig_fin = b.select::<W64>(e_ovf, sig_ovf, sig_norm);
     let e_under_z = b.select::<W64>(e_under, zero, e_inf);
     let sig_under = b.select::<W64>(e_under, zero, sig_fin);
+
+    let finite_div = bit_and(b, not_sp_in, not_za_in);
+    let finite_div = bit_and(b, finite_div, not_zb_in);
+    let ovf_occur = bit_and(b, e_ovf, finite_div);
+    let unf_occur = bit_and(b, e_under, finite_div);
+    x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, unf_occur, 1 << 4);
 
     // 特殊値の規則:
     //   nan が絡む → nan

@@ -13100,6 +13100,86 @@ fn run_x87_fsqrt_negative_sets_invalid_flag() {
 }
 
 #[test]
+fn run_x87_mul_sets_overflow_and_underflow_flags() {
+    fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16) -> (u64, u16, u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), a_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), a_exp);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), b_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), b_exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // 最大正規数に近い値へ 2.0 を掛けると overflow。最小正規数へ
+    // 0.5 を掛けると、この近似では 0 へ潰れる underflow。
+    let (osig, oexp, ofsw) = once(0xFFFF_FFFF_FFFF_FFFF, 0x7FFE, 0x8000_0000_0000_0000, 0x4000);
+    assert_eq!((osig, oexp), (0x8000_0000_0000_0000, 0x7FFF));
+    assert_ne!(ofsw & (1 << 3), 0);
+    let (usig, uexp, ufsw) = once(0x8000_0000_0000_0000, 0x0001, 0x8000_0000_0000_0000, 0x3FFE);
+    assert_eq!((usig, uexp), (0, 0));
+    assert_ne!(ufsw & (1 << 4), 0);
+}
+
+#[test]
+fn run_x87_inexact_result_sets_precision_flag() {
+    fn once(sig1: u64, exp1: u16) -> u16 {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        for slot in 0..2usize {
+            env.backend.set(
+                polyisa_guest_x86::sem::st_sig_ref(slot),
+                if slot == 0 {
+                    0x8000_0000_0000_0000
+                } else {
+                    sig1
+                },
+            );
+            env.backend.set(
+                polyisa_guest_x86::sem::st_exp_ref(slot),
+                if slot == 0 { 0x3FFF } else { exp1 },
+            );
+        }
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref())
+    }
+    // 1.0+1.0 は正確、1.0+2^-64 は丸めが起きる。PE は masked
+    // でも sticky に立つが ES/B は立たない。
+    assert_eq!(once(0x8000_0000_0000_0000, 0x3FFF) & 0x20, 0);
+    let inexact = once(0x8000_0000_0000_0000, 0x3FBF);
+    assert_ne!(inexact & 0x20, 0);
+    assert_eq!(inexact & 0x8080, 0);
+}
+
+#[test]
 fn run_x87_fdiv_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> (u64, u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
