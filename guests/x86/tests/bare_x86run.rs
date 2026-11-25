@@ -12963,6 +12963,45 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_fmul_propagates_infinity_and_nan_rules() {
+    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp0);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), sig1);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(1), exp1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    let two = (0x8000_0000_0000_0000, 0x4000);
+    let inf = (0x8000_0000_0000_0000, 0x7FFF);
+    assert_eq!(once(two.0, two.1, inf.0, inf.1), inf, "+inf * 2");
+    assert_eq!(
+        once(two.0, two.1, inf.0, inf.1 | 0x8000),
+        (inf.0, 0xFFFF),
+        "-inf * 2"
+    );
+    assert_eq!(
+        once(inf.0, inf.1, 0, 0),
+        (0xC000_0000_0000_0000, 0x7FFF),
+        "inf * 0 is NaN"
+    );
+}
+
+#[test]
 fn cpuid_leaf_d0_ebx_tracks_current_xcr0() {
     let feats: std::collections::BTreeSet<String> = [
         "xsave", "xsaveopt", "xsavec", "avx", "avx512f", "amx_tile", "apx",

@@ -14769,9 +14769,32 @@ pub(crate) fn mul_ext<B: Backend>(
     let sig_num = b.select::<W64>(over, int_bit, sig_under);
     let exp_fin = b.select::<W64>(is_zero, zero64, exp_num);
     let sig_fin = b.select::<W64>(is_zero, zero64, sig_num);
+    // 特殊値。NaN 入力と inf×0 は NaN、inf×非零は符号を
+    // 畳んだ inf、zero×有限は既存の zero 経路に残す。
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac_a = b.and::<W64>(sig_a, frac_mask);
+    let frac_b = b.and::<W64>(sig_b, frac_mask);
+    let frac_a_nz = b.cmp::<W64>(Cmp::Ne, frac_a, zero64);
+    let frac_b_nz = b.cmp::<W64>(Cmp::Ne, frac_b, zero64);
+    let nan_a = bit_and(b, sp_a, frac_a_nz);
+    let nan_b = bit_and(b, sp_b, frac_b_nz);
+    let frac_a_z = bit_not(b, frac_a_nz);
+    let frac_b_z = bit_not(b, frac_b_nz);
+    let inf_a = bit_and(b, sp_a, frac_a_z);
+    let inf_b = bit_and(b, sp_b, frac_b_z);
+    let inf_a_zb = bit_and(b, inf_a, z_b);
+    let inf_b_za = bit_and(b, inf_b, z_a);
+    let invalid_inf_zero = bit_or(b, inf_a_zb, inf_b_za);
+    let nan_in = bit_or(b, nan_a, nan_b);
+    let result_nan = bit_or(b, nan_in, invalid_inf_zero);
+    let inf_in = bit_or(b, inf_a, inf_b);
+    let not_nan = bit_not(b, result_nan);
+    let result_inf = bit_and(b, inf_in, not_nan);
+    let int_bit64 = b.konst::<W64>(1u64 << 63);
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let special_sig = b.select::<W64>(result_inf, int_bit64, nan_sig);
     let exp_mag = b.select::<W64>(is_special, special_exp, exp_fin);
-    let sig_out = b.select::<W64>(is_special, nan_sig, sig_fin);
+    let sig_out = b.select::<W64>(is_special, special_sig, sig_fin);
     let exp_word64 = b.or::<W64>(exp_mag, sign_bit);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
     (sig_out, exp_word)
