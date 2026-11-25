@@ -476,6 +476,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sllw", "R", "0000000 ..... ..... 001 ..... 0111011", "sllw {rd}, {rs1}, {rs2}", "alu"),
         ("srlw", "R", "0000000 ..... ..... 101 ..... 0111011", "srlw {rd}, {rs1}, {rs2}", "alu"),
         ("sraw", "R", "0100000 ..... ..... 101 ..... 0111011", "sraw {rd}, {rs1}, {rs2}", "alu"),
+        // Zicbom/Zicboz のキャッシュブロック操作。cbop の prefetch は
+        // rd=x0 の ORI HINT 符号化であり、基本命令として実行影響がない。
+        ("cbo_inval", "R", "000000000000 ..... 010 00000 0001111", "cbo.inval ({rs1})", "alu"),
+        ("cbo_clean", "R", "000000000001 ..... 010 00000 0001111", "cbo.clean ({rs1})", "alu"),
+        ("cbo_flush", "R", "000000000010 ..... 010 00000 0001111", "cbo.flush ({rs1})", "alu"),
+        ("cbo_zero", "R", "000000000100 ..... 010 00000 0001111", "cbo.zero ({rs1})", "alu"),
         // SYSTEM。fence の fm/pred/succ と rd/rs1 を問わず同じ命令として
         // 扱う。予約・ヒント形も単一ハートの意味論では順序付けだけなので、
         // 意味論は共通の no-op で足りる。
@@ -688,6 +694,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         }
         if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
             reqs.push("zbs");
+        }
+        if matches!(*name, "cbo_inval" | "cbo_clean" | "cbo_flush") {
+            reqs.push("zicbom");
+        }
+        if *name == "cbo_zero" {
+            reqs.push("zicboz");
         }
         if name.starts_with("mop_") {
             reqs.push("zimop");

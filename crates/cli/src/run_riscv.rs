@@ -300,6 +300,14 @@ fn step_rv_inner(
             }
             env.step(|b| sem::addiw(b, rd, rs1, imm_i(word)))
         }
+        Insn::CboInval | Insn::CboClean | Insn::CboFlush => env.step(|b| sem::cbo_mgmt(b, rs1)),
+        Insn::CboZero => {
+            if rv32 {
+                env.step(|b| sem::cbo_zero_rv32(b, rs1))
+            } else {
+                env.step(|b| sem::cbo_zero(b, rs1))
+            }
+        }
         Insn::MopR0 => env.step(|b| sem::mop(b, rd)),
         Insn::MopR1 => env.step(|b| sem::mop(b, rd)),
         Insn::MopR2 => env.step(|b| sem::mop(b, rd)),

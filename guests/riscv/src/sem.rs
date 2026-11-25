@@ -434,6 +434,41 @@ pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// キャッシュ管理操作はコヒアレントなエミュレーションでは何もしない。
+pub fn cbo_mgmt<B: Backend>(_b: &mut B, _rs1: Gpr) -> Flow<B> {
+    Ok(())
+}
+
+/// CBO.ZERO はアドレスを含む 64 バイトブロックを零で埋める。
+pub fn cbo_zero<B: Backend>(b: &mut B, rs1: Gpr) -> Flow<B> {
+    let addr = read(b, rs1);
+    let keep = const_w64(b, !63u64);
+    let base0 = b.and(addr, keep);
+    let zero = const_w64(b, 0);
+    for i in 0..8u64 {
+        let off = const_w64(b, i * 8);
+        let a = b.add(base0, off);
+        b.store::<W64>(a, zero, DATA_WRITE)?;
+    }
+    Ok(())
+}
+
+/// RV32 の CBO.ZERO。アドレスは下位 32 ビットである。
+pub fn cbo_zero_rv32<B: Backend>(b: &mut B, rs1: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let addr = b.zext::<W32, W64>(x);
+    let keep = const_w64(b, !63u64);
+    let base0 = b.and(addr, keep);
+    let zero = const_w64(b, 0);
+    for i in 0..8u64 {
+        let off = const_w64(b, i * 8);
+        let a = b.add(base0, off);
+        b.store::<W64>(a, zero, DATA_WRITE)?;
+    }
+    Ok(())
+}
+
 /// MOP は再定義されない限り rd へ 0 を書く。
 pub fn mop<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let z = const_w64(b, 0);

@@ -392,6 +392,9 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zihintntl/")
         || test_rel.contains("/Zihintpause/")
         || test_rel.contains("/Zicntr/")
+        || test_rel.contains("/Zicbom/")
+        || test_rel.contains("/Zicbop/")
+        || test_rel.contains("/Zicboz/")
     {
         for ext in [
             "Zcb",
@@ -403,6 +406,10 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zcmop",
             "Zihintntl",
             "Zihintpause",
+            "Zicntr",
+            "Zicbom",
+            "Zicbop",
+            "Zicboz",
         ] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
                 sail_json = sail_json.replace(
@@ -457,6 +464,10 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zcmop/")
         || test_rel.contains("/Zihintntl/")
         || test_rel.contains("/Zihintpause/")
+        || test_rel.contains("/Zicntr/")
+        || test_rel.contains("/Zicbom/")
+        || test_rel.contains("/Zicbop/")
+        || test_rel.contains("/Zicboz/")
     {
         &[
             "zcb",
@@ -468,6 +479,10 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zcmop",
             "zihintntl",
             "zihintpause",
+            "zicntr",
+            "zicbom",
+            "zicbop",
+            "zicboz",
         ]
     } else {
         &[]
@@ -646,6 +661,21 @@ fn act4_rv64zihintpause_suite() {
 #[test]
 fn act4_rv64zicntr_suite() {
     suite("rv64i/Zicntr");
+}
+
+#[test]
+fn act4_rv64zicbom_suite() {
+    suite("rv64i/Zicbom");
+}
+
+#[test]
+fn act4_rv64zicbop_suite() {
+    suite("rv64i/Zicbop");
+}
+
+#[test]
+fn act4_rv64zicboz_suite() {
+    suite("rv64i/Zicboz");
 }
 
 #[test]
