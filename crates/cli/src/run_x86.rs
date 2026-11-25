@@ -6324,6 +6324,317 @@ fn amx_mem_exit(addr: u64, e: polyisa_mem::MemError) -> InterpExit {
     }
 }
 
+/// XSAVEC（0F C7 /4）。標準 XSAVE と同じ成分を、RFBM にある
+/// 拡張成分だけを 64 バイト整列で詰める圧縮レイアウトで書く。
+/// XINUSE の省略最適化はせず、選択成分は使用中として保存する。
+fn xsavec_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+    mode: u8,
+) -> Option<Result<(), InterpExit>> {
+    if md.insn != polyisa_guest_x86::Insn::XsavecMem {
+        return None;
+    }
+    Some(xsavec_exec(env, md, next_rip, seg, eip, mode))
+}
+
+fn xsavec_w64(env: &mut BareEnv, a: u64, v: u64) -> Result<(), InterpExit> {
+    env.backend
+        .mem
+        .write(VirtAddr(a), &v.to_le_bytes())
+        .map_err(|e| amx_mem_exit(a, e))
+}
+
+fn xsavec_w128(env: &mut BareEnv, a: u64, v: u128) -> Result<(), InterpExit> {
+    env.backend
+        .mem
+        .write(VirtAddr(a), &v.to_le_bytes())
+        .map_err(|e| amx_mem_exit(a, e))
+}
+
+fn xsavec_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+    mode: u8,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{decode, sem, sem_ea};
+    use polyisa_sem::Backend;
+    let rm = decode::rm_of(&mut env.backend, md, next_rip, seg, false, false);
+    let decode::Rm::Mem { a, .. } = rm else {
+        return Err(amx_ud(eip));
+    };
+    let lo = u64::from(env.backend.get(polyisa_guest_x86::sem::Gpr(0).state()));
+    let hi = u64::from(env.backend.get(polyisa_guest_x86::sem::Gpr(2).state()));
+    let mask = ((hi << 32) | lo) & env.backend.get(sem::xcr0_ref());
+    let b = &mut env.backend;
+    sem_ea::fxsave_area(b, a, None, mode, mask & 1 != 0, mask & 2 != 0)?;
+    // XSTATE_BV と XCOMP_BV。圧縮形式は bit63、下位は RFBM∩XCR0。
+    xsavec_w64(env, a + 512, mask)?;
+    xsavec_w64(env, a + 520, (1u64 << 63) | mask)?;
+    // leaf D の ECX[1] どおり、AMX 成分だけを 64 バイト整列する。
+    // YMMH・AVX-512 成分は直前成分の直後に置く。
+    let mut off = 576u64;
+    let mut put =
+        |env: &mut BareEnv,
+         bit: u64,
+         size: u64,
+         write: &mut dyn FnMut(&mut BareEnv, u64) -> Result<(), InterpExit>| {
+            if mask & (1u64 << bit) == 0 {
+                return Ok(());
+            }
+            if bit >= 17 {
+                off = off.next_multiple_of(64);
+            }
+            write(env, a + off)?;
+            off += size;
+            Ok(())
+        };
+    put(env, 2, 0x100, &mut |env, base| {
+        for i in 0..16u8 {
+            let v = env.backend.get(sem::ymm_hi_ref(sem::Xmm(i)));
+            xsavec_w128(env, base + u64::from(i) * 16, v)?;
+        }
+        Ok(())
+    })?;
+    put(env, 5, 0x40, &mut |env, base| {
+        for i in 0..8u8 {
+            let v = env.backend.get(sem::kref(i));
+            xsavec_w64(env, base + u64::from(i) * 8, v)?;
+        }
+        Ok(())
+    })?;
+    put(env, 6, 0x200, &mut |env, base| {
+        for r in 0..16u8 {
+            for part in 2..4usize {
+                let v = env.backend.get(sem::zreg_ref(r, part));
+                xsavec_w128(env, base + u64::from(r) * 32 + (part as u64 - 2) * 16, v)?;
+            }
+        }
+        Ok(())
+    })?;
+    put(env, 7, 0x400, &mut |env, base| {
+        for r in 16..32u8 {
+            for part in 0..4usize {
+                let v = env.backend.get(sem::zreg_ref(r, part));
+                xsavec_w128(env, base + u64::from(r - 16) * 64 + part as u64 * 16, v)?;
+            }
+        }
+        Ok(())
+    })?;
+    put(env, 17, 0x40, &mut |env, base| {
+        for i in 0..8usize {
+            let v = env.backend.get(sem::tilecfg_qref(i));
+            xsavec_w64(env, base + i as u64 * 8, v)?;
+        }
+        Ok(())
+    })?;
+    put(env, 18, 0x2000, &mut |env, base| {
+        for i in 0..1024usize {
+            let v = env.backend.get(sem::tmm_qref(i));
+            xsavec_w64(env, base + i as u64 * 8, v)?;
+        }
+        Ok(())
+    })
+}
+
+/// XSAVEC が書く圧縮形式かどうかをヘッダで調べ、必要なら
+/// XRSTOR を圧縮レイアウトとして実行する。標準形式なら None を
+/// 返して既存の IR 実装へ任せる。
+fn xrstorc_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+    mode: u8,
+) -> Option<Result<(), InterpExit>> {
+    if md.insn != polyisa_guest_x86::Insn::Xrstor {
+        return None;
+    }
+    let rm = polyisa_guest_x86::decode::rm_of(&mut env.backend, md, next_rip, seg, false, false);
+    let polyisa_guest_x86::decode::Rm::Mem { a, .. } = rm else {
+        return Some(Err(amx_ud(eip)));
+    };
+    match xsavec_r64(env, a + 520) {
+        Ok(xcomp) if xcomp & (1u64 << 63) != 0 => {
+            Some(xrstorc_exec(env, md, next_rip, seg, eip, mode, xcomp))
+        }
+        Ok(_) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+fn xsavec_r64(env: &mut BareEnv, a: u64) -> Result<u64, InterpExit> {
+    let acc = Access {
+        endian: Endian::Le,
+        align: Align::Unaligned,
+        kind: AccessKind::DataRead,
+    };
+    let mut v = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(a), &mut v, acc)
+        .map_err(|e| amx_mem_exit(a, e))?;
+    Ok(u64::from_le_bytes(v))
+}
+
+fn xsavec_r128(env: &mut BareEnv, a: u64) -> Result<u128, InterpExit> {
+    let acc = Access {
+        endian: Endian::Le,
+        align: Align::Unaligned,
+        kind: AccessKind::DataRead,
+    };
+    let mut v = [0u8; 16];
+    env.backend
+        .mem
+        .read(VirtAddr(a), &mut v, acc)
+        .map_err(|e| amx_mem_exit(a, e))?;
+    Ok(u128::from_le_bytes(v))
+}
+
+/// polyisa が保存する圧縮成分のサイズ。未知成分は XCOMP_SUPP に
+/// 含めていないので、正規の XCR0 では発生しない。
+fn xsavec_size(bit: u64) -> u64 {
+    match bit {
+        2 => 0x100,
+        5 => 0x40,
+        6 => 0x200,
+        7 => 0x400,
+        17 => 0x40,
+        18 => 0x2000,
+        _ => 0,
+    }
+}
+
+/// XCOMP_BV が示す圧縮レイアウトでの成分オフセット。成分は昇順に
+/// 並び、polyisa が CPUID で報告するものは 64 バイト整列を要求する。
+fn xsavec_offset(xcomp: u64, bit: u64) -> u64 {
+    let mut off = 576u64;
+    for b in 2..=bit {
+        if xcomp & (1u64 << b) == 0 {
+            continue;
+        }
+        if b >= 17 {
+            off = off.next_multiple_of(64);
+        }
+        if b == bit {
+            return off;
+        }
+        off += xsavec_size(b);
+    }
+    off
+}
+
+fn xrstorc_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+    mode: u8,
+    xcomp: u64,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{decode, sem, sem_ea};
+    use polyisa_sem::Backend;
+    let rm = decode::rm_of(&mut env.backend, md, next_rip, seg, false, false);
+    let decode::Rm::Mem { a, .. } = rm else {
+        return Err(amx_ud(eip));
+    };
+    let xbv = xsavec_r64(env, a + 512)?;
+    let lo = u64::from(env.backend.get(sem::Gpr(0).state()));
+    let hi = u64::from(env.backend.get(sem::Gpr(2).state()));
+    let mask = ((hi << 32) | lo) & env.backend.get(sem::xcr0_ref());
+    let rst = mask & xbv;
+    let ini = mask & !xbv;
+    let b = &mut env.backend;
+    sem_ea::fxrstor_area(b, a, None, mode, rst, ini)?;
+    // YMMH。
+    let off = xsavec_offset(xcomp, 2);
+    if rst & 4 != 0 {
+        for i in 0..16u8 {
+            let v = xsavec_r128(env, a + off + u64::from(i) * 16)?;
+            env.backend.set(sem::ymm_hi_ref(sem::Xmm(i)), v);
+        }
+    } else if ini & 4 != 0 {
+        for i in 0..16u8 {
+            env.backend.set(sem::ymm_hi_ref(sem::Xmm(i)), 0);
+        }
+    }
+    // opmask。
+    let off = xsavec_offset(xcomp, 5);
+    if rst & (1 << 5) != 0 {
+        for i in 0..8u8 {
+            let v = xsavec_r64(env, a + off + u64::from(i) * 8)?;
+            env.backend.set(sem::kref(i), v);
+        }
+    } else if ini & (1 << 5) != 0 {
+        for i in 0..8u8 {
+            env.backend.set(sem::kref(i), 0);
+        }
+    }
+    // ZMM_Hi256 / Hi16_ZMM。
+    for (bit, first, last, parts, stride) in [
+        (6u64, 0u8, 16u8, 2..4usize, 32u64),
+        (7, 16, 32, 0..4usize, 64),
+    ] {
+        let off = xsavec_offset(xcomp, bit);
+        if rst & (1 << bit) != 0 {
+            for r in first..last {
+                for part in parts.clone() {
+                    let row = if bit == 6 {
+                        u64::from(r)
+                    } else {
+                        u64::from(r - 16)
+                    };
+                    let poff = if bit == 6 {
+                        part as u64 - 2
+                    } else {
+                        part as u64
+                    };
+                    let v = xsavec_r128(env, a + off + row * stride + poff * 16)?;
+                    env.backend.set(sem::zreg_ref(r, part), v);
+                }
+            }
+        } else if ini & (1 << bit) != 0 {
+            for r in first..last {
+                for part in parts.clone() {
+                    env.backend.set(sem::zreg_ref(r, part), 0);
+                }
+            }
+        }
+    }
+    // AMX tilecfg/tiledata。
+    let off = xsavec_offset(xcomp, 17);
+    if rst & (1 << 17) != 0 {
+        for i in 0..8usize {
+            let v = xsavec_r64(env, a + off + i as u64 * 8)?;
+            env.backend.set(sem::tilecfg_qref(i), v);
+        }
+    } else if ini & (1 << 17) != 0 {
+        for i in 0..8usize {
+            env.backend.set(sem::tilecfg_qref(i), 0);
+        }
+    }
+    let off = xsavec_offset(xcomp, 18);
+    if rst & (1 << 18) != 0 {
+        for i in 0..1024usize {
+            let v = xsavec_r64(env, a + off + i as u64 * 8)?;
+            env.backend.set(sem::tmm_qref(i), v);
+        }
+    } else if ini & (1 << 18) != 0 {
+        for i in 0..1024usize {
+            env.backend.set(sem::tmm_qref(i), 0);
+        }
+    }
+    Ok(())
+}
+
 /// x87 拡張精度ビットを f64 へ落とす。53 ビットを超える精度と
 /// f64 の範囲を外れる値は近似だが、超越関数の実装には十分な
 /// 入力精度を持つ。exp_word は符号(bit15)+biased exponent、sig は
@@ -7127,6 +7438,8 @@ fn step_x86_map(
     };
     if let Some(r) = concrete_step(env, |env| {
         x87_transcendental_step(env, &md)
+            .or_else(|| xsavec_step(env, &md, next_rip, seg, eip, mode))
+            .or_else(|| xrstorc_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| xstore_step(env, &md))
             .or_else(|| avx10_step(env, &md, next_rip, seg, eip))
             .or_else(|| avxne_step(env, &md, next_rip, seg, eip))
@@ -7306,8 +7619,28 @@ fn x86_post_step(
                 }
             }
         }
-        // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
-        // 本格実装では DivZero をシグナルに変える。
+        // #DE/#UD/#PF 等の CPU 例外は OS パーソナリティへ渡し、
+        // Linux では同期シグナルへ変換する。ハンドラがない、または
+        // 処理できなければ従来どおり VM 境界で止める。
+        Err(InterpExit::Exception(e)) => match sys.handle_exception(env, e) {
+            TrapOutcome::Handled => {}
+            TrapOutcome::Exit(code) => {
+                if !sys.take_exit(env, code) {
+                    return Err(Outcome::Exit(u64::from(code)));
+                }
+            }
+            TrapOutcome::Blocked => {
+                if !sys.on_block(env) {
+                    return Err(Outcome::Deadlock);
+                }
+            }
+            TrapOutcome::Unimplemented => {
+                return Err(Outcome::Unimplemented {
+                    pc: u64::from(eip),
+                    word,
+                });
+            }
+        },
         Err(ex) => {
             if std::env::var_os("POLYISA_HIST").is_some() {
                 for (e, i) in hist.iter() {
@@ -16123,6 +16456,50 @@ mod tests {
         file[ph + 40..ph + 48].copy_from_slice(&len.to_le_bytes());
         file[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
         file
+    }
+
+    #[test]
+    fn division_exception_enters_linux_signal_handler() {
+        // SIGFPE ハンドラを rt_sigaction で設定し、div ecx の #DE で
+        // ハンドラへ入ることを実行経路で確かめる。ハンドラは exit(42)。
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
+        env.backend.set(sem::xcr0_ref(), 3);
+        env.backend.set(Gpr(4).state(), 0x8000u32);
+        let prog: &[u8] = &[
+            0x48, 0xC7, 0xC0, 0x0D, 0x00, 0x00, 0x00, // mov rax,13 (rt_sigaction)
+            0x48, 0xC7, 0xC7, 0x08, 0x00, 0x00, 0x00, // mov rdi,8 (SIGFPE)
+            0x48, 0xC7, 0xC6, 0x00, 0x18, 0x00, 0x00, // mov rsi,0x1800
+            0x31, 0xD2, // xor edx,edx
+            0x41, 0xC7, 0xC2, 0x08, 0x00, 0x00, 0x00, // mov r10d,8
+            0x0F, 0x05, // syscall
+            0x31, 0xC0, // xor eax,eax
+            0x31, 0xD2, // xor edx,edx
+            0x31, 0xC9, // xor ecx,ecx
+            0xF7, 0xF1, // div ecx → #DE
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi,1
+            0x0F, 0x05, // syscall（到達したら失敗）
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        // kernel_sigaction {handler=0x1100, flags=SA_RESTORER,
+        // restorer=0x1120, mask=0}。ハンドラは戻らず exit する。
+        let mut act = [0u8; 32];
+        act[0..8].copy_from_slice(&0x1100u64.to_le_bytes());
+        act[8..16].copy_from_slice(&polyisa_os_linux::x86::SA_RESTORER.to_le_bytes());
+        act[16..24].copy_from_slice(&0x1120u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x1800), &act).unwrap();
+        let handler: &[u8] = &[
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, // mov rdi,42
+            0x0F, 0x05, // syscall
+        ];
+        env.backend.mem.write(VirtAddr(0x1100), handler).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 200, true);
+        assert_eq!(out, Outcome::Exit(42));
     }
 
     #[test]

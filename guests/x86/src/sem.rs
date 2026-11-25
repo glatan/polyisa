@@ -7578,6 +7578,18 @@ pub fn kref(i: u8) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, kmask) + (i as usize) * 8)
 }
 
+/// TILECFG の qword（8 本）を指す。XSAVE の XTILECFG 成分用。
+pub fn tilecfg_qref(i: usize) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tilecfg) + i * 8)
+}
+
+/// TMM 領域全体を qword 列として指す。XSAVE の XTILEDATA 成分用
+/// （8 タイル×1024 バイト=1024 qword）。XSAVE は設定済み領域
+/// だけでなく成分全体を標準形式へ書く。
+pub fn tmm_qref(i: usize) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tmm) + i * 8)
+}
+
 /// MOVD xmm, r/m32。GPR 下位32ビットを XMM 下位に移し、上位96を消す。
 pub fn movd_xmm_gpr32<B: Backend>(b: &mut B, dst: Xmm, src: Gpr) -> Flow<B> {
     let v32 = read(b, src);

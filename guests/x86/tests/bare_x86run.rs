@@ -18273,6 +18273,170 @@ fn run64_xsave_xcr0() {
     }
 }
 
+#[test]
+fn xsave_avx512_amx_components_roundtrip() {
+    // XSAVE/XRSTOR の意味論を直接呼び、AVX-512 と AMX 成分の
+    // 標準レイアウト往復を確かめる。命令経路の XSAVE は
+    // run64_xsave_xcr0 が既に通している。
+    use polyisa_guest_x86::decode::Rm;
+    use polyisa_guest_x86::{sem, sem_ea};
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    env.backend.mem.map(VirtAddr(0x4000), 3, Perms::RW).unwrap();
+    env.backend.set(sem::xcr0_ref(), 0x600e7);
+    env.backend.set(Gpr(0).state(), 0x600e7u32);
+    env.backend.set(Gpr(2).state(), 0u32);
+    let k1 = 0x1122_3344_5566_7788u64;
+    let z0h = 0x0123_4567_89AB_CDEF_1020_3040_5060_7080u128;
+    let z16l = 0xFEDC_BA98_7654_3210_0807_0605_0403_0201u128;
+    let cfg = 0x0100_0000_0040_0001u64;
+    let tile = 0xA5A5_5A5A_1234_5678u64;
+    env.backend.set(sem::kref(1), k1);
+    env.backend.set(sem::zreg_ref(0, 2), z0h);
+    env.backend.set(sem::zreg_ref(16, 0), z16l);
+    env.backend.set(sem::tilecfg_qref(0), cfg);
+    env.backend.set(sem::tmm_qref(0), tile);
+    let ea = Rm::Mem {
+        a: 0x4000,
+        wseg: None,
+    };
+    sem_ea::xsave(&mut env.backend, &ea, 64).unwrap();
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |env: &mut BareEnv, off: u64| {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x4000 + off), &mut b, acc)
+            .unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(q(&mut env, 512), 0x600e7, "xstate_bv");
+    assert_eq!(q(&mut env, 0x380 + 8), k1, "opmask k1");
+    assert_eq!(q(&mut env, 0x3c0), z0h as u64, "zmm0 hi256 low qword");
+    assert_eq!(q(&mut env, 0x5c0), z16l as u64, "zmm16 low qword");
+    assert_eq!(q(&mut env, 0x9c0), cfg, "tilecfg qword0");
+    assert_eq!(q(&mut env, 0xa00), tile, "tiledata qword0");
+    env.backend.set(sem::kref(1), 0);
+    env.backend.set(sem::zreg_ref(0, 2), 0);
+    env.backend.set(sem::zreg_ref(16, 0), 0);
+    env.backend.set(sem::tilecfg_qref(0), 0);
+    env.backend.set(sem::tmm_qref(0), 0);
+    sem_ea::xrstor(&mut env.backend, &ea, 64).unwrap();
+    assert_eq!(env.backend.get(sem::kref(1)), k1);
+    assert_eq!(env.backend.get(sem::zreg_ref(0, 2)), z0h);
+    assert_eq!(env.backend.get(sem::zreg_ref(16, 0)), z16l);
+    assert_eq!(env.backend.get(sem::tilecfg_qref(0)), cfg);
+    assert_eq!(env.backend.get(sem::tmm_qref(0)), tile);
+}
+
+#[test]
+fn run64_xsavec_compacted_roundtrip() {
+    // XSAVEC は拡張成分を 64 バイト整列で詰め、XCOMP_BV[63]=1 を
+    // 書く。XRSTOR はその形式を読んで YMMH 成分まで復元する。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_XSAVEC;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &[0x3F80_0000u32.to_le_bytes(); 8].concat(),
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC5, 0xFC, 0x10, 0x00, // vmovups ymm0,[rax]
+        0x48, 0xBB, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x3000
+        0xB8, 0x07, 0x00, 0x00, 0x00, // mov eax,7
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xC7, 0x23, // xsavec [rbx]
+        0xC5, 0xFC, 0x77, // vzeroall
+        0xB8, 0x07, 0x00, 0x00, 0x00, // mov eax,7
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xAE, 0x2B, // xrstor [rbx]
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC5, 0xFC, 0x11, 0x40, 0x40, // vmovups [rax+0x40],ymm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend
+        .mem
+        .write(VirtAddr(0x3210), &[0xAA; 48])
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    if out != Outcome::Exit(0) {
+        let acc0 = polyisa_mem::Access {
+            endian: polyisa_mem::Endian::Le,
+            align: polyisa_mem::Align::Unaligned,
+            kind: polyisa_mem::AccessKind::DataRead,
+        };
+        let mut qq = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x3200), &mut qq, acc0)
+            .unwrap();
+        eprintln!("out={out:?} xbv={:x}", u64::from_le_bytes(qq));
+        env.backend
+            .mem
+            .read(VirtAddr(0x3208), &mut qq, acc0)
+            .unwrap();
+        eprintln!("xcomp={:x}", u64::from_le_bytes(qq));
+    }
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut q = [0u8; 8];
+    env.backend.mem.read(VirtAddr(0x3200), &mut q, acc).unwrap();
+    assert_eq!(u64::from_le_bytes(q), 7, "xstate_bv");
+    env.backend.mem.read(VirtAddr(0x3208), &mut q, acc).unwrap();
+    assert_eq!(u64::from_le_bytes(q), (1u64 << 63) | 7, "xcomp_bv");
+    let mut rsv = [0u8; 48];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3210), &mut rsv, acc)
+        .unwrap();
+    assert!(
+        rsv.iter().all(|b| *b == 0xAA),
+        "reserved header is untouched"
+    );
+    let mut v = [0u8; 32];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3240), &mut v[..16], acc)
+        .unwrap();
+    for i in 0..4 {
+        assert_eq!(w32(&v, i * 4), 0x3F80_0000, "compacted ymmh lane{i}");
+    }
+    env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
+    for i in 0..8 {
+        assert_eq!(w32(&v, i * 4), 0x3F80_0000, "xrstorc ymm lane{i}");
+    }
+}
+
 fn w32(a: &[u8], i: usize) -> u32 {
     u32::from_le_bytes(a[i..i + 4].try_into().unwrap())
 }

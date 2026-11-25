@@ -104,6 +104,7 @@ fn declare_features(m: &mut Model) {
     feat(m, "aesni", &["sse2"]);
     feat(m, "xsave", &[]);
     feat(m, "xsaveopt", &["xsave"]);
+    feat(m, "xsavec", &["xsave"]);
     feat(m, "osxsave", &["xsave"]);
     feat(m, "avx", &["xsave", "sse4_2"]);
     feat(m, "f16c", &["avx"]);
@@ -656,11 +657,19 @@ fn declare_models(m: &mut Model) {
         &[],
         idbdw,
     );
-    // Skylake クライアントは AVX-512 を持たない。XSAVE 系の残り
-    // （xsavec/xsaves）と MPX・PKU の版対応は旗の宣言を待つ。
+    // Skylake クライアントは AVX-512 を持たない。XSAVES/XRSTORS は
+    // CPL0 専用なのでユーザーモード対象外、MPX・PKU の版対応は残る。
     let mut idske = intel("6", "85", "3");
     idske.extend([("cpuid.max_basic", "0x16"), ("cpuid.max_ext", "0x80000008")]);
-    model(m, "skylake", "broadwell", &["clflushopt"], &[], &[], idske);
+    model(
+        m,
+        "skylake",
+        "broadwell",
+        &["clflushopt", "xsavec"],
+        &[],
+        &[],
+        idske,
+    );
     // Skylake-X/SP は AVX-512 の基盤群（F/VL/DQ/BW/CD）を持つ。
     let mut idskx = intel("6", "85", "4");
     idskx.extend([("cpuid.max_basic", "0x16"), ("cpuid.max_ext", "0x80000008")]);
@@ -811,7 +820,7 @@ fn declare_models(m: &mut Model) {
         "piledriver",
         &[
             "avx2", "bmi2", "sha", "rdseed", "adx", "smap", "clflushopt", "clzero", "movbe",
-            "fsgsbase", "smep", "mwaitx",
+            "fsgsbase", "smep", "mwaitx", "xsavec",
         ],
         &["xop", "fma4", "tbm", "lwp"],
         &[],
@@ -1045,6 +1054,8 @@ fn declare_ident_bits(m: &mut Model) {
     b_sub(m, "sm4", 0x7, 1, "eax", 2);
     b_sub(m, "raoint", 0x7, 1, "eax", 3);
     b_sub(m, "avxvnni", 0x7, 1, "eax", 4);
+    b_sub(m, "xsaveopt", 0xd, 1, "eax", 0);
+    b_sub(m, "xsavec", 0xd, 1, "eax", 1);
     b_sub(m, "cmpccxadd", 0x7, 1, "eax", 7);
     b_sub(m, "avxifma", 0x7, 1, "eax", 23);
     b_sub(m, "movrs", 0x7, 1, "eax", 31);
@@ -1232,6 +1243,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "fxsave" | "fxrstor" => &["fxsr"],
         "xsave" | "xrstor" => &["xsave"],
         "xsaveopt" => &["xsaveopt"],
+        "xsavec" => &["xsavec"],
         // XGETBV は OS の xsave 許可（OSXSAVE）が要る。XSETBV は
         // XSAVE 機能（+特権。CPL はモデル化しない）。
         "xgetbv" => &["osxsave"],

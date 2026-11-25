@@ -964,6 +964,73 @@ impl Linux {
             .collect()
     }
 
+    /// シグナルの既定動作で現在のプロセスを終える。プロセス表には
+    /// 終了コードではなくシグナル死因を残し、wait 側が signal 付きの
+    /// status を作れるようにする。
+    fn terminate_by_signal(&mut self, sig: u32) -> TrapOutcome {
+        let me = self.ensure_self();
+        let nfd = self.fds.len();
+        for fd in 0..3u32 {
+            self.close_fd(fd);
+        }
+        for idx in 0..nfd {
+            self.close_fd(3 + idx as u32);
+        }
+        self.procs.borrow_mut().kill(me, sig);
+        self.queue
+            .0
+            .borrow_mut()
+            .meta
+            .mark_exited(polyisa_kernel::ThreadId(me.0));
+        self.sweep_fd_waits();
+        self.wake_child_waiters(me);
+        TrapOutcome::Exit(sig)
+    }
+
+    /// 同期 CPU 例外を x86-64 rt フレームで配送する。i386 の
+    /// フレーム形式は未実装なので、捕捉済みでも既定動作へ倒す。
+    /// ブロック中の同期例外も実機では再実行や終了に依存するため、
+    /// ここでは既定動作へ倒す近似にする。
+    fn deliver_exception(
+        &mut self,
+        env: &mut BareEnv,
+        sig: u32,
+        si_code: u64,
+        si_addr: u64,
+    ) -> TrapOutcome {
+        let bit = 1u64 << (sig - 1);
+        let act = self
+            .sigacts
+            .get(sig as usize - 1)
+            .copied()
+            .unwrap_or_default();
+        if act.handler <= 1 || self.sig_mask & bit != 0 {
+            return self.terminate_by_signal(sig);
+        }
+        let old = self.sig_mask;
+        self.sig_mask = old
+            | act.mask
+            | if act.flags & crate::x86::SA_NODEFER == 0 {
+                bit
+            } else {
+                0
+            };
+        if act.flags & crate::x86::SA_RESETHAND != 0 {
+            self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
+        }
+        let ok = if self.is64 {
+            crate::x86::rt_sigframe_write_ex(env, sig, &act, old, si_code, si_addr)
+        } else {
+            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, si_code, si_addr)
+        };
+        if ok {
+            return TrapOutcome::Handled;
+        }
+        self.sig_mask = old;
+        self.sigacts[sig as usize - 1] = act;
+        self.terminate_by_signal(11)
+    }
+
     /// 保留シグナルのうちブロックされていない最も小さい番号を
     /// 配送する。フレームは x86-64 の rt 形式（i386 は未配送）。
     /// ハンドラが SIG_DFL/SIG_IGN のものは `kill` 側で保留に
@@ -974,9 +1041,6 @@ impl Linux {
     // x32 は配送を x86-64 の rt フレーム形式で行う（カーネルの
     // compat フレームとは異なるが、rt_sigreturn と対で一貫）。
     fn deliver_pending(&mut self, env: &mut BareEnv) {
-        if !self.is64 {
-            return;
-        }
         let deliver = self.sig_pending & !self.sig_mask;
         if deliver == 0 {
             return;
@@ -1004,7 +1068,12 @@ impl Linux {
             self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
         }
         let pid = self.pid;
-        if !crate::x86::rt_sigframe_write(env, sig, &act, old, pid) {
+        let ok = if self.is64 {
+            crate::x86::rt_sigframe_write(env, sig, &act, old, pid)
+        } else {
+            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid)
+        };
+        if !ok {
             // フレームが書けない（未写像スタック等）。実機なら
             // SIGSEGV で死ぬが、ここでは配送を諦めて保留と
             // ハンドラを戻し、再試行できる状態にする。
@@ -3648,14 +3717,14 @@ fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     Some(TrapOutcome::Handled)
 }
 
-fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // x86-64 の rt フレームから復元する。i386 のフレーム形式は
-    // 未対応（i386 では配送自体をしていない）。
-    if !sys.is64 {
-        set64(env, Gpr(0), cx.neg(crate::ENOSYS));
-        return Some(TrapOutcome::Handled);
-    }
-    match crate::x86::rt_sigframe_read(env) {
+fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // x86-64/i386 それぞれの rt フレームから復元する。
+    let frame = if sys.is64 {
+        crate::x86::rt_sigframe_read(env)
+    } else {
+        crate::x86::rt_sigframe32_read(env)
+    };
+    match frame {
         Some(mask) => {
             sys.sig_mask = mask;
             Some(TrapOutcome::Handled)
@@ -4510,6 +4579,29 @@ impl TrapHandler for Linux {
 
     fn take_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
         self.yield_on_exit(env, code)
+    }
+
+    fn handle_exception(
+        &mut self,
+        env: &mut BareEnv,
+        e: polyisa_sem::GuestException,
+    ) -> TrapOutcome {
+        use polyisa_sem::ExceptionKind;
+        let ip = u64::from(env.backend.get(polyisa_guest_x86::sem::eip_ref()));
+        // si_code は Linux/uapi の代表値。kill 由来と区別できる
+        // ことと、fault アドレスの配置を優先し、細かい x86 固有の
+        // 分岐（SEGV_ACCERR 等）は必要になった時点で分ける。
+        let (sig, si_code, si_addr) = match e.kind {
+            ExceptionKind::Undefined => (4, 2, ip), // SIGILL, ILL_ILLOPN
+            ExceptionKind::Protection => (11, 0, e.addr.unwrap_or(ip)), // SIGSEGV
+            ExceptionKind::PageFault => (11, 1, e.addr.unwrap_or(ip)), // SEGV_MAPERR
+            ExceptionKind::Align => (7, 1, e.addr.unwrap_or(ip)), // SIGBUS, BUS_ADRALN
+            ExceptionKind::DivZero => (8, 1, ip),   // SIGFPE, FPE_INTDIV
+            ExceptionKind::Fp => (8, 0, e.addr.unwrap_or(ip)),
+            ExceptionKind::Break => (5, 1, ip), // SIGTRAP, TRAP_BRKPT
+            ExceptionKind::Trap => return TrapOutcome::Unimplemented,
+        };
+        self.deliver_exception(env, sig, si_code, si_addr)
     }
 
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
@@ -5595,6 +5687,123 @@ mod tests {
             0x1122_3344
         );
         assert_eq!(sys.sig_mask, 0);
+    }
+
+    #[test]
+    fn exception_delivers_sigsegv_frame() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+        set64(&mut env, Gpr(4), 0x8000);
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        // SIGSEGV(11) のハンドラを入れる。
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0x9000u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x208), &crate::x86::SA_RESTORER.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x210), &0x9100u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 11);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 同期 fault を配送すると、ただちにハンドラへ入る。
+        let ex = polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::PageFault,
+            code: 0,
+            addr: Some(0xDEAD_0000),
+            in_delay_slot: false,
+        };
+        assert!(matches!(
+            sys.handle_exception(&mut env, ex),
+            TrapOutcome::Handled
+        ));
+        let f = get64(&mut env, Gpr(4));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(get64(&mut env, Gpr(7)), 11);
+        assert_eq!(rd8(&mut env, f + 312) & 0xFFFF_FFFF, 11);
+        assert_eq!(rd8(&mut env, f + 312 + 8) & 0xFFFF_FFFF, 1);
+        assert_eq!(rd8(&mut env, f + 312 + 16), 0xDEAD_0000);
+        assert_eq!(rd8(&mut env, f + 48 + 8 * 16), 0x4000, "faulting rip");
+    }
+
+    #[test]
+    fn exception_default_action_records_signal_death() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        let ex = polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Undefined,
+            code: 6,
+            addr: Some(0x4000),
+            in_delay_slot: false,
+        };
+        assert!(matches!(
+            sys.handle_exception(&mut env, ex),
+            TrapOutcome::Exit(4)
+        ));
+        let pid = polyisa_kernel::ProcessId(sys.pid);
+        assert!(sys.procs.borrow().pgid(pid).is_some());
+    }
+
+    #[test]
+    fn exception_delivers_i386_sigsegv_frame_and_sigreturn() {
+        let mut sys = Linux::x86_32();
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[10] = crate::x86::SigAct {
+            handler: 0x9000,
+            flags: crate::x86::SA_RESTORER,
+            restorer: 0x9100,
+            mask: 0,
+        };
+        set64(&mut env, Gpr(4), 0x8000);
+        set64(&mut env, Gpr(3), 0xAAAA);
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        let ex = polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::PageFault,
+            code: 0,
+            addr: Some(0xDEAD_0000),
+            in_delay_slot: false,
+        };
+        assert!(matches!(
+            sys.handle_exception(&mut env, ex),
+            TrapOutcome::Handled
+        ));
+        let f = get64(&mut env, Gpr(4));
+        assert_eq!((f + 4) % 16, 0, "i386 ABI stack alignment");
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(get64(&mut env, Gpr(0)), 11, "EAX=signal");
+        assert_eq!(get64(&mut env, Gpr(2)), f + 16, "EDX=&siginfo");
+        assert_eq!(get64(&mut env, Gpr(1)), f + 144, "ECX=&ucontext");
+        assert_eq!(rd8(&mut env, f) & 0xFFFF_FFFF, 0x9100, "pretcode");
+        assert_eq!(rd8(&mut env, f + 16) & 0xFFFF_FFFF, 11, "si_signo");
+        assert_eq!(rd8(&mut env, f + 24) & 0xFFFF_FFFF, 1, "si_code");
+        assert_eq!(rd8(&mut env, f + 28) & 0xFFFF_FFFF, 0xDEAD_0000, "si_addr");
+        // sigcontext: ip=f+164+56、ebx=f+164+32。
+        assert_eq!(rd8(&mut env, f + 164 + 56) & 0xFFFF_FFFF, 0x4000);
+        assert_eq!(rd8(&mut env, f + 164 + 32) & 0xFFFF_FFFF, 0xAAAA);
+        // restorer へ来た状態（ESP=f+4）で rt_sigreturn を呼ぶ。
+        set64(&mut env, Gpr(4), f + 4);
+        set64(&mut env, Gpr(3), 0xBBBB);
+        set64(&mut env, Gpr(0), crate::x86_32::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x4000);
+        assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
+        assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
     }
 
     #[test]

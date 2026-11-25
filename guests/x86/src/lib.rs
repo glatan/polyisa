@@ -69,7 +69,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 16],
+    pub cpuid: [[u32; 4]; 21],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -197,27 +197,27 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 256 を
+        // mxcsr（sregs 12 + fsw 2 + cpuid 336 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 768);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 848);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 824);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 832);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 840);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 848);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1104);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1616);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2640);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2704);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2832);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2832 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11088);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 904);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 912);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 920);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 928);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1184);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1696);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2720);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2784);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2912);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2912 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11168);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2337);
+        assert_eq!(INSNS.len(), 2338);
     }
 
     #[test]
@@ -1816,6 +1816,12 @@ mod tests {
         // MOVUPS xmm,xmm（0F 10 /r mod=11）は SSE が無いと解読しない。
         assert!(decode_map(&[0x0F, 0x10, 0xC0], modes, 0).is_none());
         assert!(decode_map(&[0x0F, 0x10, 0xC0], modes, FEAT_SSE).is_some());
+        // XSAVEC は xsavec でゲートする（0F C7 /4、メモリ形）。
+        assert!(decode_map(&[0x0F, 0xC7, 0x23], modes, FEAT_XSAVE).is_none());
+        assert_eq!(
+            decode_map(&[0x0F, 0xC7, 0x23], modes, FEAT_XSAVE | FEAT_XSAVEC).map(|d| d.insn),
+            Some(Insn::XsavecMem)
+        );
         // EMMS は MMX でゲートする。
         assert!(decode_map(&[0x0F, 0x77], modes, 0).is_none());
         assert!(decode_map(&[0x0F, 0x77], modes, FEAT_MMX).is_some());
@@ -2231,6 +2237,11 @@ mod tests {
             "amx_movrs",
             "via_padlock_rng",
             "via_padlock_rng_en",
+            "xsave",
+            "xsaveopt",
+            "xsavec",
+            "avx",
+            "avx512f",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2242,27 +2253,35 @@ mod tests {
         assert_eq!(tbl[3][0] & (1 << 31), 1 << 31, "movrs");
         assert_eq!(tbl[3][3] & (1 << 5), 1 << 5, "avxneconvert");
         assert_eq!(tbl[3][3] & (1 << 15), 1 << 15, "user_msr");
-        assert_eq!(tbl[7][0], 1, "leaf 1d max palette");
-        assert_eq!(tbl[8][0], 0x0400_2000, "leaf 1d tile geometry eax");
-        assert_eq!(tbl[8][1], 0x0008_0040, "leaf 1d tile geometry ebx");
-        assert_eq!(tbl[8][2], 0x10, "leaf 1d max rows");
-        assert_eq!(tbl[9][1], 16 | (64 << 8), "leaf 1e tmul shape");
-        assert_eq!(tbl[10][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
+        assert_eq!(tbl[4][0] & 0x6_00e7, 0x6_00e7, "leaf d xcr0 components");
+        assert_eq!(tbl[4][1], 0x2a00, "leaf d xsave max size");
+        assert_eq!(tbl[5], [3, 0x29c0, 0, 0], "leaf d xsaveopt/xsavec");
+        assert_eq!(tbl[7], [0x40, 0x380, 0, 0], "leaf d opmask component");
+        assert_eq!(tbl[8], [0x200, 0x3c0, 0, 0], "leaf d zmm_hi256 component");
+        assert_eq!(tbl[9], [0x400, 0x5c0, 0, 0], "leaf d hi16_zmm component");
+        assert_eq!(tbl[10], [0x40, 0x9c0, 2, 0], "leaf d xtilecfg component");
+        assert_eq!(tbl[11], [0x2000, 0xa00, 2, 0], "leaf d xtiledata component");
+        assert_eq!(tbl[12][0], 1, "leaf 1d max palette");
+        assert_eq!(tbl[13][0], 0x0400_2000, "leaf 1d tile geometry eax");
+        assert_eq!(tbl[13][1], 0x0008_0040, "leaf 1d tile geometry ebx");
+        assert_eq!(tbl[13][2], 0x10, "leaf 1d max rows");
+        assert_eq!(tbl[14][1], 16 | (64 << 8), "leaf 1e tmul shape");
+        assert_eq!(tbl[15][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
         // LEAF_IDS 順: index 12 = 0x8000_0001、index 13 = 0x8000_0008。
-        assert_eq!(tbl[12][2] & (1 << 29), 1 << 29, "mwaitx");
-        assert_eq!(tbl[13][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
-        assert_eq!(tbl[13][0], 0x3020, "addr size");
-        assert_eq!(tbl[14][0], 0xC000_0001, "via max leaf");
-        assert_eq!(tbl[15][3] & 0xC, 0xC, "padlock present+enabled");
+        assert_eq!(tbl[17][2] & (1 << 29), 1 << 29, "mwaitx");
+        assert_eq!(tbl[18][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
+        assert_eq!(tbl[18][0], 0x3020, "addr size");
+        assert_eq!(tbl[19][0], 0xC000_0001, "via max leaf");
+        assert_eq!(tbl[20][3] & 0xC, 0xC, "padlock present+enabled");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());
-        assert_eq!(tbl[12][2] & (1 << 29), 0);
-        assert_eq!(tbl[13][1], 0);
-        assert_eq!(tbl[7], [0; 4]);
-        assert_eq!(tbl[10], [0; 4]);
-        assert_eq!(tbl[14], [0; 4]);
-        assert_eq!(tbl[15], [0; 4]);
+        assert_eq!(tbl[17][2] & (1 << 29), 0);
+        assert_eq!(tbl[18][1], 0);
+        assert_eq!(tbl[12], [0; 4]);
+        assert_eq!(tbl[20], [0; 4]);
+        assert_eq!(tbl[19], [0; 4]);
+        assert_eq!(tbl[20], [0; 4]);
     }
 
     #[test]

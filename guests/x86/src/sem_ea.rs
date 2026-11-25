@@ -12997,10 +12997,44 @@ pub fn fxrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     fxrstor_area(b, a, wseg, mode, rst, ini)
 }
 
+/// XSAVE 領域への 128 ビット store。`wseg` 経路が W128 を
+/// 持たないので、既存の YMMH と同じく 2 本の W64 に分解する。
+fn xsave_store128<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    v: B::V<W128>,
+) -> Result<(), B::Exit> {
+    let lo: B::V<W64> = b.trunc::<W128, W64>(v);
+    let sh = b.konst::<W128>(64);
+    let vs = b.shr_l::<W128>(v, sh);
+    let hi: B::V<W64> = b.trunc::<W128, W64>(vs);
+    decode::mem_store::<B, W64>(b, a, wseg, lo)?;
+    let ah = madd(b, a, 8);
+    decode::mem_store::<B, W64>(b, ah, wseg, hi)
+}
+
+/// `xsave_store128` と対になる 128 ビット load。
+fn xsave_load128<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Result<B::V<W128>, B::Exit> {
+    let lo: B::V<W64> = decode::mem_load(b, a, wseg)?;
+    let ah = madd(b, a, 8);
+    let hi: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+    let sh = b.konst::<W128>(64);
+    let hiz = b.zext::<W64, W128>(hi);
+    let hi128 = b.shl::<W128>(hiz, sh);
+    let loz = b.zext::<W64, W128>(lo);
+    Ok(b.or::<W128>(loz, hi128))
+}
+
 /// XSAVE/XSAVEOPT。先行 512 バイトは RFBM ∩ XCR0 の成分だけ
 /// 書き、+512 に XSTATE_BV、+520 に XCOMP_BV=0 を書く。
 /// XINUSE は全成分使用中と近似するので XSTATE_BV=RFBM∩XCR0。
-/// XSAVEOPT の省略最適化・圧縮形式・監査値はモデル化しない。
+/// XSAVEOPT の省略最適化と監査値はモデル化しない。XSAVEC の
+/// 圧縮レイアウトはインタプリタ層の具体値実行で扱う。
 pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
@@ -13028,13 +13062,62 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         for i in 0..16u8 {
             let v: B::V<W128> = b.get(sem::ymm_hi_ref(Xmm(i)));
             let ah = madd(b, a, 576 + u64::from(i) * 16);
-            let lo: B::V<W64> = b.trunc::<W128, W64>(v);
-            let sh = b.konst::<W128>(64);
-            let vs = b.shr_l::<W128>(v, sh);
-            let hi: B::V<W64> = b.trunc::<W128, W64>(vs);
-            decode::mem_store::<B, W64>(b, ah, wseg, lo)?;
-            let ah8 = madd(b, ah, 8);
-            decode::mem_store::<B, W64>(b, ah8, wseg, hi)?;
+            xsave_store128(b, ah, wseg, v)?;
+        }
+        Ok(())
+    })?;
+    // AVX-512 の標準レイアウト。MPX 領域（bit3/4）はモデルに
+    // ないが、実機どおりの固定オフセットを使う。opmask=0x380、
+    // ZMM_Hi256=0x3c0、Hi16_ZMM=0x5c0。
+    let wopmask = mask_bit(b, m, 5);
+    b.if_then(wopmask, |b| {
+        for i in 0..8u8 {
+            let v: B::V<W64> = b.get(sem::kref(i));
+            let ah = madd(b, a, 0x380 + u64::from(i) * 8);
+            decode::mem_store::<B, W64>(b, ah, wseg, v)?;
+        }
+        Ok(())
+    })?;
+    let wzmmhi = mask_bit(b, m, 6);
+    b.if_then(wzmmhi, |b| {
+        for r in 0..16u8 {
+            for part in 2..4usize {
+                let v: B::V<W128> = b.get(sem::zreg_ref(r, part));
+                let ah = madd(b, a, 0x3c0 + u64::from(r) * 32 + (part as u64 - 2) * 16);
+                xsave_store128(b, ah, wseg, v)?;
+            }
+        }
+        Ok(())
+    })?;
+    let whi16 = mask_bit(b, m, 7);
+    b.if_then(whi16, |b| {
+        for r in 16..32u8 {
+            for part in 0..4usize {
+                let v: B::V<W128> = b.get(sem::zreg_ref(r, part));
+                let ah = madd(b, a, 0x5c0 + u64::from(r - 16) * 64 + part as u64 * 16);
+                xsave_store128(b, ah, wseg, v)?;
+            }
+        }
+        Ok(())
+    })?;
+    // AMX。polyisa の標準レイアウトでは XTILECFG=0x9c0（64
+    // バイト）、XTILEDATA=0xa00（8192 バイト）とする。この配置は
+    // CPUID leaf D の成分情報と対にする。
+    let wtilecfg = mask_bit(b, m, 17);
+    b.if_then(wtilecfg, |b| {
+        for i in 0..8usize {
+            let v: B::V<W64> = b.get(sem::tilecfg_qref(i));
+            let ah = madd(b, a, 0x9c0 + i as u64 * 8);
+            decode::mem_store::<B, W64>(b, ah, wseg, v)?;
+        }
+        Ok(())
+    })?;
+    let wtiledata = mask_bit(b, m, 18);
+    b.if_then(wtiledata, |b| {
+        for i in 0..1024usize {
+            let v: B::V<W64> = b.get(sem::tmm_qref(i));
+            let ah = madd(b, a, 0xa00 + i as u64 * 8);
+            decode::mem_store::<B, W64>(b, ah, wseg, v)?;
         }
         Ok(())
     })
@@ -13080,6 +13163,98 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         let z: B::V<W128> = b.konst::<W128>(0);
         for i in 0..16u8 {
             b.set(sem::ymm_hi_ref(Xmm(i)), z);
+        }
+        Ok(())
+    })?;
+    // AVX-512 成分。bit が XSTATE_BV にあれば領域から復元し、
+    // なければ RFBM∩XCR0 の成分は初期値（0）に戻す。
+    for (bit, off, parts, first, last) in [
+        (6u64, 0x3c0u64, 2..4usize, 0u8, 16u8),
+        (7, 0x5c0, 0..4usize, 16, 32),
+    ] {
+        let rstz = mask_bit(b, rst, bit);
+        b.if_then(rstz, |b| {
+            for r in first..last {
+                for part in parts.clone() {
+                    let stride = if bit == 6 { 32 } else { 64 };
+                    let row = if bit == 6 {
+                        u64::from(r)
+                    } else {
+                        u64::from(r - 16)
+                    };
+                    let poff = if bit == 6 {
+                        part as u64 - 2
+                    } else {
+                        part as u64
+                    };
+                    let ah = madd(b, a, off + row * stride + poff * 16);
+                    let v = xsave_load128(b, ah, wseg)?;
+                    b.set(sem::zreg_ref(r, part), v);
+                }
+            }
+            Ok(())
+        })?;
+        let iniz = mask_bit(b, ini, bit);
+        b.if_then(iniz, |b| {
+            let z: B::V<W128> = b.konst::<W128>(0);
+            for r in first..last {
+                for part in parts.clone() {
+                    b.set(sem::zreg_ref(r, part), z);
+                }
+            }
+            Ok(())
+        })?;
+    }
+    // AMX。XTILECFG と XTILEDATA は独立した成分として扱うが、
+    // 実機では XCR0[18:17] は常に同時に立つ。
+    let rtcfg = mask_bit(b, rst, 17);
+    b.if_then(rtcfg, |b| {
+        for i in 0..8usize {
+            let ah = madd(b, a, 0x9c0 + i as u64 * 8);
+            let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            b.set(sem::tilecfg_qref(i), v);
+        }
+        Ok(())
+    })?;
+    let itcfg = mask_bit(b, ini, 17);
+    b.if_then(itcfg, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..8usize {
+            b.set(sem::tilecfg_qref(i), z);
+        }
+        Ok(())
+    })?;
+    let rtdata = mask_bit(b, rst, 18);
+    b.if_then(rtdata, |b| {
+        for i in 0..1024usize {
+            let ah = madd(b, a, 0xa00 + i as u64 * 8);
+            let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            b.set(sem::tmm_qref(i), v);
+        }
+        Ok(())
+    })?;
+    let itdata = mask_bit(b, ini, 18);
+    b.if_then(itdata, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..1024usize {
+            b.set(sem::tmm_qref(i), z);
+        }
+        Ok(())
+    })?;
+    let ropm = mask_bit(b, rst, 5);
+    b.if_then(ropm, |b| {
+        for i in 0..8u8 {
+            let ah = madd(b, a, 0x380 + u64::from(i) * 8);
+            let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            b.set(sem::kref(i), v);
+        }
+        Ok(())
+    })?;
+    let iopm = mask_bit(b, ini, 5);
+    b.if_then(iopm, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..8u8 {
+            b.set(sem::kref(i), z);
         }
         Ok(())
     })

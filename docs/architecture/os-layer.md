@@ -46,7 +46,7 @@ Linux のシステムコール実装は、ISA ごとの ABI モジュール（`a
 
 - **ゲストルート（`--root`）と仮想ファイルシステム**：`--root` の完全な名前空間閉じ込めは一部 ABI（aarch64・ppc64・s390x・loongarch・openrisc・hexagon 等）に限られ、x86 を含む古い経路ではホストパスへ直接アクセスする箇所が残る。`/proc/self/maps`・`/proc/cpuinfo`・`/dev` の統一的な合成も未実装である（[GAP-0002](../known-issues.md)）。
 - **マルチプロセス・マルチスレッド**：`clone`/`fork`/`execve`/`wait4` と `HostIo` 経由の非同期待ちは x86 が最も進んでおり、他の多くの Linux ABI は単一プロセス・単一スレッド模型（`fork`/`clone` は `ENOSYS`、待ち合わせは主スレッド消化）で動作する。
-- **シグナル**：x86-64 で `rt_sigaction`/`rt_sigprocmask`/`rt_sigpending`/`rt_sigreturn` と自分宛ての rt フレーム配送（FXSAVE 配置）を実装しているが、汎用機構の `kernel` 移管、i386 フレーム、CPU 例外からのシグナル変換、他スレッド配送、既定動作終了は未実装である（[GAP-0026](../known-issues.md)）。
+- **シグナル**：x86-64/i386 で `rt_sigaction`/`rt_sigprocmask`/`rt_sigpending`/`rt_sigreturn`、自分宛ての rt フレーム配送、CPU 例外からの同期シグナル変換と既定動作終了を実装しているが、汎用機構の `kernel` 移管、他スレッド配送、タイマ由来シグナル、`sigaltstack`、x32 専用フレーム、i386 `fpstate`、拡張 xstate を含むフレームは未実装である（[GAP-0026](../known-issues.md)）。
 - **ABI 構造の共通化とメモリ syscall**：`x86` をはじめ ABI ごとに状態構造体と振り分け表が重複している（[GAP-0032](../known-issues.md)）。また、一部 ABI では `munmap` が写像を解除せず、`brk` がページ整列値を保持する暫定実装になっている（[GAP-0034](../known-issues.md)）。
 
 ## その他の OS パーソナリティの現行仕様と簡略化

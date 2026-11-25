@@ -9,6 +9,8 @@
 
 use std::collections::BTreeSet;
 
+use polyisa_sem::GuestException;
+
 use crate::bare::BareEnv;
 use crate::obs::{NoObserver, Observer};
 use crate::{Budget, EngineCtx, Stop, Unimpl, VcpuRunner};
@@ -61,6 +63,14 @@ pub trait TrapHandler {
     /// 終了を別のスレッドの実行へ引き継ぐなら真。既定では終了で抜ける。
     fn take_exit(&mut self, _env: &mut BareEnv, _code: u32) -> bool {
         false
+    }
+
+    /// CPU 例外を OS 固有の通知へ変換する。Linux では SIGILL/
+    /// SIGSEGV/SIGFPE 等の同期シグナルに対応する。Handled なら
+    /// ハンドラが次の PC を設定済みの契約で、呼び出し側は命令長を
+    /// 足さない。既定では未実装として止める。
+    fn handle_exception(&mut self, _env: &mut BareEnv, _e: GuestException) -> TrapOutcome {
+        TrapOutcome::Unimplemented
     }
 
     /// 解読不能または未実装の命令語 `word`（実行中の pc 位置）。

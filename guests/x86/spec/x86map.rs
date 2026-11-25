@@ -1363,6 +1363,10 @@ pub fn build_maps(m: &mut Model) {
             it.lock_ok = true;
             it
         }),
+        // XSAVEC（0F C7 /4、メモリ形のみ）。圧縮レイアウトで
+        // XSAVE 相当の成分を書く。XSAVES/XRSTORS は CPL0 専用で、
+        // ユーザーモード実行の対象外。
+        MapItem::Insn(0xC7, gm("xsavec_mem", 4, false, &[Ea(Q64)], "xsavec {e}", "system")),
         // RDRAND/RDSEED（0F C7 /6 /7、レジスタ形のみ）。
         MapItem::Insn(
             0xC7,

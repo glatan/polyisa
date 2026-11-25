@@ -3100,6 +3100,15 @@ fn frd64(env: &mut BareEnv, a: u64) -> Option<u64> {
     Some(u64::from_le_bytes(b))
 }
 
+fn frd32(env: &mut BareEnv, a: u64) -> Option<u32> {
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(a), &mut b, data_access())
+        .ok()?;
+    Some(u32::from_le_bytes(b))
+}
+
 fn fwr(env: &mut BareEnv, a: u64, v: u64, n: usize) -> bool {
     env.backend
         .mem
@@ -3126,6 +3135,20 @@ pub fn rt_sigframe_write(
     old_mask: u64,
     pid: u64,
 ) -> bool {
+    rt_sigframe_write_ex(env, sig, act, old_mask, 0, pid)
+}
+
+/// `rt_sigframe_write` の siginfo 指定版。`si_union` は siginfo の
+/// 共用体先頭 8 バイトで、非同期 kill では pid+uid、fault 系では
+/// si_addr を置く。x86-64 では fault 系の si_addr も同じ位置にある。
+pub fn rt_sigframe_write_ex(
+    env: &mut BareEnv,
+    sig: u32,
+    act: &SigAct,
+    old_mask: u64,
+    si_code: u64,
+    si_union: u64,
+) -> bool {
     const FRAME: u64 = 1024;
     const GREGB: u64 = 48; // ucontext.mcontext.gregs のフレーム内オフセット
     let rsp = get64(env, Gpr(4));
@@ -3145,15 +3168,15 @@ pub fn rt_sigframe_write(
         (f + GREGB + 184, fp),     // uc_mcontext.fpregs
         (f + 304, old_mask),       // uc_sigmask
         (f + 312, u64::from(sig)), // si_signo+si_errno(=0)
-        (f + 312 + 8, 0),          // si_code=SI_USER
+        (f + 312 + 8, si_code),
     ];
     for (a, v) in fields {
         if !fwr(env, a, v, 8) {
             return false;
         }
     }
-    if !fwr(env, f + 312 + 16, pid, 8) {
-        // _sifields._kill = {si_pid u32, si_uid u32}
+    if !fwr(env, f + 312 + 16, si_union, 8) {
+        // kill では _sifields._kill、fault では si_addr。
         return false;
     }
     // gregs: REG_R8..R15,RDI,RSI,RBP,RBX,RDX,RAX,RCX,RSP,RIP,EFL,
@@ -3191,6 +3214,152 @@ pub fn rt_sigframe_write(
     env.backend
         .set(polyisa_guest_x86::sem::eip_ref(), act.handler as u32);
     true
+}
+
+/// i386 の rt シグナルフレームをスタックに作り、EIP を
+/// ハンドラ入口に向ける。`rt_sigframe_ia32` の配置に合わせる:
+///   +0 pretcode, +4 sig, +8 pinfo, +12 puc,
+///   +16 siginfo(128), +144 ucontext, +260 retcode。
+/// ucontext は flags/link/stack/sigcontext(88)/sigmask(8)。
+/// fpstate 拡張はまだ置かず、sigcontext.fpstate=0 とする。
+/// i386 では regparm 呼出し規約に合わせて EAX=sig、EDX=&info、
+/// ECX=&uc を設定する。失敗（未写像など）なら偽を返す。
+pub fn rt_sigframe32_write_ex(
+    env: &mut BareEnv,
+    sig: u32,
+    act: &SigAct,
+    old_mask: u64,
+    si_code: u64,
+    si_union: u64,
+) -> bool {
+    const FRAME: u64 = 268;
+    const UC: u64 = 144;
+    const SC: u64 = UC + 20;
+    let esp = get64(env, Gpr(4)) & 0xFFFF_FFFF;
+    // i386 ABI では関数入口で (esp+4) が 16 整列する。
+    let f = ((esp.wrapping_sub(FRAME) + 4) & !15).wrapping_sub(4);
+    let fields: [(u64, u64); 12] = [
+        (f, act.restorer),
+        (f + 4, u64::from(sig)),
+        (f + 8, f + 16),
+        (f + 12, f + UC),
+        (f + 16, u64::from(sig)), // si_signo
+        (f + 20, 0),              // si_errno
+        (f + 24, si_code),
+        (f + 28, si_union), // compat siginfo の union 先頭
+        (f + UC, 0),        // uc_flags
+        (f + UC + 4, 0),    // uc_link
+        (f + UC + 12, SS_DISABLE),
+        (f + UC + 108, old_mask), // uc_sigmask（8 バイト書く）
+    ];
+    for (a, v) in fields {
+        let n = if a == f + UC + 108 { 8 } else { 4 };
+        if !fwr(env, a, v, n) {
+            return false;
+        }
+    }
+    // sigcontext_32。セレクタ 4 組（gs/fs/es/ds）、整数レジスタ、
+    // trapno/err/ip/cs/flags/sp/ss/fpstate/oldmask/cr2 の順。
+    let sc = f + SC;
+    for i in 0..4u8 {
+        // frame 内は gs,fs,es,ds。CpuState の sregs は es,cs,ss,ds,fs,gs。
+        let sr = [5u8, 4, 0, 3][usize::from(i)];
+        let v = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(sr)));
+        if !fwr(env, sc + u64::from(i) * 4, v, 4) {
+            return false;
+        }
+    }
+    for (off, r) in [
+        (16u64, 7u8), // edi
+        (20, 6),      // esi
+        (24, 5),      // ebp
+        (28, 4),      // esp
+        (32, 3),      // ebx
+        (36, 2),      // edx
+        (40, 1),      // ecx
+        (44, 0),      // eax
+    ] {
+        let v = get64(env, Gpr(r)) & 0xFFFF_FFFF;
+        if !fwr(env, sc + off, v, 4) {
+            return false;
+        }
+    }
+    let tail: [(u64, u64); 10] = [
+        (sc + 48, 0), // trapno
+        (sc + 52, 0), // err
+        (
+            sc + 56,
+            u64::from(env.backend.get(polyisa_guest_x86::sem::eip_ref())),
+        ),
+        (
+            sc + 60,
+            u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1))),
+        ),
+        (
+            sc + 64,
+            u64::from(env.backend.get(polyisa_guest_x86::sem::eflags_ref())),
+        ),
+        (sc + 68, esp),
+        (
+            sc + 72,
+            u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(2))),
+        ),
+        (sc + 76, 0), // fpstate（未実装）
+        (sc + 80, old_mask),
+        (sc + 84, si_union), // cr2（fault 系では si_addr と同じ）
+    ];
+    for (a, v) in tail {
+        if !fwr(env, a, v, 4) {
+            return false;
+        }
+    }
+    // movl $__NR_rt_sigreturn,%eax; int $0x80。実際の復帰は
+    // SA_RESTORER の pretcode を使うが、gdb 互換の領域として残す。
+    let retcode = u64::from_le_bytes([0xB8, 0xAD, 0, 0, 0, 0xCD, 0x80, 0]);
+    if !fwr(env, f + 260, retcode, 8) {
+        return false;
+    }
+    set64(env, Gpr(4), f);
+    set64(env, Gpr(0), u64::from(sig));
+    set64(env, Gpr(2), f + 16);
+    set64(env, Gpr(1), f + UC);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), act.handler as u32);
+    true
+}
+
+/// i386 の rt_sigreturn。ESP-4 がフレーム基底。整数レジスタと
+/// マスクを復元する。fpstate は配送側も未実装なので読まない。
+pub fn rt_sigframe32_read(env: &mut BareEnv) -> Option<u64> {
+    const UC: u64 = 144;
+    const SC: u64 = UC + 20;
+    let f = (get64(env, Gpr(4)) & 0xFFFF_FFFF).wrapping_sub(4);
+    let mask = frd64(env, f + UC + 108)?;
+    let sc = f + SC;
+    for (off, r) in [
+        (16u64, 7u8),
+        (20, 6),
+        (24, 5),
+        (28, 4),
+        (32, 3),
+        (36, 2),
+        (40, 1),
+        (44, 0),
+    ] {
+        let v = frd32(env, sc + off)?;
+        set64(env, Gpr(r), u64::from(v));
+    }
+    for i in 0..4u8 {
+        let sr = [5u8, 4, 0, 3][usize::from(i)];
+        let v = frd32(env, sc + u64::from(i) * 4)?;
+        env.backend
+            .set(polyisa_guest_x86::sem::sreg_ref(sr), v as u16);
+    }
+    let flags = frd32(env, sc + 64)?;
+    let ip = frd32(env, sc + 56)?;
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), flags);
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), ip);
+    Some(mask)
 }
 
 /// rt_sigreturn。RSP が指すフレームからコンテキスト（レジスタ・

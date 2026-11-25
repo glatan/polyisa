@@ -17,7 +17,7 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 16] = [
+pub const LEAF_IDS: [(u32, u32); 21] = [
     (0, 0),
     (1, 0),
     (7, 0),
@@ -25,6 +25,11 @@ pub const LEAF_IDS: [(u32, u32); 16] = [
     (0xD, 0),
     (0xD, 1),
     (0xD, 2),
+    (0xD, 5),
+    (0xD, 6),
+    (0xD, 7),
+    (0xD, 17),
+    (0xD, 18),
     (0x1D, 0),
     (0x1D, 1),
     (0x1E, 0),
@@ -72,7 +77,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 16] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 21] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -120,6 +125,31 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
     } else {
         0
     };
+    // leaf D.1 EBX: XSAVEC の圧縮レイアウトで全対応成分を
+    // 保存したときのサイズ。先頭 576 バイト（legacy+header）の後に、
+    // 成分を昇順で必要なものだけ詰める。polyisa が報告する成分では
+    // AMX の XTILECFG/XTILEDATA だけが 64 バイト整列（leaf D.i ECX[1]）。
+    let compact_size = if features.contains("xsavec") {
+        let mut off = 576u32;
+        for (bit, size, align64) in [
+            (2u64, 0x100u32, false),
+            (5, 0x40, false),
+            (6, 0x200, false),
+            (7, 0x400, false),
+            (17, 0x40, true),
+            (18, 0x2000, true),
+        ] {
+            if xcomp_supp(features) & (1u64 << bit) != 0 {
+                if align64 {
+                    off = off.next_multiple_of(64);
+                }
+                off += size;
+            }
+        }
+        off
+    } else {
+        0
+    };
     // leaf 7 EAX は最大サブリーフ番号。いま宣言があるのは 1 まで。
     let max7sub = leaf_regs
         .keys()
@@ -147,32 +177,62 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(7, 1, "edx"),
         ],
         // leaf D サブリーフ 0: XCR0 対応成分（`xcomp_supp` と同じ
-        // マスク）、現在有効サイズ・最大サイズ。成分の保存実装は
-        // x87/SSE/AVX の上位 512+64+256=832 バイトまで（近似。
-        // 実機は AMX 成分ぶん大きい値と leaf D.17/D.18 を報告する）。
+        // マスク）、現在有効サイズ・最大サイズ。polyisa の標準
+        // レイアウトは AVX-512 までで 0x9c0、AMX までで 0x2a00。
         if features.contains("xsave") {
-            let sz = if features.contains("avx") {
+            let mut sz = if features.contains("avx") {
                 0x340
             } else {
                 0x240
             };
+            if features.contains("avx512f") {
+                sz = 0x9c0;
+            }
+            if features.contains("amx_tile") {
+                sz = 0x2a00;
+            }
             [xcomp_supp(features) as u32, sz, sz, 0]
         } else {
             [0; 4]
         },
         // leaf D サブリーフ 1: 拡張保存機能ビット。bit0=XSAVEOPT、
-        // bit1/3 の XSAVEC/XSAVES は未実装。EBX 以降は
-        // XSAVES 領域サイズで 0。
-        if features.contains("xsaveopt") {
-            [1, 0, 0, 0]
-        } else {
-            [0; 4]
-        },
+        // bit1=XSAVEC。bit3 の XSAVES は CPL0 専用で未実装。
+        [reg_of(0xd, 1, "eax"), compact_size, 0, 0],
         // leaf D サブリーフ 2: YMMH 成分のサイズとオフセット
         // （XSAVE レイアウトの +576、16 エントリ×16 バイト）。
         // D.0 の EAX に bit2 を立てるモデルだけ報告する。
         if features.contains("avx") {
             [0x100, 0x240, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 5-7: AVX-512 成分。polyisa の標準
+        // レイアウトは opmask=0x380、ZMM_Hi256=0x3c0、
+        // Hi16_ZMM=0x5c0。
+        if features.contains("avx512f") {
+            [0x40, 0x380, 0, 0]
+        } else {
+            [0; 4]
+        },
+        if features.contains("avx512f") {
+            [0x200, 0x3c0, 0, 0]
+        } else {
+            [0; 4]
+        },
+        if features.contains("avx512f") {
+            [0x400, 0x5c0, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 17/18: AMX XTILECFG/XTILEDATA。
+        // XTILEDATA は 8192 バイトで、CPUID leaf 1D.1 の形状と一致する。
+        if features.contains("amx_tile") {
+            [0x40, 0x9c0, 2, 0]
+        } else {
+            [0; 4]
+        },
+        if features.contains("amx_tile") {
+            [0x2000, 0xa00, 2, 0]
         } else {
             [0; 4]
         },
@@ -257,6 +317,9 @@ pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
     let mut m = 0x3u64;
     if features.contains("avx") {
         m |= 0x4;
+    }
+    if features.contains("avx512f") {
+        m |= 0xe0;
     }
     if features.contains("amx_tile") {
         m |= 0x6_0000;
