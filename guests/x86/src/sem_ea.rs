@@ -13288,14 +13288,14 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         }
         Ok(())
     })?;
-    // AVX-512 の標準レイアウト。MPX 領域（bit3/4）はモデルに
-    // ないが、実機どおりの固定オフセットを使う。opmask=0x380、
-    // ZMM_Hi256=0x3c0、Hi16_ZMM=0x5c0。
+    // AVX-512 の標準レイアウト。MPX/APX 領域を避けた実機どおりの
+    // 固定オフセットを使う。opmask=0x440、ZMM_Hi256=0x480、
+    // Hi16_ZMM=0x680。
     let wopmask = mask_bit(b, m, 5);
     b.if_then(wopmask, |b| {
         for i in 0..8u8 {
             let v: B::V<W64> = b.get(sem::kref(i));
-            let ah = madd(b, a, 0x380 + u64::from(i) * 8);
+            let ah = madd(b, a, 0x440 + u64::from(i) * 8);
             decode::mem_store::<B, W64>(b, ah, wseg, v)?;
         }
         Ok(())
@@ -13305,7 +13305,7 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         for r in 0..16u8 {
             for part in 2..4usize {
                 let v: B::V<W128> = b.get(sem::zreg_ref(r, part));
-                let ah = madd(b, a, 0x3c0 + u64::from(r) * 32 + (part as u64 - 2) * 16);
+                let ah = madd(b, a, 0x480 + u64::from(r) * 32 + (part as u64 - 2) * 16);
                 xsave_store128(b, ah, wseg, v)?;
             }
         }
@@ -13316,20 +13316,31 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         for r in 16..32u8 {
             for part in 0..4usize {
                 let v: B::V<W128> = b.get(sem::zreg_ref(r, part));
-                let ah = madd(b, a, 0x5c0 + u64::from(r - 16) * 64 + part as u64 * 16);
+                let ah = madd(b, a, 0x680 + u64::from(r - 16) * 64 + part as u64 * 16);
                 xsave_store128(b, ah, wseg, v)?;
             }
         }
         Ok(())
     })?;
-    // AMX。polyisa の標準レイアウトでは XTILECFG=0x9c0（64
-    // バイト）、XTILEDATA=0xa00（8192 バイト）とする。この配置は
+    // APX EGPR 成分（0x3c0、r16-r31）。MPX が使っていた
+    // 128 バイトを再利用する。
+    let wapx = mask_bit(b, m, 19);
+    b.if_then(wapx, |b| {
+        for i in 0..16u8 {
+            let v: B::V<W64> = b.get(sem::x_ref(Gpr(16 + i)));
+            let ah = madd(b, a, 0x3c0 + u64::from(i) * 8);
+            decode::mem_store::<B, W64>(b, ah, wseg, v)?;
+        }
+        Ok(())
+    })?;
+    // AMX。実機の標準レイアウトでは XTILECFG=0xac0（64
+    // バイト）、XTILEDATA=0xb00（8192 バイト）。この配置は
     // CPUID leaf D の成分情報と対にする。
     let wtilecfg = mask_bit(b, m, 17);
     b.if_then(wtilecfg, |b| {
         for i in 0..8usize {
             let v: B::V<W64> = b.get(sem::tilecfg_qref(i));
-            let ah = madd(b, a, 0x9c0 + i as u64 * 8);
+            let ah = madd(b, a, 0xac0 + i as u64 * 8);
             decode::mem_store::<B, W64>(b, ah, wseg, v)?;
         }
         Ok(())
@@ -13338,7 +13349,7 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     b.if_then(wtiledata, |b| {
         for i in 0..1024usize {
             let v: B::V<W64> = b.get(sem::tmm_qref(i));
-            let ah = madd(b, a, 0xa00 + i as u64 * 8);
+            let ah = madd(b, a, 0xb00 + i as u64 * 8);
             decode::mem_store::<B, W64>(b, ah, wseg, v)?;
         }
         Ok(())
@@ -13391,8 +13402,8 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     // AVX-512 成分。bit が XSTATE_BV にあれば領域から復元し、
     // なければ RFBM∩XCR0 の成分は初期値（0）に戻す。
     for (bit, off, parts, first, last) in [
-        (6u64, 0x3c0u64, 2..4usize, 0u8, 16u8),
-        (7, 0x5c0, 0..4usize, 16, 32),
+        (6u64, 0x480u64, 2..4usize, 0u8, 16u8),
+        (7, 0x680, 0..4usize, 16, 32),
     ] {
         let rstz = mask_bit(b, rst, bit);
         b.if_then(rstz, |b| {
@@ -13427,12 +13438,31 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
             Ok(())
         })?;
     }
+    // APX EGPR。bit19 が XSTATE_BV にあれば復元し、なければ
+    // RFBM∩XCR0 の成分は 0 に戻す。
+    let rapx = mask_bit(b, rst, 19);
+    b.if_then(rapx, |b| {
+        for i in 0..16u8 {
+            let ah = madd(b, a, 0x3c0 + u64::from(i) * 8);
+            let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            b.set(sem::x_ref(Gpr(16 + i)), v);
+        }
+        Ok(())
+    })?;
+    let iapx = mask_bit(b, ini, 19);
+    b.if_then(iapx, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..16u8 {
+            b.set(sem::x_ref(Gpr(16 + i)), z);
+        }
+        Ok(())
+    })?;
     // AMX。XTILECFG と XTILEDATA は独立した成分として扱うが、
     // 実機では XCR0[18:17] は常に同時に立つ。
     let rtcfg = mask_bit(b, rst, 17);
     b.if_then(rtcfg, |b| {
         for i in 0..8usize {
-            let ah = madd(b, a, 0x9c0 + i as u64 * 8);
+            let ah = madd(b, a, 0xac0 + i as u64 * 8);
             let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
             b.set(sem::tilecfg_qref(i), v);
         }
@@ -13449,7 +13479,7 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let rtdata = mask_bit(b, rst, 18);
     b.if_then(rtdata, |b| {
         for i in 0..1024usize {
-            let ah = madd(b, a, 0xa00 + i as u64 * 8);
+            let ah = madd(b, a, 0xb00 + i as u64 * 8);
             let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
             b.set(sem::tmm_qref(i), v);
         }
@@ -13466,7 +13496,7 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let ropm = mask_bit(b, rst, 5);
     b.if_then(ropm, |b| {
         for i in 0..8u8 {
-            let ah = madd(b, a, 0x380 + u64::from(i) * 8);
+            let ah = madd(b, a, 0x440 + u64::from(i) * 8);
             let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
             b.set(sem::kref(i), v);
         }

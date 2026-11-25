@@ -394,6 +394,8 @@ mod imp {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(CODE_VA), 1, rwx).unwrap();
+        env.backend
+            .set(polyisa_guest_x86::sem::xcr0_ref(), 0x8_0003);
         env
     }
 

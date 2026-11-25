@@ -69,7 +69,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 21],
+    pub cpuid: [[u32; 4]; 22],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -112,7 +112,7 @@ pub struct CpuState {
     /// マスクレジスタ k0-k7（XSAVE の Opmask 成分に対応）。
     pub kmask: [u64; 8],
     /// APX の拡張 GPR R16-R31（REX2/EVEX.map4 でだけ到達できる。
-    /// XSAVE の追加成分はなく、コンテキストとしてモデル内に持つ）。
+    /// XSAVE 成分 19 の主体）。
     pub x2: [u64; 16],
     /// AMX のタイルレジスタ tmm0-7（各最大 16 行×64 バイト、
     /// 行は colsb バイトずつ連続配置）。XSAVE の XTILEDATA 成分に対応。
@@ -197,21 +197,21 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 336 を
+        // mxcsr（sregs 12 + fsw 2 + cpuid 352 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 848);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 864);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 904);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 912);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 920);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 928);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1184);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1696);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2720);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2784);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2912);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2912 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11168);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 920);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 928);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 936);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 944);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1200);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1712);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2736);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2800);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2928);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2928 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11184);
     }
 
     #[test]
@@ -2237,6 +2237,7 @@ mod tests {
             "amx_movrs",
             "via_padlock_rng",
             "via_padlock_rng_en",
+            "apx",
             "xsave",
             "xsaveopt",
             "xsavec",
@@ -2253,34 +2254,35 @@ mod tests {
         assert_eq!(tbl[3][0] & (1 << 31), 1 << 31, "movrs");
         assert_eq!(tbl[3][3] & (1 << 5), 1 << 5, "avxneconvert");
         assert_eq!(tbl[3][3] & (1 << 15), 1 << 15, "user_msr");
-        assert_eq!(tbl[4][0] & 0x6_00e7, 0x6_00e7, "leaf d xcr0 components");
-        assert_eq!(tbl[4][1], 0x2a00, "leaf d xsave max size");
-        assert_eq!(tbl[5], [3, 0x29c0, 0, 0], "leaf d xsaveopt/xsavec");
-        assert_eq!(tbl[7], [0x40, 0x380, 0, 0], "leaf d opmask component");
-        assert_eq!(tbl[8], [0x200, 0x3c0, 0, 0], "leaf d zmm_hi256 component");
-        assert_eq!(tbl[9], [0x400, 0x5c0, 0, 0], "leaf d hi16_zmm component");
-        assert_eq!(tbl[10], [0x40, 0x9c0, 2, 0], "leaf d xtilecfg component");
-        assert_eq!(tbl[11], [0x2000, 0xa00, 2, 0], "leaf d xtiledata component");
-        assert_eq!(tbl[12][0], 1, "leaf 1d max palette");
-        assert_eq!(tbl[13][0], 0x0400_2000, "leaf 1d tile geometry eax");
-        assert_eq!(tbl[13][1], 0x0008_0040, "leaf 1d tile geometry ebx");
-        assert_eq!(tbl[13][2], 0x10, "leaf 1d max rows");
-        assert_eq!(tbl[14][1], 16 | (64 << 8), "leaf 1e tmul shape");
-        assert_eq!(tbl[15][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
+        assert_eq!(tbl[4][0] & 0xe_00e7, 0xe_00e7, "leaf d xcr0 components");
+        assert_eq!(tbl[4][1], 0x2b00, "leaf d xsave max size");
+        assert_eq!(tbl[5], [3, 0x2a40, 0, 0], "leaf d xsaveopt/xsavec");
+        assert_eq!(tbl[7], [0x40, 0x440, 0, 0], "leaf d opmask component");
+        assert_eq!(tbl[8], [0x200, 0x480, 0, 0], "leaf d zmm_hi256 component");
+        assert_eq!(tbl[9], [0x400, 0x680, 0, 0], "leaf d hi16_zmm component");
+        assert_eq!(tbl[10], [0x40, 0xac0, 2, 0], "leaf d xtilecfg component");
+        assert_eq!(tbl[11], [0x2000, 0xb00, 2, 0], "leaf d xtiledata component");
+        assert_eq!(tbl[12], [0x80, 0x3c0, 2, 0], "leaf d apx egpr component");
+        assert_eq!(tbl[13][0], 1, "leaf 1d max palette");
+        assert_eq!(tbl[14][0], 0x0400_2000, "leaf 1d tile geometry eax");
+        assert_eq!(tbl[14][1], 0x0008_0040, "leaf 1d tile geometry ebx");
+        assert_eq!(tbl[14][2], 0x10, "leaf 1d max rows");
+        assert_eq!(tbl[15][1], 16 | (64 << 8), "leaf 1e tmul shape");
+        assert_eq!(tbl[16][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
         // LEAF_IDS 順: index 12 = 0x8000_0001、index 13 = 0x8000_0008。
-        assert_eq!(tbl[17][2] & (1 << 29), 1 << 29, "mwaitx");
-        assert_eq!(tbl[18][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
-        assert_eq!(tbl[18][0], 0x3020, "addr size");
-        assert_eq!(tbl[19][0], 0xC000_0001, "via max leaf");
-        assert_eq!(tbl[20][3] & 0xC, 0xC, "padlock present+enabled");
+        assert_eq!(tbl[18][2] & (1 << 29), 1 << 29, "mwaitx");
+        assert_eq!(tbl[19][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
+        assert_eq!(tbl[19][0], 0x3020, "addr size");
+        assert_eq!(tbl[20][0], 0xC000_0001, "via max leaf");
+        assert_eq!(tbl[21][3] & 0xC, 0xC, "padlock present+enabled");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());
-        assert_eq!(tbl[17][2] & (1 << 29), 0);
-        assert_eq!(tbl[18][1], 0);
-        assert_eq!(tbl[12], [0; 4]);
+        assert_eq!(tbl[18][2] & (1 << 29), 0);
+        assert_eq!(tbl[19][1], 0);
+        assert_eq!(tbl[13], [0; 4]);
+        assert_eq!(tbl[21], [0; 4]);
         assert_eq!(tbl[20], [0; 4]);
-        assert_eq!(tbl[19], [0; 4]);
         assert_eq!(tbl[20], [0; 4]);
     }
 

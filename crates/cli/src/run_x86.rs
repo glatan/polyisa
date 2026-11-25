@@ -2744,8 +2744,19 @@ fn dispatch_map<B: Backend>(
     use polyisa_guest_x86::decode::{self, Hw, Rm};
     use polyisa_guest_x86::sem::{Gpr, eflags_ref};
     use polyisa_guest_x86::sem_ea::{self, Alu, Sh, ShiftCnt, Src};
-    use polyisa_sem::{W8, W16, W32, W64};
+    use polyisa_sem::{Cmp, W8, W16, W32, W64};
     const EAX: Gpr = Gpr(0);
+    // APX の REX2/EVEX.map4 形は XCR0[19]=1 で OS が EGPR 状態を
+    // 有効化しているときだけ実行できる。未許可では命令・接頭辞は
+    // #UD。64 ビットモード以外ではそもそもデコードされない。
+    if d.rex2_seen || (d.evex && d.vex_map == 4) {
+        let x0: B::V<W64> = b.get(polyisa_guest_x86::sem::xcr0_ref());
+        let bit = b.konst::<W64>(1u64 << 19);
+        let v = b.and::<W64>(x0, bit);
+        let z = b.konst::<W64>(0);
+        let enabled = b.cmp::<W64>(Cmp::Ne, v, z);
+        b.if_then_else(enabled, |_| Ok(()), |b| sem_ea::undefined(b, eip))?;
+    }
     let w = d.osize;
     // VEX の GPR 演算（BMI 系）の被演算子幅。64 ビットモードでは
     // VEX.W（`d.rex` bit3 に畳み込み済み）で 32/64、他モードは常に 32。
@@ -6451,6 +6462,13 @@ fn xsavec_exec(
             xsavec_w64(env, base + i as u64 * 8, v)?;
         }
         Ok(())
+    })?;
+    put(env, 19, 0x80, &mut |env, base| {
+        for i in 0..16u8 {
+            let v = env.backend.get(sem::x_ref(sem::Gpr(16 + i)));
+            xsavec_w64(env, base + u64::from(i) * 8, v)?;
+        }
+        Ok(())
     })
 }
 
@@ -6519,6 +6537,7 @@ fn xsavec_size(bit: u64) -> u64 {
         7 => 0x400,
         17 => 0x40,
         18 => 0x2000,
+        19 => 0x80,
         _ => 0,
     }
 }
@@ -6641,6 +6660,18 @@ fn xrstorc_exec(
     } else if ini & (1 << 18) != 0 {
         for i in 0..1024usize {
             env.backend.set(sem::tmm_qref(i), 0);
+        }
+    }
+    // APX EGPR。圧縮形式では成分番号順なので AMX の後ろに来る。
+    let off = xsavec_offset(xcomp, 19);
+    if rst & (1 << 19) != 0 {
+        for i in 0..16u8 {
+            let v = xsavec_r64(env, a + off + u64::from(i) * 8)?;
+            env.backend.set(sem::x_ref(sem::Gpr(16 + i)), v);
+        }
+    } else if ini & (1 << 19) != 0 {
+        for i in 0..16u8 {
+            env.backend.set(sem::x_ref(sem::Gpr(16 + i)), 0);
         }
     }
     Ok(())
@@ -15702,12 +15733,15 @@ fn run_image_x86_32_impl(
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    // XTILECFG/XTILEDATA だけは Linux の動的成分として最初は外す。
+    // APX EGPR は小さい静的成分なので、対応モデルでは最初から有効。
+    let static_supp = supp & !0x6_0000;
     env.backend
-        .set(polyisa_guest_x86::sem::xcr0_ref(), supp & 0xFFFF);
+        .set(polyisa_guest_x86::sem::xcr0_ref(), static_supp);
     env.backend
         .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
     env.backend
-        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), supp & 0xFFFF);
+        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), static_supp);
     install_cpuid(&mut env, features, ident);
     match run_mode_ex(
         &mut env,
@@ -15973,12 +16007,15 @@ fn run_image_x86_64_impl(
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    // XTILECFG/XTILEDATA だけは Linux の動的成分として最初は外す。
+    // APX EGPR は小さい静的成分なので、対応モデルでは最初から有効。
+    let static_supp = supp & !0x6_0000;
     env.backend
-        .set(polyisa_guest_x86::sem::xcr0_ref(), supp & 0xFFFF);
+        .set(polyisa_guest_x86::sem::xcr0_ref(), static_supp);
     env.backend
         .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
     env.backend
-        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), supp & 0xFFFF);
+        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), static_supp);
     install_cpuid(&mut env, features, ident);
     let out = if x32 {
         // JIT 経路は x32 未対応。64 ビットモード・32 ビットアドレス幅で逐次実行。

@@ -1653,7 +1653,7 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     /// 小さい成分は静的で、要求なしに使える。
     const XFEATURE_FIRST_DYNAMIC: u64 = 16;
     /// 成分番号の上限（XFEATURE_MAX）。
-    const XFEATURE_MAX: u64 = 18;
+    const XFEATURE_MAX: u64 = 19;
     const XFEATURE_XTILECFG: u64 = 17;
     const XFEATURE_XTILEDATA: u64 = 18;
     if op == ARCH_GET_XCOMP_SUPP || op == ARCH_GET_XCOMP_PERM {

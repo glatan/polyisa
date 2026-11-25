@@ -17,7 +17,7 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 21] = [
+pub const LEAF_IDS: [(u32, u32); 22] = [
     (0, 0),
     (1, 0),
     (7, 0),
@@ -30,6 +30,7 @@ pub const LEAF_IDS: [(u32, u32); 21] = [
     (0xD, 7),
     (0xD, 17),
     (0xD, 18),
+    (0xD, 19),
     (0x1D, 0),
     (0x1D, 1),
     (0x1E, 0),
@@ -48,6 +49,20 @@ const MAX_BASIC: u32 = 7;
 const MAX_BASIC_XSAVE: u32 = 0xD;
 /// 最大拡張リーフ（leaf 0x8000_0000 の EAX）。
 const MAX_EXT: u32 = 0x8000_0008;
+
+// XSAVE 標準（非圧縮）レイアウトの固定オフセット。MPX が
+// 使っていた 0x3c0-0x43f は APX EGPR が再利用する。0x340-0x3bf
+// と 0xa80-0xabf は予約/他成分の間隙で、polyisa が実装しない
+// PKRU・CET 等があっても AVX-512/AMX/APX の位置は変わらない。
+pub const XSAVE_YMM_OFF: u32 = 0x240;
+pub const XSAVE_APX_OFF: u32 = 0x3c0;
+pub const XSAVE_APX_SIZE: u32 = 0x80;
+pub const XSAVE_OPMASK_OFF: u32 = 0x440;
+pub const XSAVE_ZMMHI_OFF: u32 = 0x480;
+pub const XSAVE_HI16ZMM_OFF: u32 = 0x680;
+pub const XSAVE_TILECFG_OFF: u32 = 0xac0;
+pub const XSAVE_TILEDATA_OFF: u32 = 0xb00;
+pub const XSAVE_AMX_END: u32 = XSAVE_TILEDATA_OFF + 0x2000;
 
 fn get_ident<'a>(ident: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
     ident.get(key).map(String::as_str)
@@ -77,7 +92,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 21] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 22] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -138,6 +153,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             (7, 0x400, false),
             (17, 0x40, true),
             (18, 0x2000, true),
+            (19, XSAVE_APX_SIZE, true),
         ] {
             if xcomp_supp(features) & (1u64 << bit) != 0 {
                 if align64 {
@@ -177,19 +193,23 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(7, 1, "edx"),
         ],
         // leaf D サブリーフ 0: XCR0 対応成分（`xcomp_supp` と同じ
-        // マスク）、現在有効サイズ・最大サイズ。polyisa の標準
-        // レイアウトは AVX-512 までで 0x9c0、AMX までで 0x2a00。
+        // マスク）、現在有効サイズ・最大サイズ。EBX は実機では
+        // 現在の XCR0 に依存するが、polyisa の CPUID 表は静的なので
+        // ECX と同じく対応成分全体の末尾を返す近似とする。
         if features.contains("xsave") {
             let mut sz = if features.contains("avx") {
-                0x340
+                XSAVE_YMM_OFF + 0x100
             } else {
                 0x240
             };
+            if features.contains("apx") {
+                sz = sz.max(XSAVE_APX_OFF + XSAVE_APX_SIZE);
+            }
             if features.contains("avx512f") {
-                sz = 0x9c0;
+                sz = sz.max(XSAVE_HI16ZMM_OFF + 0x400);
             }
             if features.contains("amx_tile") {
-                sz = 0x2a00;
+                sz = sz.max(XSAVE_AMX_END);
             }
             [xcomp_supp(features) as u32, sz, sz, 0]
         } else {
@@ -206,33 +226,40 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         } else {
             [0; 4]
         },
-        // leaf D サブリーフ 5-7: AVX-512 成分。polyisa の標準
-        // レイアウトは opmask=0x380、ZMM_Hi256=0x3c0、
-        // Hi16_ZMM=0x5c0。
+        // leaf D サブリーフ 5-7: AVX-512 成分。実機の標準
+        // レイアウトは opmask=0x440、ZMM_Hi256=0x480、
+        // Hi16_ZMM=0x680。
         if features.contains("avx512f") {
-            [0x40, 0x380, 0, 0]
+            [0x40, XSAVE_OPMASK_OFF, 0, 0]
         } else {
             [0; 4]
         },
         if features.contains("avx512f") {
-            [0x200, 0x3c0, 0, 0]
+            [0x200, XSAVE_ZMMHI_OFF, 0, 0]
         } else {
             [0; 4]
         },
         if features.contains("avx512f") {
-            [0x400, 0x5c0, 0, 0]
+            [0x400, XSAVE_HI16ZMM_OFF, 0, 0]
         } else {
             [0; 4]
         },
         // leaf D サブリーフ 17/18: AMX XTILECFG/XTILEDATA。
         // XTILEDATA は 8192 バイトで、CPUID leaf 1D.1 の形状と一致する。
         if features.contains("amx_tile") {
-            [0x40, 0x9c0, 2, 0]
+            [0x40, XSAVE_TILECFG_OFF, 2, 0]
         } else {
             [0; 4]
         },
         if features.contains("amx_tile") {
-            [0x2000, 0xa00, 2, 0]
+            [0x2000, XSAVE_TILEDATA_OFF, 2, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 19: APX EGPR（r16-r31、16×8 バイト）。
+        // 非圧縮形式では廃止された MPX 領域 0x3c0-0x43f を再利用する。
+        if features.contains("apx") {
+            [XSAVE_APX_SIZE, XSAVE_APX_OFF, 2, 0]
         } else {
             [0; 4]
         },
@@ -308,7 +335,8 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
 
 /// Linux `arch_prctl(ARCH_GET_XCOMP_SUPP)` が返す「OS が
 /// 対応する拡張状態」の成分マスク。bit0=x87, bit1=SSE は常に、
-/// bit17=XTILECFG, bit18=XTILEDATA は `amx_tile` 宣言時に含む。
+/// bit17=XTILECFG, bit18=XTILEDATA は `amx_tile`、bit19=APX EGPR は
+/// `apx` 宣言時に含む。
 /// bit2 (YMM) 以降はその成分の XSAVE 実装が入ってから足す。
 /// leaf D.0 の EAX が報告する成分と同じマスクを返す（実機の
 /// XCOMP_SUPP は leaf D の uabi 成分と一致する）。
@@ -323,6 +351,9 @@ pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
     }
     if features.contains("amx_tile") {
         m |= 0x6_0000;
+    }
+    if features.contains("apx") {
+        m |= 0x8_0000;
     }
     m
 }
