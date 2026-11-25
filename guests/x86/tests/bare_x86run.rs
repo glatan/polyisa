@@ -12963,6 +12963,36 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn cpuid_leaf_d0_ebx_tracks_current_xcr0() {
+    let feats: std::collections::BTreeSet<String> = [
+        "xsave", "xsaveopt", "xsavec", "avx", "avx512f", "amx_tile", "apx",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let tbl = polyisa_guest_x86::cpuid::derive(&feats, &Default::default());
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    for (i, row) in tbl.iter().enumerate() {
+        for (r, v) in row.iter().enumerate() {
+            env.backend.set(polyisa_guest_x86::sem::cpuid_ref(i, r), *v);
+        }
+    }
+    for (xcr0, ebx) in [(7u64, 832u32), (0x8_0003, 1088), (0x6_0007, 11008)] {
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), xcr0);
+        env.step(|b| {
+            let eax = b.konst::<polyisa_sem::W32>(0xD);
+            let ecx = b.konst::<polyisa_sem::W32>(0);
+            b.set(polyisa_guest_x86::sem::Gpr(0).state(), eax);
+            b.set(polyisa_guest_x86::sem::Gpr(1).state(), ecx);
+            polyisa_guest_x86::sem::cpuid(b)
+        })
+        .unwrap();
+        assert_eq!(env.backend.get(Gpr(3).state()), ebx, "xcr0={xcr0:x}");
+        assert_eq!(env.backend.get(Gpr(1).state()), 11008, "max size");
+    }
+}
+
+#[test]
 fn run_frndint_honors_fcw_and_preserves_negative_zero() {
     fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());

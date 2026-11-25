@@ -6922,6 +6922,37 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
             *slot = b.select::<W32>(hit, v, *slot);
         }
     }
+    // CPUID.0D.0:EBX は現在有効な XCR0 成分を収める XSAVE 領域
+    // サイズに依存する。表は対応成分全体の最大サイズを ECX に持つ
+    // 静的値なので、EBX だけ実行時の XCR0 から計算し直す。
+    let kd = b.konst::<W32>(0xD);
+    let leaf_d = b.cmp::<W32>(Cmp::Eq, leaf, kd);
+    let sub0 = b.cmp::<W32>(Cmp::Eq, subleaf, zero);
+    let hit_d0 = bit_and(b, leaf_d, sub0);
+    let has_xsave = b.cmp::<W32>(Cmp::Ne, out[0], zero);
+    let dyn_d0 = bit_and(b, hit_d0, has_xsave);
+    let x0 = b.get(xcr0_ref());
+    let mut size64 = b.konst::<W64>(576);
+    for (bit, end) in [
+        (2u64, 0x340u64), // YMM_Hi128
+        (5, 0x480),       // opmask
+        (6, 0x680),       // ZMM_Hi256
+        (7, 0xa80),       // Hi16_ZMM
+        (17, 0xb00),      // XTILECFG
+        (18, 0x2b00),     // XTILEDATA
+        (19, 0x440),      // APX EGPR（MPX 領域を再利用）
+    ] {
+        let bm = b.konst::<W64>(1u64 << bit);
+        let present = b.and::<W64>(x0, bm);
+        let z64 = b.konst::<W64>(0);
+        let on = b.cmp::<W64>(Cmp::Ne, present, z64);
+        let endv = b.konst::<W64>(end);
+        let less = b.cmp::<W64>(Cmp::LtU, size64, endv);
+        let grow = bit_and(b, on, less);
+        size64 = b.select::<W64>(grow, endv, size64);
+    }
+    let size32 = b.trunc::<W64, W32>(size64);
+    out[1] = b.select::<W32>(dyn_d0, size32, out[1]);
     write(b, Gpr(0), out[0]);
     write(b, Gpr(3), out[1]);
     write(b, Gpr(1), out[2]);

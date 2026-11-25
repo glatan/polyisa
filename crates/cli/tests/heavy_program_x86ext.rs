@@ -202,11 +202,11 @@ fn x86ext_xsave_amx_vsyscall() {
     .unwrap_or_else(|e| panic!("run: {e}"));
     let captured_out = captured.borrow().clone();
     let out = String::from_utf8_lossy(&captured_out);
-    // CPUID leaf D.0 の EBX/ECX は有効 XCR0=7 に対応する XSAVE 領域
-    // サイズ（832B）。supp は XTILECFG|XTILEDATA を含む 0x60007。
+    // CPUID leaf D.0 の EBX は有効 XCR0=7 に対応する 832B、ECX は
+    // 対応成分全体の最大 11008B。supp は XTILECFG|XTILEDATA を含む。
     let expect = concat!(
         "x86ext\n",
-        "cpuidD ebx=832 ecx=832\n",
+        "cpuidD ebx=832 ecx=11008\n",
         "xcomp_supp=0x60007 r=0\n",
         "xcomp_perm=0x7 r=0\n",
         "xcr0=0x7\n",
