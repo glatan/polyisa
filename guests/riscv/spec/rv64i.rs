@@ -41,6 +41,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zbc", &["zbkc"][..], &[][..]),
         ("zbkc", &[][..], &[][..]),
         ("zbkx", &[][..], &[][..]),
+        ("zknh", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -466,6 +467,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
         ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
         // Zbc（キャリーレス乗算）
+        ("sha256sum0", "I", "000100000000 ..... 001 ..... 0010011", "sha256sum0 {rd}, {rs1}", "alu"),
+        ("sha256sum1", "I", "000100000001 ..... 001 ..... 0010011", "sha256sum1 {rd}, {rs1}", "alu"),
+        ("sha256sig0", "I", "000100000010 ..... 001 ..... 0010011", "sha256sig0 {rd}, {rs1}", "alu"),
+        ("sha256sig1", "I", "000100000011 ..... 001 ..... 0010011", "sha256sig1 {rd}, {rs1}", "alu"),
+        ("sha512sum0", "I", "000100000100 ..... 001 ..... 0010011", "sha512sum0 {rd}, {rs1}", "alu"),
+        ("sha512sum1", "I", "000100000101 ..... 001 ..... 0010011", "sha512sum1 {rd}, {rs1}", "alu"),
+        ("sha512sig0", "I", "000100000110 ..... 001 ..... 0010011", "sha512sig0 {rd}, {rs1}", "alu"),
+        ("sha512sig1", "I", "000100000111 ..... 001 ..... 0010011", "sha512sig1 {rd}, {rs1}", "alu"),
         ("xperm4", "R", "0010100 ..... ..... 010 ..... 0110011", "xperm4 {rd}, {rs1}, {rs2}", "alu"),
         ("xperm8", "R", "0010100 ..... ..... 100 ..... 0110011", "xperm8 {rd}, {rs1}, {rs2}", "alu"),
         ("clmul", "R", "0000101 ..... ..... 001 ..... 0110011", "clmul {rd}, {rs1}, {rs2}", "alu"),
@@ -722,6 +731,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ) {
             reqs.push("zbb");
         }
+        if name.starts_with("sha256") || name.starts_with("sha512") {
+            reqs.push("zknh");
+        }
         if matches!(*name, "xperm4" | "xperm8") {
             reqs.push("zbkx");
         }
@@ -933,6 +945,8 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "remuw" | "lr_d"
                 | "sc_d" | "amoswap_d"
                 | "amocas_q"
+                | "sha512sum0" | "sha512sum1"
+                | "sha512sig0" | "sha512sig1"
                 | "amoadd_d" | "amoxor_d"
                 | "amoand_d" | "amoor_d"
                 | "amomin_d" | "amomax_d"

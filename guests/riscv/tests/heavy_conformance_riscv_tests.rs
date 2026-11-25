@@ -409,6 +409,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zacas/")
         || test_rel.contains("/Zbkc/")
         || test_rel.contains("/Zbkx/")
+        || test_rel.contains("/Zknh/")
     {
         for ext in [
             "Zcb",
@@ -430,6 +431,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "Zacas",
             "Zbkc",
             "Zbkx",
+            "Zknh",
             "Zaamo",
         ] {
             if !sail_json.contains(&format!("\"{ext}\"")) {
@@ -498,6 +500,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
         || test_rel.contains("/Zacas/")
         || test_rel.contains("/Zbkc/")
         || test_rel.contains("/Zbkx/")
+        || test_rel.contains("/Zknh/")
     {
         &[
             "zcb",
@@ -505,6 +508,7 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "zbb",
             "zbc",
             "zbkx",
+            "zknh",
             "zbs",
             "zimop",
             "zcmop",
@@ -741,6 +745,11 @@ fn act4_rv64zbkc_suite() {
 #[test]
 fn act4_rv64zbkx_suite() {
     suite("rv64i/Zbkx");
+}
+
+#[test]
+fn act4_rv64zknh_suite() {
+    suite("rv64i/Zknh");
 }
 
 #[test]

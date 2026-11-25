@@ -864,6 +864,103 @@ fn xperm64<B: Backend>(
     Ok(())
 }
 
+fn ror32_const<B: Backend>(b: &mut B, x: B::V<W32>, n: u32) -> B::V<W32> {
+    let k = b.konst::<W32>(n);
+    ror32(b, x, k)
+}
+
+fn ror64_const<B: Backend>(b: &mut B, x: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = const_w64(b, n);
+    ror64(b, x, k)
+}
+
+fn sha256_op<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u8) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let (a, c, d, shift) = match kind {
+        0 => (ror32_const(b, x, 7), ror32_const(b, x, 18), None, 3),
+        1 => (ror32_const(b, x, 17), ror32_const(b, x, 19), None, 10),
+        2 => (
+            ror32_const(b, x, 2),
+            ror32_const(b, x, 13),
+            Some(ror32_const(b, x, 22)),
+            0,
+        ),
+        _ => (
+            ror32_const(b, x, 6),
+            ror32_const(b, x, 11),
+            Some(ror32_const(b, x, 25)),
+            0,
+        ),
+    };
+    let mut out = b.xor(a, c);
+    if let Some(v) = d {
+        out = b.xor(out, v);
+    } else {
+        let k = b.konst::<W32>(shift);
+        let v = b.shr_l(x, k);
+        out = b.xor(out, v);
+    }
+    write_w(b, rd, out);
+    Ok(())
+}
+
+pub fn sha256sig0<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha256_op(b, rd, rs1, 0)
+}
+pub fn sha256sig1<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha256_op(b, rd, rs1, 1)
+}
+pub fn sha256sum0<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha256_op(b, rd, rs1, 2)
+}
+pub fn sha256sum1<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha256_op(b, rd, rs1, 3)
+}
+
+fn sha512_op<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u8) -> Flow<B> {
+    let x = read(b, rs1);
+    let (a, c, d, shift) = match kind {
+        0 => (ror64_const(b, x, 1), ror64_const(b, x, 8), None, 7),
+        1 => (ror64_const(b, x, 19), ror64_const(b, x, 61), None, 6),
+        2 => (
+            ror64_const(b, x, 28),
+            ror64_const(b, x, 34),
+            Some(ror64_const(b, x, 39)),
+            0,
+        ),
+        _ => (
+            ror64_const(b, x, 14),
+            ror64_const(b, x, 18),
+            Some(ror64_const(b, x, 41)),
+            0,
+        ),
+    };
+    let mut out = b.xor(a, c);
+    if let Some(v) = d {
+        out = b.xor(out, v);
+    } else {
+        let k = const_w64(b, shift);
+        let v = b.shr_l(x, k);
+        out = b.xor(out, v);
+    }
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn sha512sig0<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha512_op(b, rd, rs1, 0)
+}
+pub fn sha512sig1<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha512_op(b, rd, rs1, 1)
+}
+pub fn sha512sum0<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha512_op(b, rd, rs1, 2)
+}
+pub fn sha512sum1<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    sha512_op(b, rd, rs1, 3)
+}
+
 pub fn xperm4<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     xperm64(b, rd, rs1, rs2, 4, 16)
 }

@@ -510,6 +510,14 @@ fn step_rv_inner(
             }
             env.step(|b| sem::rorw(b, rd, rs1, rs2))
         }
+        Insn::Sha256sig0 => env.step(|b| sem::sha256sig0(b, rd, rs1)),
+        Insn::Sha256sig1 => env.step(|b| sem::sha256sig1(b, rd, rs1)),
+        Insn::Sha256sum0 => env.step(|b| sem::sha256sum0(b, rd, rs1)),
+        Insn::Sha256sum1 => env.step(|b| sem::sha256sum1(b, rd, rs1)),
+        Insn::Sha512sig0 => env.step(|b| sem::sha512sig0(b, rd, rs1)),
+        Insn::Sha512sig1 => env.step(|b| sem::sha512sig1(b, rd, rs1)),
+        Insn::Sha512sum0 => env.step(|b| sem::sha512sum0(b, rd, rs1)),
+        Insn::Sha512sum1 => env.step(|b| sem::sha512sum1(b, rd, rs1)),
         Insn::Xperm4 => {
             if rv32 {
                 env.step(|b| sem::xperm4_rv32(b, rd, rs1, rs2))
