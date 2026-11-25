@@ -522,6 +522,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("lr_d", "I", "00010..00000 ..... 011 ..... 0101111", "lr_d {rd}, ({rs1})", "atomic"),
         ("sc_w", "R", "00011.. ..... ..... 010 ..... 0101111", "sc_w {rd}, {rs1}, {rs2}", "atomic"),
         ("sc_d", "R", "00011.. ..... ..... 011 ..... 0101111", "sc_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amocas_b", "R", "00101.. ..... ..... 000 ..... 0101111", "amocas.b {rd}, {rs1}, {rs2}", "atomic"),
+        ("amocas_h", "R", "00101.. ..... ..... 001 ..... 0101111", "amocas.h {rd}, {rs1}, {rs2}", "atomic"),
+        ("amocas_w", "R", "00101.. ..... ..... 010 ..... 0101111", "amocas.w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amocas_d", "R", "00101.. ..... ..... 011 ..... 0101111", "amocas.d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amocas_q", "R", "00101.. ..... ..... 100 ..... 0101111", "amocas.q {rd}, {rs1}, {rs2}", "atomic"),
         ("amoswap_w", "R", "00001.. ..... ..... 010 ..... 0101111", "amoswap_w {rd}, {rs1}, {rs2}", "atomic"),
         ("amoadd_w", "R", "00000.. ..... ..... 010 ..... 0101111", "amoadd_w {rd}, {rs1}, {rs2}", "atomic"),
         ("amoxor_w", "R", "00100.. ..... ..... 010 ..... 0101111", "amoxor_w {rd}, {rs1}, {rs2}", "atomic"),
@@ -719,7 +724,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
             reqs.push("zbs");
         }
-        if name.starts_with("amo") && (name.ends_with("_b") || name.ends_with("_h")) {
+        if name.starts_with("amocas") {
+            reqs.push("zacas");
+        } else if name.starts_with("amo") && (name.ends_with("_b") || name.ends_with("_h")) {
             reqs.push("zabha");
         }
         if matches!(*name, "beqi" | "bnei") {
@@ -915,6 +922,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "divuw" | "remw"
                 | "remuw" | "lr_d"
                 | "sc_d" | "amoswap_d"
+                | "amocas_q"
                 | "amoadd_d" | "amoxor_d"
                 | "amoand_d" | "amoor_d"
                 | "amomin_d" | "amomax_d"

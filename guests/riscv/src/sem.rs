@@ -1915,6 +1915,84 @@ where
     Ok(())
 }
 
+macro_rules! amocas_small {
+    ($name:ident, $rv32:ident, $w:ident, $len:expr) => {
+        pub fn $name<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            let addr = load_addr(b, rs1, oimm);
+            b.probe(addr, $len, AMO_ACC)?;
+            let cmp64 = read(b, rd);
+            let cmp = b.trunc::<W64, $w>(cmp64);
+            let new64 = read(b, rs2);
+            let new = b.trunc::<W64, $w>(new64);
+            let old = b.cmpxchg(addr, cmp, new, AMO_ACC)?;
+            let out = b.sext::<$w, W64>(old);
+            write(b, rd, out);
+            Ok(())
+        }
+        pub fn $rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+            let addr = load_addr_rv32(b, rs1, oimm);
+            b.probe(addr, $len, AMO_ACC)?;
+            let cmp64 = read(b, rd);
+            let cmp = b.trunc::<W64, $w>(cmp64);
+            let new64 = read(b, rs2);
+            let new = b.trunc::<W64, $w>(new64);
+            let old = b.cmpxchg(addr, cmp, new, AMO_ACC)?;
+            let out = b.sext::<$w, W32>(old);
+            write_w(b, rd, out);
+            Ok(())
+        }
+    };
+}
+
+amocas_small!(amocas_b, amocas_b_rv32, W8, 1);
+amocas_small!(amocas_h, amocas_h_rv32, W16, 2);
+amocas_small!(amocas_w, amocas_w_rv32, W32, 4);
+amocas_small!(amocas_d, amocas_d_rv32, W64, 8);
+
+fn pair_reg(r: Gpr) -> (Gpr, Gpr) {
+    (r, Gpr(r.0.wrapping_add(1) & 31))
+}
+
+fn read_pair<B: Backend>(b: &mut B, r: Gpr) -> (B::V<W64>, B::V<W64>) {
+    if r.is_zero() {
+        (const_w64(b, 0), const_w64(b, 0))
+    } else {
+        let (lo, hi) = pair_reg(r);
+        (read(b, lo), read(b, hi))
+    }
+}
+
+fn write_pair<B: Backend>(b: &mut B, r: Gpr, lo: B::V<W64>, hi: B::V<W64>) {
+    if !r.is_zero() {
+        let (rlo, rhi) = pair_reg(r);
+        write(b, rlo, lo);
+        write(b, rhi, hi);
+    }
+}
+
+/// AMOCAS.Q（RV64）。単一ホストスレッドでは二つの 64 ビットアクセスでも不可分性は変わらない。
+pub fn amocas_q<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 16, AMO_ACC)?;
+    let old_lo: B::V<W64> = b.load(addr, AMO_ACC)?;
+    let off = const_w64(b, 8);
+    let hi_addr = b.add(addr, off);
+    let old_hi: B::V<W64> = b.load(hi_addr, AMO_ACC)?;
+    let (cmp_lo, cmp_hi) = read_pair(b, rd);
+    let (new_lo, new_hi) = read_pair(b, rs2);
+    let eq_lo = b.cmp(Cmp::Eq, old_lo, cmp_lo);
+    b.if_then(eq_lo, |b| {
+        let eq_hi = b.cmp(Cmp::Eq, old_hi, cmp_hi);
+        b.if_then(eq_hi, |b| {
+            b.store(addr, new_lo, AMO_ACC)?;
+            b.store(hi_addr, new_hi, AMO_ACC)?;
+            Ok(())
+        })
+    })?;
+    write_pair(b, rd, old_lo, old_hi);
+    Ok(())
+}
+
 macro_rules! amo_bh {
     ($bname:ident, $hname:ident, $b32:ident, $h32:ident, $op:expr) => {
         pub fn $bname<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {

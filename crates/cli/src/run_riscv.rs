@@ -1205,6 +1205,35 @@ fn step_rv_inner(
                 env.step(|b| sem::sc_w(b, rd, rs1, rs2, 0))
             }
         }
+        Insn::AmocasB => {
+            if rv32 {
+                env.step(|b| sem::amocas_b_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amocas_b(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmocasH => {
+            if rv32 {
+                env.step(|b| sem::amocas_h_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amocas_h(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmocasW => {
+            if rv32 {
+                env.step(|b| sem::amocas_w_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amocas_w(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmocasD => {
+            if rv32 {
+                env.step(|b| sem::amocas_d_rv32(b, rd, rs1, rs2, 0))
+            } else {
+                env.step(|b| sem::amocas_d(b, rd, rs1, rs2, 0))
+            }
+        }
+        Insn::AmocasQ => env.step(|b| sem::amocas_q(b, rd, rs1, rs2, 0)),
         Insn::AmoswapB => {
             if rv32 {
                 env.step(|b| sem::amoswap_b_rv32(b, rd, rs1, rs2, 0))
