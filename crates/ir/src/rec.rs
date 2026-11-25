@@ -76,6 +76,21 @@ impl IrBackend {
         d
     }
 
+    /// 記録位置の印。`rollback` でこの地点以降の値と操作を捨てる。
+    /// `if_then_else` の子列記録中では使えない。
+    #[must_use]
+    pub fn mark(&self) -> (usize, usize) {
+        (self.ir.ops.len(), self.ir.wids.len())
+    }
+
+    /// `mark` 以降に足した値と操作を捨てる。 SSA は前方向参照だけなので、
+    /// 既存の操作が巻き戻した値を参照することはない。
+    pub fn rollback(&mut self, mark: (usize, usize)) {
+        assert!(self.stack.is_empty(), "子列の記録中は巻き戻せない");
+        self.ir.ops.truncate(mark.0);
+        self.ir.wids.truncate(mark.1);
+    }
+
     /// `IrExit` を現在の列の終端操作として足す。
     /// `if_then_else` の子列と `record` の終端で共通。
     pub fn abort(&mut self, e: IrExit) {

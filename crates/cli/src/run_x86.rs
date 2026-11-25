@@ -16266,6 +16266,108 @@ pub struct X86Tx {
     pub params: polyisa_guest_x86::Params,
 }
 
+/// ユーザーモード JIT 用の map decode。実モードの世代別名や
+/// CS 限界は関係ないので、32/64 ビットモードの通常形だけを読む。
+fn decode_map_user(
+    mem: &polyisa_mem::AddressSpace,
+    pc: u64,
+    is64: bool,
+    feats: u128,
+) -> Option<polyisa_guest_x86::MapDec> {
+    let mut buf = [0u8; 15];
+    let mut n = 0usize;
+    while n < 15 {
+        if mem
+            .read(VirtAddr(pc + n as u64), &mut buf[n..n + 1], acc_fetch())
+            .is_err()
+        {
+            break;
+        }
+        n += 1;
+    }
+    let adr = if is64 {
+        polyisa_guest_x86::MODE_ADR_A64
+    } else {
+        polyisa_guest_x86::MODE_ADR_A32
+    };
+    let mut modes = (polyisa_guest_x86::MODE_OPD_O32 << polyisa_guest_x86::MODE_OPD_SHIFT)
+        | (adr << polyisa_guest_x86::MODE_ADR_SHIFT);
+    if is64 {
+        modes |= polyisa_guest_x86::MODE_M64;
+    }
+    polyisa_guest_x86::decode_map(&buf[..n], modes, feats)
+}
+
+/// 実行時の可変長メモリや host 浮動小数点に依存し、IR ではなく
+/// インタプリタの concrete hook で実行する命令。ブロックの手前で
+/// 切って、先頭なら 1 命令ぶんインタプリタへ任せる。
+fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
+    use polyisa_guest_x86::Insn;
+    if matches!(
+        md.insn,
+        Insn::XsavecMem | Insn::Xrstor | Insn::Xstore | Insn::RepXstore
+    ) {
+        return true;
+    }
+    if matches!(
+        md.insn,
+        Insn::Ldtilecfg
+            | Insn::Sttilecfg
+            | Insn::Tilerelease
+            | Insn::Tilezero
+            | Insn::Tileloadd
+            | Insn::Tileloaddt1
+            | Insn::Tileloaddrs
+            | Insn::Tileloaddrst1
+            | Insn::Tilestored
+            | Insn::Tdpbssd
+            | Insn::Tdpbsud
+            | Insn::Tdpbusd
+            | Insn::Tdpbuud
+            | Insn::Tdpbf16ps
+            | Insn::Tdpfp16ps
+            | Insn::Tcmmimfp16ps
+            | Insn::Tcmmrlfp16ps
+            | Insn::Vsha512rnds2XvHvWv
+            | Insn::Vsha512msg1XvWv
+            | Insn::Vsha512msg2XvWv
+            | Insn::Vsm3msg1XvHvWv
+            | Insn::Vsm3msg2XvHvWv
+            | Insn::Vsm4key4XvHvWv
+            | Insn::Vsm4rnds4XvHvWv
+            | Insn::Vcvtneoph2psXvWv
+            | Insn::Vcvtneeph2psXvWv
+            | Insn::Vcvtneebf162psXvWv
+            | Insn::Vcvtneobf162psXvWv
+            | Insn::Vbcstnesh2psXvWv
+            | Insn::Vbcstnebf162psXvWv
+            | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vaddbf16XvHvWv
+            | Insn::Vsubbf16XvHvWv
+            | Insn::Vmulbf16XvHvWv
+            | Insn::Vdivbf16XvHvWv
+            | Insn::Vminbf16XvHvWv
+            | Insn::Vmaxbf16XvHvWv
+            | Insn::Vsqrtbf16XvWv
+            | Insn::Vdpbf16psXvHvWv
+            | Insn::Vcvtph2bf8XvWv
+            | Insn::Vcvtph2bf8sXvWv
+            | Insn::Vcvtph2hf8XvWv
+            | Insn::Vcvtph2hf8sXvWv
+            | Insn::Vcvt2ph2bf8XvHvWv
+            | Insn::Vcvt2ph2bf8sXvHvWv
+            | Insn::Vcvt2ph2hf8XvHvWv
+            | Insn::Vcvt2ph2hf8sXvHvWv
+    ) {
+        return true;
+    }
+    match md.insn {
+        Insn::X87d96 => md.modrm >= 0xC0 && matches!(md.modrm, 0xF0..=0xF3),
+        Insn::FnstcwM16 => md.modrm >= 0xC0 && matches!(md.modrm, 0xF9 | 0xFB | 0xFE | 0xFF),
+        _ => false,
+    }
+}
+
 impl polyisa_jit::Translate for X86Tx {
     fn key(&self, b: &polyisa_engine::interp::InterpBackend, pc: u64) -> u64 {
         // FS/GS ベースは記録時に定数として埋め込まれるため、同じ pc でも
@@ -16292,39 +16394,65 @@ impl polyisa_jit::Translate for X86Tx {
         let mut irb = polyisa_ir::IrBackend::new();
         // 挙動パラメータは記録時に定数として読まれ、枝が畳まれる。
         polyisa_guest_x86::install_params(&mut irb, &self.params);
-        let mut hist = std::collections::VecDeque::new();
         let mut pc = entry;
+        let mode = if self.is64 { 64 } else { 32 };
         for _ in 0..MAX_BLOCK_INSNS {
-            let d = match decode_x86(&b.mem, pc, self.is64, self.feats, &mut hist) {
-                Ok(d) => d,
-                Err(_) => break,
+            let Some(md) = decode_map_user(&b.mem, pc, self.is64, self.feats) else {
+                break;
             };
             b.mem.mark_code(VirtAddr(pc));
+            irb.cur_pc = pc;
+            irb.cur_next = pc + u64::from(md.len);
+            // 無効 LOCK はインタプリタと同じく #UD の記録にする。
+            if md.lock && !md.lock_ok {
+                if let Err(e) = polyisa_guest_x86::sem_ea::undefined(&mut irb, pc as u32) {
+                    irb.abort(e);
+                }
+                break;
+            }
+            // concrete hook の命令は IR に写さず、ブロックの手前で切る。
+            if map_needs_concrete(&md) {
+                break;
+            }
             // セグメントベースはゲスト状態の定数として埋め込む。変わるのは
             // トラップ経路（arch_prctl/set_thread_area）だけで、それは
             // ブロックの境界なので新しいベースで別ブロックを記録する。
-            let fs = d.has_fs.then(|| b.get(sem::fs_base_ref()));
-            let seg = fs.or(d.has_gs.then(|| b.get(sem::gs_base_ref())));
-            irb.cur_pc = pc;
-            irb.cur_next = pc + d.nbytes;
-            let imm32 = || (d.word as u32).swap_bytes();
-            let disp8 = || (d.word & 0xff) as u8 as i8;
-            let r = dispatch(
-                &mut irb, d.insn, pc as u32, d.word, d.nbytes, d.off, self.is64, d.rex, d.has66,
-                d.has_f2, d.rep, seg, imm32, disp8,
+            let seg = match md.seg {
+                0x64 => b.get(sem::fs_base_ref()),
+                0x65 => b.get(sem::gs_base_ref()),
+                _ => 0,
+            };
+            let mark = irb.mark();
+            let r = dispatch_map(
+                &mut irb,
+                &md,
+                pc as u32,
+                pc + u64::from(md.len),
+                seg,
+                false,
+                0,
+                0,
+                mode,
+                self.feats,
             );
             match r {
-                Ok(()) => {}
+                Ok(true) => {}
+                Ok(false) | Err(polyisa_ir::IrExit::Unimpl) => {
+                    // 未対応形や IR に写せない操作はブロックの手前で切り、
+                    // その 1 命令はインタプリタへ任せる。
+                    irb.rollback(mark);
+                    break;
+                }
                 Err(e) => {
                     irb.abort(e);
                     break;
                 }
             }
             if irb.ir.has_flow() {
-                pc += d.nbytes;
+                pc += u64::from(md.len);
                 break;
             }
-            pc += d.nbytes;
+            pc += u64::from(md.len);
         }
         if irb.ir.ops.is_empty() {
             return None;
@@ -17160,6 +17288,34 @@ mod tests {
         let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
         assert_eq!(out, Outcome::Exit(9));
     }
+    #[test]
+    fn jit_invalid_lock_raises_ud_instead_of_executing() {
+        // lock mov eax,[eax] はメモリ宛て RMW ではないので #UD。
+        // legacy decoder が接頭辞を捨てて実行する経路と分離できていることを、
+        // JIT 側でも確認する。
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xF0, 0x8B, 0x00])
+            .unwrap();
+        let mut sys = Linux::x86_64();
+        let mut jit = polyisa_jit::Jit::new();
+        jit.set_threshold(1);
+        let out = run_mode_ex_jit(
+            &mut env,
+            0x1000,
+            &mut sys,
+            4,
+            true,
+            polyisa_guest_x86::DEFAULT_FEATS,
+            &polyisa_guest_x86::DEFAULT_PARAMS,
+            &mut jit,
+        );
+        assert!(matches!(out, Outcome::Unimplemented { .. }), "{out:?}");
+    }
+
     /// 差分テスト用の環境。コードは 0x1000（RWX）、データ/スタックは
     /// 0x4000 から 8 ページ。レジスタはデータ領域を指す値で埋める。
     fn diff_env(code: &[u8]) -> BareEnv {
