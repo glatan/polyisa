@@ -213,8 +213,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         "swab_v",
         ParamKind::Enum(vec!["clear".to_string(), "keep".to_string()]),
         "clear",
-        "SWAB の V 桁。clear は V=0（全現モデル）、keep は V を変えない \
-         （11/15・11/20 のみ —— 付録 B 項目 6）",
+        "SWAB の V 桁。clear は V=0、keep は V を変えない \
+         （11/05・11/10 のみ —— 付録 B 項目 6）",
     );
     m.param(
         "sp_buserr",
@@ -439,9 +439,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         ),
         // 11/20 系。EIS・MMU・MTPS/MFPS を持たず SOB/MARK/SXT も
         // ない（付録 B 項目 8）。jmp_reginc=inc と t_direct は
-        // 全車種共通、opr_same_reg=inc・pc_stored=pc4・swab_v=keep
-        // は 11/15・11/20 だけ（付録 B 項目 1-3・6）。11/10・11/15
-        // は包装違いで命令面の差が見えないため空の派生とする。
+        // 全車種共通、opr_same_reg=inc・pc_stored=pc4 は 11/15・
+        // 11/20 だけ（付録 B 項目 1-3）。swab_v=keep は付録 B
+        // 項目 6 の表で 05/10 の列だけに X がある —— 11/05・11/10
+        // が V を変えない側で、11/15・11/20 は clears V の列に
+        // ある（一次画像で列位置を項目 5 の既知機種と交叉確認済み。
+        // 初回転記は列を 1 つ誤読していた）。11/10・11/15 は包装
+        // 違いで命令面の差が見えないため空の派生とする。
         // ea_fault_reg は奇数値バスエラーで keep（項目 30）。
         (
             "pdp11_05",
@@ -451,6 +455,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("jmp_reginc", "inc"),
                 ("t_direct", "true"),
                 ("ea_fault_reg", "keep"),
+                ("swab_v", "keep"),
             ][..],
         ),
         ("pdp11_10", "pdp11_05", &[][..], &[][..]),
@@ -461,7 +466,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             &[
                 ("opr_same_reg", "inc"),
                 ("pc_stored", "pc4"),
-                ("swab_v", "keep"),
+                ("swab_v", "clear"),
             ][..],
         ),
         ("pdp11_15", "pdp11_20", &[][..], &[][..]),

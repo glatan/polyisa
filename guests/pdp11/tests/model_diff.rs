@@ -667,3 +667,22 @@ fn maint_insn() {
     step_m(&mut env, "pdp11_04").unwrap();
     assert_eq!(env.pc, 0o2400);
 }
+
+// ---- 項目 6: SWAB の V 桁（付録 B の表の列位置は一次画像で確認） ----
+
+#[test]
+fn swab_v_models() {
+    // keep（V を変えない）は 11/05・11/10 だけ。11/15・11/20 は
+    // clears V の列にある（初回転記は列を 1 つ誤読していた）。
+    for (model, keep) in [
+        ("pdp11_05", true),
+        ("pdp11_10", true),
+        ("pdp11_20", false),
+        ("pdp11_15", false),
+        ("pdp11_45", false),
+        ("pdp11_70", false),
+    ] {
+        let v = model_params(model).swab_v;
+        assert_eq!(v == 1, keep, "{model}");
+    }
+}
