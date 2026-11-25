@@ -510,6 +510,14 @@ fn step_rv_inner(
             }
             env.step(|b| sem::rorw(b, rd, rs1, rs2))
         }
+        Insn::Sm4ed0 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 0)),
+        Insn::Sm4ed1 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 1)),
+        Insn::Sm4ed2 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 2)),
+        Insn::Sm4ed3 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 3)),
+        Insn::Sm4ks0 => env.step(|b| sem::sm4ks(b, rd, rs1, rs2, 0)),
+        Insn::Sm4ks1 => env.step(|b| sem::sm4ks(b, rd, rs1, rs2, 1)),
+        Insn::Sm4ks2 => env.step(|b| sem::sm4ks(b, rd, rs1, rs2, 2)),
+        Insn::Sm4ks3 => env.step(|b| sem::sm4ks(b, rd, rs1, rs2, 3)),
         Insn::Sm3p0 => env.step(|b| sem::sm3p0(b, rd, rs1)),
         Insn::Sm3p1 => env.step(|b| sem::sm3p1(b, rd, rs1)),
         Insn::Sha256sig0 => env.step(|b| sem::sha256sig0(b, rd, rs1)),
