@@ -371,9 +371,9 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     let sig = build.join(format!("{artifact}.sig"));
     let sail = bin(&["sail_riscv_sim", "/opt/sail-riscv/bin/sail_riscv_sim"])
         .ok_or("sail_riscv_sim がない（TOOL-SAIL-RISCV）")?;
-    // qemu-RVI20U64 はプロファイル要件外の Zicond を切っているが、
+    // qemu-RVI20U64 はプロファイル要件外の拡張をいくつか切っているが、
     // Sail 0.16 自体は実装している。参照実行だけが落ちないよう、
-    // この拡張のテストでは作業領域の写しで有効化する。
+    // 対象拡張のテストでは作業領域の写しで有効化する。
     let mut sail_json = std::fs::read_to_string(qemu_dir().join("sail.json"))
         .map_err(|e| format!("read sail.json: {e}"))?;
     if test_rel.contains("/Zicond/") {
@@ -382,8 +382,13 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
             "\"Zicond\": {\n      \"supported\": true",
         );
     }
-    if test_rel.contains("/Zcb/") {
-        for ext in ["Zcb", "Zba", "Zbb"] {
+    if test_rel.contains("/Zcb/")
+        || test_rel.contains("/Zba/")
+        || test_rel.contains("/Zbb/")
+        || test_rel.contains("/Zbc/")
+        || test_rel.contains("/Zbs/")
+    {
+        for ext in ["Zcb", "Zba", "Zbb", "Zbc", "Zbs"] {
             sail_json = sail_json.replace(
                 &format!("\"{ext}\": {{\n      \"supported\": false"),
                 &format!("\"{ext}\": {{\n      \"supported\": true"),
@@ -420,8 +425,13 @@ fn build_and_run(test_rel: &str, corrupt_signature: bool) -> Result<(), String> 
     let mut semi = run_riscv::SemiRv::new("", false);
     let add_feats: &[&str] = if test_rel.contains("/Zicond/") {
         &["zicond"]
-    } else if test_rel.contains("/Zcb/") {
-        &["zcb", "zba", "zbb"]
+    } else if test_rel.contains("/Zcb/")
+        || test_rel.contains("/Zba/")
+        || test_rel.contains("/Zbb/")
+        || test_rel.contains("/Zbc/")
+        || test_rel.contains("/Zbs/")
+    {
+        &["zcb", "zba", "zbb", "zbc", "zbs"]
     } else {
         &[]
     };
@@ -554,6 +564,26 @@ fn act4_rv64zicond_suite() {
 #[test]
 fn act4_rv64zcb_suite() {
     suite("rv64i/Zcb");
+}
+
+#[test]
+fn act4_rv64zba_suite() {
+    suite("rv64i/Zba");
+}
+
+#[test]
+fn act4_rv64zbb_suite() {
+    suite("rv64i/Zbb");
+}
+
+#[test]
+fn act4_rv64zbc_suite() {
+    suite("rv64i/Zbc");
+}
+
+#[test]
+fn act4_rv64zbs_suite() {
+    suite("rv64i/Zbs");
 }
 
 #[test]

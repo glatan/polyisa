@@ -38,6 +38,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zifencei", &[][..], &[][..]),
         ("zba", &[][..], &[][..]),
         ("zbb", &[][..], &[][..]),
+        ("zbc", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -365,6 +366,53 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Zicond（条件ゼロ化）
         ("czero_eqz", "R", "0000111 ..... ..... 101 ..... 0110011", "czero.eqz {rd}, {rs1}, {rs2}", "alu"),
         ("czero_nez", "R", "0000111 ..... ..... 111 ..... 0110011", "czero.nez {rd}, {rs1}, {rs2}", "alu"),
+        // Zba（アドレス加算・上位ゼロ拡張シフト）
+        ("add_uw", "R", "0000100 ..... ..... 000 ..... 0111011", "add.uw {rd}, {rs1}, {rs2}", "alu"),
+        ("sh1add", "R", "0010000 ..... ..... 010 ..... 0110011", "sh1add {rd}, {rs1}, {rs2}", "alu"),
+        ("sh2add", "R", "0010000 ..... ..... 100 ..... 0110011", "sh2add {rd}, {rs1}, {rs2}", "alu"),
+        ("sh3add", "R", "0010000 ..... ..... 110 ..... 0110011", "sh3add {rd}, {rs1}, {rs2}", "alu"),
+        ("sh1add_uw", "R", "0010000 ..... ..... 010 ..... 0111011", "sh1add.uw {rd}, {rs1}, {rs2}", "alu"),
+        ("sh2add_uw", "R", "0010000 ..... ..... 100 ..... 0111011", "sh2add.uw {rd}, {rs1}, {rs2}", "alu"),
+        ("sh3add_uw", "R", "0010000 ..... ..... 110 ..... 0111011", "sh3add.uw {rd}, {rs1}, {rs2}", "alu"),
+        ("slli_uw", "I", "000010 ...... ..... 001 ..... 0011011", "slli.uw {rd}, {rs1}, {imm}", "alu"),
+        // Zbb（論理・カウント・最小最大・回転・バイト操作）
+        ("andn", "R", "0100000 ..... ..... 111 ..... 0110011", "andn {rd}, {rs1}, {rs2}", "alu"),
+        ("orn", "R", "0100000 ..... ..... 110 ..... 0110011", "orn {rd}, {rs1}, {rs2}", "alu"),
+        ("xnor", "R", "0100000 ..... ..... 100 ..... 0110011", "xnor {rd}, {rs1}, {rs2}", "alu"),
+        ("clz", "R", "0110000 00000 ..... 001 ..... 0010011", "clz {rd}, {rs1}", "alu"),
+        ("clzw", "R", "0110000 00000 ..... 001 ..... 0011011", "clzw {rd}, {rs1}", "alu"),
+        ("ctz", "R", "0110000 00001 ..... 001 ..... 0010011", "ctz {rd}, {rs1}", "alu"),
+        ("ctzw", "R", "0110000 00001 ..... 001 ..... 0011011", "ctzw {rd}, {rs1}", "alu"),
+        ("cpop", "R", "0110000 00010 ..... 001 ..... 0010011", "cpop {rd}, {rs1}", "alu"),
+        ("cpopw", "R", "0110000 00010 ..... 001 ..... 0011011", "cpopw {rd}, {rs1}", "alu"),
+        ("max", "R", "0000101 ..... ..... 110 ..... 0110011", "max {rd}, {rs1}, {rs2}", "alu"),
+        ("maxu", "R", "0000101 ..... ..... 111 ..... 0110011", "maxu {rd}, {rs1}, {rs2}", "alu"),
+        ("min", "R", "0000101 ..... ..... 100 ..... 0110011", "min {rd}, {rs1}, {rs2}", "alu"),
+        ("minu", "R", "0000101 ..... ..... 101 ..... 0110011", "minu {rd}, {rs1}, {rs2}", "alu"),
+        ("rol", "R", "0110000 ..... ..... 001 ..... 0110011", "rol {rd}, {rs1}, {rs2}", "alu"),
+        ("rolw", "R", "0110000 ..... ..... 001 ..... 0111011", "rolw {rd}, {rs1}, {rs2}", "alu"),
+        ("ror", "R", "0110000 ..... ..... 101 ..... 0110011", "ror {rd}, {rs1}, {rs2}", "alu"),
+        ("rorw", "R", "0110000 ..... ..... 101 ..... 0111011", "rorw {rd}, {rs1}, {rs2}", "alu"),
+        ("rori", "I", "011000 ...... ..... 101 ..... 0010011", "rori {rd}, {rs1}, {imm}", "alu"),
+        ("roriw", "I", "011000 ...... ..... 101 ..... 0011011", "roriw {rd}, {rs1}, {imm}", "alu"),
+        ("orc_b", "R", "0010100 00111 ..... 101 ..... 0010011", "orc.b {rd}, {rs1}", "alu"),
+        ("rev8", "R", "0110101 11000 ..... 101 ..... 0010011", "rev8 {rd}, {rs1}", "alu"),
+        ("sext_b", "R", "0110000 00100 ..... 001 ..... 0010011", "sext.b {rd}, {rs1}", "alu"),
+        ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
+        ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
+        // Zbc（キャリーレス乗算）
+        ("clmul", "R", "0000101 ..... ..... 001 ..... 0110011", "clmul {rd}, {rs1}, {rs2}", "alu"),
+        ("clmulh", "R", "0000101 ..... ..... 011 ..... 0110011", "clmulh {rd}, {rs1}, {rs2}", "alu"),
+        ("clmulr", "R", "0000101 ..... ..... 010 ..... 0110011", "clmulr {rd}, {rs1}, {rs2}", "alu"),
+        // Zbs（単一ビット操作）
+        ("bclr", "R", "0100100 ..... ..... 001 ..... 0110011", "bclr {rd}, {rs1}, {rs2}", "alu"),
+        ("bclri", "I", "010010 ...... ..... 001 ..... 0010011", "bclri {rd}, {rs1}, {imm}", "alu"),
+        ("bext", "R", "0100100 ..... ..... 101 ..... 0110011", "bext {rd}, {rs1}, {rs2}", "alu"),
+        ("bexti", "I", "010010 ...... ..... 101 ..... 0010011", "bexti {rd}, {rs1}, {imm}", "alu"),
+        ("binv", "R", "0110100 ..... ..... 001 ..... 0110011", "binv {rd}, {rs1}, {rs2}", "alu"),
+        ("binvi", "I", "011010 ...... ..... 001 ..... 0010011", "binvi {rd}, {rs1}, {imm}", "alu"),
+        ("bset", "R", "0010100 ..... ..... 001 ..... 0110011", "bset {rd}, {rs1}, {rs2}", "alu"),
+        ("bseti", "I", "001010 ...... ..... 001 ..... 0010011", "bseti {rd}, {rs1}, {imm}", "alu"),
         // OP-32
         ("addw", "R", "0000000 ..... ..... 000 ..... 0111011", "addw {rd}, {rs1}, {rs2}", "alu"),
         ("subw", "R", "0100000 ..... ..... 000 ..... 0111011", "subw {rd}, {rs1}, {rs2}", "alu"),
@@ -555,6 +603,26 @@ pub fn build_model() -> polyisa_isadl::Model {
         if matches!(*timing, "mult" | "div") {
             reqs.push("m");
         }
+        if matches!(
+            *name,
+            "add_uw" | "sh1add" | "sh2add" | "sh3add" | "sh1add_uw" | "sh2add_uw" | "sh3add_uw" | "slli_uw"
+        ) {
+            reqs.push("zba");
+        }
+        if matches!(
+            *name,
+            "andn" | "orn" | "xnor" | "clz" | "clzw" | "ctz" | "ctzw" | "cpop" | "cpopw"
+                | "max" | "maxu" | "min" | "minu" | "rol" | "rolw" | "ror" | "rorw" | "rori" | "roriw"
+                | "orc_b" | "rev8" | "sext_b" | "sext_h" | "zext_h"
+        ) {
+            reqs.push("zbb");
+        }
+        if matches!(*name, "clmul" | "clmulh" | "clmulr") {
+            reqs.push("zbc");
+        }
+        if matches!(*name, "bclr" | "bclri" | "bext" | "bexti" | "binv" | "binvi" | "bset" | "bseti") {
+            reqs.push("zbs");
+        }
         if name.starts_with("czero_") {
             reqs.push("zicond");
         }
@@ -724,7 +792,16 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "amominu_d" | "amomaxu_d"
                 | "c_ld" | "c_sd"
                 | "c_addiw" | "c_ldsp"
-                | "c_zext_w"
+                | "c_zext_w" | "add_uw"
+                | "sh1add_uw" | "sh2add_uw"
+                | "sh3add_uw" | "slli_uw"
+                | "clzw" | "ctzw"
+                | "cpopw" | "rolw"
+                | "rorw" | "roriw"
+                | "rev8" | "zext_h"
+                | "rori" | "bclri"
+                | "bexti" | "binvi"
+                | "bseti"
                 | "c_sdsp"
                 | "fcvt_l_s" | "fcvt_lu_s"
                 | "fcvt_s_l" | "fcvt_s_lu"

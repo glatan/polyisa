@@ -281,6 +281,393 @@ pub(crate) fn step_rv(
             }
             env.step(|b| sem::addiw(b, rd, rs1, imm_i(word)))
         }
+        Insn::AddUw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::add_uw(b, rd, rs1, rs2))
+        }
+        Insn::Sh1add => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh1add(b, rd, rs1, rs2))
+        }
+        Insn::Sh2add => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh2add(b, rd, rs1, rs2))
+        }
+        Insn::Sh3add => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh3add(b, rd, rs1, rs2))
+        }
+        Insn::Sh1addUw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh1add_uw(b, rd, rs1, rs2))
+        }
+        Insn::Sh2addUw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh2add_uw(b, rd, rs1, rs2))
+        }
+        Insn::Sh3addUw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sh3add_uw(b, rd, rs1, rs2))
+        }
+        Insn::Andn => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::andn(b, rd, rs1, rs2))
+        }
+        Insn::Orn => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::orn(b, rd, rs1, rs2))
+        }
+        Insn::Xnor => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::xnor(b, rd, rs1, rs2))
+        }
+        Insn::Max => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::max(b, rd, rs1, rs2))
+        }
+        Insn::Maxu => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::maxu(b, rd, rs1, rs2))
+        }
+        Insn::Min => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::min(b, rd, rs1, rs2))
+        }
+        Insn::Minu => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::minu(b, rd, rs1, rs2))
+        }
+        Insn::Rol => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::rol(b, rd, rs1, rs2))
+        }
+        Insn::Rolw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::rolw(b, rd, rs1, rs2))
+        }
+        Insn::Ror => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::ror(b, rd, rs1, rs2))
+        }
+        Insn::Rorw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::rorw(b, rd, rs1, rs2))
+        }
+        Insn::Clmul => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::clmul(b, rd, rs1, rs2))
+        }
+        Insn::Clmulh => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::clmulh(b, rd, rs1, rs2))
+        }
+        Insn::Clmulr => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::clmulr(b, rd, rs1, rs2))
+        }
+        Insn::Bclr => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bclr(b, rd, rs1, rs2))
+        }
+        Insn::Bext => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bext(b, rd, rs1, rs2))
+        }
+        Insn::Binv => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::binv(b, rd, rs1, rs2))
+        }
+        Insn::Bset => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bset(b, rd, rs1, rs2))
+        }
+        Insn::SlliUw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::slli_uw(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Rori => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::rori(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Roriw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::roriw(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Bclri => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bclri(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Bexti => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bexti(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Binvi => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::binvi(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Bseti => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::bseti(b, rd, rs1, imm_i(word) as u64))
+        }
+        Insn::Clz => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::clz(b, rd, rs1))
+        }
+        Insn::Clzw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::clzw(b, rd, rs1))
+        }
+        Insn::Ctz => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::ctz(b, rd, rs1))
+        }
+        Insn::Ctzw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::ctzw(b, rd, rs1))
+        }
+        Insn::Cpop => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::cpop(b, rd, rs1))
+        }
+        Insn::Cpopw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::cpopw(b, rd, rs1))
+        }
+        Insn::OrcB => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::orc_b(b, rd, rs1))
+        }
+        Insn::Rev8 => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::rev8(b, rd, rs1))
+        }
+        Insn::SextB => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sext_b(b, rd, rs1))
+        }
+        Insn::SextH => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::sext_h(b, rd, rs1))
+        }
+        Insn::ZextH => {
+            if rv32 {
+                return Err(Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                });
+            }
+            env.step(|b| sem::zext_h(b, rd, rs1))
+        }
         Insn::CzeroEqz => env.step(|b| sem::czero_eqz(b, rd, rs1, rs2)),
         Insn::CzeroNez => env.step(|b| sem::czero_nez(b, rd, rs1, rs2)),
         Insn::Lui => {

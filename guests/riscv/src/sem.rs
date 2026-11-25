@@ -434,6 +434,485 @@ pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+// Zba/Zbb/Zbc/Zbs。RV64 形の意味論。RV32 形は対応する符号化と
+// 32 ビット包み込みを別途そろえる。
+
+fn shl64<B: Backend>(b: &mut B, x: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = const_w64(b, n);
+    b.shl(x, k)
+}
+
+fn shr64<B: Backend>(b: &mut B, x: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = const_w64(b, n);
+    b.shr_l(x, k)
+}
+
+fn bit_count<B: Backend>(b: &mut B, x: B::V<W64>, bits: u32) -> B::V<W64> {
+    let mut acc = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    for i in 0..bits {
+        let s = shr64(b, x, u64::from(i));
+        let bit = b.and(s, one);
+        acc = b.add(acc, bit);
+    }
+    acc
+}
+
+fn zero_count<B: Backend>(b: &mut B, x: B::V<W64>, bits: u32, leading: bool) -> B::V<W64> {
+    let mut acc = const_w64(b, 0);
+    let mut higher = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    for i in 0..bits {
+        let pos = if leading { bits - 1 - i } else { i };
+        let s = shr64(b, x, u64::from(pos));
+        let bit = b.and(s, one);
+        let notbit = b.sub(one, bit);
+        let unseen = b.sub(one, higher);
+        let contribute = b.and(notbit, unseen);
+        acc = b.add(acc, contribute);
+        higher = b.or(higher, bit);
+    }
+    acc
+}
+
+fn rol64<B: Backend>(b: &mut B, x: B::V<W64>, n: B::V<W64>) -> B::V<W64> {
+    let mask = const_w64(b, 63);
+    let n = b.and(n, mask);
+    let width = const_w64(b, 64);
+    let inv0 = b.sub(width, n);
+    let inv = b.and(inv0, mask);
+    let l = b.shl(x, n);
+    let r = b.shr_l(x, inv);
+    b.or(l, r)
+}
+
+fn ror64<B: Backend>(b: &mut B, x: B::V<W64>, n: B::V<W64>) -> B::V<W64> {
+    let mask = const_w64(b, 63);
+    let n = b.and(n, mask);
+    let width = const_w64(b, 64);
+    let inv0 = b.sub(width, n);
+    let inv = b.and(inv0, mask);
+    let r = b.shr_l(x, n);
+    let l = b.shl(x, inv);
+    b.or(l, r)
+}
+
+fn rol32<B: Backend>(b: &mut B, x: B::V<W32>, n: B::V<W32>) -> B::V<W32> {
+    let mask = b.konst::<W32>(31);
+    let n = b.and(n, mask);
+    let width = b.konst::<W32>(32);
+    let inv0 = b.sub(width, n);
+    let inv = b.and(inv0, mask);
+    let l = b.shl(x, n);
+    let r = b.shr_l(x, inv);
+    b.or(l, r)
+}
+
+fn ror32<B: Backend>(b: &mut B, x: B::V<W32>, n: B::V<W32>) -> B::V<W32> {
+    let mask = b.konst::<W32>(31);
+    let n = b.and(n, mask);
+    let width = b.konst::<W32>(32);
+    let inv0 = b.sub(width, n);
+    let inv = b.and(inv0, mask);
+    let r = b.shr_l(x, n);
+    let l = b.shl(x, inv);
+    b.or(l, r)
+}
+
+pub fn add_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.zext::<W32, W64>(x32);
+    let y = read(b, rs2);
+    let s = b.add(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn shadd<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, sh: u64) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let t = shl64(b, x, sh);
+    let s = b.add(t, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn sh1add<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd(b, rd, rs1, rs2, 1)
+}
+pub fn sh2add<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd(b, rd, rs1, rs2, 2)
+}
+pub fn sh3add<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd(b, rd, rs1, rs2, 3)
+}
+
+fn shadd_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, sh: u64) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.zext::<W32, W64>(x32);
+    let y = read(b, rs2);
+    let t = shl64(b, x, sh);
+    let s = b.add(t, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn sh1add_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd_uw(b, rd, rs1, rs2, 1)
+}
+pub fn sh2add_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd_uw(b, rd, rs1, rs2, 2)
+}
+pub fn sh3add_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    shadd_uw(b, rd, rs1, rs2, 3)
+}
+
+pub fn slli_uw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.zext::<W32, W64>(x32);
+    let s = shl64(b, x, shamt & 63);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn andn<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let ny = b.not(y);
+    let s = b.and(x, ny);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn orn<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let ny = b.not(y);
+    let s = b.or(x, ny);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn xnor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let xy = b.xor(x, y);
+    let s = b.not(xy);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn count64<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u32) -> Flow<B> {
+    let x = read(b, rs1);
+    let s = match kind {
+        0 => zero_count(b, x, 64, true),
+        1 => zero_count(b, x, 64, false),
+        _ => bit_count(b, x, 64),
+    };
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn clz<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    count64(b, rd, rs1, 0)
+}
+pub fn ctz<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    count64(b, rd, rs1, 1)
+}
+pub fn cpop<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    count64(b, rd, rs1, 2)
+}
+
+fn countw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, kind: u32) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x32 = b.trunc::<W64, W32>(x64);
+    let x = b.zext::<W32, W64>(x32);
+    let s64 = match kind {
+        0 => zero_count(b, x, 32, true),
+        1 => zero_count(b, x, 32, false),
+        _ => bit_count(b, x, 32),
+    };
+    let s = b.trunc::<W64, W32>(s64);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn clzw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    countw(b, rd, rs1, 0)
+}
+pub fn ctzw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    countw(b, rd, rs1, 1)
+}
+pub fn cpopw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    countw(b, rd, rs1, 2)
+}
+
+fn minmax<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, op: Cmp, choose_x: bool) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let c = b.cmp(op, x, y);
+    let s = if choose_x {
+        b.select(c, x, y)
+    } else {
+        b.select(c, y, x)
+    };
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn max<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    minmax(b, rd, rs1, rs2, Cmp::GtS, true)
+}
+pub fn maxu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    minmax(b, rd, rs1, rs2, Cmp::GtU, true)
+}
+pub fn min<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    minmax(b, rd, rs1, rs2, Cmp::LtS, true)
+}
+pub fn minu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    minmax(b, rd, rs1, rs2, Cmp::LtU, true)
+}
+
+pub fn rol<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = read(b, rs2);
+    let s = rol64(b, x, n);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn ror<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = read(b, rs2);
+    let s = ror64(b, x, n);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn rolw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let n64 = read(b, rs2);
+    let n = b.trunc::<W64, W32>(n64);
+    let s = rol32(b, x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn rorw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let n64 = read(b, rs2);
+    let n = b.trunc::<W64, W32>(n64);
+    let s = ror32(b, x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn rori<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = const_w64(b, shamt & 63);
+    let s = ror64(b, x, n);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn roriw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W32>(x64);
+    let n = b.konst::<W32>((shamt & 31) as u32);
+    let s = ror32(b, x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn orc_b<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let mut out = const_w64(b, 0);
+    let zero = const_w64(b, 0);
+    let ff = const_w64(b, 0xff);
+    for i in 0..8 {
+        let sh = shr64(b, x, i * 8);
+        let byte = b.and(sh, ff);
+        let nz = b.cmp(Cmp::Ne, byte, zero);
+        let part0 = b.select(nz, ff, zero);
+        let part = shl64(b, part0, i * 8);
+        out = b.or(out, part);
+    }
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn rev8<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let mut out = const_w64(b, 0);
+    let ff = const_w64(b, 0xff);
+    for i in 0..8 {
+        let sh = shr64(b, x, i * 8);
+        let byte = b.and(sh, ff);
+        let part = shl64(b, byte, 56 - i * 8);
+        out = b.or(out, part);
+    }
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn sext_b<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W8>(x64);
+    let s = b.sext::<W8, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn sext_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W16>(x64);
+    let s = b.sext::<W16, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn zext_h<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x64 = read(b, rs1);
+    let x = b.trunc::<W64, W16>(x64);
+    let s = b.zext::<W16, W64>(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn clmul_parts<B: Backend>(b: &mut B, x: B::V<W64>, y: B::V<W64>) -> (B::V<W64>, B::V<W64>) {
+    let mut lo = const_w64(b, 0);
+    let mut hi = const_w64(b, 0);
+    let zero = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    for i in 0..64u64 {
+        let ys = shr64(b, y, i);
+        let bit = b.and(ys, one);
+        let on = b.cmp(Cmp::Ne, bit, zero);
+        let lt = if i == 0 { x } else { shl64(b, x, i) };
+        let ht = if i == 0 { zero } else { shr64(b, x, 64 - i) };
+        let lt = b.select(on, lt, zero);
+        let ht = b.select(on, ht, zero);
+        lo = b.xor(lo, lt);
+        hi = b.xor(hi, ht);
+    }
+    (lo, hi)
+}
+
+pub fn clmul<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let (s, _) = clmul_parts(b, x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn clmulh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let (_, s) = clmul_parts(b, x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn clmulr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let (lo, hi) = clmul_parts(b, x, y);
+    let a = shr64(b, lo, 63);
+    let c = shl64(b, hi, 1);
+    let s = b.or(a, c);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn bitpos64<B: Backend>(b: &mut B, rs2: Gpr) -> B::V<W64> {
+    let raw = read(b, rs2);
+    let m = const_w64(b, 63);
+    b.and(raw, m)
+}
+
+fn bitmask64<B: Backend>(b: &mut B, n: B::V<W64>) -> B::V<W64> {
+    let one = const_w64(b, 1);
+    b.shl(one, n)
+}
+
+pub fn bclr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = bitpos64(b, rs2);
+    let mask = bitmask64(b, n);
+    let nm = b.not(mask);
+    let s = b.and(x, nm);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn bext<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = bitpos64(b, rs2);
+    let s0 = b.shr_l(x, n);
+    let one = const_w64(b, 1);
+    let s = b.and(s0, one);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn binv<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = bitpos64(b, rs2);
+    let mask = bitmask64(b, n);
+    let s = b.xor(x, mask);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn bset<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = bitpos64(b, rs2);
+    let mask = bitmask64(b, n);
+    let s = b.or(x, mask);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn bitop_imm<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64, kind: u32) -> Flow<B> {
+    let x = read(b, rs1);
+    let n = const_w64(b, shamt & 63);
+    let mask = bitmask64(b, n);
+    let s = match kind {
+        0 => {
+            let nm = b.not(mask);
+            b.and(x, nm)
+        }
+        1 => {
+            let v = b.shr_l(x, n);
+            let one = const_w64(b, 1);
+            b.and(v, one)
+        }
+        2 => b.xor(x, mask),
+        _ => b.or(x, mask),
+    };
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn bclri<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    bitop_imm(b, rd, rs1, shamt, 0)
+}
+pub fn bexti<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    bitop_imm(b, rd, rs1, shamt, 1)
+}
+pub fn binvi<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    bitop_imm(b, rd, rs1, shamt, 2)
+}
+pub fn bseti<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    bitop_imm(b, rd, rs1, shamt, 3)
+}
+
 pub fn czero_eqz<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     let x = read(b, rs1);
     let cond = read(b, rs2);
