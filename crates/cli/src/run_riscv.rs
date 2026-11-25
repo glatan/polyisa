@@ -955,11 +955,26 @@ pub(crate) fn step_rv(
                 env.step(|b| sem::fsw(b, rs1, fs2, imm_s(word)))
             }
         }
-        Insn::FaddS => env.step(|b| sem::fadd_s(b, fd, fs1, fs2)),
-        Insn::FsubS => env.step(|b| sem::fsub_s(b, fd, fs1, fs2)),
-        Insn::FmulS => env.step(|b| sem::fmul_s(b, fd, fs1, fs2)),
-        Insn::FdivS => env.step(|b| sem::fdiv_s(b, fd, fs1, fs2)),
-        Insn::FsqrtS => env.step(|b| sem::fsqrt_s(b, fd, fs1)),
+        Insn::FaddS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fadd_s(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsubS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsub_s(b, fd, fs1, fs2, rm))
+        }
+        Insn::FmulS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmul_s(b, fd, fs1, fs2, rm))
+        }
+        Insn::FdivS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fdiv_s(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsqrtS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsqrt_s(b, fd, fs1, rm))
+        }
         Insn::FsgnjS => env.step(|b| sem::fsgnj_s(b, fd, fs1, fs2)),
         Insn::FsgnjnS => env.step(|b| sem::fsgnjn_s(b, fd, fs1, fs2)),
         Insn::FsgnjxS => env.step(|b| sem::fsgnjx_s(b, fd, fs1, fs2)),
@@ -1027,10 +1042,22 @@ pub(crate) fn step_rv(
             env.step(|b| sem::fcvt_s_lu(b, fd, rs1, rm))
         }
         Insn::FmvWX => env.step(|b| sem::fmv_w_x(b, fd, rs1)),
-        Insn::FmaddS => env.step(|b| sem::fmadd_s(b, fd, fs1, fs2, fs3)),
-        Insn::FmsubS => env.step(|b| sem::fmsub_s(b, fd, fs1, fs2, fs3)),
-        Insn::FnmsubS => env.step(|b| sem::fnmsub_s(b, fd, fs1, fs2, fs3)),
-        Insn::FnmaddS => env.step(|b| sem::fnmadd_s(b, fd, fs1, fs2, fs3)),
+        Insn::FmaddS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmadd_s(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FmsubS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmsub_s(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmsubS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmsub_s(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmaddS => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmadd_s(b, fd, fs1, fs2, fs3, rm))
+        }
         // D 倍精度。
         Insn::Fld => {
             if rv32 {
@@ -1046,11 +1073,26 @@ pub(crate) fn step_rv(
                 env.step(|b| sem::fsd(b, rs1, fs2, imm_s(word)))
             }
         }
-        Insn::FaddD => env.step(|b| sem::fadd_d(b, fd, fs1, fs2)),
-        Insn::FsubD => env.step(|b| sem::fsub_d(b, fd, fs1, fs2)),
-        Insn::FmulD => env.step(|b| sem::fmul_d(b, fd, fs1, fs2)),
-        Insn::FdivD => env.step(|b| sem::fdiv_d(b, fd, fs1, fs2)),
-        Insn::FsqrtD => env.step(|b| sem::fsqrt_d(b, fd, fs1)),
+        Insn::FaddD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fadd_d(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsubD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsub_d(b, fd, fs1, fs2, rm))
+        }
+        Insn::FmulD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmul_d(b, fd, fs1, fs2, rm))
+        }
+        Insn::FdivD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fdiv_d(b, fd, fs1, fs2, rm))
+        }
+        Insn::FsqrtD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fsqrt_d(b, fd, fs1, rm))
+        }
         Insn::FsgnjD => env.step(|b| sem::fsgnj_d(b, fd, fs1, fs2)),
         Insn::FsgnjnD => env.step(|b| sem::fsgnjn_d(b, fd, fs1, fs2)),
         Insn::FsgnjxD => env.step(|b| sem::fsgnjx_d(b, fd, fs1, fs2)),
@@ -1126,10 +1168,22 @@ pub(crate) fn step_rv(
             let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
             env.step(|b| sem::fcvt_d_s(b, fd, fs1, rm))
         }
-        Insn::FmaddD => env.step(|b| sem::fmadd_d(b, fd, fs1, fs2, fs3)),
-        Insn::FmsubD => env.step(|b| sem::fmsub_d(b, fd, fs1, fs2, fs3)),
-        Insn::FnmsubD => env.step(|b| sem::fnmsub_d(b, fd, fs1, fs2, fs3)),
-        Insn::FnmaddD => env.step(|b| sem::fnmadd_d(b, fd, fs1, fs2, fs3)),
+        Insn::FmaddD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmadd_d(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FmsubD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fmsub_d(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmsubD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmsub_d(b, fd, fs1, fs2, fs3, rm))
+        }
+        Insn::FnmaddD => {
+            let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+            env.step(|b| sem::fnmadd_d(b, fd, fs1, fs2, fs3, rm))
+        }
         Insn::Ecall => match sys.handle_ecall(env, word) {
             EcallOutcome::Exit(code) => return Err(Outcome::Exit(code)),
             EcallOutcome::Handled => {
