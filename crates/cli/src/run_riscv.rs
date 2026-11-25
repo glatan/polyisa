@@ -510,6 +510,23 @@ fn step_rv_inner(
             }
             env.step(|b| sem::rorw(b, rd, rs1, rs2))
         }
+        Insn::Aes64ds => env.step(|b| sem::aes64ds(b, rd, rs1, rs2)),
+        Insn::Aes64dsm => env.step(|b| sem::aes64dsm(b, rd, rs1, rs2)),
+        Insn::Aes64es => env.step(|b| sem::aes64es(b, rd, rs1, rs2)),
+        Insn::Aes64esm => env.step(|b| sem::aes64esm(b, rd, rs1, rs2)),
+        Insn::Aes64im => env.step(|b| sem::aes64im(b, rd, rs1)),
+        Insn::Aes64ks2 => env.step(|b| sem::aes64ks2(b, rd, rs1, rs2)),
+        Insn::Aes64ks1i0 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 0)),
+        Insn::Aes64ks1i1 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 1)),
+        Insn::Aes64ks1i2 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 2)),
+        Insn::Aes64ks1i3 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 3)),
+        Insn::Aes64ks1i4 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 4)),
+        Insn::Aes64ks1i5 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 5)),
+        Insn::Aes64ks1i6 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 6)),
+        Insn::Aes64ks1i7 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 7)),
+        Insn::Aes64ks1i8 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 8)),
+        Insn::Aes64ks1i9 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 9)),
+        Insn::Aes64ks1i10 => env.step(|b| sem::aes64ks1i(b, rd, rs1, 10)),
         Insn::Sm4ed0 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 0)),
         Insn::Sm4ed1 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 1)),
         Insn::Sm4ed2 => env.step(|b| sem::sm4ed(b, rd, rs1, rs2, 2)),

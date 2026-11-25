@@ -44,6 +44,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("zknh", &[][..], &[][..]),
         ("zksh", &[][..], &[][..]),
         ("zksed", &[][..], &[][..]),
+        ("zkne", &[][..], &[][..]),
+        ("zknd", &[][..], &[][..]),
         ("zbs", &[][..], &[][..]),
         // RVA22/23 で必須化される拡張。命令はいずれも未実装で、
         // カバレッジ表にゼロ件で見える。カウンタ系（Zicntr/Zihpm）・
@@ -469,6 +471,23 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sext_h", "R", "0110000 00101 ..... 001 ..... 0010011", "sext.h {rd}, {rs1}", "alu"),
         ("zext_h", "R", "0000100 00000 ..... 100 ..... 0111011", "zext.h {rd}, {rs1}", "alu"),
         // Zbc（キャリーレス乗算）
+        ("aes64ds", "R", "0011101 ..... ..... 000 ..... 0110011", "aes64ds {rd}, {rs1}, {rs2}", "alu"),
+        ("aes64dsm", "R", "0011111 ..... ..... 000 ..... 0110011", "aes64dsm {rd}, {rs1}, {rs2}", "alu"),
+        ("aes64es", "R", "0011001 ..... ..... 000 ..... 0110011", "aes64es {rd}, {rs1}, {rs2}", "alu"),
+        ("aes64esm", "R", "0011011 ..... ..... 000 ..... 0110011", "aes64esm {rd}, {rs1}, {rs2}", "alu"),
+        ("aes64ks2", "R", "0111111 ..... ..... 000 ..... 0110011", "aes64ks2 {rd}, {rs1}, {rs2}", "alu"),
+        ("aes64im", "I", "001100000000 ..... 001 ..... 0010011", "aes64im {rd}, {rs1}", "alu"),
+        ("aes64ks1i0", "I", "001100010000 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 0", "alu"),
+        ("aes64ks1i1", "I", "001100010001 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 1", "alu"),
+        ("aes64ks1i2", "I", "001100010010 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 2", "alu"),
+        ("aes64ks1i3", "I", "001100010011 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 3", "alu"),
+        ("aes64ks1i4", "I", "001100010100 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 4", "alu"),
+        ("aes64ks1i5", "I", "001100010101 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 5", "alu"),
+        ("aes64ks1i6", "I", "001100010110 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 6", "alu"),
+        ("aes64ks1i7", "I", "001100010111 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 7", "alu"),
+        ("aes64ks1i8", "I", "001100011000 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 8", "alu"),
+        ("aes64ks1i9", "I", "001100011001 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 9", "alu"),
+        ("aes64ks1i10", "I", "001100011010 ..... 001 ..... 0010011", "aes64ks1i {rd}, {rs1}, 10", "alu"),
         ("sm4ed0", "R", "0011000 ..... ..... 000 ..... 0110011", "sm4ed {rd}, {rs1}, {rs2}, 0", "alu"),
         ("sm4ed1", "R", "0111000 ..... ..... 000 ..... 0110011", "sm4ed {rd}, {rs1}, {rs2}, 1", "alu"),
         ("sm4ed2", "R", "1011000 ..... ..... 000 ..... 0110011", "sm4ed {rd}, {rs1}, {rs2}, 2", "alu"),
@@ -743,6 +762,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ) {
             reqs.push("zbb");
         }
+        if matches!(*name, "aes64es" | "aes64esm") {
+            reqs.push("zkne");
+        }
+        if matches!(*name, "aes64ds" | "aes64dsm" | "aes64im") {
+            reqs.push("zknd");
+        }
         if name.starts_with("sm4ed") || name.starts_with("sm4ks") {
             reqs.push("zksed");
         }
@@ -950,6 +975,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     // モデルで解決する（ADR-0006）。
     // Ref: SPEC-RISCV-UNPRIV (20250508).
     for insn in m.insns.iter_mut() {
+        if insn.name == "aes64ks2" || insn.name.starts_with("aes64ks1i") {
+            // 鍵スケジュール命令は Zkne/Zknd のどちら側にも属する。
+            insn.when = Pred::Any(vec![
+                Pred::Flag("zkne".to_string()),
+                Pred::Flag("zknd".to_string()),
+            ]);
+        }
         let rv64_only = matches!(
             insn.name.as_str(),
             "ld" | "lwu"
@@ -964,6 +996,9 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "sc_d" | "amoswap_d"
                 | "amocas_q"
                 | "sha512sum0" | "sha512sum1"
+                | "aes64es" | "aes64esm"
+                | "aes64ds" | "aes64dsm"
+                | "aes64im" | "aes64ks2"
                 | "sha512sig0" | "sha512sig1"
                 | "amoadd_d" | "amoxor_d"
                 | "amoand_d" | "amoor_d"
@@ -988,7 +1023,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "fcvt_d_l" | "fcvt_d_lu"
                 | "fmv_x_d" | "fmv_d_x"
         );
-        if rv64_only {
+        if rv64_only || insn.name.starts_with("aes64ks1i") {
             insn.when = if insn.when == Pred::True {
                 Pred::Flag("rv64".to_string())
             } else {

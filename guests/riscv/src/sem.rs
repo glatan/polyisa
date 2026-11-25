@@ -874,6 +874,307 @@ fn ror64_const<B: Backend>(b: &mut B, x: B::V<W64>, n: u64) -> B::V<W64> {
     ror64(b, x, k)
 }
 
+struct AesTables {
+    sbox: [u32; 256],
+    inv_sbox: [u32; 256],
+    fwd: [[u32; 256]; 4],
+    inv: [[u32; 256]; 4],
+    inv_id: [[u32; 256]; 4],
+}
+
+const fn aes_gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        let hi = a & 0x80;
+        a <<= 1;
+        if hi != 0 {
+            a ^= 0x1b;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+const fn aes_gf_pow(mut x: u8, mut n: u32) -> u8 {
+    let mut out = 1u8;
+    while n != 0 {
+        if n & 1 != 0 {
+            out = aes_gf_mul(out, x);
+        }
+        x = aes_gf_mul(x, x);
+        n >>= 1;
+    }
+    out
+}
+
+const fn aes_sbox_val(x: u8) -> u8 {
+    let inv = if x == 0 { 0 } else { aes_gf_pow(x, 254) };
+    inv ^ inv.rotate_left(1) ^ inv.rotate_left(2) ^ inv.rotate_left(3) ^ inv.rotate_left(4) ^ 0x63
+}
+
+const fn aes_mixcolumn_fwd_const(x: u32) -> u32 {
+    let s0 = x as u8;
+    let s1 = (x >> 8) as u8;
+    let s2 = (x >> 16) as u8;
+    let s3 = (x >> 24) as u8;
+    let b0 = aes_gf_mul(s0, 2) ^ aes_gf_mul(s1, 3) ^ s2 ^ s3;
+    let b1 = s0 ^ aes_gf_mul(s1, 2) ^ aes_gf_mul(s2, 3) ^ s3;
+    let b2 = s0 ^ s1 ^ aes_gf_mul(s2, 2) ^ aes_gf_mul(s3, 3);
+    let b3 = aes_gf_mul(s0, 3) ^ s1 ^ s2 ^ aes_gf_mul(s3, 2);
+    ((b3 as u32) << 24) | ((b2 as u32) << 16) | ((b1 as u32) << 8) | b0 as u32
+}
+
+const fn aes_mixcolumn_inv_const(x: u32) -> u32 {
+    let s0 = x as u8;
+    let s1 = (x >> 8) as u8;
+    let s2 = (x >> 16) as u8;
+    let s3 = (x >> 24) as u8;
+    let b0 = aes_gf_mul(s0, 0xe) ^ aes_gf_mul(s1, 0xb) ^ aes_gf_mul(s2, 0xd) ^ aes_gf_mul(s3, 9);
+    let b1 = aes_gf_mul(s0, 9) ^ aes_gf_mul(s1, 0xe) ^ aes_gf_mul(s2, 0xb) ^ aes_gf_mul(s3, 0xd);
+    let b2 = aes_gf_mul(s0, 0xd) ^ aes_gf_mul(s1, 9) ^ aes_gf_mul(s2, 0xe) ^ aes_gf_mul(s3, 0xb);
+    let b3 = aes_gf_mul(s0, 0xb) ^ aes_gf_mul(s1, 0xd) ^ aes_gf_mul(s2, 9) ^ aes_gf_mul(s3, 0xe);
+    ((b3 as u32) << 24) | ((b2 as u32) << 16) | ((b1 as u32) << 8) | b0 as u32
+}
+
+const fn aes_tables() -> AesTables {
+    let mut sbox8 = [0u8; 256];
+    let mut inv_sbox8 = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let v = aes_sbox_val(i as u8);
+        sbox8[i] = v;
+        inv_sbox8[v as usize] = i as u8;
+        i += 1;
+    }
+    let mut sbox = [0u32; 256];
+    let mut inv_sbox = [0u32; 256];
+    let mut fwd = [[0u32; 256]; 4];
+    let mut inv = [[0u32; 256]; 4];
+    let mut inv_id = [[0u32; 256]; 4];
+    let mut pos = 0usize;
+    while pos < 4 {
+        let mut x = 0usize;
+        while x < 256 {
+            let sh = (pos * 8) as u32;
+            let sx = sbox8[x] as u32;
+            let ix = inv_sbox8[x] as u32;
+            sbox[x] = sx;
+            inv_sbox[x] = ix;
+            fwd[pos][x] = aes_mixcolumn_fwd_const(sx << sh);
+            inv[pos][x] = aes_mixcolumn_inv_const(ix << sh);
+            inv_id[pos][x] = aes_mixcolumn_inv_const((x as u32) << sh);
+            x += 1;
+        }
+        pos += 1;
+    }
+    AesTables {
+        sbox,
+        inv_sbox,
+        fwd,
+        inv,
+        inv_id,
+    }
+}
+
+const AES_TABLES: AesTables = aes_tables();
+
+fn byte64<B: Backend>(b: &mut B, x: B::V<W64>, index: u64) -> B::V<W32> {
+    let s = shr64(b, x, index * 8);
+    b.trunc::<W64, W32>(s)
+}
+
+fn pack32<B: Backend>(b: &mut B, bytes: [B::V<W32>; 4]) -> B::V<W32> {
+    let ff = b.konst::<W32>(0xff);
+    let mut out = b.konst::<W32>(0);
+    for (i, byte) in bytes.into_iter().enumerate() {
+        let v = b.and(byte, ff);
+        let sh = b.konst::<W32>((i as u32) * 8);
+        let part = b.shl(v, sh);
+        out = b.or(out, part);
+    }
+    out
+}
+
+fn pack64<B: Backend>(b: &mut B, bytes: [B::V<W32>; 8]) -> B::V<W64> {
+    let mut out = const_w64(b, 0);
+    for (i, byte) in bytes.into_iter().enumerate() {
+        let v = b.zext::<W32, W64>(byte);
+        let ff = const_w64(b, 0xff);
+        let v = b.and(v, ff);
+        let part = shl64(b, v, (i as u64) * 8);
+        out = b.or(out, part);
+    }
+    out
+}
+
+fn aes_apply_sbox64<B: Backend>(b: &mut B, x: B::V<W64>, inverse: bool) -> B::V<W64> {
+    let table = if inverse {
+        &AES_TABLES.inv_sbox
+    } else {
+        &AES_TABLES.sbox
+    };
+    let mut bytes = [b.konst::<W32>(0); 8];
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        let idx = byte64(b, x, i as u64);
+        *slot = lut32(b, idx, table);
+    }
+    pack64(b, bytes)
+}
+
+fn aes_shiftrows_fwd64<B: Backend>(b: &mut B, rs2v: B::V<W64>, rs1v: B::V<W64>) -> B::V<W64> {
+    let b0 = byte64(b, rs1v, 0);
+    let b1 = byte64(b, rs1v, 5);
+    let b2 = byte64(b, rs2v, 2);
+    let b3 = byte64(b, rs2v, 7);
+    let b4 = byte64(b, rs1v, 4);
+    let b5 = byte64(b, rs2v, 1);
+    let b6 = byte64(b, rs2v, 6);
+    let b7 = byte64(b, rs1v, 3);
+    pack64(b, [b0, b1, b2, b3, b4, b5, b6, b7])
+}
+
+fn aes_shiftrows_inv64<B: Backend>(b: &mut B, rs2v: B::V<W64>, rs1v: B::V<W64>) -> B::V<W64> {
+    let b0 = byte64(b, rs1v, 0);
+    let b1 = byte64(b, rs2v, 5);
+    let b2 = byte64(b, rs2v, 2);
+    let b3 = byte64(b, rs1v, 7);
+    let b4 = byte64(b, rs1v, 4);
+    let b5 = byte64(b, rs1v, 1);
+    let b6 = byte64(b, rs2v, 6);
+    let b7 = byte64(b, rs2v, 3);
+    pack64(b, [b0, b1, b2, b3, b4, b5, b6, b7])
+}
+
+fn aes_mix64_tables<B: Backend>(b: &mut B, x: B::V<W64>, tables: &[[u32; 256]; 4]) -> B::V<W64> {
+    let zero = b.konst::<W32>(0);
+    let mut cols = [zero; 2];
+    for (col, slot) in cols.iter_mut().enumerate() {
+        let mut out = zero;
+        for pos in 0..4u64 {
+            let idx = byte64(b, x, (col as u64) * 4 + pos);
+            let v = lut32(b, idx, &tables[pos as usize]);
+            out = b.xor(out, v);
+        }
+        *slot = out;
+    }
+    let lo = b.zext::<W32, W64>(cols[0]);
+    let hi0 = b.zext::<W32, W64>(cols[1]);
+    let hi = shl64(b, hi0, 32);
+    b.or(lo, hi)
+}
+
+fn aes64_round<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs1: Gpr,
+    rs2: Gpr,
+    decrypt: bool,
+    mix: bool,
+) -> Flow<B> {
+    let x1 = read(b, rs1);
+    let x2 = read(b, rs2);
+    let sr = if decrypt {
+        aes_shiftrows_inv64(b, x2, x1)
+    } else {
+        aes_shiftrows_fwd64(b, x2, x1)
+    };
+    let out = if mix {
+        let tables = if decrypt {
+            &AES_TABLES.inv
+        } else {
+            &AES_TABLES.fwd
+        };
+        aes_mix64_tables(b, sr, tables)
+    } else {
+        aes_apply_sbox64(b, sr, decrypt)
+    };
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn aes64es<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    aes64_round(b, rd, rs1, rs2, false, false)
+}
+
+pub fn aes64esm<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    aes64_round(b, rd, rs1, rs2, false, true)
+}
+
+pub fn aes64ds<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    aes64_round(b, rd, rs1, rs2, true, false)
+}
+
+pub fn aes64dsm<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    aes64_round(b, rd, rs1, rs2, true, true)
+}
+
+pub fn aes64im<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let out = aes_mix64_tables(b, x, &AES_TABLES.inv_id);
+    write(b, rd, out);
+    Ok(())
+}
+
+fn aes_subword<B: Backend>(b: &mut B, x: B::V<W32>) -> B::V<W32> {
+    let ff = b.konst::<W32>(0xff);
+    let mut bytes = [b.konst::<W32>(0); 4];
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        let sh = b.konst::<W32>((i as u32) * 8);
+        let idx0 = b.shr_l(x, sh);
+        let idx = b.and(idx0, ff);
+        *slot = lut32(b, idx, &AES_TABLES.sbox);
+    }
+    pack32(b, bytes)
+}
+
+pub fn aes64ks1i<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rnum: u8) -> Flow<B> {
+    let x = read(b, rs1);
+    let hi64 = shr64(b, x, 32);
+    let tmp1 = b.trunc::<W64, W32>(hi64);
+    let tmp2 = if rnum == 10 {
+        tmp1
+    } else {
+        ror32_const(b, tmp1, 8)
+    };
+    let tmp3 = aes_subword(b, tmp2);
+    let rc = if rnum < 10 {
+        [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36][rnum as usize]
+    } else {
+        0
+    };
+    let rcv = b.konst::<W32>(rc);
+    let w = b.xor(tmp3, rcv);
+    let lo = b.zext::<W32, W64>(w);
+    let hi0 = b.zext::<W32, W64>(w);
+    let hi = shl64(b, hi0, 32);
+    let out = b.or(lo, hi);
+    write(b, rd, out);
+    Ok(())
+}
+
+pub fn aes64ks2<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x1 = read(b, rs1);
+    let x2 = read(b, rs2);
+    let ff64 = const_w64(b, 0xffff_ffff);
+    let rs1_hi64 = shr64(b, x1, 32);
+    let rs2_lo64 = b.and(x2, ff64);
+    let rs2_hi64 = shr64(b, x2, 32);
+    let rs1_hi = b.trunc::<W64, W32>(rs1_hi64);
+    let rs2_lo = b.trunc::<W64, W32>(rs2_lo64);
+    let rs2_hi = b.trunc::<W64, W32>(rs2_hi64);
+    let w0 = b.xor(rs1_hi, rs2_lo);
+    let w1 = b.xor(w0, rs2_hi);
+    let lo = b.zext::<W32, W64>(w0);
+    let hi0 = b.zext::<W32, W64>(w1);
+    let hi = shl64(b, hi0, 32);
+    let out = b.or(lo, hi);
+    write(b, rd, out);
+    Ok(())
+}
+
 #[rustfmt::skip]
 const SM4_SBOX: [u8; 256] = [
     0xd6,0x90,0xe9,0xfe,0xcc,0xe1,0x3d,0xb7,0x16,0xb6,0x14,0xc2,0x28,0xfb,0x2c,0x05,

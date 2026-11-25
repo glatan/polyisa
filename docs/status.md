@@ -20,7 +20,7 @@
 | parisc | 7 | 4 | ELF | Linux | — | — | — | bare・abi・program | [parisc.md](guests/parisc.md) |
 | pdp11 | 21 | 16 | a.out（`cpus`未掲載） | Unix V7 | — | — | — | bare・program | [pdp11.md](guests/pdp11.md) |
 | power | 6 | 8 | ELF | Linux | — | — | — | bare・oracle・abi・program | [power.md](guests/power.md) |
-| riscv | 15 | 38 | ELF | Linux・Semihosting | — | approx_uncalibrated | 対応 | bare・conformance・oracle・abi・program・diff | [riscv.md](guests/riscv.md) |
+| riscv | 15 | 40 | ELF | Linux・Semihosting | — | approx_uncalibrated | 対応 | bare・conformance・oracle・abi・program・diff | [riscv.md](guests/riscv.md) |
 | s390 | 19 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [s390.md](guests/s390.md) |
 | sparc | 13 | 5 | ELF | Linux | — | — | — | bare・oracle・abi・program | [sparc.md](guests/sparc.md) |
 | superh | 12 | 10 | ELF | Linux | — | — | — | bare・abi・program | [superh.md](guests/superh.md) |
