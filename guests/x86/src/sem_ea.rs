@@ -9963,16 +9963,34 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// FRNDINT。倍精度経由で整数値へ丸める（RC は RNE 近似、|x|>2^63 は不正確）。
+/// FRNDINT。80 ビット整数変換を使い FCW の RC に従う。
+/// |x| >= 2^63・無限大・NaN は整数化しても値が変わらないので入力を保つ。
 pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
-    let v = sem::f80_to_f64(b, sig, exp);
-    let f = b.trunc::<W64, polyisa_sem::F64>(v);
-    let i = b.fcvt_s64::<polyisa_sem::F64>(f, 0);
-    let r = b.fcvt_from_s64::<polyisa_sem::F64>(i, 0);
-    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
-    let (sr, er) = sem::f64_to_ext(b, r64);
+    let iv = sem::f80_to_i64(b, sig, exp);
+    let (isig, mut iexp) = sem::i64_to_ext(b, iv);
+    // 入力が負で結果整数が 0 のときは -0 を保つ。
+    let z64 = b.konst::<W64>(0);
+    let zero_i = b.cmp::<W64>(Cmp::Eq, iv, z64);
+    let e64 = b.zext::<W16, W64>(exp);
+    let s15 = b.konst::<W64>(15);
+    let sign = b.shr_l::<W64>(e64, s15);
+    let one64 = b.konst::<W64>(1);
+    let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
+    let neg_zero = sem::bit_and(b, zero_i, neg);
+    let signbit = b.konst::<W16>(0x8000);
+    let iexp_signed = b.or::<W16>(iexp, signbit);
+    iexp = b.select::<W16>(neg_zero, iexp_signed, iexp);
+    // 指数が 63 以上なら整数化で値は変わらない。NaN/Inf の
+    // 0x7fff もこの条件に含まれる。
+    let exp64 = b.zext::<W16, W64>(exp);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(exp64, mask15);
+    let lim = b.konst::<W64>(16383 + 63);
+    let small = b.cmp::<W64>(Cmp::LtU, ea, lim);
+    let sr = b.select::<W64>(small, isig, sig);
+    let er = b.select::<W16>(small, iexp, exp);
     sem::write_st(b, top, sr, er);
     Ok(())
 }
@@ -11750,16 +11768,15 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     Ok(())
 }
 
-/// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。仮数は変えず指数に整数を加える。
+/// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。整数化は 80 ビットから直接行い、
+/// 仮数は変えず指数に整数を加える。
 /// 結果が上限を超えると無限、下限を割ると仮数右シフトの非正規数（近似）。
 pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (s0, e0) = sem::read_st(b, top);
     let slot = st_slot(b, 1);
     let (s1, e1) = sem::read_st(b, slot);
-    let b1 = sem::f80_to_f64(b, s1, e1);
-    let f1 = b.trunc::<W64, polyisa_sem::F64>(b1);
-    let n = b.fcvt_s64::<polyisa_sem::F64>(f1, 1);
+    let n = f80_to_i64_trunc(b, s1, e1);
     let hi = b.konst::<W64>(0x8000);
     let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
     let nhi = b.cmp::<W64>(Cmp::GtS, n, hi);

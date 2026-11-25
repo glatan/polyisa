@@ -12963,6 +12963,42 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_frndint_honors_fcw_and_preserves_negative_zero() {
+    fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFC])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // 1.5 は nearest では 2.0、truncate では 1.0。
+    assert_eq!(
+        once(0xC000_0000_0000_0000, 0x3FFF, 0x037F),
+        (0x8000_0000_0000_0000, 0x4000)
+    );
+    assert_eq!(
+        once(0xC000_0000_0000_0000, 0x3FFF, 0x0C7F),
+        (0x8000_0000_0000_0000, 0x3FFF)
+    );
+    // -0.5 の nearest は -0。符号を落とさない。
+    assert_eq!(once(0x8000_0000_0000_0000, 0xBFFE, 0x037F), (0, 0x8000));
+}
+
+#[test]
 fn run_fisttp_m64_truncates_independent_of_fcw() {
     // DD 4C 24 30 = fisttpq 0x30(%rsp)。ST=1.5、FCW=nearest でも
     // FISTTP は常に切り捨てて 1 を書く。
