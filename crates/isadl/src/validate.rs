@@ -615,6 +615,18 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                             field: format!("{}: zu には promoted が要る", mi.name),
                         });
                     }
+                    if mi.zu_optional && !mi.promoted {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: zu_optional には promoted が要る", mi.name),
+                        });
+                    }
+                    if mi.zu_optional && (mi.zu || mi.ndd_req || mi.nci) {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: zu_optional と zu/ndd_req/nci は排他", mi.name),
+                        });
+                    }
                     if mi.nf_ok && !mi.promoted {
                         errors.push(ValidationError::BadField {
                             format: "map-insn".to_string(),

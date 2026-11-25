@@ -2123,7 +2123,9 @@ fn emit_map_candidate(
             if !mi.nf_ok {
                 c.push_str(" && !d.nf");
             }
-            if mi.zu {
+            if mi.zu_optional {
+                c.push_str(" && d.vex_v == 0");
+            } else if mi.zu {
                 c.push_str(" && d.ndd && d.vex_v == 0");
             } else {
                 c.push_str(" && (d.ndd || d.vex_v == 0)");

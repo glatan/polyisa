@@ -400,6 +400,10 @@ pub struct MapInsn {
     /// の両方を要求し、宛先は引き続き ModRM.reg になる。
     /// `promoted` とだけ併用する。
     pub zu: bool,
+    /// ZU 任意形。vvvv は未使用（全 1）を要求し、ND=0 は
+    /// 通常の上位保持、ND=1 は zero-upper を選ぶ。SETcc と
+    /// IMUL 即値形に使う。`promoted` とだけ併用する。
+    pub zu_optional: bool,
     /// NF（P2.2）を受理する昇格形。NF 可能命令の一覧外
     /// （ADC/SBB/NOT/CMP/TEST/RCL/RCR・PUSH2/POP2 など）では
     /// NF=1 のエンコードは #UD。`promoted` とだけ併用する。

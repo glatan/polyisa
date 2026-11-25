@@ -2623,6 +2623,22 @@ fn apx_decode() {
     assert_eq!(crate::decode::rm_reg(&d).0, 18);
     // ZU 形は vvvv がレジスタを指すと #UD（ND=1 + ~vvvv!=1111）。
     assert!(decode_map(&[0x62, 0xEC, 0x3C, 0x18, 0x6B, 0xCA, 0x05], modes, FEAT_APX).is_none());
+    // IMUL 即値形は ND=0 でも通常形として有効（ZU は ND=1 の選択）。
+    let d = decode_map(&[0x62, 0xEC, 0xFC, 0x08, 0x6B, 0xCA, 0x05], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::ImulGvEvIb);
+    assert!(!d.ndd && d.vex_v == 0);
+    // SETcc（pp=F2、40+cc）。ND=0 は byte 書き、ND=1 は ZU。
+    let d = decode_map(&[0x62, 0x4C, 0x7F, 0x08, 0x44, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::SetjeEb);
+    assert!(!d.ndd && d.vex_v == 0);
+    let d = decode_map(&[0x62, 0x4C, 0x7F, 0x18, 0x44, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::SetjeEb);
+    assert!(d.ndd && d.vex_v == 0);
+    assert_eq!(crate::decode::rm_reg(&d).0, 25);
+    // pp=F2 でない 40+cc は SETcc ではなく、この時点では #UD。
+    assert!(decode_map(&[0x62, 0x4C, 0x7C, 0x10, 0x44, 0xD1], modes, FEAT_APX).is_none());
+    // ZU/通常とも vvvv が未使用でなければ #UD。
+    assert!(decode_map(&[0x62, 0x4C, 0x3F, 0x18, 0x44, 0xD1], modes, FEAT_APX).is_none());
     // REX2 の予約行：primary の 0x7*/0xE* 行、map1 の 0x8* 行。
     assert!(decode_map(&[0xD5, 0x40, 0x70, 0x00], modes, FEAT_APX).is_none());
     assert!(decode_map(&[0xD5, 0x40, 0xE8, 0, 0, 0, 0], modes, FEAT_APX | FEAT_I186).is_none());

@@ -24125,6 +24125,13 @@ fn run64_apx() {
         0x62, 0x4C, 0x0C, 0x0A, 0xF7, 0xC1, 0x02, 0x00, 0x00, 0x00, // ctestt {dfv=cf} r25,2
         0x9C, // pushf
         0x41, 0x59, // pop r9
+        // SETZ.ZU: r25=1 を not して -2 にし、ZF=1 で setz すると
+        // ZU 形は 1、ND=0 形は上位を残して -255 になる。
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25 → -2
+        0x31, 0xC0, // xor eax,eax → ZF=1
+        0x62, 0x4C, 0x7F, 0x18, 0x44, 0xD1, // setz.zu %r25
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25 → -2
+        0x62, 0x4C, 0x7F, 0x08, 0x44, 0xD1, // setz %r25（上位保持）
         // PUSH2/POP2 往復。
         0x49, 0xBC, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r12,0x1111
         0x49, 0xBD, 0x22, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r13,0x2222
@@ -24176,6 +24183,15 @@ fn run64_apx() {
     let tt: u32 = env.backend.get(Gpr(9).state());
     assert_ne!(tt & 0x40, 0, "ctestt は zf");
     assert_eq!(tt & 0x1, 0, "ctestt は cf を下ろす");
+    // 1 回目の SETZ.ZU で 1、2 回目の ND=0 は -2 の下位だけを
+    // 1 にするので -255（0xffffffffffffff01）になる。
+    let x2 = core::mem::offset_of!(polyisa_guest_x86::CpuState, x2);
+    let r25 = u64::from_le_bytes(
+        env.backend.state[x2 + 9 * 8..x2 + 10 * 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(r25, 0xFFFF_FFFF_FFFF_FF01, "setcc zu/keep");
 }
 
 #[test]

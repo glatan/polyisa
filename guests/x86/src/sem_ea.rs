@@ -1956,6 +1956,14 @@ pub fn setcc<B: Backend>(b: &mut B, n: u8, rm: &Rm<B::V<W64>>, d: &MapDec) -> Fl
     let one = b.konst::<W8>(1);
     let zero = b.konst::<W8>(0);
     let v = b.select::<W8>(take, one, zero);
+    // APX ZU ではレジスタ宛先の上位をゼロにする。vvvv は使わず、
+    // ND ビットが ZU の選択子。メモリ宛先は byte 書きのまま。
+    if d.ndd
+        && let Rm::Reg(g) = rm
+    {
+        put_ndd::<B, W8>(b, *g, v);
+        return Ok(());
+    }
     wr_w::<B, W8>(b, rm, d, v)
 }
 

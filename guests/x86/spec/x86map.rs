@@ -38,6 +38,7 @@ fn mi(
         promoted: false,
         ndd_req: false,
         zu: false,
+        zu_optional: false,
         nf_ok: false,
         nci: false,
         vex_rv: false,
@@ -4818,10 +4819,27 @@ fn build_map_apx(m: &mut Model) {
             v.push(MapItem::Insn(byte, it));
         }
     }
+    // SETcc（map4 では 40+cc、pp=F2）。ND=0 は byte だけを書き、
+    // ND=1 は ZU でレジスタ全体を 0/1 にする。vvvv は未使用固定。
+    let cc_names = [
+        "jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja", "js", "jns", "jp", "jnp", "jl",
+        "jge", "jle", "jg",
+    ];
+    for (k, cc) in cc_names.iter().enumerate() {
+        let mut it = px(
+            &format!("set{cc}_eb"),
+            &[Ea(B8)],
+            "setcc {e}",
+            "alu",
+        );
+        it.pfx = PfxSel::PF2;
+        it.zu_optional = true;
+        v.push(MapItem::Insn(0x40 + k as u8, it));
+    }
     // IMUL（0F AF / 69 / 6B の昇格形）。map4 では 0F を省略した
     // 番号で置かれ、NDD が宛先になる。
-    // IMUL 2 被演算子形（AF）は NDD、即値形（69/6B）は ZU
-    // （ND=1 + vvvv 全 1 で宛先は reg のまま上位ゼロ拡張）。
+    // IMUL 2 被演算子形（AF）は NDD、即値形（69/6B）は vvvv 全 1
+    // 固定で ND が ZU を選ぶ（ND=0 は通常の上位保持）。
     let mut i2 = px("imul_gv_ev", &[Reg(V), Ea(V)], "imul {g}, {e}", "mult");
     i2.nf_ok = true;
     i2.ndd_req = true;
@@ -4832,7 +4850,7 @@ fn build_map_apx(m: &mut Model) {
         "mult",
     );
     i3z.nf_ok = true;
-    i3z.zu = true;
+    i3z.zu_optional = true;
     let mut i3b = px(
         "imul_gv_ev_ib",
         &[Reg(V), Ea(V), Imm(B8)],
@@ -4840,7 +4858,7 @@ fn build_map_apx(m: &mut Model) {
         "mult",
     );
     i3b.nf_ok = true;
-    i3b.zu = true;
+    i3b.zu_optional = true;
     v.extend([
         MapItem::Insn(0xAF, i2),
         MapItem::Insn(0x69, i3z),
