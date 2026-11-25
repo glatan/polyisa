@@ -3,7 +3,7 @@
 // Gap: GAP-0030
 //! QEMU user-mode との RV64 実行差分（層: diff、E3）。
 //!
-//! RV64I に加え、M/A 拡張、幅違いロード、条件分岐/JAL で作った
+//! RV64I に加え、M/A/C 拡張、幅違いロード、条件分岐/JAL で作った
 //! 64 ビット値を静的 ELF から stdout へ書き、同じ ELF を polyisa と
 //! `qemu-riscv64` で実行して出力と終了コードを比較する。
 //! qemu-riscv64 がなければスキップする。
@@ -127,7 +127,7 @@ fn sx32(x: u32) -> u64 {
     x as i32 as i64 as u64
 }
 
-fn expected() -> [u64; 7] {
+fn expected() -> [u64; 8] {
     let mut t0 = 0x1234_5000u64;
     t0 = t0.wrapping_add(0x678);
     t0 <<= 32;
@@ -179,7 +179,8 @@ fn expected() -> [u64; 7] {
     let sc_success = 0u64;
     let q5 = 5u64 ^ 12u64 ^ sc_success ^ 7u64;
     let q6 = 3u64;
-    [q0, q1, q2, q3, q4, q5, q6]
+    let q7 = 15u64;
+    [q0, q1, q2, q3, q4, q5, q6, q7]
 }
 
 /// コード列と、結果・メモリ実験用のデータを含む 1 セグメント ELF。
@@ -320,10 +321,18 @@ fn image() -> Vec<u8> {
     // 次の ADDI の後ろだが、条件が偽なので通らない。
     patch_branch(&mut code, beq_at, beq_at + 2, 0, 5, 0);
 
-    // write(1,out,56); exit_group(0)
+    // q7: C 拡張。4 個の 16 ビット命令を 2 ワードへ詰め、
+    // c.li/c.addi/c.add で 15 を作る。
+    code.extend([
+        0x040D_4415, // c.li s0,5; c.addi s0,3
+        0x9426_449D, // c.li s1,7; c.add s0,s1
+        stype(56, 8, 11, 3),
+    ]);
+
+    // write(1,out,64); exit_group(0)
     code.extend([
         addi(10, 0, 1),
-        addi(12, 0, 56),
+        addi(12, 0, 64),
         addi(17, 0, 64),
         0x0000_0073,
         addi(10, 0, 0),
@@ -421,7 +430,7 @@ fn qemu_path() -> Option<&'static str> {
 }
 
 #[test]
-fn diff_qemu_rv64ima_program() {
+fn diff_qemu_rv64imac_program() {
     let Some(qemu) = qemu_path() else {
         eprintln!("qemu-riscv64 がない。スキップ");
         return;
@@ -447,8 +456,8 @@ fn diff_qemu_rv64ima_program() {
     let argv = vec![elf.to_str().unwrap().to_string()];
     let code = run_elf_handler(elf.to_str().unwrap(), &argv, None, &mut cap).expect("polyisa run");
     assert_eq!(code, 0, "poly exit");
-    assert_eq!(qout.stdout.len(), 56, "qemu stdout len");
-    assert_eq!(cap.out.len(), 56, "poly stdout len");
+    assert_eq!(qout.stdout.len(), 64, "qemu stdout len");
+    assert_eq!(cap.out.len(), 64, "poly stdout len");
     assert_eq!(cap.out, qout.stdout, "qemu/poly stdout");
     for (i, want) in expected().into_iter().enumerate() {
         let got = u64::from_le_bytes(cap.out[i * 8..i * 8 + 8].try_into().unwrap());
