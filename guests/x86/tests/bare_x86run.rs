@@ -13030,6 +13030,36 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_fchs_empty_operand_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xE0])
+            .unwrap(); // fchs
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    let (fsw, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
+    let (fsw, sig, exp) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((sig, exp), (0, 0));
+}
+
+#[test]
 fn run_x87_fadd_empty_source_underflow_masked_and_unmasked() {
     fn once(fcw: u16) -> (u16, u64, u16) {
         let mut env = bare_x86_env();

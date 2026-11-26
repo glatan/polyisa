@@ -10059,16 +10059,23 @@ pub fn fcmov<B: Backend>(b: &mut B, cond: B::B, i: u8) -> Flow<B> {
 /// FCHS（符号反転）/FABS（符号クリア）。
 pub fn fchs_abs<B: Backend>(b: &mut B, abs: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
-    let new_exp = if abs {
-        let m = b.konst::<W16>(0x7fff);
-        b.and::<W16>(exp, m)
-    } else {
-        let m = b.konst::<W16>(0x8000);
-        b.xor::<W16>(exp, m)
-    };
-    sem::write_st(b, top, sig, new_exp);
-    Ok(())
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let new_exp = if abs {
+            let m = b.konst::<W16>(0x7fff);
+            b.and::<W16>(exp, m)
+        } else {
+            let m = b.konst::<W16>(0x8000);
+            b.xor::<W16>(exp, m)
+        };
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        let sig_out = b.select::<W64>(fault, indef_sig, sig);
+        let exp_out = b.select::<W16>(fault, indef_exp, new_exp);
+        sem::write_st(b, top, sig_out, exp_out);
+        Ok(())
+    })
 }
 
 /// FLD1/FLDZ/FLDPI/FLDL2T/FLDL2E/FLDLG2/FLDLN2。
