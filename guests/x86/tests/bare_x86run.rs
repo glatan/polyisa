@@ -13032,6 +13032,84 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_binary_empty_source_masked_and_unmasked() {
+    fn once(opcode: u8, fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, opcode])
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // FPREM と FSCALE。ST(1) が empty なので masked では ST(0)=indefinite。
+    for opcode in [0xF8, 0xFD] {
+        let (fsw, sig, exp) = once(opcode, 0x037F);
+        assert_eq!(fsw & 0x241, 0x41, "opcode {opcode:#x}");
+        assert_eq!(fsw & 0x8080, 0, "opcode {opcode:#x}");
+        assert_eq!(
+            (sig, exp),
+            (0xC000_0000_0000_0000, 0xFFFF),
+            "opcode {opcode:#x}"
+        );
+        let (fsw, sig, exp) = once(opcode, 0x037E);
+        assert_eq!(fsw & 0x82C1, 0x80C1, "opcode {opcode:#x}");
+        assert_eq!(
+            (sig, exp),
+            (0x8000_0000_0000_0000, 0x3FFF),
+            "opcode {opcode:#x}"
+        );
+    }
+}
+
+#[test]
+fn run_x87_unary_empty_operand_masked_and_unmasked() {
+    fn once(opcode: u8, fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, opcode])
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    for opcode in [0xFA, 0xFC] {
+        let (fsw, sig, exp) = once(opcode, 0x037F);
+        assert_eq!(fsw & 0x241, 0x41, "opcode {opcode:#x}");
+        assert_eq!(fsw & 0x8080, 0, "opcode {opcode:#x}");
+        assert_eq!(
+            (sig, exp),
+            (0xC000_0000_0000_0000, 0xFFFF),
+            "opcode {opcode:#x}"
+        );
+        let (fsw, sig, exp) = once(opcode, 0x037E);
+        assert_eq!(fsw & 0x82C1, 0x80C1, "opcode {opcode:#x}");
+        assert_eq!((sig, exp), (0, 0), "opcode {opcode:#x}");
+    }
+}
+
+#[test]
 fn run_x87_fcmov_empty_source_false_condition() {
     fn once(fcw: u16) -> (u16, u64, u16) {
         let mut env = bare_x86_env();
@@ -14048,6 +14126,7 @@ fn run_frndint_honors_fcw_and_preserves_negative_zero() {
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        x87_recalc_tag(&mut env, 0);
         env.backend
             .mem
             .write(VirtAddr(0x1000), &[0xD9, 0xFC])
@@ -18299,6 +18378,8 @@ fn run_x87_fprem_exact_complete_and_partial_reduction() {
         .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
     env.backend
         .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xD9, 0xF8]) // fprem
@@ -18331,6 +18412,8 @@ fn run_x87_fprem_exact_complete_and_partial_reduction() {
         .set(polyisa_guest_x86::sem::st_sig_ref(1), 0xC000_0000_0000_0000);
     env.backend
         .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xD9, 0xF8, 0xD9, 0xF8])

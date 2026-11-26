@@ -10112,69 +10112,97 @@ pub fn fld_const<B: Backend>(b: &mut B, which: u8) -> Flow<B> {
 /// FSQRT。80 ビットを倍精度に落として平方根し戻す（精度は倍精度近似）。
 pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
-    // 負の非零・非 NaN 入力は invalid operation。結果 NaN は
-    // 既存の host f64 経路に任せ、ここでは例外フラグだけ立てる。
-    let e64 = b.zext::<W16, W64>(exp);
-    let z64 = b.konst::<W64>(0);
-    let one64 = b.konst::<W64>(1);
-    let s15 = b.konst::<W64>(15);
-    let sign = b.shr_l::<W64>(e64, s15);
-    let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
-    let mask15 = b.konst::<W64>(0x7fff);
-    let ea = b.and::<W64>(e64, mask15);
-    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
-    let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, z64);
-    let is_zero = sem::bit_and(b, exp_zero, sig_zero);
-    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
-    let frac = b.and::<W64>(sig, frac_mask);
-    let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, z64);
-    let sp = b.cmp::<W64>(Cmp::Eq, ea, mask15);
-    let is_nan = sem::bit_and(b, sp, frac_nz);
-    let nonzero = sem::bit_not(b, is_zero);
-    let not_nan = sem::bit_not(b, is_nan);
-    let neg_nonzero = sem::bit_and(b, neg, nonzero);
-    let invalid = sem::bit_and(b, neg_nonzero, not_nan);
-    sem::x87_exception_flag(b, invalid, 1);
-    let v = sem::f80_to_f64(b, sig, exp);
-    let f = b.trunc::<W64, polyisa_sem::F64>(v);
-    let r = b.fsqrt::<polyisa_sem::F64>(f);
-    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
-    let (sr, er) = sem::f64_to_ext(b, r64);
-    sem::write_st(b, top, sr, er);
-    Ok(())
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                sem::write_st(b, top, indef_sig, indef_exp);
+                Ok(())
+            },
+            |b| {
+                // 負の非零・非 NaN 入力は invalid operation。結果 NaN は
+                // 既存の host f64 経路に任せ、ここでは例外フラグだけ立てる。
+                let e64 = b.zext::<W16, W64>(exp);
+                let z64 = b.konst::<W64>(0);
+                let one64 = b.konst::<W64>(1);
+                let s15 = b.konst::<W64>(15);
+                let sign = b.shr_l::<W64>(e64, s15);
+                let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
+                let mask15 = b.konst::<W64>(0x7fff);
+                let ea = b.and::<W64>(e64, mask15);
+                let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
+                let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, z64);
+                let is_zero = sem::bit_and(b, exp_zero, sig_zero);
+                let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+                let frac = b.and::<W64>(sig, frac_mask);
+                let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, z64);
+                let sp = b.cmp::<W64>(Cmp::Eq, ea, mask15);
+                let is_nan = sem::bit_and(b, sp, frac_nz);
+                let nonzero = sem::bit_not(b, is_zero);
+                let not_nan = sem::bit_not(b, is_nan);
+                let neg_nonzero = sem::bit_and(b, neg, nonzero);
+                let invalid = sem::bit_and(b, neg_nonzero, not_nan);
+                sem::x87_exception_flag(b, invalid, 1);
+                let v = sem::f80_to_f64(b, sig, exp);
+                let f = b.trunc::<W64, polyisa_sem::F64>(v);
+                let r = b.fsqrt::<polyisa_sem::F64>(f);
+                let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
+                let (sr, er) = sem::f64_to_ext(b, r64);
+                sem::write_st(b, top, sr, er);
+                Ok(())
+            },
+        )
+    })
 }
 
 /// FRNDINT。80 ビット整数変換を使い FCW の RC に従う。
 /// |x| >= 2^63・無限大・NaN は整数化しても値が変わらないので入力を保つ。
 pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
-    let iv = sem::f80_to_i64(b, sig, exp);
-    let (isig, mut iexp) = sem::i64_to_ext(b, iv);
-    // 入力が負で結果整数が 0 のときは -0 を保つ。
-    let z64 = b.konst::<W64>(0);
-    let zero_i = b.cmp::<W64>(Cmp::Eq, iv, z64);
-    let e64 = b.zext::<W16, W64>(exp);
-    let s15 = b.konst::<W64>(15);
-    let sign = b.shr_l::<W64>(e64, s15);
-    let one64 = b.konst::<W64>(1);
-    let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
-    let neg_zero = sem::bit_and(b, zero_i, neg);
-    let signbit = b.konst::<W16>(0x8000);
-    let iexp_signed = b.or::<W16>(iexp, signbit);
-    iexp = b.select::<W16>(neg_zero, iexp_signed, iexp);
-    // 指数が 63 以上なら整数化で値は変わらない。NaN/Inf の
-    // 0x7fff もこの条件に含まれる。
-    let exp64 = b.zext::<W16, W64>(exp);
-    let mask15 = b.konst::<W64>(0x7fff);
-    let ea = b.and::<W64>(exp64, mask15);
-    let lim = b.konst::<W64>(16383 + 63);
-    let small = b.cmp::<W64>(Cmp::LtU, ea, lim);
-    let sr = b.select::<W64>(small, isig, sig);
-    let er = b.select::<W16>(small, iexp, exp);
-    sem::write_st(b, top, sr, er);
-    Ok(())
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                sem::write_st(b, top, indef_sig, indef_exp);
+                Ok(())
+            },
+            |b| {
+                let iv = sem::f80_to_i64(b, sig, exp);
+                let (isig, mut iexp) = sem::i64_to_ext(b, iv);
+                // 入力が負で結果整数が 0 のときは -0 を保つ。
+                let z64 = b.konst::<W64>(0);
+                let zero_i = b.cmp::<W64>(Cmp::Eq, iv, z64);
+                let e64 = b.zext::<W16, W64>(exp);
+                let s15 = b.konst::<W64>(15);
+                let sign = b.shr_l::<W64>(e64, s15);
+                let one64 = b.konst::<W64>(1);
+                let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
+                let neg_zero = sem::bit_and(b, zero_i, neg);
+                let signbit = b.konst::<W16>(0x8000);
+                let iexp_signed = b.or::<W16>(iexp, signbit);
+                iexp = b.select::<W16>(neg_zero, iexp_signed, iexp);
+                // 指数が 63 以上なら整数化で値は変わらない。NaN/Inf の
+                // 0x7fff もこの条件に含まれる。
+                let exp64 = b.zext::<W16, W64>(exp);
+                let mask15 = b.konst::<W64>(0x7fff);
+                let ea = b.and::<W64>(exp64, mask15);
+                let lim = b.konst::<W64>(16383 + 63);
+                let small = b.cmp::<W64>(Cmp::LtU, ea, lim);
+                let sr = b.select::<W64>(small, isig, sig);
+                let er = b.select::<W16>(small, iexp, exp);
+                sem::write_st(b, top, sr, er);
+                Ok(())
+            },
+        )
+    })
 }
 
 /// FFREE。データビットは残し、タグだけ empty にする。
@@ -12014,9 +12042,12 @@ pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
 /// FPREM は商を trunc、FPREM1 は最近接偶数へ丸める。結果は exact。
 pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (s0, e0) = sem::read_st(b, top);
+    let (s0, e0, fault0) = sem::read_st_source(b, top);
     let slot = st_slot(b, 1);
-    let (s1, e1) = sem::read_st(b, slot);
+    let (s1, e1, fault1) = sem::read_st_source(b, slot);
+    let fault = sem::bit_or(b, fault0, fault1);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    let nofault = sem::bit_not(b, fault);
 
     // 非正規入力や特殊値に対する既存の倍精度近似。通常の有限入力では
     // 下の整数経路が優先される。
@@ -12055,7 +12086,8 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let snz1 = sem::bit_not(b, sz1);
     let den0 = sem::bit_and(b, ez0, snz0);
     let den1 = sem::bit_and(b, ez1, snz1);
-    let denormal_in = sem::bit_or(b, den0, den1);
+    let denormal_in0 = sem::bit_or(b, den0, den1);
+    let denormal_in = sem::bit_and(b, denormal_in0, nofault);
     sem::x87_exception_flag(b, denormal_in, 1 << 1);
 
     let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
@@ -12071,7 +12103,8 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let inf1 = sem::bit_and(b, sp1, f1zero);
     let zero0 = sem::bit_and(b, ez0, sz0);
     let zero1 = sem::bit_and(b, ez1, sz1);
-    let invalid0 = sem::bit_or(b, inf0, zero1);
+    let invalid_raw = sem::bit_or(b, inf0, zero1);
+    let invalid0 = sem::bit_and(b, invalid_raw, nofault);
     sem::x87_exception_flag(b, invalid0, 1);
 
     // 正規化有限入力では、指数差に応じて整数の筆算だけで求める。
@@ -12181,9 +12214,12 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let er_sel0 = b.select::<W16>(normal_inputs, er_exact16, er_f);
     let sig_sel1 = b.select::<W64>(unchanged0, s0, sig_sel0);
     let er_sel1 = b.select::<W16>(unchanged0, e0, er_sel0);
-    let sig_out = b.select::<W64>(use_nan, nan_sig, sig_sel1);
-    let er_out = b.select::<W16>(use_nan, nan_exp, er_sel1);
-    sem::write_st(b, top, sig_out, er_out);
+    let sig_out0 = b.select::<W64>(use_nan, nan_sig, sig_sel1);
+    let er_out0 = b.select::<W16>(use_nan, nan_exp, er_sel1);
+    let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp = b.konst::<W16>(0xffff);
+    let sig_out = b.select::<W64>(fault, indef_sig, sig_out0);
+    let er_out = b.select::<W16>(fault, indef_exp, er_out0);
 
     // 商の符号を反映した低 3 ビット。完全時は C0=Q2/C3=Q1/C1=Q0、
     // 部分時は C2=1、C0=C3=0 で C1 だけ商の bit0。
@@ -12222,9 +12258,15 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let c23 = b.or::<W16>(c2, c3);
     let cbits = b.or::<W16>(c01, c23);
     let exact_cc = b.or::<W16>(cleared, cbits);
-    let nv = b.select::<W16>(normal_inputs, exact_cc, old);
-    b.set(sem::fsw_ref(), nv);
-    Ok(())
+    let nv_normal = b.select::<W16>(normal_inputs, exact_cc, old);
+    // stack fault の masked response では indefinite を置き、C ビットは
+    // 不定なので 0 側へ揃える。unmasked ではこのブロック自体が走らない。
+    let nv = b.select::<W16>(fault, cleared, nv_normal);
+    b.if_then(commit, |b| {
+        sem::write_st(b, top, sig_out, er_out);
+        b.set(sem::fsw_ref(), nv);
+        Ok(())
+    })
 }
 
 /// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。整数化は 80 ビットから直接行い、
@@ -12232,9 +12274,11 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
 /// 結果が上限を超えると無限、下限を割ると仮数右シフトの非正規数（近似）。
 pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (s0, e0) = sem::read_st(b, top);
+    let (s0, e0, fault0) = sem::read_st_source(b, top);
     let slot = st_slot(b, 1);
-    let (s1, e1) = sem::read_st(b, slot);
+    let (s1, e1, fault1) = sem::read_st_source(b, slot);
+    let fault = sem::bit_or(b, fault0, fault1);
+    let commit = sem::x87_commit_after_fault(b, fault);
     let n = f80_to_i64_trunc_occ(b, s1, e1).0;
     let hi = b.konst::<W64>(0x8000);
     let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
@@ -12273,8 +12317,14 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let sgn = b.and::<W64>(e64, m8000);
     let exp_s = b.or::<W64>(exp_p, sgn);
     let exp16 = b.trunc::<W64, W16>(exp_s);
-    sem::write_st(b, top, sig_p, exp16);
-    Ok(())
+    let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp = b.konst::<W16>(0xffff);
+    let sig_out = b.select::<W64>(fault, indef_sig, sig_p);
+    let exp_out = b.select::<W16>(fault, indef_exp, exp16);
+    b.if_then(commit, |b| {
+        sem::write_st(b, top, sig_out, exp_out);
+        Ok(())
+    })
 }
 
 /// FXTRACT。ST(0) を指数・仮数に分け、結果は ST(0)=仮数（指数 0x3fff、
