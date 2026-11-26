@@ -5587,6 +5587,8 @@ mod tests {
         env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
         // 64 ビットでフルサイズの CPU 状態が要る。
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
         env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
         env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
         env.backend.set(
@@ -5697,6 +5699,8 @@ mod tests {
         let mut env = bare();
         env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
         env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
         env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
         set64(&mut env, Gpr(4), 0x8000);

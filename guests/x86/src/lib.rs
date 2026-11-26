@@ -53,6 +53,9 @@ pub struct CpuState {
     pub top: u16,
     /// x87 レジスタの指数部。bit15 が符号、bit14:0 がバイアス 16383 の指数。
     pub st_exp: [u16; 8],
+    /// x87 の full tag word。物理レジスタ R0-R7 ごとの 2 ビットで、
+    /// 00=valid、01=zero、10=special、11=empty。初期値は全 empty の 0xffff。
+    pub ftw: u16,
     /// x87 レジスタの仮数。bit63 が整数ビット。
     pub st_sig: [u64; 8],
     /// FS セグメントのベース（TLS）。arch_prctl(ARCH_SET_FS) 相当で設定する。
@@ -138,6 +141,7 @@ impl Default for CpuState {
             fcw: 0,
             top: 0,
             st_exp: Default::default(),
+            ftw: 0xffff,
             st_sig: Default::default(),
             fs_base: 0,
             gs_base: 0,

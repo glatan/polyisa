@@ -6772,12 +6772,31 @@ fn x87_read_st(env: &mut BareEnv, logical: u16) -> (u64, u16) {
     )
 }
 
+fn x87_tag_from_value_scalar(sig: u64, exp: u16) -> u16 {
+    let ef = exp & 0x7fff;
+    if ef == 0 && sig == 0 {
+        1
+    } else if ef != 0 && ef != 0x7fff && sig & (1u64 << 63) != 0 {
+        0
+    } else {
+        2
+    }
+}
+
+fn x87_write_tag_scalar(env: &mut BareEnv, physical: usize, tag: u16) {
+    let old: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    let shift = physical * 2;
+    let nv = (old & !(3u16 << shift)) | ((tag & 3) << shift);
+    env.backend.set(polyisa_guest_x86::sem::ftw_ref(), nv);
+}
+
 fn x87_write_st(env: &mut BareEnv, logical: u16, value: (u64, u16)) {
     let i = x87_st_index(env, logical);
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(i), value.0);
     env.backend
         .set(polyisa_guest_x86::sem::st_exp_ref(i), value.1);
+    x87_write_tag_scalar(env, i, x87_tag_from_value_scalar(value.0, value.1));
 }
 
 fn x87_push(env: &mut BareEnv, value: (u64, u16)) {
@@ -6788,14 +6807,16 @@ fn x87_push(env: &mut BareEnv, value: (u64, u16)) {
         .set(polyisa_guest_x86::sem::st_sig_ref(usize::from(nt)), value.0);
     env.backend
         .set(polyisa_guest_x86::sem::st_exp_ref(usize::from(nt)), value.1);
+    x87_write_tag_scalar(
+        env,
+        usize::from(nt),
+        x87_tag_from_value_scalar(value.0, value.1),
+    );
 }
 
 fn x87_pop(env: &mut BareEnv) {
     let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
-    env.backend
-        .set(polyisa_guest_x86::sem::st_sig_ref(usize::from(top)), 0);
-    env.backend
-        .set(polyisa_guest_x86::sem::st_exp_ref(usize::from(top)), 0);
+    x87_write_tag_scalar(env, usize::from(top), 3);
     env.backend
         .set(polyisa_guest_x86::sem::top_ref(), (top + 1) & 7);
 }
@@ -6882,8 +6903,15 @@ fn concrete_step(
 fn x87_transcendental_step(
     env: &mut BareEnv,
     md: &polyisa_guest_x86::MapDec,
+    mode: u8,
+    eip: u32,
 ) -> Option<Result<(), InterpExit>> {
     use polyisa_guest_x86::Insn;
+    if mode == 16 {
+        // 実モードでは FPU 有無と ESC 例外の世代差を dispatch_map が
+        // 扱う。ここで先取りするとその規則を bypass する。
+        return None;
+    }
     if md.modrm < 0xC0 {
         return None;
     }
@@ -6894,6 +6922,18 @@ fn x87_transcendental_step(
         _ => false,
     };
     if hit {
+        // 超越関数の concrete hook は dispatch_map より先に走るので、
+        // 次の x87 命令に遅延する unmasked 例外の検査もここで行う。
+        let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if (fsw & !fcw & 0x3f) != 0 {
+            return Some(Err(InterpExit::Exception(polyisa_sem::GuestException {
+                kind: ExceptionKind::Fp,
+                code: 16,
+                addr: Some(u64::from(eip)),
+                in_delay_slot: false,
+            })));
+        }
         x87_transcendental_exec(env, op);
         Some(Ok(()))
     } else {
@@ -7505,7 +7545,7 @@ fn step_x86_map(
         (seg, false, 0)
     };
     if let Some(r) = concrete_step(env, |env| {
-        x87_transcendental_step(env, &md)
+        x87_transcendental_step(env, &md, mode, eip)
             .or_else(|| xsavec_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| xrstorc_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| xstore_step(env, &md))
@@ -15755,6 +15795,8 @@ fn run_image_x86_32_impl(
     env.backend.set(Gpr(4).state(), sp as u32);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
@@ -16029,6 +16071,8 @@ fn run_image_x86_64_impl(
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
@@ -17586,6 +17630,7 @@ mod tests {
         env.backend.mem.write(VirtAddr(sp), &img).unwrap();
         sem::write64(&mut env.backend, Gpr(4), sp);
         env.backend.set(sem::fcw_ref(), 0x037F);
+        env.backend.set(sem::ftw_ref(), 0xffffu16);
         env.backend.set(sem::mxcsr_ref(), 0x1F80);
         // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
         // 後の 3 で始める（実機のリセット値は 1）。

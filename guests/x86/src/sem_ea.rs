@@ -8491,8 +8491,10 @@ fn maskmov_store<B: Backend>(
     Ok(())
 }
 
-/// EMMS。タグワードはモデル化していないので状態変化なし。
-pub fn emms<B: Backend>(_b: &mut B) -> Flow<B> {
+/// EMMS。全 x87 タグを empty にする。
+pub fn emms<B: Backend>(b: &mut B) -> Flow<B> {
+    let empty_tags = b.konst::<W16>(0xffff);
+    b.set(sem::ftw_ref(), empty_tags);
     Ok(())
 }
 
@@ -10015,12 +10017,11 @@ pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// FFREE。タグ未モデルのためスロットをゼロにする。
+/// FFREE。データビットは残し、タグだけ empty にする。
 pub fn ffree<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let slot = st_slot(b, i);
-    let z64 = b.konst::<W64>(0);
-    let z16 = b.konst::<W16>(0);
-    sem::write_st(b, slot, z64, z16);
+    let empty = b.konst::<W16>(3);
+    sem::x87_write_tag(b, slot, empty);
     Ok(())
 }
 
@@ -10056,17 +10057,15 @@ pub fn fclex<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// FINIT。FCW=0x037f、TOP=0、スタックを空にする。
+/// FINIT。FCW=0x037f、TOP=0、全タグを empty にする。
 pub fn finit<B: Backend>(b: &mut B) -> Flow<B> {
     let fcw = b.konst::<W16>(0x037f);
     b.set(sem::fcw_ref(), fcw);
     let z16 = b.konst::<W16>(0);
-    let z64 = b.konst::<W64>(0);
     b.set(sem::top_ref(), z16);
-    for slot in 0..8 {
-        b.set(sem::st_sig_ref(slot), z64);
-        b.set(sem::st_exp_ref(slot), z16);
-    }
+    b.set(sem::fsw_ref(), z16);
+    let empty_tags = b.konst::<W16>(0xffff);
+    b.set(sem::ftw_ref(), empty_tags);
     Ok(())
 }
 
@@ -11704,10 +11703,9 @@ pub fn ftst_st<B: Backend>(b: &mut B) -> Flow<B> {
     fcom_ext(b, zs, ze, false)
 }
 
-/// FXAM。ST(0) を分類して C0=符号、C1-C3=クラスを書く。
+/// FXAM。ST(0) を分類して C1=符号、C3/C2/C0=クラスを書く。
 /// クラス: 0=未対応(unnormal) 1=NaN 2=正規 3=無限 4=ゼロ 5=空 6=非正規。
-/// モデルはタグを持たず sig==0 && exp==0 をゼロと空で区別できないため、
-/// 両方 0 のスロットは Zero(4) に分類する。
+/// タグが empty のスロットは値ビットに関係なく Empty(5) に分類する。
 pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
@@ -11730,11 +11728,13 @@ pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
     let not_ef = sem::bit_not(b, ef);
     let range = sem::bit_and(b, not_ez, not_ef);
     let not_sib = sem::bit_not(b, sib);
-    let is_nan = sem::bit_and(b, ef, not_sib);
+    let nan_shape = sem::bit_and(b, not_sib, int_set);
+    let is_nan = sem::bit_and(b, ef, nan_shape);
     let is_inf = sem::bit_and(b, ef, sib);
     let is_zero = sem::bit_and(b, ez, sz);
     let is_den = sem::bit_and(b, ez, snz);
-    let is_unn = sem::bit_and(b, range, not_int);
+    let nonzero_exp = sem::bit_or(b, range, ef);
+    let is_unn = sem::bit_and(b, nonzero_exp, not_int);
     let mut class = b.konst::<W16>(2);
     let z16 = b.konst::<W16>(0);
     let k0 = b.konst::<W16>(0);
@@ -11747,16 +11747,21 @@ pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
     class = b.select::<W16>(is_inf, k3, class);
     class = b.select::<W16>(is_zero, k4, class);
     class = b.select::<W16>(is_den, k6, class);
+    let tag = sem::x87_read_tag(b, top);
+    let empty_tag = b.konst::<W16>(3);
+    let is_empty = b.cmp::<W16>(Cmp::Eq, tag, empty_tag);
+    let k5 = b.konst::<W16>(5);
+    class = b.select::<W16>(is_empty, k5, class);
     let four = b.konst::<W16>(4);
     let two = b.konst::<W16>(2);
     let c3f = b.cmp::<W16>(Cmp::GeU, class, four);
     let c2v = b.and::<W16>(class, two);
     let c2f = b.cmp::<W16>(Cmp::Ne, c2v, z16);
-    let c1v = b.and::<W16>(class, k1);
-    let c1f = b.cmp::<W16>(Cmp::Ne, c1v, z16);
+    let c0v = b.and::<W16>(class, k1);
+    let c0f = b.cmp::<W16>(Cmp::Ne, c0v, z16);
     let s15 = b.konst::<W64>(15);
     let sgn = b.shr_l::<W64>(e64, s15);
-    let c0f = b.cmp::<W64>(Cmp::Eq, sgn, one64);
+    let c1f = b.cmp::<W64>(Cmp::Eq, sgn, one64);
     let old: B::V<W16> = b.get(sem::fsw_ref());
     let keep = b.konst::<W16>(!X87_CC_MASK);
     let cleared = b.and::<W16>(old, keep);
@@ -12065,10 +12070,15 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
 }
 
 /// FNSAVE/FNSTENV 共通の環境 28 バイト書き込み。
-/// FCW(2)+FSW|TOP<<11(2)+簡約 FTW(2)+予約/FIP/FCS/FOP/FDP/FDS=0(22)。
+/// 32 ビット保護モード形式。各 32 ビット語の下位に FCW/FSW/FTW を置き、
+/// 上位は 0。FIP/FCS/FOP/FDP/FDS は追跡未実装なので 0 を書く。
 fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64>)>) -> Flow<B> {
     let fcw: B::V<W16> = b.get(sem::fcw_ref());
     decode::mem_store::<B, W16>(b, a, wseg, fcw)?;
+    let z16 = b.konst::<W16>(0);
+    let a2 = b.konst::<W64>(2);
+    let aw = b.add::<W64>(a, a2);
+    decode::mem_store::<B, W16>(b, aw, wseg, z16)?;
     let fsw: B::V<W16> = b.get(sem::fsw_ref());
     let top = b.get(sem::top_ref());
     let seven = b.konst::<W16>(7);
@@ -12076,55 +12086,37 @@ fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W6
     let sh = b.konst::<W16>(11);
     let tbits = b.shl::<W16>(t3, sh);
     let fswv = b.or::<W16>(fsw, tbits);
-    let a2 = b.konst::<W64>(2);
-    let afs = b.add::<W64>(a, a2);
-    decode::mem_store::<B, W16>(b, afs, wseg, fswv)?;
-    // FTW（簡約形）: 物理スロット i が空でなければ bit i = 1。
-    let mut ftag = b.konst::<W16>(0);
-    for i in 0..8u16 {
-        let slot = b.konst::<W16>(i);
-        let (sig, exp) = sem::read_st(b, slot);
-        let e64 = b.zext::<W16, W64>(exp);
-        let mask = b.konst::<W64>(0x7fff);
-        let em = b.and::<W64>(e64, mask);
-        let zro = b.konst::<W64>(0);
-        let e_nz = b.cmp::<W64>(Cmp::Ne, em, zro);
-        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, zro);
-        let nonempty = sem::bit_or(b, e_nz, s_nz);
-        let bit = b.konst::<W16>(1u16 << i);
-        let z16 = b.konst::<W16>(0);
-        let sel = b.select::<W16>(nonempty, bit, z16);
-        ftag = b.or::<W16>(ftag, sel);
-    }
     let a4 = b.konst::<W64>(4);
-    let aft = b.add::<W64>(a, a4);
-    decode::mem_store::<B, W16>(b, aft, wseg, ftag)?;
-    // 予約 + FIP/FCS/FOP/FDP/FDS（オフセット 6-27、計 22 バイト）は 0。
-    let z64 = b.konst::<W64>(0);
+    let afs = b.add::<W64>(a, a4);
+    decode::mem_store::<B, W16>(b, afs, wseg, fswv)?;
     let a6 = b.konst::<W64>(6);
-    let a6w = b.add::<W64>(a, a6);
-    decode::mem_store::<B, W64>(b, a6w, wseg, z64)?;
-    let a14 = b.konst::<W64>(14);
-    let a14w = b.add::<W64>(a, a14);
-    decode::mem_store::<B, W64>(b, a14w, wseg, z64)?;
-    let a22 = b.konst::<W64>(22);
-    let a22w = b.add::<W64>(a, a22);
-    let z32 = b.konst::<W32>(0);
-    decode::mem_store::<B, W32>(b, a22w, wseg, z32)?;
-    let a26 = b.konst::<W64>(26);
-    let a26w = b.add::<W64>(a, a26);
-    let z16 = b.konst::<W16>(0);
-    decode::mem_store::<B, W16>(b, a26w, wseg, z16)?;
+    let aw = b.add::<W64>(a, a6);
+    decode::mem_store::<B, W16>(b, aw, wseg, z16)?;
+    let ftag: B::V<W16> = b.get(sem::ftw_ref());
+    let a8 = b.konst::<W64>(8);
+    let aft = b.add::<W64>(a, a8);
+    decode::mem_store::<B, W16>(b, aft, wseg, ftag)?;
+    let a10 = b.konst::<W64>(10);
+    let aw = b.add::<W64>(a, a10);
+    decode::mem_store::<B, W16>(b, aw, wseg, z16)?;
+    let z64 = b.konst::<W64>(0);
+    let a12 = b.konst::<W64>(12);
+    let aw = b.add::<W64>(a, a12);
+    decode::mem_store::<B, W64>(b, aw, wseg, z64)?;
+    let a20 = b.konst::<W64>(20);
+    let aw = b.add::<W64>(a, a20);
+    decode::mem_store::<B, W64>(b, aw, wseg, z64)?;
     Ok(())
 }
 
-/// FRSTOR/FLDENV 共通の環境読み出し。FCW・FSW（C ビット+TOP）を戻す。
-/// FTW はタグ未モデルのため読み飛ばす。
+/// FRSTOR/FLDENV 共通の環境読み出し。32 ビット保護モード形式の
+/// FCW・FSW（C ビット+TOP）・FTW を戻す。FRSTOR 側はこの FTW の
+/// empty/non-empty だけを使い、非空タグをデータから再計算する。
 fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64>)>) -> Flow<B> {
     let fcw = decode::mem_load::<B, W16>(b, a, wseg)?;
     b.set(sem::fcw_ref(), fcw);
-    let a2 = b.konst::<W64>(2);
-    let afs = b.add::<W64>(a, a2);
+    let a4 = b.konst::<W64>(4);
+    let afs = b.add::<W64>(a, a4);
     let fsw = decode::mem_load::<B, W16>(b, afs, wseg)?;
     let sh = b.konst::<W16>(11);
     let t = b.shr_l::<W16>(fsw, sh);
@@ -12135,7 +12127,26 @@ fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64
     let fsw_n = b.and::<W16>(fsw, keep);
     b.set(sem::fsw_ref(), fsw_n);
     b.set(sem::top_ref(), top);
+    let a8 = b.konst::<W64>(8);
+    let aft = b.add::<W64>(a, a8);
+    let ftw = decode::mem_load::<B, W16>(b, aft, wseg)?;
+    b.set(sem::ftw_ref(), ftw);
     Ok(())
+}
+
+/// FTW image の empty/non-empty を保ち、非空スロットの
+/// valid/zero/special を現在のデータビットから再計算する。
+fn x87_recompute_tags_from_data<B: Backend>(b: &mut B) {
+    for i in 0..8u16 {
+        let slot = b.konst::<W16>(i);
+        let image_tag = sem::x87_read_tag(b, slot);
+        let empty_tag = b.konst::<W16>(3);
+        let is_empty = b.cmp::<W16>(Cmp::Eq, image_tag, empty_tag);
+        let (sig, exp) = sem::read_st(b, slot);
+        let value_tag = sem::x87_tag_from_value(b, sig, exp);
+        let tag = b.select::<W16>(is_empty, empty_tag, value_tag);
+        sem::x87_write_tag(b, slot, tag);
+    }
 }
 
 /// FLDENV m28。環境を読み戻す（FIP/FCS/FOP/FDP/FDS はモデル外）。
@@ -12143,7 +12154,9 @@ pub fn fldenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
-    x87_env_load(b, *a, *wseg)
+    x87_env_load(b, *a, *wseg)?;
+    x87_recompute_tags_from_data(b);
+    Ok(())
 }
 
 /// FNSTENV m28。環境を書き出し、全浮動小数点例外をマスクする（FCW|=0x3f）。
@@ -12204,11 +12217,8 @@ pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     let z16 = b.konst::<W16>(0);
     b.set(sem::fsw_ref(), z16);
     b.set(sem::top_ref(), z16);
-    for i in 0..8u32 {
-        let ii = b.konst::<W16>(i as u16);
-        let z = b.konst::<W64>(0);
-        sem::write_st(b, ii, z, z16);
-    }
+    let empty_tags = b.konst::<W16>(0xffff);
+    b.set(sem::ftw_ref(), empty_tags);
     Ok(())
 }
 
@@ -12235,7 +12245,13 @@ pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
         let ii = b.konst::<W16>(i as u16);
         let summed = b.add::<W16>(top, ii);
         let slot = b.and::<W16>(summed, seven);
-        sem::write_st(b, slot, sig, exp);
+        sem::write_st_data(b, slot, sig, exp);
+        let image_tag = sem::x87_read_tag(b, slot);
+        let empty_tag = b.konst::<W16>(3);
+        let is_empty = b.cmp::<W16>(Cmp::Eq, image_tag, empty_tag);
+        let value_tag = sem::x87_tag_from_value(b, sig, exp);
+        let tag = b.select::<W16>(is_empty, empty_tag, value_tag);
+        sem::x87_write_tag(b, slot, tag);
     }
     Ok(())
 }
@@ -13308,21 +13324,16 @@ pub fn fxsave_area<B: Backend>(
     let tbits = b.shl::<W16>(t3, k11);
     let fswv = b.or::<W16>(fsw, tbits);
     cstore::<B, W16>(b, a2, wseg, fswv, w87)?;
-    // FTW（簡約形、1 ビット/物理スロット）: 空でなければ 1。
-    // 空判定は `x87_env_store` と同じ sig/exp 由来の近似で、
-    // +0.0 のような値のある空判定の誤りは の枠組み。
-    // 予約の上位バイト（+5）は 0 で書く。
+    // FTW（簡約形、1 ビット/物理スロット）: empty だけが 0。
+    let ftw_full: B::V<W16> = b.get(sem::ftw_ref());
     let mut ftw = b.konst::<W8>(0);
     for i in 0..8u16 {
-        let slot = b.konst::<W16>(i);
-        let (sig, exp) = sem::read_st(b, slot);
-        let e64 = b.zext::<W16, W64>(exp);
-        let m7fff = b.konst::<W64>(0x7fff);
-        let em = b.and::<W64>(e64, m7fff);
-        let z0 = b.konst::<W64>(0);
-        let e_nz = b.cmp::<W64>(Cmp::Ne, em, z0);
-        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, z0);
-        let non = sem::bit_or(b, e_nz, s_nz);
+        let sh = b.konst::<W16>(i * 2);
+        let shifted = b.shr_l::<W16>(ftw_full, sh);
+        let three16 = b.konst::<W16>(3);
+        let tag = b.and::<W16>(shifted, three16);
+        let empty = b.cmp::<W16>(Cmp::Eq, tag, three16);
+        let non = sem::bit_not(b, empty);
         let bit = b.konst::<W8>(1u8 << i);
         let z8 = b.konst::<W8>(0);
         let sel = b.select::<W8>(non, bit, z8);
@@ -13345,9 +13356,11 @@ pub fn fxsave_area<B: Backend>(
     let a28 = madd(b, a, 28);
     let mm = b.konst::<W32>(0xFFBF);
     cstore::<B, W32>(b, a28, wseg, mm, wsse)?;
-    // ST0-7（物理レジスタ順。FTW/TOP と組で往復できる）。
+    // ST0-7 のデータ領域は論理順（ST(0) から）。簡約 FTW のビット順だけが物理順。
     for i in 0..8u64 {
-        let slot = b.konst::<W16>(i as u16);
+        let ii = b.konst::<W16>(i as u16);
+        let summed = b.add::<W16>(top, ii);
+        let slot = b.and::<W16>(summed, k7);
         let (sig, exp) = sem::read_st(b, slot);
         let asig = madd(b, a, 32 + 16 * i);
         cstore::<B, W64>(b, asig, wseg, sig, w87)?;
@@ -13373,7 +13386,7 @@ pub fn fxsave_area<B: Backend>(
 /// 両方偽なら現状を保つ（XRSTOR の RFBM 外成分）。
 /// `cstore` と同様の近似で、RFBM 外の成分も値は読み込む
 /// （読み出し側の副作用は残るが状態には反映しない）。
-/// FTW/FOP/FIP/FDP は追跡していないので読み捨てる。
+/// FOP/FIP/FDP は追跡していないので読み捨てる。
 /// 公開の理由: rt_sigreturn が fpstate（同じ配置）から
 /// 復元するとき os-linux 側から呼ぶ。
 pub fn fxrstor_area<B: Backend>(
@@ -13413,21 +13426,40 @@ pub fn fxrstor_area<B: Backend>(
     let t3 = b.select::<W16>(i87, fsw_i, fsw_c);
     let fsw_n = b.select::<W16>(r87, fsw_keep, t3);
     b.set(sem::fsw_ref(), fsw_n);
-    for i in 0..8 {
-        let asig = madd(b, a, 32 + 16 * i as u64);
+    let a4 = madd(b, a, 4);
+    let ftw_m8: B::V<W8> = decode::mem_load(b, a4, wseg)?;
+    let ftw_m = b.zext::<W8, W16>(ftw_m8);
+    for i in 0..8u16 {
+        let asig = madd(b, a, 32 + 16 * u64::from(i));
         let sig_m: B::V<W64> = decode::mem_load(b, asig, wseg)?;
-        let aexp = madd(b, a, 40 + 16 * i as u64);
+        let aexp = madd(b, a, 40 + 16 * u64::from(i));
         let exp_m: B::V<W16> = decode::mem_load(b, aexp, wseg)?;
-        let s_c = b.get(sem::st_sig_ref(i));
-        let e_c = b.get(sem::st_exp_ref(i));
+        // メモリ上の論理 ST(i) は、復元後 TOP を使って物理スロット
+        // (TOP+i)&7 へ戻る。
+        let ii = b.konst::<W16>(i);
+        let summed = b.add::<W16>(top_n, ii);
+        let phys = b.and::<W16>(summed, k7);
+        let (s_c, e_c) = sem::read_st(b, phys);
         let z64 = b.konst::<W64>(0);
         let z16 = b.konst::<W16>(0);
         let s_t = b.select::<W64>(i87, z64, s_c);
         let e_t = b.select::<W16>(i87, z16, e_c);
         let s_n = b.select::<W64>(r87, sig_m, s_t);
         let e_n = b.select::<W16>(r87, exp_m, e_t);
-        b.set(sem::st_sig_ref(i), s_n);
-        b.set(sem::st_exp_ref(i), e_n);
+        sem::write_st_data(b, phys, s_n, e_n);
+        // 簡約 FTW は物理ビット順。0 なら empty、1 なら値から full tag を再計算する。
+        let ftw_sh = b.shr_l::<W16>(ftw_m, phys);
+        let one16 = b.konst::<W16>(1);
+        let nonbit = b.and::<W16>(ftw_sh, one16);
+        let z16b = b.konst::<W16>(0);
+        let nonempty = b.cmp::<W16>(Cmp::Ne, nonbit, z16b);
+        let empty_tag = b.konst::<W16>(3);
+        let value_tag = sem::x87_tag_from_value(b, s_n, e_n);
+        let mem_tag = b.select::<W16>(nonempty, value_tag, empty_tag);
+        let old_tag = sem::x87_read_tag(b, phys);
+        let init_tag = b.select::<W16>(i87, empty_tag, old_tag);
+        let tag_n = b.select::<W16>(r87, mem_tag, init_tag);
+        sem::x87_write_tag(b, phys, tag_n);
     }
     let a24 = madd(b, a, 24);
     let mx_m: B::V<W32> = decode::mem_load(b, a24, wseg)?;

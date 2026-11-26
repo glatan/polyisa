@@ -67,6 +67,11 @@ pub fn st_exp_ref(i: usize) -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, st_exp) + i * 2)
 }
 
+/// x87 の full tag word を指す。物理レジスタごとの 2 ビット。
+pub fn ftw_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, ftw))
+}
+
 /// x87 レジスタ `i` の仮数を指す。
 pub fn st_sig_ref(i: usize) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, st_sig) + i * 8)
@@ -14005,16 +14010,7 @@ pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16
     let seven = b.konst::<W16>(7);
     let new_top = b.and::<W16>(dec, seven);
     b.set(top_ref(), new_top);
-    for i in 0..8 {
-        let slot = b.konst::<W16>(i as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, new_top, slot);
-        let old_sig = b.get(st_sig_ref(i));
-        let old_exp = b.get(st_exp_ref(i));
-        let sig_i = b.select::<W64>(hit, sig, old_sig);
-        let exp_i = b.select::<W16>(hit, exp_word, old_exp);
-        b.set(st_sig_ref(i), sig_i);
-        b.set(st_exp_ref(i), exp_i);
-    }
+    write_st(b, new_top, sig, exp_word);
     Ok(())
 }
 
@@ -14236,16 +14232,7 @@ pub(crate) fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let top = b.get(top_ref());
     let (sig0, exp0) = read_st(b, top);
     let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig_m, exp_m);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, sig_p, old_sig);
-        let new_exp = b.select::<W16>(hit, exp_p, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
+    write_st(b, top, sig_p, exp_p);
     Ok(())
 }
 
@@ -14445,6 +14432,8 @@ pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
     let (sig1, exp1) = read_st(b, src);
+    let tag0 = x87_read_tag(b, top);
+    let tag1 = x87_read_tag(b, src);
     for slot in 0..8 {
         let idx = b.konst::<W16>(slot as u16);
         let hit_top = b.cmp::<W16>(Cmp::Eq, top, idx);
@@ -14458,6 +14447,8 @@ pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
         b.set(st_sig_ref(slot), new_sig);
         b.set(st_exp_ref(slot), new_exp);
     }
+    x87_write_tag(b, top, tag1);
+    x87_write_tag(b, src, tag0);
     Ok(())
 }
 
@@ -14632,43 +14623,9 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let dst = b.and::<W16>(summed, seven);
-    let mut sig = b.konst::<W64>(0);
-    let mut exp = b.konst::<W16>(0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let got_sig = b.get(st_sig_ref(slot));
-        let got_exp = b.get(st_exp_ref(slot));
-        sig = b.select::<W64>(hit, got_sig, sig);
-        exp = b.select::<W16>(hit, got_exp, exp);
-    }
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, sig, old_sig);
-        let new_exp = b.select::<W16>(hit, exp, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let zero64 = b.konst::<W64>(0);
-    let zero16 = b.konst::<W16>(0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, zero64, old_sig);
-        let new_exp = b.select::<W16>(hit, zero16, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let one = b.konst::<W16>(1);
-    let inc = b.add::<W16>(top, one);
-    let new_top = b.and::<W16>(inc, seven);
-    b.set(top_ref(), new_top);
-    Ok(())
+    let (sig, exp) = read_st(b, top);
+    write_st(b, dst, sig, exp);
+    pop_st(b, top)
 }
 
 /// x87 の例外フラグを sticky に立てる。対応する FCW マスクが
@@ -14690,6 +14647,63 @@ pub(crate) fn x87_exception_flag<B: Backend>(b: &mut B, occur: B::B, bit: u16) {
     let summary = b.select::<W16>(unmasked, es_b, z16);
     let nv = b.or::<W16>(flagged, summary);
     b.set(fsw_ref(), nv);
+}
+
+/// 80 ビット値から x87 tag を求める。戻り値は 00=valid、
+/// 01=zero、10=special。empty は値からは求まらず、タグ語だけが持つ。
+pub(crate) fn x87_tag_from_value<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+) -> B::V<W16> {
+    let z64 = b.konst::<W64>(0);
+    let e64 = b.zext::<W16, W64>(exp);
+    let m7fff = b.konst::<W64>(0x7fff);
+    let ef = b.and::<W64>(e64, m7fff);
+    let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, z64);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ef, z64);
+    let exp_all = b.cmp::<W64>(Cmp::Eq, ef, m7fff);
+    let ib = b.konst::<W64>(1u64 << 63);
+    let ibits = b.and::<W64>(sig, ib);
+    let int_set = b.cmp::<W64>(Cmp::Ne, ibits, z64);
+    let exp_nz = bit_not(b, exp_zero);
+    let exp_not_all = bit_not(b, exp_all);
+    let exp_norm = bit_and(b, exp_nz, exp_not_all);
+    let valid = bit_and(b, exp_norm, int_set);
+    let zero = bit_and(b, exp_zero, sig_zero);
+    let mut tag = b.konst::<W16>(2);
+    let valid_tag = b.konst::<W16>(0);
+    tag = b.select::<W16>(valid, valid_tag, tag);
+    let zero_tag = b.konst::<W16>(1);
+    tag = b.select::<W16>(zero, zero_tag, tag);
+    tag
+}
+
+/// 物理スロット `slot_sel` の tag を読む。00=valid、01=zero、
+/// 10=special、11=empty。
+pub(crate) fn x87_read_tag<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> B::V<W16> {
+    let ftw = b.get(ftw_ref());
+    let two = b.konst::<W16>(2);
+    let shift = b.mul::<W16>(slot_sel, two);
+    let shifted = b.shr_l::<W16>(ftw, shift);
+    let three = b.konst::<W16>(3);
+    b.and::<W16>(shifted, three)
+}
+
+/// 物理スロット `slot_sel` の tag を書く。
+pub(crate) fn x87_write_tag<B: Backend>(b: &mut B, slot_sel: B::V<W16>, tag: B::V<W16>) {
+    let ftw = b.get(ftw_ref());
+    let two = b.konst::<W16>(2);
+    let shift = b.mul::<W16>(slot_sel, two);
+    let three = b.konst::<W16>(3);
+    let mask = b.shl::<W16>(three, shift);
+    let all = b.konst::<W16>(0xffff);
+    let keep = b.xor::<W16>(mask, all);
+    let cleared = b.and::<W16>(ftw, keep);
+    let clean_tag = b.and::<W16>(tag, three);
+    let bits = b.shl::<W16>(clean_tag, shift);
+    let nv = b.or::<W16>(cleared, bits);
+    b.set(ftw_ref(), nv);
 }
 
 pub(crate) fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>) {
@@ -15261,8 +15275,13 @@ pub(crate) fn add_ext<B: Backend>(
     x87_apply_precision(b, sig_final, exp_word)
 }
 
-/// ST(slot_sel) に 80 ビット値を書く。スロット番号は値ドメイン。
-pub(crate) fn write_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>, sig: B::V<W64>, exp: B::V<W16>) {
+/// ST(slot_sel) のデータビットだけを書く。タグは変えない。
+pub(crate) fn write_st_data<B: Backend>(
+    b: &mut B,
+    slot_sel: B::V<W16>,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+) {
     for slot in 0..8 {
         let idx = b.konst::<W16>(slot as u16);
         let hit = b.cmp::<W16>(Cmp::Eq, slot_sel, idx);
@@ -15273,6 +15292,13 @@ pub(crate) fn write_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>, sig: B::V<W64
         b.set(st_sig_ref(slot), new_sig);
         b.set(st_exp_ref(slot), new_exp);
     }
+}
+
+/// ST(slot_sel) に 80 ビット値を書き、値から非空タグを再計算する。
+pub(crate) fn write_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>, sig: B::V<W64>, exp: B::V<W16>) {
+    write_st_data(b, slot_sel, sig, exp);
+    let tag = x87_tag_from_value(b, sig, exp);
+    x87_write_tag(b, slot_sel, tag);
 }
 
 /// 正規化済み 80 ビット同士の除算（a / b）。指数の差と 128 ビットの
@@ -15450,16 +15476,7 @@ pub fn fadd_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let src = b.and::<W16>(summed, seven);
     let (sig1, exp1) = read_st(b, src);
     let (sig_s, exp_s) = add_ext(b, sig0, exp0, sig1, exp1);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, sig_s, old_sig);
-        let new_exp = b.select::<W16>(hit, exp_s, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
+    write_st(b, top, sig_s, exp_s);
     Ok(())
 }
 
@@ -15473,33 +15490,8 @@ pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let dst = b.and::<W16>(summed, seven);
     let (sig1, exp1) = read_st(b, dst);
     let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig1, exp1);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, sig_p, old_sig);
-        let new_exp = b.select::<W16>(hit, exp_p, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let zero64 = b.konst::<W64>(0);
-    let zero16 = b.konst::<W16>(0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, zero64, old_sig);
-        let new_exp = b.select::<W16>(hit, zero16, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let one = b.konst::<W16>(1);
-    let inc = b.add::<W16>(top, one);
-    let new_top = b.and::<W16>(inc, seven);
-    b.set(top_ref(), new_top);
-    Ok(())
+    write_st(b, dst, sig_p, exp_p);
+    pop_st(b, top)
 }
 
 /// FSUBP ST(i), ST(0) (DE E8+i)。ST(i) から ST(0) を引いて書き、スタックを一つ捨てる。seq 0x4d0c51 対応.
@@ -15514,33 +15506,8 @@ pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let sign_mask = b.konst::<W16>(0x8000);
     let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
     let (sig_d, exp_d) = add_ext(b, sig1, exp1, sig0, neg_exp0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, sig_d, old_sig);
-        let new_exp = b.select::<W16>(hit, exp_d, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let zero64 = b.konst::<W64>(0);
-    let zero16 = b.konst::<W16>(0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, zero64, old_sig);
-        let new_exp = b.select::<W16>(hit, zero16, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    let one = b.konst::<W16>(1);
-    let inc = b.add::<W16>(top, one);
-    let new_top = b.and::<W16>(inc, seven);
-    b.set(top_ref(), new_top);
-    Ok(())
+    write_st(b, dst, sig_d, exp_d);
+    pop_st(b, top)
 }
 
 /// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
@@ -15738,18 +15705,8 @@ pub fn fistp_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, di
 }
 
 pub(crate) fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
-    let zero64 = b.konst::<W64>(0);
-    let zero16 = b.konst::<W16>(0);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let new_sig = b.select::<W64>(hit, zero64, old_sig);
-        let new_exp = b.select::<W16>(hit, zero16, old_exp);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
+    let empty = b.konst::<W16>(3);
+    x87_write_tag(b, top, empty);
     let one = b.konst::<W16>(1);
     let inc = b.add::<W16>(top, one);
     let seven = b.konst::<W16>(7);

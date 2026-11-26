@@ -10,6 +10,11 @@ use polyisa_guest_x86::sem::Gpr;
 use polyisa_mem::{Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
+fn x87_tag(env: &mut BareEnv, slot: usize) -> u16 {
+    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    (ftw >> (slot * 2)) & 3
+}
+
 /// `exit(ebx)` だけ処理する。番号は EAX、引数は EBX から読む。
 struct ExitOne;
 
@@ -11766,8 +11771,7 @@ fn run_fstp_st0_pops() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)), 0);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)), 0);
+    assert_eq!(x87_tag(&mut env, 7), 3);
 }
 
 #[test]
@@ -11858,8 +11862,7 @@ fn run_fmulp_st1_three_times_one() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
         0x4000
@@ -11929,7 +11932,7 @@ fn run_fstp_m64_sibd_stores_three() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12132,7 +12135,7 @@ fn run_fstp_m80_memnd_stores_three() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12341,7 +12344,7 @@ fn run_fstp_m80_sib_stores_three() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12393,7 +12396,7 @@ fn run_fstp_m80_sibd32_stores_three() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12543,7 +12546,7 @@ fn run_fstp_m80_sibd_stores_three() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12775,8 +12778,7 @@ fn run_fucomip_st1_pops() {
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x42);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(x87_tag(&mut env, 0), 3);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
         0x4000
@@ -13011,6 +13013,32 @@ fn run_x87_unmasked_exception_is_deferred_to_next_fp_insn() {
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xD9, 0xFA, 0xD8, 0xC0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert!(
+        matches!(out, Outcome::Unimplemented { pc: 0x1002, .. }),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn run_x87_pending_exception_blocks_transcendental_hook() {
+    // FSIN は concrete hook で実行されるが、dispatch_map と同じく
+    // 前の x87 命令で残った unmasked exception を先に #MF へ返す。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0xBFFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xFA, 0xD9, 0xFE])
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
@@ -13519,7 +13547,7 @@ fn run_fistp_m64_sibd_honors_rounding() {
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+        assert_eq!(x87_tag(&mut env, 0), 3);
         let acc = polyisa_mem::Access {
             endian: polyisa_mem::Endian::Le,
             align: polyisa_mem::Align::Unaligned,
@@ -13606,8 +13634,7 @@ fn run_fsubp_st1_subtracts_and_pops() {
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
-        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
-        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+        assert_eq!(x87_tag(&mut env, 0), 3);
         (
             env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
             env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
@@ -17401,7 +17428,7 @@ fn run_a2_ftst_fxam() {
         0xDD, 0x3D, 0x06, 0x20, 0x00, 0x00, // fnstsw word [0x2006]
         0xD9, 0xE8, // fld1
         0xD9, 0xE0, // fchs → -1.0
-        0xD9, 0xE5, // fxam → Normal + C0
+        0xD9, 0xE5, // fxam → Normal + sign(C1)
         0xDD, 0x3D, 0x08, 0x20, 0x00, 0x00, // fnstsw word [0x2008]
         0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
     ];
@@ -17417,7 +17444,7 @@ fn run_a2_ftst_fxam() {
     assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0);
     env.backend
         .mem
-        .read(VirtAddr(0x2002), &mut b2, polyisa_mem::Access::DATA_LE)
+        .read(VirtAddr(0x2004), &mut b2, polyisa_mem::Access::DATA_LE)
         .unwrap();
     assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x4000);
     env.backend
@@ -17434,7 +17461,7 @@ fn run_a2_ftst_fxam() {
         .mem
         .read(VirtAddr(0x2008), &mut b2, polyisa_mem::Access::DATA_LE)
         .unwrap();
-    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x0500);
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x0600);
 }
 
 #[test]
@@ -17780,7 +17807,7 @@ fn run_a2_fnstenv_fldenv() {
     assert_eq!(u16::from_le_bytes(b2), 0x0fff);
     env.backend
         .mem
-        .read(VirtAddr(0x2002), &mut b2, polyisa_mem::Access::DATA_LE)
+        .read(VirtAddr(0x2004), &mut b2, polyisa_mem::Access::DATA_LE)
         .unwrap();
     assert_eq!(u16::from_le_bytes(b2) & 0x3800, 7 << 11);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
@@ -18761,6 +18788,139 @@ fn run64_fsgsbase_cet() {
     }
 }
 #[test]
+fn run_x87_tags_distinguish_zero_valid_and_empty() {
+    // FLD1; FLDZ で physical7=valid(1.0)、physical6=zero(+0.0)。
+    // FNSTENV は full tag、FXSAVE は abridged tag を書く。データ領域は論理順。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2000
+        0xD9, 0xE8, // fld1
+        0xD9, 0xEE, // fldz
+        0xD9, 0x33, // fnstenv [rbx]
+        0x48, 0x83, 0xC3, 0x40, // add rbx,0x40
+        0x0F, 0xAE, 0x03, // fxsave [rbx]
+        0xDD, 0xD8, // fstp st(0)
+        0x48, 0x83, 0xC3, 0x40, // add rbx,0x40
+        0x0F, 0xAE, 0x03, // fxsave [rbx]
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 9, true);
+    assert_eq!(
+        out,
+        Outcome::StepLimit {
+            pc: 0x1000 + prog.len() as u64
+        }
+    );
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut h = [0u8; 2];
+    env.backend.mem.read(VirtAddr(0x2008), &mut h, acc).unwrap();
+    assert_eq!(u16::from_le_bytes(h), 0x1fff, "full tag: valid/zero/empty");
+    let mut fx = [0u8; 0x60];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2040), &mut fx, acc)
+        .unwrap();
+    assert_eq!(fx[4], 0xc0, "abridged tag: physical6/7 nonempty");
+    let q = |i: usize| u64::from_le_bytes(fx[i..i + 8].try_into().unwrap());
+    let wh = |i: usize| u16::from_le_bytes(fx[i..i + 2].try_into().unwrap());
+    assert_eq!((q(32), wh(40)), (0, 0), "logical ST(0)=+0.0");
+    assert_eq!(
+        (q(48), wh(56)),
+        (0x8000_0000_0000_0000, 0x3fff),
+        "logical ST(1)=1.0"
+    );
+    env.backend
+        .mem
+        .read(VirtAddr(0x2084), &mut h[..1], acc)
+        .unwrap();
+    assert_eq!(h[0], 0x80, "pop は zero だけを empty にする");
+}
+
+#[test]
+fn run_x87_fldenv_recomputes_nonzero_tag_from_data() {
+    // FLDENV image の slot0 は valid(00) と書かれていても、実データが
+    // +0.0 なら内部 tag は zero(01) へ再計算される。形式は 32 ビット
+    // 保護モードの 28 バイト環境。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0xfffcu16.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2000
+        0xD9, 0x23, // fldenv [rbx]
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(
+        out,
+        Outcome::StepLimit {
+            pc: 0x1000 + prog.len() as u64
+        }
+    );
+    assert_eq!(x87_tag(&mut env, 0), 1);
+    for slot in 1..8 {
+        assert_eq!(x87_tag(&mut env, slot), 3);
+    }
+}
+
+#[test]
+fn run_x87_fsave_frstor_restores_tags_and_logical_order() {
+    // FLD1; FLDZ のあと FNSAVE/FRSTOR。論理 ST(0)=+0、ST(1)=1.0、
+    // physical6=zero、physical7=valid へ戻る。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2000
+        0xD9, 0xE8, // fld1
+        0xD9, 0xEE, // fldz
+        0xDD, 0x33, // fnsave [rbx]
+        0xDD, 0x23, // frstor [rbx]
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 5, true);
+    assert_eq!(
+        out,
+        Outcome::StepLimit {
+            pc: 0x1000 + prog.len() as u64
+        }
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 6);
+    assert_eq!(x87_tag(&mut env, 6), 1, "physical6 は zero");
+    assert_eq!(x87_tag(&mut env, 7), 0, "physical7 は valid");
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(6)), 0);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(6)), 0);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        0x8000_0000_0000_0000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0x3fff
+    );
+}
+
+#[test]
 fn run64_xsave_xcr0() {
     // XGETBV/XSETBV と FXSAVE/FXRSTOR/XSAVE/XRSTOR/XSAVEOPT。
     // xsave 領域は 0x4000（FXSAVE）、0x4400（XSAVE/XSAVEOPT）。
@@ -18772,6 +18932,8 @@ fn run64_xsave_xcr0() {
     env.backend.set(Gpr(4).state(), 0x5800);
     // run_image と同じ電源投入状態（XCR0=1 で x87 成分のみ有効）。
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
     let prog: &[u8] = &[
@@ -18842,8 +19004,8 @@ fn run64_xsave_xcr0() {
     assert_eq!(a[4], 0x80, "ftw: 物理スロット 7 のみ使用中");
     assert_eq!(w32(&a, 24), 0x1F80, "mxcsr");
     assert_eq!(w32(&a, 28), 0xFFBF, "mxcsr_mask");
-    assert_eq!(q(32 + 16 * 7), 0x8000_0000_0000_0000, "st7 有意");
-    assert_eq!(h(40 + 16 * 7), 0x3FFF, "st7 指数(1.0)");
+    assert_eq!(q(32), 0x8000_0000_0000_0000, "ST(0) 有意");
+    assert_eq!(h(40), 0x3FFF, "ST(0) 指数(1.0)");
     // XSAVE 領域（0x4400）: ヘッダ XSTATE_BV=3、XCOMP_BV=0。
     let mut x = [0u8; 8];
     env.backend
