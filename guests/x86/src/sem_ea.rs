@@ -14204,10 +14204,40 @@ pub fn xsave_area_mask<B: Backend>(
     })
 }
 
-/// XSAVE 拡張成分のうち `m` に含まれるものを初期値へ戻す。
-/// x87/SSE は FXSAVE 領域側で扱うためここでは扱わない。
+/// XSAVE 成分のうち `m` に含まれるものを初期値へ戻す。
 /// Linux の sigreturn がフレームにない user xfeature を初期化するために使う。
 pub fn xrstor_init_mask<B: Backend>(b: &mut B, m: B::V<W64>) -> Flow<B> {
+    let i87 = mask_bit(b, m, 0);
+    b.if_then(i87, |b| {
+        let cw = b.konst::<W16>(0x037F);
+        b.set(sem::fcw_ref(), cw);
+        let z16 = b.konst::<W16>(0);
+        b.set(sem::fsw_ref(), z16);
+        b.set(sem::top_ref(), z16);
+        let empty = b.konst::<W16>(0xffff);
+        b.set(sem::ftw_ref(), empty);
+        let z64 = b.konst::<W64>(0);
+        b.set(sem::fip_ref(), z64);
+        b.set(sem::fdp_ref(), z64);
+        b.set(sem::fcs_ref(), z16);
+        b.set(sem::fds_ref(), z16);
+        b.set(sem::fop_ref(), z16);
+        for i in 0..8usize {
+            b.set(sem::st_sig_ref(i), z64);
+            b.set(sem::st_exp_ref(i), z16);
+        }
+        Ok(())
+    })?;
+    let isse = mask_bit(b, m, 1);
+    b.if_then(isse, |b| {
+        let mx = b.konst::<W32>(0x1F80);
+        b.set(sem::mxcsr_ref(), mx);
+        let z: B::V<W128> = b.konst::<W128>(0);
+        for i in 0..16u8 {
+            b.set(sem::xmm_ref(Xmm(i)), z);
+        }
+        Ok(())
+    })?;
     let iymm = mask_bit(b, m, 2);
     b.if_then(iymm, |b| {
         let z: B::V<W128> = b.konst::<W128>(0);
@@ -14289,6 +14319,19 @@ pub fn xrstor_area_mask<B: Backend>(
     let nxbv = b.not::<W64>(xbv);
     let ini = b.and::<W64>(m, nxbv);
     fxrstor_area(b, a, wseg, mode, rst, ini)?;
+    // 標準形式の XRSTOR では、RFBM[1] と RFBM[2] のどちらかが
+    // 立っていれば XSTATE_BV[1] の有無に関係なく MXCSR を legacy
+    // 領域から読む。XMM の初期化は fxrstor_area 側の規則のまま。
+    let sse_or_avx = b.konst::<W64>(0x6);
+    let mxreq = b.and::<W64>(m, sse_or_avx);
+    let z64mx = b.konst::<W64>(0);
+    let load_mx = b.cmp::<W64>(Cmp::Ne, mxreq, z64mx);
+    b.if_then(load_mx, |b| {
+        let a24 = madd(b, a, 24);
+        let mx: B::V<W32> = decode::mem_load(b, a24, wseg)?;
+        b.set(sem::mxcsr_ref(), mx);
+        Ok(())
+    })?;
     // YMMH 成分（+576）。`rst` が立つときだけ領域を読み、`ini`
     // なら読まずに 0 を書く。両方偽なら領域も状態も触らない
     // （xsave 側と同じ回帰防止）。`rst`/`ini` は排他。

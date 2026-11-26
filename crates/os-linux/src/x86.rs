@@ -3141,6 +3141,15 @@ fn signal_use_fxsr(env: &mut BareEnv) -> bool {
     env.backend.get(polyisa_guest_x86::sem::cpuid_ref(1, 3)) & (1 << 24) != 0
 }
 
+/// シグナルハンドラ開始時に user xfeatures を XSAVE init state へ戻す。
+/// 中断時の状態は ucontext.fpregs にだけ残る。
+pub fn signal_init_user_fpstate(env: &mut BareEnv) -> bool {
+    let enabled = signal_user_xfeatures(env);
+    let b = &mut env.backend;
+    let m = b.konst::<W64>(enabled);
+    polyisa_guest_x86::sem_ea::xrstor_init_mask(b, m).is_ok()
+}
+
 /// i386 legacy `fregs_state` の先頭 108 バイトと status/magic を書く。
 /// ST image は logical ST(0) から並ぶ FSAVE 形式。FXSR 対応では
 /// 実データは後続 FXSAVE 領域が正本で、この前置部は互換用の写し。
@@ -3178,6 +3187,16 @@ fn fsave32_header_write(env: &mut BareEnv, fp: u64) -> bool {
         }
     }
     fwr(env, fp + 108, fsw & 0xffff, 4)
+}
+
+/// ia32 FXSR frame の legacy FSAVE 前置部を x87 状態へ fold する。
+/// Linux は互換性のため FX 領域の x87 部を無視し、この legacy 側を
+/// 正本として扱う。SSE/拡張成分はここでは触らない。
+fn fsave32_x87_fold(env: &mut BareEnv, fp: u64) -> bool {
+    let b = &mut env.backend;
+    let a = b.konst::<W64>(fp);
+    let ea = polyisa_guest_x86::decode::Rm::Mem { a, wseg: None };
+    polyisa_guest_x86::sem_ea::frstor_m(b, &ea, 32, 32).is_ok()
 }
 
 /// x86-64 の rt シグナルフレームをスタックに作り、RIP を
@@ -3457,7 +3476,7 @@ pub fn rt_sigframe32_write_ex(
                 return false;
             }
         }
-    } else if !fsave32_header_write(env, fp) {
+    } else if !fsave32_header_write(env, fp) || !fwr(env, fp + 110, 0xffff, 2) {
         return false;
     }
     // movl $__NR_rt_sigreturn,%eax; int $0x80。実際の復帰は
@@ -3512,8 +3531,8 @@ pub fn rt_sigframe32_read(env: &mut BareEnv) -> Option<u64> {
             if use_xsave {
                 let mut xstate_mask = 0x3;
                 let mut as_xstate = false;
-                if let Some(FP_XSTATE_MAGIC1) = buf_fx.checked_add(464).and_then(|a| frd32(env, a))
-                {
+                let magic1 = buf_fx.checked_add(464).and_then(|a| frd32(env, a))?;
+                if magic1 == FP_XSTATE_MAGIC1 {
                     let extended_size = frd32(env, buf_fx + 468)?;
                     let sw_xfeatures = frd64(env, buf_fx + 472)?;
                     let xstate_size = frd32(env, buf_fx + 480)?;
@@ -3540,20 +3559,33 @@ pub fn rt_sigframe32_read(env: &mut BareEnv) -> Option<u64> {
                     polyisa_guest_x86::sem_ea::fxrstor_area(b, buf_fx, None, 32, 3, 0).ok()?;
                 }
                 let missing = enabled & !xstate_mask;
-                if missing & 0x3 != 0 {
-                    let z = b.konst::<W64>(0);
-                    let mi87 = b.konst::<W64>(missing & 0x3);
-                    polyisa_guest_x86::sem_ea::fxrstor_area(b, buf_fx, None, 32, z, mi87).ok()?;
-                }
-                if missing & !0x3 != 0 {
-                    let mi = b.konst::<W64>(missing & !0x3);
+                if missing != 0 {
+                    let mi = b.konst::<W64>(missing);
                     polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
+                }
+                // legacy 前置部が x87 の正本。xstate では XSTATE_BV[0] が
+                // 立つ場合だけ fold し、clear なら x87 は初期値のままにする。
+                let xbv = frd64(env, buf_fx + 512)?;
+                let fold_x87 = xstate_mask & 1 != 0 && (!as_xstate || xbv & 1 != 0);
+                if fold_x87 && !fsave32_x87_fold(env, fp) {
+                    return None;
                 }
             } else {
                 let b = &mut env.backend;
                 polyisa_guest_x86::sem_ea::fxrstor_area(b, buf_fx, None, 32, 3, 0).ok()?;
+                if !fsave32_x87_fold(env, fp) {
+                    return None;
+                }
             }
+        } else if !fsave32_x87_fold(env, fp) {
+            return None;
         }
+    } else {
+        // fpstate=0 は FP/SSE/拡張状態を初期状態へ戻す。
+        let enabled = signal_user_xfeatures(env);
+        let b = &mut env.backend;
+        let mi = b.konst::<W64>(enabled);
+        polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
     }
     let flags = frd32(env, sc + 64)?;
     let ip = frd32(env, sc + 56)?;
@@ -3584,7 +3616,13 @@ pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
         set64(env, Gpr(*r), g[8 + i]);
     }
     let use_xsave = signal_use_xsave(env);
-    if use_xsave {
+    if fp == 0 {
+        // fpstate=0 は FP/SSE/拡張状態を初期状態へ戻す。
+        let enabled = signal_user_xfeatures(env);
+        let b = &mut env.backend;
+        let mi = b.konst::<W64>(enabled);
+        polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
+    } else if use_xsave {
         // SW 予約域と末尾 magic がある場合だけ xstate として復元する。
         // 不正または legacy なら FP/SSE だけを FXRSTOR 相当で復元する。
         let magic1 = fp.checked_add(464).and_then(|a| frd32(env, a))?;
@@ -3596,16 +3634,14 @@ pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
             let xstate_size = fp.checked_add(480).and_then(|a| frd32(env, a))?;
             let enabled = signal_user_xfeatures(env);
             let max_size = polyisa_guest_x86::cpuid::xstate_size(enabled) as u32;
-            if xstate_size >= 576
-                && xstate_size <= max_size
-                && xstate_size <= extended_size
-                && fp
+            if xstate_size >= 576 && xstate_size <= max_size && xstate_size <= extended_size {
+                let magic2 = fp
                     .checked_add(u64::from(xstate_size))
-                    .and_then(|a| frd32(env, a))
-                    == Some(FP_XSTATE_MAGIC2)
-            {
-                xstate_mask = sw_xfeatures & enabled;
-                as_xstate = true;
+                    .and_then(|a| frd32(env, a))?;
+                if magic2 == FP_XSTATE_MAGIC2 {
+                    xstate_mask = sw_xfeatures & enabled;
+                    as_xstate = true;
+                }
             }
         }
         let enabled = signal_user_xfeatures(env);
@@ -3618,13 +3654,8 @@ pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
         }
         // sigreturn はフレームに含まれなかった有効成分を初期状態へ戻す。
         let missing = enabled & !xstate_mask;
-        if missing & 0x3 != 0 {
-            let z = b.konst::<W64>(0);
-            let mi87 = b.konst::<W64>(missing & 0x3);
-            polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, z, mi87).ok()?;
-        }
-        if missing & !0x3 != 0 {
-            let mi = b.konst::<W64>(missing & !0x3);
+        if missing != 0 {
+            let mi = b.konst::<W64>(missing);
             polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
         }
     } else {

@@ -987,8 +987,7 @@ impl Linux {
         TrapOutcome::Exit(sig)
     }
 
-    /// 同期 CPU 例外を x86-64 rt フレームで配送する。i386 の
-    /// フレーム形式は未実装なので、捕捉済みでも既定動作へ倒す。
+    /// 同期 CPU 例外を x86-64/i386 の rt フレームで配送する。
     /// ブロック中の同期例外も実機では再実行や終了に依存するため、
     /// ここでは既定動作へ倒す近似にする。
     fn deliver_exception(
@@ -1024,6 +1023,7 @@ impl Linux {
             crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, si_code, si_addr)
         };
         if ok {
+            crate::x86::signal_init_user_fpstate(env);
             return TrapOutcome::Handled;
         }
         self.sig_mask = old;
@@ -1031,8 +1031,7 @@ impl Linux {
         self.terminate_by_signal(11)
     }
 
-    /// 保留シグナルのうちブロックされていない最も小さい番号を
-    /// 配送する。フレームは x86-64 の rt 形式（i386 は未配送）。
+    /// 保留シグナルのうちブロックされていない最も小さい番号を配送する。
     /// ハンドラが SIG_DFL/SIG_IGN のものは `kill` 側で保留に
     /// しないのでここには来ない。
     // Gap: GAP-0026 — CPU 例外→シグナルの変換、i386 フレーム、
@@ -1073,7 +1072,9 @@ impl Linux {
         } else {
             crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid)
         };
-        if !ok {
+        if ok {
+            crate::x86::signal_init_user_fpstate(env);
+        } else {
             // フレームが書けない（未写像スタック等）。実機なら
             // SIGSEGV で死ぬが、ここでは配送を諦めて保留と
             // ハンドラを戻し、再試行できる状態にする。
@@ -5659,6 +5660,13 @@ mod tests {
         // フレーム基底は ≡8 (mod 16)（call 直後の関数入口と同じ）。
         assert_eq!(f % 16, 8);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0,
+            "ハンドラ開始時の user FP state は初期化される"
+        );
         assert_eq!(get64(&mut env, Gpr(7)), 10); // 第1引数=シグナル
         assert_eq!(get64(&mut env, Gpr(6)), f + 312); // &siginfo
         assert_eq!(get64(&mut env, Gpr(2)), f + 8); // &ucontext
@@ -5717,6 +5725,50 @@ mod tests {
             0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128
         );
         assert_eq!(sys.sig_mask, 0);
+    }
+
+    #[test]
+    fn sigreturn_null_fpstate_initializes_fp_sse_state() {
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 8, Perms::RW).unwrap();
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        set64(&mut env, Gpr(4), 0x9000);
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        assert!(crate::x86::rt_sigframe_write(
+            &mut env,
+            10,
+            &crate::x86::SigAct::default(),
+            0,
+            1234
+        ));
+        let f = get64(&mut env, Gpr(4));
+        // sigcontext.fpregs=NULL。ハンドラ中の値は中断コンテキストへ漏れない。
+        env.backend
+            .mem
+            .write(VirtAddr(f + 48 + 184), &0u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0xffffu128,
+        );
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0);
+        set64(&mut env, Gpr(4), f + 8);
+        assert!(crate::x86::rt_sigframe_read(&mut env).is_some());
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0
+        );
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::mxcsr_ref()), 0x1F80);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x037F);
     }
 
     #[test]
@@ -5859,6 +5911,10 @@ mod tests {
         env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
         env.backend
             .set(polyisa_guest_x86::sem::cpuid_ref(1, 3), 1u32 << 24);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 3);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 3);
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
         env.backend
             .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
@@ -5907,6 +5963,15 @@ mod tests {
         assert_eq!(rd8(&mut env, fp + 110) & 0xFFFF, 0, "X86_FXSR_MAGIC");
         assert_eq!(rd8(&mut env, fp + 112) & 0xFFFF, 0x037F);
         assert_eq!(rd8(&mut env, fp + 112 + 160), 0x1122_3344);
+        assert_eq!(rd8(&mut env, fp + 112 + 464) & 0xFFFF_FFFF, 0x4650_5853);
+        assert_eq!(rd8(&mut env, fp + 112 + 468) & 0xFFFF_FFFF, 0x240 + 4 + 112);
+        assert_eq!(rd8(&mut env, fp + 112 + 480) & 0xFFFF_FFFF, 0x240);
+        assert_eq!(rd8(&mut env, fp + 112 + 0x240) & 0xFFFF_FFFF, 0x4650_5845);
+        // legacy 前置部が x87 の正本。FX 側と異なる値へ書き換えても legacy が勝つ。
+        env.backend
+            .mem
+            .write(VirtAddr(fp), &0x027Fu16.to_le_bytes())
+            .unwrap();
         // restorer へ来た状態（ESP=f+4）で rt_sigreturn を呼ぶ。
         set64(&mut env, Gpr(4), f + 4);
         set64(&mut env, Gpr(3), 0xBBBB);
@@ -5919,6 +5984,7 @@ mod tests {
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x4000);
         assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
         assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x027F);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::xmm_ref(
                 polyisa_guest_x86::sem::Xmm(0)
