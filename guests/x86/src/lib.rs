@@ -58,6 +58,16 @@ pub struct CpuState {
     pub ftw: u16,
     /// x87 レジスタの仮数。bit63 が整数ビット。
     pub st_sig: [u64; 8],
+    /// 最後の non-control x87 命令の命令ポインタ offset。
+    pub fip: u64,
+    /// 最後の non-control x87 命令の CS selector。
+    pub fcs: u16,
+    /// 最後の non-control x87 メモリオペランドの offset。
+    pub fdp: u64,
+    /// 最後の non-control x87 メモリオペランドの selector。
+    pub fds: u16,
+    /// 最後の non-control x87 命令の opcode 11ビット。
+    pub fop: u16,
     /// FS セグメントのベース（TLS）。arch_prctl(ARCH_SET_FS) 相当で設定する。
     /// 実機ではセグメントディスクリプタキャッシュに対応する CPU 状態。
     pub fs_base: u64,
@@ -143,6 +153,11 @@ impl Default for CpuState {
             st_exp: Default::default(),
             ftw: 0xffff,
             st_sig: Default::default(),
+            fip: 0,
+            fcs: 0,
+            fdp: 0,
+            fds: 0,
+            fop: 0,
             fs_base: 0,
             gs_base: 0,
             sregs: Default::default(),
@@ -199,23 +214,23 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, top), 394);
         assert_eq!(core::mem::offset_of!(CpuState, st_exp), 396);
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
-        assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
-        assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
+        assert_eq!(core::mem::offset_of!(CpuState, fs_base), 512);
+        assert_eq!(core::mem::offset_of!(CpuState, gs_base), 520);
         // mxcsr（sregs 12 + fsw 2 + cpuid 352 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 864);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 896);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 920);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 928);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 936);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 944);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1200);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1712);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2736);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2800);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2928);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2928 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11184);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 952);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 960);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 968);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 976);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1232);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1744);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2768);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2832);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2960);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2960 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11216);
     }
 
     #[test]

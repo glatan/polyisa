@@ -10082,6 +10082,12 @@ pub fn finit<B: Backend>(b: &mut B) -> Flow<B> {
     b.set(sem::fsw_ref(), z16);
     let empty_tags = b.konst::<W16>(0xffff);
     b.set(sem::ftw_ref(), empty_tags);
+    let z64 = b.konst::<W64>(0);
+    b.set(sem::fip_ref(), z64);
+    b.set(sem::fdp_ref(), z64);
+    b.set(sem::fcs_ref(), z16);
+    b.set(sem::fds_ref(), z16);
+    b.set(sem::fop_ref(), z16);
     Ok(())
 }
 
@@ -12115,13 +12121,31 @@ fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W6
     let a10 = b.konst::<W64>(10);
     let aw = b.add::<W64>(a, a10);
     decode::mem_store::<B, W16>(b, aw, wseg, z16)?;
-    let z64 = b.konst::<W64>(0);
     let a12 = b.konst::<W64>(12);
     let aw = b.add::<W64>(a, a12);
-    decode::mem_store::<B, W64>(b, aw, wseg, z64)?;
+    let fip: B::V<W64> = b.get(sem::fip_ref());
+    let fip32: B::V<W32> = b.trunc::<W64, W32>(fip);
+    decode::mem_store::<B, W32>(b, aw, wseg, fip32)?;
+    let a16 = b.konst::<W64>(16);
+    let aw = b.add::<W64>(a, a16);
+    let fcs: B::V<W16> = b.get(sem::fcs_ref());
+    decode::mem_store::<B, W16>(b, aw, wseg, fcs)?;
+    let a18 = b.konst::<W64>(18);
+    let aw = b.add::<W64>(a, a18);
+    let fop: B::V<W16> = b.get(sem::fop_ref());
+    decode::mem_store::<B, W16>(b, aw, wseg, fop)?;
     let a20 = b.konst::<W64>(20);
     let aw = b.add::<W64>(a, a20);
-    decode::mem_store::<B, W64>(b, aw, wseg, z64)?;
+    let fdp: B::V<W64> = b.get(sem::fdp_ref());
+    let fdp32: B::V<W32> = b.trunc::<W64, W32>(fdp);
+    decode::mem_store::<B, W32>(b, aw, wseg, fdp32)?;
+    let a24 = b.konst::<W64>(24);
+    let aw = b.add::<W64>(a, a24);
+    let fds: B::V<W16> = b.get(sem::fds_ref());
+    decode::mem_store::<B, W16>(b, aw, wseg, fds)?;
+    let a26 = b.konst::<W64>(26);
+    let aw = b.add::<W64>(a, a26);
+    decode::mem_store::<B, W16>(b, aw, wseg, z16)?;
     Ok(())
 }
 
@@ -12147,6 +12171,28 @@ fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64
     let aft = b.add::<W64>(a, a8);
     let ftw = decode::mem_load::<B, W16>(b, aft, wseg)?;
     b.set(sem::ftw_ref(), ftw);
+    let a12 = b.konst::<W64>(12);
+    let aw = b.add::<W64>(a, a12);
+    let fip32: B::V<W32> = decode::mem_load::<B, W32>(b, aw, wseg)?;
+    let fip = b.zext::<W32, W64>(fip32);
+    b.set(sem::fip_ref(), fip);
+    let a16 = b.konst::<W64>(16);
+    let aw = b.add::<W64>(a, a16);
+    let fcs = decode::mem_load::<B, W16>(b, aw, wseg)?;
+    b.set(sem::fcs_ref(), fcs);
+    let a18 = b.konst::<W64>(18);
+    let aw = b.add::<W64>(a, a18);
+    let fop = decode::mem_load::<B, W16>(b, aw, wseg)?;
+    b.set(sem::fop_ref(), fop);
+    let a20 = b.konst::<W64>(20);
+    let aw = b.add::<W64>(a, a20);
+    let fdp32: B::V<W32> = decode::mem_load::<B, W32>(b, aw, wseg)?;
+    let fdp = b.zext::<W32, W64>(fdp32);
+    b.set(sem::fdp_ref(), fdp);
+    let a24 = b.konst::<W64>(24);
+    let aw = b.add::<W64>(a, a24);
+    let fds = decode::mem_load::<B, W16>(b, aw, wseg)?;
+    b.set(sem::fds_ref(), fds);
     Ok(())
 }
 
@@ -12235,6 +12281,12 @@ pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     b.set(sem::top_ref(), z16);
     let empty_tags = b.konst::<W16>(0xffff);
     b.set(sem::ftw_ref(), empty_tags);
+    let z64 = b.konst::<W64>(0);
+    b.set(sem::fip_ref(), z64);
+    b.set(sem::fdp_ref(), z64);
+    b.set(sem::fcs_ref(), z16);
+    b.set(sem::fds_ref(), z16);
+    b.set(sem::fop_ref(), z16);
     Ok(())
 }
 
@@ -13359,13 +13411,14 @@ pub fn fxsave_area<B: Backend>(
     let ftw16 = b.zext::<W8, W16>(ftw);
     cstore::<B, W16>(b, a4, wseg, ftw16, w87)?;
     let a6 = madd(b, a, 6);
-    let z16 = b.konst::<W16>(0);
-    cstore::<B, W16>(b, a6, wseg, z16, w87)?;
-    let z64 = b.konst::<W64>(0);
+    let fop: B::V<W16> = b.get(sem::fop_ref());
+    cstore::<B, W16>(b, a6, wseg, fop, w87)?;
     let a8 = madd(b, a, 8);
-    cstore::<B, W64>(b, a8, wseg, z64, w87)?;
+    let fip: B::V<W64> = b.get(sem::fip_ref());
+    cstore::<B, W64>(b, a8, wseg, fip, w87)?;
     let a16 = madd(b, a, 16);
-    cstore::<B, W64>(b, a16, wseg, z64, w87)?;
+    let fdp: B::V<W64> = b.get(sem::fdp_ref());
+    cstore::<B, W64>(b, a16, wseg, fdp, w87)?;
     let mx: B::V<W32> = b.get(sem::mxcsr_ref());
     let a24 = madd(b, a, 24);
     cstore::<B, W32>(b, a24, wseg, mx, wsse)?;
@@ -13442,6 +13495,27 @@ pub fn fxrstor_area<B: Backend>(
     let t3 = b.select::<W16>(i87, fsw_i, fsw_c);
     let fsw_n = b.select::<W16>(r87, fsw_keep, t3);
     b.set(sem::fsw_ref(), fsw_n);
+    let a6 = madd(b, a, 6);
+    let fop_m: B::V<W16> = decode::mem_load(b, a6, wseg)?;
+    let fop_i = b.konst::<W16>(0);
+    let fop_c = b.get(sem::fop_ref());
+    let tfop = b.select::<W16>(i87, fop_i, fop_c);
+    let fop_n = b.select::<W16>(r87, fop_m, tfop);
+    b.set(sem::fop_ref(), fop_n);
+    let a8 = madd(b, a, 8);
+    let fip_m: B::V<W64> = decode::mem_load(b, a8, wseg)?;
+    let z64i = b.konst::<W64>(0);
+    let fip_c = b.get(sem::fip_ref());
+    let tfip = b.select::<W64>(i87, z64i, fip_c);
+    let fip_n = b.select::<W64>(r87, fip_m, tfip);
+    b.set(sem::fip_ref(), fip_n);
+    let a16 = madd(b, a, 16);
+    let fdp_m: B::V<W64> = decode::mem_load(b, a16, wseg)?;
+    let z64j = b.konst::<W64>(0);
+    let fdp_c = b.get(sem::fdp_ref());
+    let tfdp = b.select::<W64>(i87, z64j, fdp_c);
+    let fdp_n = b.select::<W64>(r87, fdp_m, tfdp);
+    b.set(sem::fdp_ref(), fdp_n);
     let a4 = madd(b, a, 4);
     let ftw_m8: B::V<W8> = decode::mem_load(b, a4, wseg)?;
     let ftw_m = b.zext::<W8, W16>(ftw_m8);

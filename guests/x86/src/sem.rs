@@ -77,6 +77,27 @@ pub fn st_sig_ref(i: usize) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, st_sig) + i * 8)
 }
 
+/// x87 last instruction pointer offset。
+pub fn fip_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fip))
+}
+/// x87 last instruction CS selector。
+pub fn fcs_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fcs))
+}
+/// x87 last data pointer offset。
+pub fn fdp_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fdp))
+}
+/// x87 last data selector。
+pub fn fds_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fds))
+}
+/// x87 last opcode。
+pub fn fop_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fop))
+}
+
 /// 汎用レジスタの上位32ビットを指す（x86-64 用、0-7 のみ）。
 pub fn hi_ref(r: Gpr) -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, h) + (r.0 as usize) * 4)
