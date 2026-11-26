@@ -16050,11 +16050,14 @@ fn run_image_x86_32_impl(
     // i386 musl は syscall を `call *%gs:0x10`（AT_SYSINFO の vsyscall スタブ）で行う。
     // スタブページを写像し、AT_SYSINFO (32) で番地を知らせる。中身は int 0x80; ret.
     const VSYS_ADDR: u64 = 0xffff_e000;
+    let minsigstksz = polyisa_os_linux::x86::min_sigstksz_for_xfeatures(
+        polyisa_guest_x86::cpuid::xcomp_supp(features),
+    );
     let (img, sp) = polyisa_os_linux::build_initial_stack32(
         top,
         &arg_bytes,
         &[],
-        &[(6, 0x1000), (32, VSYS_ADDR)],
+        &[(6, 0x1000), (32, VSYS_ADDR), (51, minsigstksz)],
     );
     // スタックは 8MB 確保する (Linux既定と同等)。sub $0x1000,%rsp等の拡張でPageFaultにならないため.
     const STACK_SIZE: u64 = 8 * 1024 * 1024;
@@ -16335,10 +16338,14 @@ fn run_image_x86_64_impl(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     // x32 のスタック項目は 32 ビット幅（ポインタが 4 バイトの ILP32）。
+    let minsigstksz = polyisa_os_linux::x86::min_sigstksz_for_xfeatures(
+        polyisa_guest_x86::cpuid::xcomp_supp(features),
+    );
+    let auxv = [(6, 0x1000), (51, minsigstksz)];
     let (img, sp) = if x32 {
-        polyisa_os_linux::build_initial_stack32(top, &arg_bytes, &[], &[(6, 0x1000)])
+        polyisa_os_linux::build_initial_stack32(top, &arg_bytes, &[], &auxv)
     } else {
-        polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)])
+        polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &auxv)
     };
     // スタックは 8MB 確保する (Linux既定と同等)。sub $0x1000,%rsp等の拡張でPageFaultにならないため.
     const STACK_SIZE: u64 = 8 * 1024 * 1024;

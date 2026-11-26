@@ -29,6 +29,7 @@ pub const PAUSE: u64 = 34;
 pub const RT_SIGPENDING: u64 = 127;
 pub const RT_SIGTIMEDWAIT: u64 = 128;
 pub const RT_SIGSUSPEND: u64 = 130;
+pub const SIGALTSTACK: u64 = 131;
 pub const CLOCK_GETTIME: u64 = 228;
 pub const GETRANDOM: u64 = 318;
 pub const OPENAT: u64 = 257;

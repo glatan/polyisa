@@ -29,6 +29,7 @@ pub const GETEGID: u64 = 50;
 pub const RT_SIGACTION: u64 = 174;
 pub const RT_SIGPROCMASK: u64 = 175;
 pub const RT_SIGRETURN: u64 = 173;
+pub const SIGALTSTACK: u64 = 186;
 pub const PAUSE: u64 = 29;
 pub const RT_SIGPENDING: u64 = 176;
 pub const RT_SIGTIMEDWAIT: u64 = 177;

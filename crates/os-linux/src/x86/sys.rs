@@ -83,6 +83,8 @@ pub struct Linux {
     sig_mask: u64,
     /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
     sig_pending: u64,
+    /// 代替シグナルスタック（task の sas_ss_*）。
+    sigaltstack: crate::x86::SigAltStack,
     /// ゲストプロセス表。fork した子と共有する。
     procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
     /// 0 は未登録。最初のシステムコールか命令で 1 から採番する。
@@ -934,6 +936,7 @@ impl Linux {
             sigacts: self.sigacts.clone(),
             sig_mask: self.sig_mask,
             sig_pending: 0,
+            sigaltstack: self.sigaltstack,
             procs: std::rc::Rc::clone(&self.procs),
             pid: self.pid,
             steps: 0,
@@ -1018,14 +1021,44 @@ impl Linux {
             self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
         }
         let ok = if self.x32 {
-            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, si_code, si_addr)
+            crate::x86::rt_sigframe_x32_write_ex(
+                env,
+                sig,
+                &act,
+                old,
+                si_code,
+                si_addr,
+                self.sigaltstack,
+            )
         } else if self.is64 {
-            crate::x86::rt_sigframe_write_ex(env, sig, &act, old, si_code, si_addr)
+            crate::x86::rt_sigframe_write_ex(
+                env,
+                sig,
+                &act,
+                old,
+                si_code,
+                si_addr,
+                self.sigaltstack,
+            )
         } else {
-            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, si_code, si_addr)
+            crate::x86::rt_sigframe32_write_ex(
+                env,
+                sig,
+                &act,
+                old,
+                si_code,
+                si_addr,
+                self.sigaltstack,
+            )
         };
         if ok {
             crate::x86::signal_init_user_fpstate(env);
+            if self.sigaltstack.flags & crate::x86::SS_AUTODISARM != 0 {
+                self.sigaltstack = crate::x86::SigAltStack {
+                    flags: crate::x86::SS_DISABLE,
+                    ..crate::x86::SigAltStack::default()
+                };
+            }
             return TrapOutcome::Handled;
         }
         self.sig_mask = old;
@@ -1070,14 +1103,20 @@ impl Linux {
         }
         let pid = self.pid;
         let ok = if self.x32 {
-            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, 0, pid)
+            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
         } else if self.is64 {
-            crate::x86::rt_sigframe_write(env, sig, &act, old, pid)
+            crate::x86::rt_sigframe_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
         } else {
-            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid)
+            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
         };
         if ok {
             crate::x86::signal_init_user_fpstate(env);
+            if self.sigaltstack.flags & crate::x86::SS_AUTODISARM != 0 {
+                self.sigaltstack = crate::x86::SigAltStack {
+                    flags: crate::x86::SS_DISABLE,
+                    ..crate::x86::SigAltStack::default()
+                };
+            }
         } else {
             // フレームが書けない（未写像スタック等）。実機なら
             // SIGSEGV で死ぬが、ここでは配送を諦めて保留と
@@ -1385,6 +1424,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getgroups", sys_getgroups),
     ("mprotect", sys_mprotect),
     ("munmap", sys_munmap),
+    ("sigaltstack", sys_sigaltstack),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
     ("rt_sigpending", sys_rt_sigpending),
@@ -1467,6 +1507,7 @@ const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
     ("ftruncate", sys_ftruncate),
     ("mprotect", sys_mprotect),
     ("munmap", sys_munmap),
+    ("sigaltstack", sys_sigaltstack),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
     ("rt_sigpending", sys_rt_sigpending),
@@ -3605,6 +3646,86 @@ fn sig_settable(sig: u64) -> bool {
     (1..=64).contains(&sig) && sig != 9 && sig != 19
 }
 
+/// `do_sigaltstack` の更新部。返り値は Linux errno 番号。
+fn sigaltstack_update(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    new: crate::x86::SigAltStack,
+    sp: u64,
+) -> Result<(), u32> {
+    if sys.sigaltstack.on_stack(sp) {
+        return Err(EPERM);
+    }
+    let mode = new.flags & !crate::x86::SS_FLAG_BITS;
+    if mode != crate::x86::SS_DISABLE && mode != crate::x86::SS_ONSTACK && mode != 0 {
+        return Err(EINVAL);
+    }
+    if sys.sigaltstack == new {
+        return Ok(());
+    }
+    let mut next = new;
+    if mode == crate::x86::SS_DISABLE {
+        next.sp = 0;
+        next.size = 0;
+    } else {
+        if next.size < crate::x86::MINSIGSTKSZ {
+            return Err(ENOMEM);
+        }
+        // Linux の既定では strict 検査はしないが、動的 xfeature（AMX）の
+        // 許可を取った task では、その user state を含む frame が入る
+        // ことを要求する。XTILECFG/XTILEDATA は bit17/18。
+        let supp = env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref());
+        let perm = env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref());
+        if supp & 0x6_0000 != 0 && perm & 0x6_0000 != 0 {
+            let need =
+                crate::x86::min_sigstksz_for_xfeatures(crate::x86::signal_user_xfeatures(env));
+            if next.size <= need {
+                return Err(ENOMEM);
+            }
+        }
+    }
+    sys.sigaltstack = next;
+    Ok(())
+}
+
+fn sys_sigaltstack(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sigaltstack(uss, uoss)。x86-64 は 24 バイト stack_t、i386/x32 は
+    // 12 バイト compat_stack_t。
+    let uss = get64(env, cx.r_a);
+    let uoss = get64(env, cx.r_b);
+    let wide = sys.is64 && !sys.x32;
+    let sp = get64(env, Gpr(4));
+    let new = if uss != 0 {
+        let Some(ss) = crate::x86::sigaltstack_read(env, uss, wide) else {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        };
+        Some(ss)
+    } else {
+        None
+    };
+    // do_sigaltstack は更新前の状態を oss へ作る。 copy_to_user は
+    // 新規設定の検証に成功した後だが、中身は更新前である。
+    let cur = sys.sigaltstack;
+    let old = crate::x86::SigAltStack {
+        sp: cur.sp,
+        size: cur.size,
+        flags: cur.status_flags(sp) | (cur.flags & crate::x86::SS_FLAG_BITS),
+    };
+    if let Some(ss) = new
+        && let Err(errno) = sigaltstack_update(sys, env, ss, sp)
+    {
+        set64(env, Gpr(0), cx.neg(errno));
+        return Some(TrapOutcome::Handled);
+    }
+    if uoss != 0 && !crate::x86::sigaltstack_write(env, uoss, old, wide) {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
 fn sys_rt_sigaction(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // rt_sigaction(sig, act, oldact, sigsetsize)。kernel_sigaction
     // は x86-64 で 32 バイト、i386 で 20 バイト。x86-64 では
@@ -3723,7 +3844,18 @@ fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // x86-64/i386 それぞれの rt フレームから復元する。
+    // x86-64/i386 それぞれの rt フレームから復元する。uc_stack も
+    // restore_altstack 相当で戻す。エラーは実機と同じく握り潰す。
+    let sp_before = get64(env, Gpr(4));
+    let frame_base = sp_before.wrapping_sub(if sys.is64 { 8 } else { 4 });
+    let (alt_addr, wide) = if sys.x32 {
+        (frame_base + 16, false)
+    } else if sys.is64 {
+        (frame_base + 24, true)
+    } else {
+        (frame_base + 152, false)
+    };
+    let alt = crate::x86::sigaltstack_read(env, alt_addr, wide);
     let frame = if sys.x32 {
         crate::x86::rt_sigframe_x32_read(env)
     } else if sys.is64 {
@@ -3736,6 +3868,19 @@ fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<
             // set_current_blocked と同じく SIGKILL/SIGSTOP は frame 経由で
             // block できない。
             sys.sig_mask = mask & !(1 << 8 | 1 << 18);
+            let Some(ss) = alt else {
+                // restore_altstack の copy_from_user 失敗は badframe。
+                return Some(TrapOutcome::Exit(11));
+            };
+            // x86-64 は sigcontext 復元前、i386/x32 は復元後に
+            // restore_altstack を呼ぶ。したがって後者の on_sig_stack
+            // 判定には復元された interrupted SP を使う。
+            let sp_for_altstack = if sys.is64 && !sys.x32 {
+                sp_before
+            } else {
+                get64(env, Gpr(4))
+            };
+            let _ = sigaltstack_update(sys, env, ss, sp_for_altstack);
             Some(TrapOutcome::Handled)
         }
         // 壊れたフレーム。実機は SIGSEGV で殺す。
@@ -4493,11 +4638,15 @@ fn install_exec(
         }
     }
     let top = 0x7fff_0000u64;
+    let minsigstksz = crate::x86::min_sigstksz_for_xfeatures(
+        env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref()),
+    );
+    let auxv = [(6, 0x1000), (51, minsigstksz)];
     // x32 は 64 ビットモードで動くが初期スタックのポインタは 32 ビット。
     let (img, sp) = if sys.is64 && !sys.x32 {
-        crate::build_initial_stack(top, argv, envp, &[(6, 0x1000)])
+        crate::build_initial_stack(top, argv, envp, &auxv)
     } else {
-        crate::build_initial_stack32(top, argv, envp, &[(6, 0x1000)])
+        crate::build_initial_stack32(top, argv, envp, &auxv)
     };
     const STACK_SIZE: u64 = 8 * 1024 * 1024;
     let base = top - STACK_SIZE;
@@ -4518,6 +4667,11 @@ fn install_exec(
     env.backend
         .set(polyisa_guest_x86::sem::eip_ref(), ehdr.entry as u32);
     sys.init_brk(image_end);
+    // 成功した exec では代替シグナルスタックを無効化する。
+    sys.sigaltstack = crate::x86::SigAltStack {
+        flags: crate::x86::SS_DISABLE,
+        ..crate::x86::SigAltStack::default()
+    };
     // アドレス空間を置き換えたので mmap の割り当て基底も初期に戻す。
     sys.mmap_base = 0;
     sys.exe_path = path.to_string();
@@ -5999,6 +6153,92 @@ mod tests {
             )),
             0x1122_3344
         );
+    }
+
+    #[test]
+    fn sigaltstack_install_query_and_delivery() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 2, Perms::RW).unwrap();
+        // stack_t {ss_sp=0x6000, ss_flags=0, ss_size=0x2000}。
+        let mut st = [0u8; 24];
+        st[0..8].copy_from_slice(&0x6000u64.to_le_bytes());
+        st[16..24].copy_from_slice(&0x2000u64.to_le_bytes());
+        // 入力の ss_flags padding は無視する。
+        st[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x100), &st).unwrap();
+        set64(&mut env, Gpr(0), 131); // x86-64 sigaltstack
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x120);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(rd8(&mut env, 0x120), 0);
+        assert_eq!(rd8(&mut env, 0x128) & 0xFFFF_FFFF, crate::x86::SS_DISABLE);
+        assert_eq!(
+            rd8(&mut env, 0x12C) & 0xFFFF_FFFF,
+            0,
+            "出力 padding は zero"
+        );
+        assert_eq!(rd8(&mut env, 0x130), 0, "初期状態の代替スタックは未設定");
+        // 小さすぎる代替スタックは ENOMEM。
+        st[16..24].copy_from_slice(&100u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x100), &st).unwrap();
+        set64(&mut env, Gpr(0), 131);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOMEM));
+
+        // SA_ONSTACK の配送は通常スタックではなく代替スタック上へ置く。
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9] = crate::x86::SigAct {
+            handler: 0x9000,
+            flags: crate::x86::SA_RESTORER | crate::x86::SA_ONSTACK,
+            restorer: 0x9100,
+            mask: 0,
+        };
+        // 正しいサイズを再設定する。
+        st[16..24].copy_from_slice(&0x2000u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x100), &st).unwrap();
+        set64(&mut env, Gpr(0), 131);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(4), 0x1800);
+        sys.sig_pending = 1 << 9;
+        sys.deliver_pending(&mut env);
+        let f = get64(&mut env, Gpr(4));
+        assert!(f > 0x6000 && f <= 0x8000, "frame {f:#x} は altstack 内");
+        assert_eq!(
+            f, 0x7C38,
+            "新規 altstack では 128 バイト redzone を引かない"
+        );
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(rd8(&mut env, f + 24), 0x6000, "uc_stack.ss_sp");
+        assert_eq!(rd8(&mut env, f + 32), 0, "uc_stack.ss_flags");
+        assert_eq!(rd8(&mut env, f + 40), 0x2000, "uc_stack.ss_size");
+    }
+
+    #[test]
+    fn sigaltstack_i386_uses_compat_stack() {
+        let mut sys = Linux::x86_32();
+        let mut env = bare();
+        let mut st = [0u8; 12];
+        st[0..4].copy_from_slice(&0x6000u32.to_le_bytes());
+        st[8..12].copy_from_slice(&0x2000u32.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x100), &st).unwrap();
+        set64(&mut env, Gpr(0), 186); // i386 sigaltstack
+        set64(&mut env, Gpr(3), 0x100);
+        set64(&mut env, Gpr(1), 0x120);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(rd8(&mut env, 0x120) & 0xFFFF_FFFF, 0);
+        assert_eq!(rd8(&mut env, 0x124) & 0xFFFF_FFFF, crate::x86::SS_DISABLE);
+        assert_eq!(rd8(&mut env, 0x128) & 0xFFFF_FFFF, 0);
     }
 
     #[test]

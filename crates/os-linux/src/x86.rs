@@ -3024,6 +3024,110 @@ pub struct SigAct {
     pub mask: u64,
 }
 
+/// 代替シグナルスタックの設定。Linux task の `sas_ss_*` に対応する。
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SigAltStack {
+    pub sp: u64,
+    pub size: u64,
+    pub flags: u64,
+}
+
+impl SigAltStack {
+    /// `__on_sig_stack(sp)`。SS_AUTODISARM の影響を受けない raw 判定。
+    pub fn raw_on_stack(self, sp: u64) -> bool {
+        self.size != 0 && sp > self.sp && sp.wrapping_sub(self.sp) <= self.size
+    }
+
+    /// `on_sig_stack(sp)`。SS_AUTODISARM では常に偽。
+    pub fn on_stack(self, sp: u64) -> bool {
+        self.flags & SS_AUTODISARM == 0 && self.raw_on_stack(sp)
+    }
+
+    /// `sas_ss_flags(sp)` の動的部分。SS_DISABLE / SS_ONSTACK / 0。
+    pub fn status_flags(self, sp: u64) -> u64 {
+        if self.size == 0 {
+            SS_DISABLE
+        } else if self.on_stack(sp) {
+            SS_ONSTACK
+        } else {
+            0
+        }
+    }
+
+    /// SA_ONSTACK 配送で使う最初のスタックポインタ。
+    /// `redzone` は切り替え前の現在スタックだけで引く。代替スタックへ
+    /// 切り替えるときは新しいスタックトップがそのまま使われる。
+    /// 戻り値は (sp, entering_altstack, nested_altstack)。
+    pub fn delivery_sp(self, sp: u64, onstack: bool, redzone: u64) -> (u64, bool, bool) {
+        let nested = self.on_stack(sp);
+        let sp = sp.wrapping_sub(redzone);
+        if onstack && self.status_flags(sp) == 0 {
+            (self.sp.wrapping_add(self.size), true, nested)
+        } else {
+            (sp, false, nested)
+        }
+    }
+}
+
+/// `sigaltstack` の uss/uoss 形式を読む。x86-64 は 24 バイト、
+/// i386/x32 は compat_stack_t の 12 バイト。
+pub fn sigaltstack_read(env: &mut BareEnv, addr: u64, wide: bool) -> Option<SigAltStack> {
+    if wide {
+        Some(SigAltStack {
+            sp: frd64(env, addr)?,
+            // ss_flags は int。8–15 バイト目の上位 4 バイトは padding。
+            flags: frd32(env, addr + 8)?.into(),
+            size: frd64(env, addr + 16)?,
+        })
+    } else {
+        Some(SigAltStack {
+            sp: frd32(env, addr)?.into(),
+            flags: frd32(env, addr + 4)?.into(),
+            size: frd32(env, addr + 8)?.into(),
+        })
+    }
+}
+
+/// `sigaltstack` の uoss 形式を書く。
+pub fn sigaltstack_write(env: &mut BareEnv, addr: u64, ss: SigAltStack, wide: bool) -> bool {
+    if wide {
+        fwr(env, addr, ss.sp, 8)
+            && fwr(env, addr + 8, ss.flags, 4)
+            && fwr(env, addr + 12, 0, 4)
+            && fwr(env, addr + 16, ss.size, 8)
+    } else {
+        fwr(env, addr, ss.sp, 4)
+            && fwr(env, addr + 4, ss.flags, 4)
+            && fwr(env, addr + 8, ss.size, 4)
+    }
+}
+
+/// x86 カーネルが AT_MINSIGSTKSZ に使う worst-case フレーム量の近似。
+/// sigframe_ia32(732) + frame padding(15) + xsave padding(63) + fpstate。
+pub fn min_sigstksz_for_xfeatures(xfeatures: u64) -> u64 {
+    let fpstate = if xfeatures != 0 {
+        // XSAVE 形式は 576 バイト以上で、末尾に magic2 がある。
+        // x86-64 カーネルの worst case には ia32 の legacy header 112 も入る。
+        polyisa_guest_x86::cpuid::xstate_size(xfeatures) + 4 + 112
+    } else {
+        512
+    };
+    (732 + 15 + 63 + fpstate).next_multiple_of(16)
+}
+
+/// 動的 xfeature 許可後の sigaltstack 検査に使う必要量。
+/// auxv の worst-case 値から fpstate 保存形式に伴う magic2 と
+/// ia32 legacy header 分を除く。Linux の max_frame_size 差分に対応する。
+pub fn required_sigstksz_for_xfeatures(xfeatures: u64) -> u64 {
+    min_sigstksz_for_xfeatures(xfeatures)
+        .saturating_sub(4 + 112)
+        .max(MINSIGSTKSZ)
+}
+
+/// SA_ONSTACK で配送する。
+pub const SA_ONSTACK: u64 = 0x0800_0000;
+/// 代替スタック上で実行中を表す ss_flags の値。
+pub const SS_ONSTACK: u64 = 1;
 /// ハンドラ実行中に当該シグナル自身を止めない。
 pub const SA_NODEFER: u64 = 0x4000_0000;
 /// 配送のたびにハンドラを SIG_DFL に戻す。
@@ -3032,6 +3136,12 @@ pub const SA_RESETHAND: u64 = 0x8000_0000;
 pub const SA_RESTORER: u64 = 0x0400_0000;
 /// 代替スタックなしを表す ss_flags の値。
 pub const SS_DISABLE: u64 = 2;
+/// 配送時に代替スタック設定を自動解除する。
+pub const SS_AUTODISARM: u64 = 1 << 31;
+/// ss_flags に許される制御ビット。
+pub const SS_FLAG_BITS: u64 = SS_AUTODISARM;
+/// uapi の固定最小シグナルスタック。
+pub const MINSIGSTKSZ: u64 = 2048;
 /// ucontext.uc_flags。xsave fpstate が sigcontext にある。
 pub const UC_FP_XSTATE: u64 = 1;
 /// sigcontext.ss が有効。
@@ -3135,7 +3245,7 @@ fn signal_use_xsave(env: &mut BareEnv) -> bool {
 /// sigframe に入れる user xfeatures。Linux の fpstate->user_xfeatures
 /// 相当で、FP/SSE は常に含め、残りは OS 対応成分とスレッド許可成分の
 /// 交差にする。
-fn signal_user_xfeatures(env: &mut BareEnv) -> u64 {
+pub(crate) fn signal_user_xfeatures(env: &mut BareEnv) -> u64 {
     let supp = env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref());
     let perm = env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref());
     0x3 | (supp & perm)
@@ -3330,7 +3440,7 @@ pub fn rt_sigframe_write(
     old_mask: u64,
     pid: u64,
 ) -> bool {
-    rt_sigframe_write_ex(env, sig, act, old_mask, 0, pid)
+    rt_sigframe_write_ex(env, sig, act, old_mask, 0, pid, SigAltStack::default())
 }
 
 /// `rt_sigframe_write` の siginfo 指定版。`si_union` は siginfo の
@@ -3343,10 +3453,13 @@ pub fn rt_sigframe_write_ex(
     old_mask: u64,
     si_code: u64,
     si_union: u64,
+    altstack: SigAltStack,
 ) -> bool {
-    const FRAME: u64 = 1024;
+    const FRAME: u64 = 440;
     const GREGB: u64 = 48; // ucontext.mcontext.gregs のフレーム内オフセット
-    let rsp = get64(env, Gpr(4));
+    let rsp0 = get64(env, Gpr(4));
+    let (rsp, entering_altstack, nested_altstack) =
+        altstack.delivery_sp(rsp0, act.flags & SA_ONSTACK != 0, 128);
     let use_xsave = signal_use_xsave(env);
     let user_xfeatures = signal_user_xfeatures(env);
     let xstate_size = if use_xsave {
@@ -3357,8 +3470,11 @@ pub fn rt_sigframe_write_ex(
     let fpstate_size = xstate_size + u64::from(use_xsave) * 4;
     // レッドゾーン(128)を避け、実カーネルと同じく fpstate 全体を
     // 引いてから 64 整列する。フレーム基底は fp の下に ≡8 (mod 16)。
-    let fp = rsp.wrapping_sub(128).wrapping_sub(fpstate_size) & !63;
-    let f = (fp & !15).wrapping_sub(FRAME + 8);
+    let fp = rsp.wrapping_sub(fpstate_size) & !63;
+    let f = (fp.wrapping_sub(FRAME) & !15).wrapping_sub(8);
+    if (entering_altstack || nested_altstack) && !altstack.raw_on_stack(f) {
+        return false;
+    }
     // ucontext の固定部と siginfo。
     let fields: [(u64, u64); 10] = [
         (f, act.restorer),
@@ -3373,9 +3489,9 @@ pub fn rt_sigframe_write_ex(
                 },
         ), // uc_flags
         (f + 16, 0),               // uc_link
-        (f + 24, 0),               // uc_stack.ss_sp
-        (f + 32, SS_DISABLE),      // uc_stack.ss_flags
-        (f + 40, 0),               // uc_stack.ss_size
+        (f + 24, altstack.sp),     // uc_stack.ss_sp
+        (f + 32, altstack.flags),  // uc_stack.ss_flags
+        (f + 40, altstack.size),   // uc_stack.ss_size
         (f + GREGB + 184, fp),     // uc_mcontext.fpregs
         (f + 304, old_mask),       // uc_sigmask
         (f + 312, u64::from(sig)), // si_signo+si_errno(=0)
@@ -3438,10 +3554,13 @@ pub fn rt_sigframe_x32_write_ex(
     old_mask: u64,
     si_code: u64,
     si_union: u64,
+    altstack: SigAltStack,
 ) -> bool {
     const FRAME: u64 = 424;
     const SC: u64 = 32;
-    let rsp = get64(env, Gpr(4));
+    let rsp0 = get64(env, Gpr(4));
+    let (rsp, entering_altstack, nested_altstack) =
+        altstack.delivery_sp(rsp0, act.flags & SA_ONSTACK != 0, 128);
     let use_xsave = signal_use_xsave(env);
     let user_xfeatures = signal_user_xfeatures(env);
     let xstate_size = if use_xsave {
@@ -3450,21 +3569,24 @@ pub fn rt_sigframe_x32_write_ex(
         512
     };
     let fpstate_size = xstate_size + u64::from(use_xsave) * 4;
-    let fp = rsp.wrapping_sub(128).wrapping_sub(fpstate_size) & !63;
+    let fp = rsp.wrapping_sub(fpstate_size) & !63;
     // カーネルの round_down(fp - sizeof(frame), 16) - 8。fp は 64 整列。
     let f = (fp.wrapping_sub(FRAME) & !15).wrapping_sub(8);
+    if (entering_altstack || nested_altstack) && !altstack.raw_on_stack(f) {
+        return false;
+    }
     if !fwr(env, f, act.restorer, 8) {
         return false;
     }
     let uc_flags =
         UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS | if use_xsave { UC_FP_XSTATE } else { 0 };
     for (a, v) in [
-        (f + 8, uc_flags),    // uc_flags
-        (f + 12, 0),          // uc_link
-        (f + 16, 0),          // uc_stack.ss_sp
-        (f + 20, SS_DISABLE), // uc_stack.ss_flags
-        (f + 24, 0),          // uc_stack.ss_size
-        (f + 28, 0),          // uc__pad0
+        (f + 8, uc_flags),        // uc_flags
+        (f + 12, 0),              // uc_link
+        (f + 16, altstack.sp),    // uc_stack.ss_sp
+        (f + 20, altstack.flags), // uc_stack.ss_flags
+        (f + 24, altstack.size),  // uc_stack.ss_size
+        (f + 28, 0),              // uc__pad0
     ] {
         if !fwr(env, a, v, 4) {
             return false;
@@ -3543,11 +3665,14 @@ pub fn rt_sigframe32_write_ex(
     old_mask: u64,
     si_code: u64,
     si_union: u64,
+    altstack: SigAltStack,
 ) -> bool {
     const FRAME: u64 = 268;
     const UC: u64 = 144;
     const SC: u64 = UC + 20;
-    let esp = get64(env, Gpr(4)) & 0xFFFF_FFFF;
+    let esp0 = get64(env, Gpr(4)) & 0xFFFF_FFFF;
+    let (esp, entering_altstack, nested_altstack) =
+        altstack.delivery_sp(esp0, act.flags & SA_ONSTACK != 0, 0);
     let use_xsave = signal_use_xsave(env);
     let use_fxsr = signal_use_fxsr(env);
     let user_xfeatures = signal_user_xfeatures(env);
@@ -3565,7 +3690,10 @@ pub fn rt_sigframe32_write_ex(
     };
     // fpstate の下に置き、i386 ABI では関数入口で (esp+4) が 16 整列する。
     let f = (fp.wrapping_sub(FRAME) & !15).wrapping_sub(4);
-    let fields: [(u64, u64); 12] = [
+    if (entering_altstack || nested_altstack) && !altstack.raw_on_stack(f) {
+        return false;
+    }
+    let fields: [(u64, u64); 14] = [
         (f, act.restorer),
         (f + 4, u64::from(sig)),
         (f + 8, f + 16),
@@ -3576,7 +3704,9 @@ pub fn rt_sigframe32_write_ex(
         (f + 28, si_union), // compat siginfo の union 先頭
         (f + UC, 0),        // uc_flags
         (f + UC + 4, 0),    // uc_link
-        (f + UC + 12, SS_DISABLE),
+        (f + UC + 8, altstack.sp),
+        (f + UC + 12, altstack.flags),
+        (f + UC + 16, altstack.size),
         (f + UC + 108, old_mask), // uc_sigmask（8 バイト書く）
     ];
     for (a, v) in fields {
@@ -3814,6 +3944,16 @@ pub use sys::{Linux, SCHED_SLICE};
 mod tests {
     use super::*;
     use polyisa_mem::Perms;
+
+    #[test]
+    fn min_sigstksz_follows_xstate_size() {
+        // XSAVE-only (x87+SSE): 732+15+63+(576+4+112) = 1502 → 1504。
+        assert_eq!(min_sigstksz_for_xfeatures(0x3), 1504);
+        // AVX では xstate が 0x340 まで伸びる。
+        assert_eq!(min_sigstksz_for_xfeatures(0x7), 1760);
+        // 動的検査では magic2 と ia32 legacy header を差し引く。
+        assert_eq!(required_sigstksz_for_xfeatures(0x3), MINSIGSTKSZ.max(1388));
+    }
 
     #[test]
     fn c_string_spans_pages() {
