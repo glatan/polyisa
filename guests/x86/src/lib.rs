@@ -2040,6 +2040,26 @@ mod tests {
         assert_eq!(d.insn, Insn::VpaddqXvHvWv);
         assert!(decode_map(&[0x62, 0xF1, 0xEC, 0x48, 0x58, 0xCB], modes, fvl).is_none());
         assert!(decode_map(&[0x62, 0xF1, 0x6D, 0x48, 0x58, 0xCB], modes, fvl).is_none());
+        // VMINPS/PD の zmm 形は {sae} を受理する。{sae} のレジスタ形は
+        // ベクトル長 512 固定で、L'L には 00 が入る。
+        let d = decode_map(&[0x62, 0xF1, 0x74, 0x18, 0x5D, 0xC2], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VminpsXvHvWv);
+        assert!(d.evex_b && d.evex_ll == 0);
+        // AVX10.2 の enhanced scalar compare。{sae} は reg 形で
+        // 受理する。これらは LLIG で L'L を無視する。opmask を
+        // 持たないので aaa!=0 は拒否し、disp8 は SS の 4 倍率。
+        let favx10 = FEAT_AVX10_2 | FEAT_AVX512F;
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x08, 0x2F, 0xC1], modes, favx10).unwrap();
+        assert_eq!(d.insn, Insn::VcomxssXvWv);
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x18, 0x2F, 0xC1], modes, favx10).unwrap();
+        assert_eq!(d.insn, Insn::VcomxssXvWv);
+        assert!(d.evex_b && d.evex_ll == 0);
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x38, 0x2F, 0xC1], modes, favx10).unwrap();
+        assert_eq!(d.insn, Insn::VcomxssXvWv);
+        assert_eq!(d.evex_ll, 1);
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x09, 0x2F, 0xC1], modes, favx10).is_none());
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x08, 0x2F, 0x40, 0x01], modes, favx10).unwrap();
+        assert_eq!(d.disp, 4);
         // 埋め込み broadcast は宣言された L'L 形（512 のみ）で
         // だけ有効。b=1 のメモリ形で L'L!=2 は #UD。
         assert!(decode_map(&[0x62, 0xF1, 0x6C, 0x18, 0x58, 0x48, 0x11], modes, fvl).is_none());

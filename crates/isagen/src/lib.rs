@@ -1502,11 +1502,11 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       *i += 1;\n\
          \x20       d.has_modrm = true;\n\
          \x20       d.modrm = m;\n\
-         \x20       // EVEX.b の合法性。レジスタ形は er（ebok bit1）、\n\
+         \x20       // EVEX.b の合法性。レジスタ形は er（bit1）か sae（bit2）、\n\
          \x20       // メモリ形は埋め込み broadcast（ebok bit0）を要求。\n\
          \x20       // それ以外で b=1 は予約で UD。\n\
          \x20       if d.evex_b {\n\
-         \x20           let ok = if m >> 6 == 3 { ebok & 2 } else { ebok & 1 };\n\
+         \x20           let ok = if m >> 6 == 3 { ebok & 6 } else { ebok & 1 };\n\
          \x20           if ok == 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
@@ -2166,13 +2166,13 @@ fn emit_map_candidate(
             (Some(VexL::L0), None) => "d.vex && !d.vex_l".to_string(),
             (Some(VexL::L1), None) => "d.vex && d.vex_l".to_string(),
             (None, Some(mask)) => {
-                if mi.er {
+                if mi.er || mi.sae {
                     // {er} 形（b=1 + レジスタ形）では L'L は丸め指定
-                    // なので全値を受理する。レジスタ形の判定は、非グループ
-                    // 項目では `bytes[i]`（=ModRM バイト）の mod、グループ
-                    // 項目では定義済みの `m` を見る。postop 表では ModRM が
-                    // 先読み済みなので `d.modrm` を使う（現状 er は
-                    // vex_code のある表にだけ置けるので到達不能だが）。
+                    // なので全値を受理する。{sae} だけの形ではベクトル長は
+                    // 512 に固定され、L'L=00 を要求する。レジスタ形の判定は、
+                    // 非グループ項目では `bytes[i]`（=ModRM バイト）の mod、
+                    // グループ項目では定義済みの `m` を見る。postop 表では
+                    // ModRM が先読み済みなので `d.modrm` を使う。
                     let modreg =
                         if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
                             "m >> 6 == 3".to_string()
@@ -2181,9 +2181,12 @@ fn emit_map_candidate(
                         } else {
                             "*bytes.get(*i)? >> 6 == 3".to_string()
                         };
-                    format!(
-                        "d.evex && ((1u32 << d.evex_ll) & {mask} != 0 || (d.evex_b && {modreg}))"
-                    )
+                    let llc = if mi.er {
+                        "d.evex_b".to_string()
+                    } else {
+                        "d.evex_b && d.evex_ll == 0".to_string()
+                    };
+                    format!("d.evex && ((1u32 << d.evex_ll) & {mask} != 0 || ({llc} && {modreg}))")
                 } else {
                     format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0")
                 }
@@ -2202,6 +2205,11 @@ fn emit_map_candidate(
     // `wsel` は VEX/EVEX.W の値で項目を分ける。
     let vex = if let Some(w) = mi.wsel {
         format!("{vex} && d.vex_w == {w}")
+    } else {
+        vex
+    };
+    let vex = if mi.no_mask {
+        format!("{vex} && d.evex_aaa == 0")
     } else {
         vex
     };
@@ -2227,7 +2235,7 @@ fn emit_map_candidate(
     let ops = mi.ops.iter().map(opk_code).collect::<Vec<_>>().join(", ");
     let group = mi.group.is_some();
     let edisp = mi.edisp;
-    let ebok = u8::from(mi.bcast) | (u8::from(mi.er) << 1);
+    let ebok = u8::from(mi.bcast) | (u8::from(mi.er) << 1) | (u8::from(mi.sae) << 2);
     s.push_str(&format!(
         "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok}, {postop}, {});\n            }}\n",
         to_ident(&mi.name),

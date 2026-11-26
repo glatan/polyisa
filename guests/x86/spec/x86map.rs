@@ -34,6 +34,8 @@ fn mi(
         edisp: 0,
         bcast: false,
         er: false,
+        sae: false,
+        no_mask: false,
         wsel: None,
         promoted: false,
         ndd_req: false,
@@ -2105,6 +2107,7 @@ pub fn build_maps(m: &mut Model) {
         );
         it.bcast = true;
         it.er = er;
+        it.sae = mn.starts_with("vmin") || mn.starts_with("vmax");
         it.edisp = edisp;
         it.wsel = Some(w);
         m0f.push(MapItem::Insn(op, it));
@@ -2237,13 +2240,15 @@ pub fn build_maps(m: &mut Model) {
             &format!("{mn}_xv_wv"),
             &[RegX, RmX],
             sel,
-            0b001,
+            0b111,
             true,
             "{op} {x}, {w}",
             "alu",
         );
         it.wsel = Some(w);
         it.edisp = if w { 8 } else { 4 };
+        it.sae = true;
+        it.no_mask = true;
         it.when = Pred::Flag("avx10_2".to_string());
         m0f.push(MapItem::Insn(op, it));
     }
@@ -2856,13 +2861,15 @@ fn build_map_avx10(m: &mut Model) {
             &format!("{mn}_xv_wv"),
             &[RegX, RmX],
             PfxSel::PF3,
-            0b001,
+            0b111,
             true,
             "{op} {x}, {w}",
             "alu",
         );
         it.wsel = Some(false);
         it.edisp = 2;
+        it.sae = true;
+        it.no_mask = true;
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
