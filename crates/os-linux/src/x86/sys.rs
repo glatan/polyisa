@@ -5590,10 +5590,18 @@ mod tests {
         env.backend
             .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
         env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
-        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
         env.backend.set(
             polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
             0x1122_3344,
+        );
+        env.backend.set(
+            polyisa_guest_x86::sem::ymm_hi_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128,
         );
         set64(&mut env, Gpr(4), 0x8000); // RSP
         set64(&mut env, Gpr(3), 0xAAAA); // RBX
@@ -5667,6 +5675,15 @@ mod tests {
         assert_eq!(rd8(&mut env, fp) & 0xFFFF, 0x037F);
         assert_eq!(rd8(&mut env, fp + 24) & 0xFFFF_FFFF, 0x1F80);
         assert_eq!(rd8(&mut env, fp + 160), 0x1122_3344);
+        // xsave 拡張: SW 予約域、xstate header、YMMH 成分。
+        assert_eq!(rd8(&mut env, fp + 464) & 0xFFFF_FFFF, 0x4650_5853);
+        assert_eq!(rd8(&mut env, fp + 468) & 0xFFFF_FFFF, 0x340 + 4);
+        assert_eq!(rd8(&mut env, fp + 472), 7);
+        assert_eq!(rd8(&mut env, fp + 480) & 0xFFFF_FFFF, 0x340);
+        assert_eq!(rd8(&mut env, fp + 0x340) & 0xFFFF_FFFF, 0x4650_5845);
+        assert_eq!(rd8(&mut env, fp + 512), 7, "xstate_bv");
+        assert_eq!(rd8(&mut env, fp + 0x240), 0x99aa_bbcc_ddee_ff00);
+        assert_eq!(rd8(&mut env, fp + 0x248), 0x1122_3344_5566_7788);
         // ハンドラ中はマスクが act.mask|シグナル になる。
         assert_eq!(sys.sig_mask, (1 << 11) | (1 << 9));
         // ハンドラが状態を変えてから ret で pretcode（restorer）
@@ -5674,6 +5691,10 @@ mod tests {
         set64(&mut env, Gpr(3), 0xBBBB);
         env.backend.set(
             polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0,
+        );
+        env.backend.set(
+            polyisa_guest_x86::sem::ymm_hi_ref(polyisa_guest_x86::sem::Xmm(0)),
             0,
         );
         set64(&mut env, Gpr(4), f + 8);
@@ -5689,7 +5710,75 @@ mod tests {
             )),
             0x1122_3344
         );
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::ymm_hi_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128
+        );
         assert_eq!(sys.sig_mask, 0);
+    }
+
+    #[test]
+    fn sigreturn_initializes_xfeatures_missing_from_frame() {
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 8, Perms::RW).unwrap();
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344,
+        );
+        env.backend.set(
+            polyisa_guest_x86::sem::ymm_hi_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128,
+        );
+        set64(&mut env, Gpr(4), 0x9000);
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        assert!(crate::x86::rt_sigframe_write(
+            &mut env,
+            10,
+            &crate::x86::SigAct::default(),
+            0,
+            1234
+        ));
+        let f = get64(&mut env, Gpr(4));
+        let fp = rd8(&mut env, f + 48 + 184);
+        // user により xfeatures から AVX(bit2) が削られたフレームを再現する。
+        env.backend
+            .mem
+            .write(VirtAddr(fp + 472), &3u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0,
+        );
+        env.backend.set(
+            polyisa_guest_x86::sem::ymm_hi_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0xffffu128,
+        );
+        set64(&mut env, Gpr(4), f + 8);
+        assert!(crate::x86::rt_sigframe_read(&mut env).is_some());
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0x1122_3344
+        );
+        // AVX は復元対象から外れたので、ハンドラの値を残さず初期状態へ戻る。
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::ymm_hi_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0
+        );
     }
 
     #[test]

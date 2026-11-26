@@ -13,7 +13,7 @@ use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
 use polyisa_kernel::{FdTable, ProcessId, ProcessTable};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
-use polyisa_sem::Backend;
+use polyisa_sem::{Backend, W64};
 
 use super::TrapOutcome;
 
@@ -3116,6 +3116,25 @@ fn fwr(env: &mut BareEnv, a: u64, v: u64, n: usize) -> bool {
         .is_ok()
 }
 
+const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
+
+/// CPUID.1:ECX[26]（XSAVE）から、Linux が xsave 形式の
+/// sigframe を使うかを判定する。cpuid 表の 1 番目は leaf 1、
+/// レジスタ index 2 は ECX。
+fn signal_use_xsave(env: &mut BareEnv) -> bool {
+    env.backend.get(polyisa_guest_x86::sem::cpuid_ref(1, 2)) & (1 << 26) != 0
+}
+
+/// sigframe に入れる user xfeatures。Linux の fpstate->user_xfeatures
+/// 相当で、FP/SSE は常に含め、残りは OS 対応成分とスレッド許可成分の
+/// 交差にする。
+fn signal_user_xfeatures(env: &mut BareEnv) -> u64 {
+    let supp = env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref());
+    let perm = env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref());
+    0x3 | (supp & perm)
+}
+
 /// x86-64 の rt シグナルフレームをスタックに作り、RIP を
 /// ハンドラ入口に向ける。失敗（未写像など）なら偽を返す。
 /// 配置（`struct rt_sigframe` 相当）:
@@ -3123,7 +3142,7 @@ fn fwr(env: &mut BareEnv, a: u64, v: u64, n: usize) -> bool {
 ///   +8    ucontext: flags,link,stack,mcontext{gregs[23],fpregs*,rsvd}
 ///         ,sigmask（旧マスク）… +311
 ///   +312  siginfo（128 バイト、si_signo/si_code=SI_USER/si_pid）
-///   fpstate（512 バイト、FXSAVE 配置）はフレームの直上に
+///   fpstate（FXSAVE/XSAVE 配置）はフレームの直上に
 ///   別置きし、uc_mcontext.fpregs が指す（64 整列が要るため）。
 /// フレーム基底は ≡8 (mod 16)。call 直後の関数入口と同じ
 /// ABI 整列でハンドラへ入る。RDI=sig, RSI=&info, RDX=&uc。
@@ -3152,10 +3171,17 @@ pub fn rt_sigframe_write_ex(
     const FRAME: u64 = 1024;
     const GREGB: u64 = 48; // ucontext.mcontext.gregs のフレーム内オフセット
     let rsp = get64(env, Gpr(4));
-    // レッドゾーン(128)を避けて、fpstate をフレームより上に
-    // 64 整列で取る。フレーム基底は fp の下に ≡8 (mod 16) で
-    // 置く（実カーネルの round_down(...,16)-8 と同じ整列）。
-    let fp = ((rsp - 128).wrapping_sub(512)) & !63;
+    let use_xsave = signal_use_xsave(env);
+    let user_xfeatures = signal_user_xfeatures(env);
+    let xstate_size = if use_xsave {
+        polyisa_guest_x86::cpuid::xstate_size(user_xfeatures)
+    } else {
+        512
+    };
+    let fpstate_size = xstate_size + u64::from(use_xsave) * 4;
+    // レッドゾーン(128)を避け、実カーネルと同じく fpstate 全体を
+    // 引いてから 64 整列する。フレーム基底は fp の下に ≡8 (mod 16)。
+    let fp = rsp.wrapping_sub(128).wrapping_sub(fpstate_size) & !63;
     let f = (fp & !15).wrapping_sub(FRAME + 8);
     // ucontext の固定部と siginfo。
     let fields: [(u64, u64); 10] = [
@@ -3200,10 +3226,36 @@ pub fn rt_sigframe_write_ex(
             return false;
         }
     }
-    // fpstate（FXSAVE 配置）。両成分を無条件で書く。
-    let b = &mut env.backend;
-    if polyisa_guest_x86::sem_ea::fxsave_area(b, fp, None, 64, true, true).is_err() {
-        return false;
+    // fpstate。xsave 対応では XSAVE 標準レイアウトと SW 予約域を書き、
+    // 非対応では 512 バイトの FXSAVE 配置だけを書く。
+    if use_xsave {
+        // 新しいフレームの XSAVE header は 0 初期化してから XSAVE 相当の
+        // 成分保存へ渡す。XSTATE_BV の RFBM 外ビットが残らないようにする。
+        for off in (512..576).step_by(8) {
+            if !fwr(env, fp + off, 0, 8) {
+                return false;
+            }
+        }
+        let b = &mut env.backend;
+        let mask = b.konst::<W64>(user_xfeatures);
+        if polyisa_guest_x86::sem_ea::xsave_area_mask(b, fp, None, 64, mask).is_err() {
+            return false;
+        }
+        // struct _fpx_sw_bytes は FXSAVE 領域 +464。extended_size には
+        // 末尾の FP_XSTATE_MAGIC2 を含む。
+        if !fwr(env, fp.wrapping_add(464), u64::from(FP_XSTATE_MAGIC1), 4)
+            || !fwr(env, fp.wrapping_add(468), xstate_size + 4, 4)
+            || !fwr(env, fp.wrapping_add(472), user_xfeatures, 8)
+            || !fwr(env, fp.wrapping_add(480), xstate_size, 4)
+            || !fwr(env, fp + xstate_size, u64::from(FP_XSTATE_MAGIC2), 4)
+        {
+            return false;
+        }
+    } else {
+        let b = &mut env.backend;
+        if polyisa_guest_x86::sem_ea::fxsave_area(b, fp, None, 64, true, true).is_err() {
+            return false;
+        }
     }
     // ハンドラへ入る引数とスタック。
     set64(env, Gpr(4), f);
@@ -3383,9 +3435,54 @@ pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
     for (i, r) in [7u8, 6, 5, 3, 2, 0, 1].iter().enumerate() {
         set64(env, Gpr(*r), g[8 + i]);
     }
-    let xcr0 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
-    let b = &mut env.backend;
-    polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, xcr0 & 3, 0).ok()?;
+    let use_xsave = signal_use_xsave(env);
+    if use_xsave {
+        // SW 予約域と末尾 magic がある場合だけ xstate として復元する。
+        // 不正または legacy なら FP/SSE だけを FXRSTOR 相当で復元する。
+        let magic1 = fp.checked_add(464).and_then(|a| frd32(env, a))?;
+        let mut xstate_mask = 0x3;
+        let mut as_xstate = false;
+        if magic1 == FP_XSTATE_MAGIC1 {
+            let extended_size = fp.checked_add(468).and_then(|a| frd32(env, a))?;
+            let sw_xfeatures = fp.checked_add(472).and_then(|a| frd64(env, a))?;
+            let xstate_size = fp.checked_add(480).and_then(|a| frd32(env, a))?;
+            let enabled = signal_user_xfeatures(env);
+            let max_size = polyisa_guest_x86::cpuid::xstate_size(enabled) as u32;
+            if xstate_size >= 576
+                && xstate_size <= max_size
+                && xstate_size <= extended_size
+                && fp
+                    .checked_add(u64::from(xstate_size))
+                    .and_then(|a| frd32(env, a))
+                    == Some(FP_XSTATE_MAGIC2)
+            {
+                xstate_mask = sw_xfeatures & enabled;
+                as_xstate = true;
+            }
+        }
+        let enabled = signal_user_xfeatures(env);
+        let b = &mut env.backend;
+        if as_xstate {
+            let mask = b.konst::<W64>(xstate_mask);
+            polyisa_guest_x86::sem_ea::xrstor_area_mask(b, fp, None, 64, mask).ok()?;
+        } else {
+            polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
+        }
+        // sigreturn はフレームに含まれなかった有効成分を初期状態へ戻す。
+        let missing = enabled & !xstate_mask;
+        if missing & 0x3 != 0 {
+            let z = b.konst::<W64>(0);
+            let mi87 = b.konst::<W64>(missing & 0x3);
+            polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, z, mi87).ok()?;
+        }
+        if missing & !0x3 != 0 {
+            let mi = b.konst::<W64>(missing & !0x3);
+            polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
+        }
+    } else {
+        let b = &mut env.backend;
+        polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
+    }
     set64(env, Gpr(4), g[15]);
     env.backend
         .set(polyisa_guest_x86::sem::eflags_ref(), g[17] as u32);

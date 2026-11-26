@@ -333,6 +333,29 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
     tbl
 }
 
+/// XSAVE 標準レイアウトで、成分マスク `mask` を収めるのに必要な
+/// ユーザー領域サイズ。先頭 576 バイト（legacy 512 + xsave header 64）
+/// を最低値とし、各成分の固定末尾まで拡げる。Linux の sigframe の
+/// `xstate_size` と CPUID.0D.0:EBX の現在サイズ計算に対応する。
+#[must_use]
+pub fn xstate_size(mask: u64) -> u64 {
+    let mut size = 576u64;
+    for (bit, end) in [
+        (2u64, 0x340u64),
+        (5, 0x480),
+        (6, 0x680),
+        (7, 0xa80),
+        (17, 0xb00),
+        (18, 0x2b00),
+        (19, 0x440),
+    ] {
+        if mask & (1u64 << bit) != 0 {
+            size = size.max(end);
+        }
+    }
+    size
+}
+
 /// Linux `arch_prctl(ARCH_GET_XCOMP_SUPP)` が返す「OS が
 /// 対応する拡張状態」の成分マスク。bit0=x87, bit1=SSE は常に、
 /// bit17=XTILECFG, bit18=XTILEDATA は `amx_tile`、bit19=APX EGPR は

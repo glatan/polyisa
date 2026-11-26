@@ -13759,8 +13759,7 @@ fn cstore<B: Backend, W: decode::Hw>(
 /// レイアウト: FCW(0)+FSW|TOP(2)+FTW(4)+FOP(6)+FIP(8)+FDP(16)
 /// +MXCSR(24)+MASK(28)+ST0-7(32-,16B毎: sig@0,exp@8)
 /// +XMM(160-,16B毎。m64 は XMM8-15 が +288 以降)。
-/// FOP/FIP/FDP は命令ポインタを追跡しないので 0。64 バイト
-/// 境界整列の #GP はモデル化しない。
+/// 64 バイト境界整列の #GP はモデル化しない。
 /// 公開の理由: Linux のシグナルフレームの fpstate もこの
 /// 配置なので、os-linux が `wseg=None` で呼び直す。
 pub fn fxsave_area<B: Backend>(
@@ -13845,7 +13844,6 @@ pub fn fxsave_area<B: Backend>(
 /// 両方偽なら現状を保つ（XRSTOR の RFBM 外成分）。
 /// `cstore` と同様の近似で、RFBM 外の成分も値は読み込む
 /// （読み出し側の副作用は残るが状態には反映しない）。
-/// FOP/FIP/FDP は追跡していないので読み捨てる。
 /// 公開の理由: rt_sigreturn が fpstate（同じ配置）から
 /// 復元するとき os-linux 側から呼ぶ。
 pub fn fxrstor_area<B: Backend>(
@@ -14047,29 +14045,40 @@ fn xsave_load128<B: Backend>(
 }
 
 /// XSAVE/XSAVEOPT。先行 512 バイトは RFBM ∩ XCR0 の成分だけ
-/// 書き、+512 に XSTATE_BV、+520 に XCOMP_BV=0 を書く。
-/// XINUSE は全成分使用中と近似するので XSTATE_BV=RFBM∩XCR0。
+/// 書き、+512 の XSTATE_BV では RFBM 内のビットを立て、RFBM 外の
+/// 既存ビットを残す。XINUSE は全成分使用中と近似する。
 /// XSAVEOPT の省略最適化と監査値はモデル化しない。XSAVEC の
 /// 圧縮レイアウトはインタプリタ層の具体値実行で扱う。
 pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
-    let a = *a;
-    let wseg = *wseg;
     let m = xsave_mask(b);
+    xsave_area_mask(b, *a, *wseg, mode, m)
+}
+
+/// XSAVE の標準レイアウトを、明示した成分マスクで書く。
+/// Linux のシグナルフレームはゲストレジスタ EDX:EAX を経由せず、
+/// OS が許可した user xfeatures を使うため公開する。
+pub fn xsave_area_mask<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    m: B::V<W64>,
+) -> Flow<B> {
     let w87 = mask_bit(b, m, 0);
     let wsse = mask_bit(b, m, 1);
     let wymm = mask_bit(b, m, 2);
     fxsave_area(b, a, wseg, mode, w87, wsse)?;
+    // XSTATE_BV だけを更新し、RFBM 外のビットは既存値から残す。
+    // XCOMP_BV と予約域は XSAVE が書き換えない。
     let a512 = madd(b, a, 512);
-    decode::mem_store::<B, W64>(b, a512, wseg, m)?;
-    let z = b.konst::<W64>(0);
-    // XCOMP_BV=0。ヘッダの予約域（528-575）も実機同様 0 で埋める。
-    for off in (520..576).step_by(8) {
-        let ah = madd(b, a, off);
-        decode::mem_store::<B, W64>(b, ah, wseg, z)?;
-    }
+    let old_xbv: B::V<W64> = decode::mem_load(b, a512, wseg)?;
+    let nm = b.not::<W64>(m);
+    let keep = b.and::<W64>(old_xbv, nm);
+    let xbv = b.or::<W64>(keep, m);
+    decode::mem_store::<B, W64>(b, a512, wseg, xbv)?;
     // YMMH 成分（+576、YMM0-15 の上位 128 ビット）。W128 の
     // メモリアクセスは wseg 経路がないので 2 本の W64 に分解する。
     // 成分が RFBM∩XCR0 から外れるモデルでは領域外を触らないよう
@@ -14150,6 +14159,64 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     })
 }
 
+/// XSAVE 拡張成分のうち `m` に含まれるものを初期値へ戻す。
+/// x87/SSE は FXSAVE 領域側で扱うためここでは扱わない。
+/// Linux の sigreturn がフレームにない user xfeature を初期化するために使う。
+pub fn xrstor_init_mask<B: Backend>(b: &mut B, m: B::V<W64>) -> Flow<B> {
+    let iymm = mask_bit(b, m, 2);
+    b.if_then(iymm, |b| {
+        let z: B::V<W128> = b.konst::<W128>(0);
+        for i in 0..16u8 {
+            b.set(sem::ymm_hi_ref(Xmm(i)), z);
+        }
+        Ok(())
+    })?;
+    let iopm = mask_bit(b, m, 5);
+    b.if_then(iopm, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..8u8 {
+            b.set(sem::kref(i), z);
+        }
+        Ok(())
+    })?;
+    for (bit, parts, first, last) in [(6u64, 2..4usize, 0u8, 16u8), (7, 0..4usize, 16, 32)] {
+        let iz = mask_bit(b, m, bit);
+        b.if_then(iz, |b| {
+            let z: B::V<W128> = b.konst::<W128>(0);
+            for r in first..last {
+                for part in parts.clone() {
+                    b.set(sem::zreg_ref(r, part), z);
+                }
+            }
+            Ok(())
+        })?;
+    }
+    let itcfg = mask_bit(b, m, 17);
+    b.if_then(itcfg, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..8usize {
+            b.set(sem::tilecfg_qref(i), z);
+        }
+        Ok(())
+    })?;
+    let itdata = mask_bit(b, m, 18);
+    b.if_then(itdata, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..1024usize {
+            b.set(sem::tmm_qref(i), z);
+        }
+        Ok(())
+    })?;
+    let iapx = mask_bit(b, m, 19);
+    b.if_then(iapx, |b| {
+        let z = b.konst::<W64>(0);
+        for i in 0..16u8 {
+            b.set(sem::x_ref(Gpr(16 + i)), z);
+        }
+        Ok(())
+    })
+}
+
 /// XRSTOR。成分 i∈RFBM∩XCR0 は領域の XSTATE_BV ビットが立てば
 /// 復元、立たなければ初期値に戻す。RFBM 外の成分は手付かず。
 /// MXCSR 予約ビット・XSTATE_BV 不整合の #GP はモデル化しない。
@@ -14157,11 +14224,22 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
-    let a = *a;
-    let wseg = *wseg;
+    let m = xsave_mask(b);
+    xrstor_area_mask(b, *a, *wseg, mode, m)
+}
+
+/// XRSTOR の標準レイアウトを、明示した成分マスクで読む。
+/// Linux の rt_sigreturn はゲストレジスタ EDX:EAX を経由せず、
+/// sigframe の user xfeatures と OS 許可成分の交差を使う。
+pub fn xrstor_area_mask<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    m: B::V<W64>,
+) -> Flow<B> {
     let a512 = madd(b, a, 512);
     let xbv: B::V<W64> = decode::mem_load(b, a512, wseg)?;
-    let m = xsave_mask(b);
     let rst = b.and::<W64>(m, xbv);
     let nxbv = b.not::<W64>(xbv);
     let ini = b.and::<W64>(m, nxbv);
