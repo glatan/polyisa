@@ -4573,12 +4573,25 @@ fn build_map_0f3a(m: &mut Model) {
         (0x8D, PfxSel::PF3, "top4mxhbf8ps"),
         (0x8D, PfxSel::P66, "top4mxhf8ps"),
         (0x8F, PfxSel::PF2, "top4mxbssps"),
+        (0x8C, PfxSel::PF3, "top8fmxbf4ps"),
+        (0x8E, PfxSel::PF2, "top8fmxnssps"),
+        (0x8E, PfxSel::PF3, "top8fmxnsups"),
+        (0x8E, PfxSel::P66, "top8fmxnusps"),
+        (0x8E, PfxSel::Plain, "top8fmxnuups"),
+        (0x8F, PfxSel::PF3, "top4mxbsups"),
+        (0x8F, PfxSel::P66, "top4mxbusps"),
+        (0x8F, PfxSel::Plain, "top4mxbuups"),
     ] {
         let mut it = ex(mn, &[RegT, RmX, Vv, ib], sel, 0b100, false, "{op}", "alu");
         it.group_mod = Some(true);
         it.wsel = Some(false);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        let flag = if mn.starts_with("top8fmx") || matches!(mn, "top4mxbsups" | "top4mxbusps" | "top4mxbuups") {
+            "ace_v2"
+        } else {
+            "ace"
+        };
+        it.when = Pred::All(vec![w("m64"), Pred::Flag(flag.to_string())]);
         items.push(MapItem::Insn(op, it));
     }
     // ACE row convert-and-move の immediate 形。TCVTROWPS2PHL は

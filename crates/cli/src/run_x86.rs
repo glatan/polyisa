@@ -6077,6 +6077,14 @@ fn amx_tile_step(
             | Insn::Top4mxhbf8ps
             | Insn::Top4mxhf8ps
             | Insn::Top4mxbssps
+            | Insn::Top8fmxbf4ps
+            | Insn::Top8fmxnssps
+            | Insn::Top8fmxnsups
+            | Insn::Top8fmxnusps
+            | Insn::Top8fmxnuups
+            | Insn::Top4mxbsups
+            | Insn::Top4mxbusps
+            | Insn::Top4mxbuups
     ) {
         return None;
     }
@@ -6824,6 +6832,42 @@ fn ace_add_f32_ftz(a: u32, b: u32) -> u32 {
     } else {
         flush(r.bits() as u32)
     }
+}
+
+/// MX block scale を integer mantissa と 2 の exponent へ分解する。
+fn ace_scale_int_mantissa(scale: u8, e5m3: bool) -> (i128, i32) {
+    if !e5m3 {
+        return (1, i32::from(scale) - 127);
+    }
+    let exp = i32::from(scale >> 3 & 0x1f);
+    let mant = i128::from(scale & 7);
+    if exp == 0 {
+        (mant, -17)
+    } else {
+        (mant + 8, exp - 18)
+    }
+}
+
+fn ace_scaled_fixpoint_to_f32(acc: i128, sa: u8, sb: u8, fmt: u64, adjust: i32) -> u32 {
+    if sa == 0xff || sb == 0xff {
+        return 0xffc0_0000;
+    }
+    let e5 = fmt & 1 != 0;
+    let (ma, ea) = ace_scale_int_mantissa(sa, e5);
+    let (mb, eb) = ace_scale_int_mantissa(sb, e5);
+    ace_fixpoint_to_f32(acc * ma * mb, adjust + ea + eb)
+}
+
+fn ace_fp4_fixed(nib: u8) -> i32 {
+    let sign = nib & 8 != 0;
+    let exp = nib >> 1 & 3;
+    let mant = i32::from(nib & 1);
+    let mag = if exp == 0 {
+        mant
+    } else {
+        (2 + mant) << (exp - 1)
+    };
+    if sign { -mag } else { mag }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7787,6 +7831,14 @@ fn amx_tile_exec(
             | Insn::Top4mxhbf8ps
             | Insn::Top4mxhf8ps
             | Insn::Top4mxbssps
+            | Insn::Top8fmxbf4ps
+            | Insn::Top8fmxnssps
+            | Insn::Top8fmxnsups
+            | Insn::Top8fmxnusps
+            | Insn::Top8fmxnuups
+            | Insn::Top4mxbsups
+            | Insn::Top4mxbusps
+            | Insn::Top4mxbuups
     ) {
         const ACE_XCR0: u64 = 0x16_00e6;
         if xcr0_tile & ACE_XCR0 != ACE_XCR0
@@ -7814,6 +7866,14 @@ fn amx_tile_exec(
                         | Insn::Top4mxhbf8ps
                         | Insn::Top4mxhf8ps
                         | Insn::Top4mxbssps
+                        | Insn::Top8fmxbf4ps
+                        | Insn::Top8fmxnssps
+                        | Insn::Top8fmxnsups
+                        | Insn::Top8fmxnusps
+                        | Insn::Top8fmxnuups
+                        | Insn::Top4mxbsups
+                        | Insn::Top4mxbusps
+                        | Insn::Top4mxbuups
                 ) {
                     let a_group = (md.imm & 3) as usize;
                     let b_group = ((md.imm >> 3) & 3) as usize;
@@ -7821,15 +7881,67 @@ fn amx_tile_exec(
                     let bscale = env.backend.state[SCALEDATA_OFF + col * 4 + b_group];
                     let sop_fp32 = if ascale == 0xff || bscale == 0xff {
                         0xffc0_0000
-                    } else if insn == Insn::Top4mxbssps {
+                    } else if matches!(
+                        insn,
+                        Insn::Top4mxbssps
+                            | Insn::Top4mxbsups
+                            | Insn::Top4mxbusps
+                            | Insn::Top4mxbuups
+                    ) {
+                        let a_signed = matches!(insn, Insn::Top4mxbssps | Insn::Top4mxbsups);
+                        let b_signed = matches!(insn, Insn::Top4mxbssps | Insn::Top4mxbusps);
                         let mut sop = 0i128;
                         for k in 0..4usize {
-                            let av = i128::from((aq >> (k * 8)) as u8 as i8);
-                            let bv = i128::from((bq >> (k * 8)) as u8 as i8);
+                            let x = (aq >> (k * 8)) as u8;
+                            let y = (bq >> (k * 8)) as u8;
+                            let av = if a_signed {
+                                i128::from(x as i8)
+                            } else {
+                                i128::from(x)
+                            };
+                            let bv = if b_signed {
+                                i128::from(y as i8)
+                            } else {
+                                i128::from(y)
+                            };
                             sop += av * bv;
                         }
-                        let adjust = -12 + i32::from(ascale) + i32::from(bscale) - 254;
-                        ace_fixpoint_to_f32(sop, adjust)
+                        ace_scaled_fixpoint_to_f32(sop, ascale, bscale, 0, -12)
+                    } else if matches!(
+                        insn,
+                        Insn::Top8fmxnssps
+                            | Insn::Top8fmxnsups
+                            | Insn::Top8fmxnusps
+                            | Insn::Top8fmxnuups
+                    ) {
+                        let a_signed = matches!(insn, Insn::Top8fmxnssps | Insn::Top8fmxnsups);
+                        let b_signed = matches!(insn, Insn::Top8fmxnssps | Insn::Top8fmxnusps);
+                        let mut sop = 0i128;
+                        for k in 0..8usize {
+                            let x = (aq >> (k * 4)) as u8 & 0xf;
+                            let y = (bq >> (k * 4)) as u8 & 0xf;
+                            let av = if a_signed && x & 8 != 0 {
+                                i128::from(x) - 16
+                            } else {
+                                i128::from(x)
+                            };
+                            let bv = if b_signed && y & 8 != 0 {
+                                i128::from(y) - 16
+                            } else {
+                                i128::from(y)
+                            };
+                            sop += av * bv;
+                        }
+                        ace_scaled_fixpoint_to_f32(sop, ascale, bscale, md.imm >> 6, 0)
+                    } else if insn == Insn::Top8fmxbf4ps {
+                        let mut sop = 0i128;
+                        for k in 0..8usize {
+                            let av = ace_fp4_fixed((aq >> (k * 4)) as u8 & 0xf);
+                            let bv = ace_fp4_fixed((bq >> (k * 4)) as u8 & 0xf);
+                            sop += i128::from(av * bv);
+                        }
+                        // fp4 fixpoint は 2×値。ドラフト仕様の factor=2 に従う。
+                        ace_scaled_fixpoint_to_f32(sop, ascale, bscale, md.imm >> 6, -2)
                     } else {
                         let a_hf = matches!(insn, Insn::Top4mxhbf8ps | Insn::Top4mxhf8ps);
                         let b_hf = matches!(insn, Insn::Top4mxbhf8ps | Insn::Top4mxhf8ps);

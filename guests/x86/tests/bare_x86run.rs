@@ -26615,7 +26615,8 @@ fn run64_ace_outer_products_basic() {
     // row0/col0 の代表値で整数累積と FP32 累積を確認する。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3")
         | polyisa_guest_x86::FEAT_AVX512F
-        | polyisa_guest_x86::FEAT_ACE;
+        | polyisa_guest_x86::FEAT_ACE
+        | polyisa_guest_x86::FEAT_ACE_V2;
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
@@ -26678,6 +26679,14 @@ fn run64_ace_outer_products_basic() {
             u128::from_le_bytes(b),
         );
     }
+    for r in [12u8, 13] {
+        let mut b = [0u8; 16];
+        b[0] = 1;
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(b),
+        );
+    }
     let prog: &[u8] = &[
         // top4bssd tmm1,zmm4,zmm5。vvvv=5 なので P1 の vvvv フィールドは !5=0xa。
         0x62, 0xF2, 0x57, 0x48, 0x5E, 0xCC,
@@ -26685,7 +26694,8 @@ fn run64_ace_outer_products_basic() {
         0x62, 0xF2, 0x66, 0x48, 0x5C, 0xD2,
         // top4mxbssps tmm3,zmm6,zmm7,0（src2=zmm7 なので vvvv フィールドは !7=8）
         0x62, 0xF3, 0x47, 0x48, 0x8F, 0xDE, 0x00, // top4mxbf8ps tmm4,zmm8,zmm9,0
-        0x62, 0xD3, 0x34, 0x48, 0x8D, 0xE0, 0x00, 0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00,
+        0x62, 0xD3, 0x34, 0x48, 0x8D, 0xE0, 0x00, // top8fmxnssps tmm5,zmm12,zmm13,0
+        0x62, 0xD3, 0x17, 0x48, 0x8E, 0xEC, 0x00, 0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00,
         0x00, // mov rax,60
         0x48, 0x31, 0xFF, // xor rdi,rdi
         0x0F, 0x05, // syscall → exit(0)
@@ -26733,6 +26743,15 @@ fn run64_ace_outer_products_basic() {
         ),
         0x3f80_0000,
         "BF8 1.0 * 1.0 with unit scales"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 5 * 1024..tmm_off + 5 * 1024 + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x3f80_0000,
+        "MX INT4 1 * 1 with unit scales"
     );
 }
 
