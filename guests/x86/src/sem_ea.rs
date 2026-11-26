@@ -13804,10 +13804,25 @@ pub fn fxsave_area<B: Backend>(
     cstore::<B, W16>(b, a6, wseg, fop, w87)?;
     let a8 = madd(b, a, 8);
     let fip: B::V<W64> = b.get(sem::fip_ref());
-    cstore::<B, W64>(b, a8, wseg, fip, w87)?;
     let a16 = madd(b, a, 16);
     let fdp: B::V<W64> = b.get(sem::fdp_ref());
-    cstore::<B, W64>(b, a16, wseg, fdp, w87)?;
+    if mode == 64 {
+        cstore::<B, W64>(b, a8, wseg, fip, w87)?;
+        cstore::<B, W64>(b, a16, wseg, fdp, w87)?;
+    } else {
+        let fip32: B::V<W32> = b.trunc::<W64, W32>(fip);
+        cstore::<B, W32>(b, a8, wseg, fip32, w87)?;
+        let a12 = madd(b, a, 12);
+        let fcs: B::V<W16> = b.get(sem::fcs_ref());
+        let fcs32 = b.zext::<W16, W32>(fcs);
+        cstore::<B, W32>(b, a12, wseg, fcs32, w87)?;
+        let fdp32: B::V<W32> = b.trunc::<W64, W32>(fdp);
+        cstore::<B, W32>(b, a16, wseg, fdp32, w87)?;
+        let a20 = madd(b, a, 20);
+        let fds: B::V<W16> = b.get(sem::fds_ref());
+        let fds32 = b.zext::<W16, W32>(fds);
+        cstore::<B, W32>(b, a20, wseg, fds32, w87)?;
+    }
     let mx: B::V<W32> = b.get(sem::mxcsr_ref());
     let a24 = madd(b, a, 24);
     cstore::<B, W32>(b, a24, wseg, mx, wsse)?;
@@ -13891,19 +13906,49 @@ pub fn fxrstor_area<B: Backend>(
     let fop_n = b.select::<W16>(r87, fop_m, tfop);
     b.set(sem::fop_ref(), fop_n);
     let a8 = madd(b, a, 8);
-    let fip_m: B::V<W64> = decode::mem_load(b, a8, wseg)?;
-    let z64i = b.konst::<W64>(0);
-    let fip_c = b.get(sem::fip_ref());
-    let tfip = b.select::<W64>(i87, z64i, fip_c);
-    let fip_n = b.select::<W64>(r87, fip_m, tfip);
-    b.set(sem::fip_ref(), fip_n);
     let a16 = madd(b, a, 16);
-    let fdp_m: B::V<W64> = decode::mem_load(b, a16, wseg)?;
+    let z64i = b.konst::<W64>(0);
     let z64j = b.konst::<W64>(0);
-    let fdp_c = b.get(sem::fdp_ref());
-    let tfdp = b.select::<W64>(i87, z64j, fdp_c);
-    let fdp_n = b.select::<W64>(r87, fdp_m, tfdp);
-    b.set(sem::fdp_ref(), fdp_n);
+    let z16i = b.konst::<W16>(0);
+    if mode == 64 {
+        let fip_m: B::V<W64> = decode::mem_load(b, a8, wseg)?;
+        let fip_c = b.get(sem::fip_ref());
+        let tfip = b.select::<W64>(i87, z64i, fip_c);
+        let fip_n = b.select::<W64>(r87, fip_m, tfip);
+        b.set(sem::fip_ref(), fip_n);
+        let fdp_m: B::V<W64> = decode::mem_load(b, a16, wseg)?;
+        let fdp_c = b.get(sem::fdp_ref());
+        let tfdp = b.select::<W64>(i87, z64j, fdp_c);
+        let fdp_n = b.select::<W64>(r87, fdp_m, tfdp);
+        b.set(sem::fdp_ref(), fdp_n);
+    } else {
+        let fip32: B::V<W32> = decode::mem_load(b, a8, wseg)?;
+        let fip_m = b.zext::<W32, W64>(fip32);
+        let fip_c = b.get(sem::fip_ref());
+        let tfip = b.select::<W64>(i87, z64i, fip_c);
+        let fip_n = b.select::<W64>(r87, fip_m, tfip);
+        b.set(sem::fip_ref(), fip_n);
+        let a12 = madd(b, a, 12);
+        let fcs32: B::V<W32> = decode::mem_load(b, a12, wseg)?;
+        let fcs_m = b.trunc::<W32, W16>(fcs32);
+        let fcs_c = b.get(sem::fcs_ref());
+        let tfcs = b.select::<W16>(i87, z16i, fcs_c);
+        let fcs_n = b.select::<W16>(r87, fcs_m, tfcs);
+        b.set(sem::fcs_ref(), fcs_n);
+        let fdp32: B::V<W32> = decode::mem_load(b, a16, wseg)?;
+        let fdp_m = b.zext::<W32, W64>(fdp32);
+        let fdp_c = b.get(sem::fdp_ref());
+        let tfdp = b.select::<W64>(i87, z64j, fdp_c);
+        let fdp_n = b.select::<W64>(r87, fdp_m, tfdp);
+        b.set(sem::fdp_ref(), fdp_n);
+        let a20 = madd(b, a, 20);
+        let fds32: B::V<W32> = decode::mem_load(b, a20, wseg)?;
+        let fds_m = b.trunc::<W32, W16>(fds32);
+        let fds_c = b.get(sem::fds_ref());
+        let tfds = b.select::<W16>(i87, z16i, fds_c);
+        let fds_n = b.select::<W16>(r87, fds_m, tfds);
+        b.set(sem::fds_ref(), fds_n);
+    }
     let a4 = madd(b, a, 4);
     let ftw_m8: B::V<W8> = decode::mem_load(b, a4, wseg)?;
     let ftw_m = b.zext::<W8, W16>(ftw_m8);

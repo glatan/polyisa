@@ -5857,6 +5857,16 @@ mod tests {
         let mut sys = Linux::x86_32();
         let mut env = bare();
         env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 3), 1u32 << 24);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344,
+        );
         sys.sigacts.resize(64, crate::x86::SigAct::default());
         sys.sigacts[10] = crate::x86::SigAct {
             handler: 0x9000,
@@ -5890,14 +5900,31 @@ mod tests {
         // sigcontext: ip=f+164+56、ebx=f+164+32。
         assert_eq!(rd8(&mut env, f + 164 + 56) & 0xFFFF_FFFF, 0x4000);
         assert_eq!(rd8(&mut env, f + 164 + 32) & 0xFFFF_FFFF, 0xAAAA);
+        let fp = rd8(&mut env, f + 164 + 76) & 0xFFFF_FFFF;
+        assert_ne!(fp, 0);
+        assert_eq!((fp + 112) % 64, 0, "ia32 FX 領域は 64 整列");
+        assert_eq!(rd8(&mut env, fp) & 0xFFFF, 0x037F);
+        assert_eq!(rd8(&mut env, fp + 110) & 0xFFFF, 0, "X86_FXSR_MAGIC");
+        assert_eq!(rd8(&mut env, fp + 112) & 0xFFFF, 0x037F);
+        assert_eq!(rd8(&mut env, fp + 112 + 160), 0x1122_3344);
         // restorer へ来た状態（ESP=f+4）で rt_sigreturn を呼ぶ。
         set64(&mut env, Gpr(4), f + 4);
         set64(&mut env, Gpr(3), 0xBBBB);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0,
+        );
         set64(&mut env, Gpr(0), crate::x86_32::RT_SIGRETURN);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x4000);
         assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
         assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0x1122_3344
+        );
     }
 
     #[test]
