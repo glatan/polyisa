@@ -13984,8 +13984,8 @@ pub(crate) fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, 
     let mut v = frac;
     let mut n = zero32;
     for (k, mask) in [
-        (16u32, 0x7f_8000u32),
-        (8, 0x7c_0000),
+        (16u32, 0x7f_ff80u32),
+        (8, 0x7f_8000),
         (4, 0x78_0000),
         (2, 0x60_0000),
         (1, 0x40_0000),
@@ -14018,7 +14018,37 @@ pub(crate) fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, 
     (sig_final, exp_word)
 }
 
+pub(crate) fn f32_denormal<B: Backend>(b: &mut B, bits: B::V<W32>) -> B::B {
+    let s23 = b.konst::<W32>(23);
+    let shifted = b.shr_l::<W32>(bits, s23);
+    let m8 = b.konst::<W32>(0xff);
+    let exp8 = b.and::<W32>(shifted, m8);
+    let mfrac = b.konst::<W32>(0x7f_ffff);
+    let frac = b.and::<W32>(bits, mfrac);
+    let zero32 = b.konst::<W32>(0);
+    let exp_zero = b.cmp::<W32>(Cmp::Eq, exp8, zero32);
+    let frac_zero = b.cmp::<W32>(Cmp::Eq, frac, zero32);
+    let frac_nonzero = bit_not(b, frac_zero);
+    bit_and(b, exp_zero, frac_nonzero)
+}
+
+pub(crate) fn f64_denormal<B: Backend>(b: &mut B, bits: B::V<W64>) -> B::B {
+    let s52 = b.konst::<W64>(52);
+    let exp_raw = b.shr_l::<W64>(bits, s52);
+    let exp_mask = b.konst::<W64>(0x7ff);
+    let ea = b.and::<W64>(exp_raw, exp_mask);
+    let frac_mask = b.konst::<W64>((1u64 << 52) - 1);
+    let frac = b.and::<W64>(bits, frac_mask);
+    let zero64 = b.konst::<W64>(0);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, zero64);
+    let frac_zero = b.cmp::<W64>(Cmp::Eq, frac, zero64);
+    let frac_nonzero = bit_not(b, frac_zero);
+    bit_and(b, exp_zero, frac_nonzero)
+}
+
 pub(crate) fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+    let denormal = f32_denormal(b, bits);
+    x87_exception_flag(b, denormal, 1 << 1);
     let (sig, exp) = f32_to_ext(b, bits);
     push_ext(b, sig, exp)
 }
@@ -14263,6 +14293,8 @@ pub(crate) fn f64_to_ext<B: Backend>(b: &mut B, bits: B::V<W64>) -> (B::V<W64>, 
 
 /// 倍精度を 80 ビットへ伸ばしてスタックへ載せる。
 pub(crate) fn push_f64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+    let denormal = f64_denormal(b, bits);
+    x87_exception_flag(b, denormal, 1 << 1);
     let (sig, exp) = f64_to_ext(b, bits);
     push_ext(b, sig, exp)
 }

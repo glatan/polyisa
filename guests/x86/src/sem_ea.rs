@@ -9890,9 +9890,13 @@ pub fn farith_m<B: Backend>(
         let a = *a;
         let (sm, em) = if fbits == 32 {
             let v: B::V<W32> = decode::mem_load::<B, W32>(b, a, *wseg)?;
+            let denormal = sem::f32_denormal(b, v);
+            sem::x87_exception_flag(b, denormal, 1 << 1);
             sem::f32_to_ext(b, v)
         } else {
             let v: B::V<W64> = decode::mem_load::<B, W64>(b, a, *wseg)?;
+            let denormal = sem::f64_denormal(b, v);
+            sem::x87_exception_flag(b, denormal, 1 << 1);
             sem::f64_to_ext(b, v)
         };
         let top = b.get(sem::top_ref());
@@ -11761,9 +11765,13 @@ pub fn fcom_m<B: Backend>(
             let a = *a;
             if bits == 64 {
                 let v = decode::mem_load::<B, W64>(b, a, *wseg)?;
+                let denormal = sem::f64_denormal(b, v);
+                sem::x87_exception_flag(b, denormal, 1 << 1);
                 sem::f64_to_ext(b, v)
             } else {
                 let v = decode::mem_load::<B, W32>(b, a, *wseg)?;
+                let denormal = sem::f32_denormal(b, v);
+                sem::x87_exception_flag(b, denormal, 1 << 1);
                 sem::f32_to_ext(b, v)
             }
         }

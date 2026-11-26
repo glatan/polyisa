@@ -13175,6 +13175,41 @@ fn run_x87_fstp_m32_underflow_stores_single_indefinite() {
 }
 
 #[test]
+fn run_x87_fld_denormal_memory_sets_denormal_flag() {
+    fn once(op0: u8, bytes: &[u8], want_exp: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[op0, 0x03])
+            .unwrap(); // fld fp [rbx]
+        env.backend.mem.write(VirtAddr(0x2000), bytes).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+        let sig: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7));
+        let exp: u16 = env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7));
+        assert_eq!(exp, want_exp);
+        (fsw, sig, exp)
+    }
+    let (fsw, sig, exp) = once(0xD9, &1u32.to_le_bytes(), 0x3F6A);
+    assert_eq!(fsw & 0x43, 0x2);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3F6A));
+    let (fsw, sig, exp) = once(0xD9, &0x4000u32.to_le_bytes(), 0x3F78);
+    assert_eq!(fsw & 0x43, 0x2);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3F78));
+    let (fsw, sig, exp) = once(0xDD, &1u64.to_le_bytes(), 0x3BCD);
+    assert_eq!(fsw & 0x43, 0x2);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3BCD));
+}
+
+#[test]
 fn run_x87_successful_push_clears_c1() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
