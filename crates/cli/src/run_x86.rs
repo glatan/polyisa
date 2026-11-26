@@ -6057,6 +6057,21 @@ fn amx_tile_step(
             | Insn::TilemovrowWImm
             | Insn::TilemovcolWGpr
             | Insn::TilemovcolWImm
+            | Insn::Tcvtrowd2psGpr
+            | Insn::Tcvtrowd2psImm
+            | Insn::Tcvtrowps2bf16hGpr
+            | Insn::Tcvtrowps2bf16hImm
+            | Insn::Tcvtrowps2bf16lGpr
+            | Insn::Tcvtrowps2bf16lImm
+            | Insn::Tcvtrowps2phhGpr
+            | Insn::Tcvtrowps2phhImm
+            | Insn::Tcvtrowps2phlGpr
+            | Insn::Tcvtrowps2phlImm
+            | Insn::Top2bf16ps
+            | Insn::Top4bssd
+            | Insn::Top4bsud
+            | Insn::Top4busd
+            | Insn::Top4buud
     ) {
         return None;
     }
@@ -6754,6 +6769,15 @@ fn amx_ud(eip: u32) -> InterpExit {
     InterpExit::Exception(polyisa_sem::GuestException {
         kind: polyisa_sem::ExceptionKind::Undefined,
         code: 6,
+        addr: Some(u64::from(eip)),
+        in_delay_slot: false,
+    })
+}
+
+fn amx_gp(eip: u32) -> InterpExit {
+    InterpExit::Exception(polyisa_sem::GuestException {
+        kind: polyisa_sem::ExceptionKind::Protection,
+        code: 0x0D,
         addr: Some(u64::from(eip)),
         in_delay_slot: false,
     })
@@ -7646,21 +7670,162 @@ fn amx_tile_exec(
     let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
     if matches!(
         insn,
+        Insn::Top2bf16ps | Insn::Top4bssd | Insn::Top4bsud | Insn::Top4busd | Insn::Top4buud
+    ) {
+        const ACE_XCR0: u64 = 0x16_00e6;
+        if xcr0_tile & ACE_XCR0 != ACE_XCR0
+            || env.backend.state[TILECFG_OFF] != 2
+            || md.evex_b
+            || md.evex_z
+            || md.evex_aaa != 0
+            || decode::reg_x5(md) >= 8
+        {
+            return Err(amx_ud(eip));
+        }
+        let t = usize::from(md.modrm >> 3 & 7);
+        let a = zget64(env, decode::rm_reg_x5(md));
+        let bvec = zget64(env, md.vex_v);
+        let base = TMM_OFF + t * 1024;
+        for row in 0..16usize {
+            let aq = u32::from_le_bytes(a[row * 4..row * 4 + 4].try_into().unwrap());
+            for col in 0..16usize {
+                let bq = u32::from_le_bytes(bvec[col * 4..col * 4 + 4].try_into().unwrap());
+                let at = base + row * 64 + col * 4;
+                if insn == Insn::Top2bf16ps {
+                    use polyisa_softfloat::{F32, Rm};
+                    let bf = |w: u16| {
+                        let x = u32::from(w);
+                        if x & 0x7f80 == 0 && x & 0x7f != 0 {
+                            (x & 0x8000) << 16
+                        } else {
+                            x << 16
+                        }
+                    };
+                    let f32new = |bits: u32| F32::from_bits(u64::from(bits));
+                    let ftz = |f: F32| {
+                        let bits = f.bits() as u32;
+                        if bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0 {
+                            f32new(bits & 0x8000_0000)
+                        } else {
+                            f
+                        }
+                    };
+                    let indef = || F32::from_bits(0xffc0_0000);
+                    let mul = |x: F32, y: F32| {
+                        let (r, _) = x.mul_rm(y, Rm::Rne);
+                        if r.is_nan() { indef() } else { r }
+                    };
+                    let add_ftz = |x: F32, y: F32| {
+                        let (r, _) = x.add_rm(y, Rm::Rne);
+                        if r.is_nan() { indef() } else { ftz(r) }
+                    };
+                    let aw = u32::from(aq as u16);
+                    let ah = aq >> 16;
+                    let bw = u32::from(bq as u16);
+                    let bh = bq >> 16;
+                    let a0 = f32new(bf(aw as u16));
+                    let a1 = f32new(bf(ah as u16));
+                    let b0 = f32new(bf(bw as u16));
+                    let b1 = f32new(bf(bh as u16));
+                    let p0 = mul(a0, b0);
+                    let p1 = mul(a1, b1);
+                    let sop = add_ftz(p0, p1);
+                    let oldbits =
+                        u32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap());
+                    let acc = f32new(
+                        if oldbits & 0x7f80_0000 == 0 && oldbits & 0x007f_ffff != 0 {
+                            oldbits & 0x8000_0000
+                        } else {
+                            oldbits
+                        },
+                    );
+                    let out = add_ftz(acc, sop);
+                    env.backend.state[at..at + 4]
+                        .copy_from_slice(&(out.bits() as u32).to_le_bytes());
+                } else {
+                    let aval = |k: usize| {
+                        let x = (aq >> (k * 8)) as u8;
+                        if matches!(insn, Insn::Top4bssd | Insn::Top4bsud) {
+                            i32::from(x as i8)
+                        } else {
+                            i32::from(x)
+                        }
+                    };
+                    let bval = |k: usize| {
+                        let x = (bq >> (k * 8)) as u8;
+                        if matches!(insn, Insn::Top4bssd | Insn::Top4busd) {
+                            i32::from(x as i8)
+                        } else {
+                            i32::from(x)
+                        }
+                    };
+                    let mut acc = 0i32;
+                    for k in 0..4usize {
+                        acc += aval(k) * bval(k);
+                    }
+                    let old = i32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap());
+                    env.backend.state[at..at + 4]
+                        .copy_from_slice(&old.wrapping_add(acc).to_le_bytes());
+                }
+            }
+        }
+        return Ok(());
+    }
+    if matches!(
+        insn,
         Insn::TilemovrowRGpr
             | Insn::TilemovrowRImm
             | Insn::TilemovrowWGpr
             | Insn::TilemovrowWImm
             | Insn::TilemovcolWGpr
             | Insn::TilemovcolWImm
+            | Insn::Tcvtrowd2psGpr
+            | Insn::Tcvtrowd2psImm
+            | Insn::Tcvtrowps2bf16hGpr
+            | Insn::Tcvtrowps2bf16hImm
+            | Insn::Tcvtrowps2bf16lGpr
+            | Insn::Tcvtrowps2bf16lImm
+            | Insn::Tcvtrowps2phhGpr
+            | Insn::Tcvtrowps2phhImm
+            | Insn::Tcvtrowps2phlGpr
+            | Insn::Tcvtrowps2phlImm
     ) {
         const ACE_XCR0: u64 = 0x16_00e6;
-        let read_form = matches!(insn, Insn::TilemovrowRGpr | Insn::TilemovrowRImm);
+        let cvt_form = matches!(
+            insn,
+            Insn::Tcvtrowd2psGpr
+                | Insn::Tcvtrowd2psImm
+                | Insn::Tcvtrowps2bf16hGpr
+                | Insn::Tcvtrowps2bf16hImm
+                | Insn::Tcvtrowps2bf16lGpr
+                | Insn::Tcvtrowps2bf16lImm
+                | Insn::Tcvtrowps2phhGpr
+                | Insn::Tcvtrowps2phhImm
+                | Insn::Tcvtrowps2phlGpr
+                | Insn::Tcvtrowps2phlImm
+        );
+        let read_form = cvt_form || matches!(insn, Insn::TilemovrowRGpr | Insn::TilemovrowRImm);
         let imm_form = matches!(
             insn,
-            Insn::TilemovrowRImm | Insn::TilemovrowWImm | Insn::TilemovcolWImm
+            Insn::TilemovrowRImm
+                | Insn::TilemovrowWImm
+                | Insn::TilemovcolWImm
+                | Insn::Tcvtrowd2psImm
+                | Insn::Tcvtrowps2bf16hImm
+                | Insn::Tcvtrowps2bf16lImm
+                | Insn::Tcvtrowps2phhImm
+                | Insn::Tcvtrowps2phlImm
         );
+        let palette = env.backend.state[TILECFG_OFF];
+        // read/convert は ACE では palette1/2 の両方で有効、
+        // write/column は palette2 専用。
+        let palette_ok = if read_form {
+            palette != 0
+        } else {
+            palette == 2
+        };
         if xcr0_tile & ACE_XCR0 != ACE_XCR0
-            || env.backend.state[TILECFG_OFF] != 2
+            || !palette_ok
             || md.evex_b
             || md.evex_z
             || md.evex_aaa != 0
@@ -7684,9 +7849,102 @@ fn amx_tile_exec(
             if decode::rm_reg_x5(md) >= 8 {
                 return Err(amx_ud(eip));
             }
+            if palette == 1 && !tile_valid(&env.backend.state, t) {
+                return Err(amx_ud(eip));
+            }
             let mut v = [0u8; 64];
             let base = tmm_off(t) + rowcol as usize * 64;
-            v.copy_from_slice(&env.backend.state[base..base + 64]);
+            if cvt_form {
+                use polyisa_softfloat::{F32, Rm};
+                let flush32 = |bits: u32| {
+                    if bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0 {
+                        bits & 0x8000_0000
+                    } else {
+                        bits
+                    }
+                };
+                let mut rowbytes = [0u8; 64];
+                if palette == 1 {
+                    let rows = tile_rows(&env.backend.state, t);
+                    let colsb = tile_colsb(&env.backend.state, t);
+                    if (rowcol as usize) < rows {
+                        let srcbase = tmm_off(t) + rowcol as usize * colsb;
+                        let n = colsb.min(64);
+                        rowbytes[..n].copy_from_slice(&env.backend.state[srcbase..srcbase + n]);
+                    }
+                } else {
+                    rowbytes.copy_from_slice(&env.backend.state[base..base + 64]);
+                }
+                for col in 0..16usize {
+                    let at = col * 4;
+                    let raw = u32::from_le_bytes(rowbytes[at..at + 4].try_into().unwrap());
+                    match insn {
+                        Insn::Tcvtrowd2psGpr | Insn::Tcvtrowd2psImm => {
+                            let (f, _) = F32::from_i64(i64::from(raw as i32), Rm::Rne);
+                            v[col * 4..col * 4 + 4]
+                                .copy_from_slice(&(f.bits() as u32).to_le_bytes());
+                        }
+                        Insn::Tcvtrowps2bf16hGpr
+                        | Insn::Tcvtrowps2bf16hImm
+                        | Insn::Tcvtrowps2bf16lGpr
+                        | Insn::Tcvtrowps2bf16lImm => {
+                            let mut w =
+                                if raw & 0x7f80_0000 == 0x7f80_0000 && raw & 0x007f_ffff != 0 {
+                                    ((raw >> 16) | 0x0040) as u64
+                                } else {
+                                    let (f, _) =
+                                        F32::from_bits(u64::from(flush32(raw))).to_bf16(Rm::Rne);
+                                    f.bits()
+                                };
+                            // FTZ=1 固定なので BF16 denormal 出力は符号付き零。
+                            if w & 0x7f80 == 0 && w & 0x7f != 0 {
+                                w &= 0x8000;
+                            }
+                            let pos = if matches!(
+                                insn,
+                                Insn::Tcvtrowps2bf16hGpr | Insn::Tcvtrowps2bf16hImm
+                            ) {
+                                2
+                            } else {
+                                0
+                            };
+                            v[col * 4 + pos..col * 4 + pos + 2]
+                                .copy_from_slice(&(w as u16).to_le_bytes());
+                        }
+                        _ => {
+                            let fbits = if raw & 0x7f80_0000 == 0x7f80_0000
+                                && raw & 0x007f_ffff != 0
+                            {
+                                u64::from(((raw >> 16) & 0x8000) | 0x7e00 | ((raw >> 13) & 0x01ff))
+                            } else {
+                                let (f, _) =
+                                    F32::from_bits(u64::from(flush32(raw))).to_f16(Rm::Rne);
+                                f.bits()
+                            };
+                            let pos = if matches!(
+                                insn,
+                                Insn::Tcvtrowps2phhGpr | Insn::Tcvtrowps2phhImm
+                            ) {
+                                2
+                            } else {
+                                0
+                            };
+                            v[col * 4 + pos..col * 4 + pos + 2]
+                                .copy_from_slice(&(fbits as u16).to_le_bytes());
+                        }
+                    }
+                }
+            } else if palette == 1 {
+                let rows = tile_rows(&env.backend.state, t);
+                let colsb = tile_colsb(&env.backend.state, t);
+                if (rowcol as usize) < rows {
+                    let srcbase = tmm_off(t) + rowcol as usize * colsb;
+                    let n = colsb.min(64);
+                    v[..n].copy_from_slice(&env.backend.state[srcbase..srcbase + n]);
+                }
+            } else {
+                v.copy_from_slice(&env.backend.state[base..base + 64]);
+            }
             zput64(env, dst, &v);
         } else {
             let t = md.modrm >> 3 & 7;
@@ -7720,7 +7978,12 @@ fn amx_tile_exec(
         // ACE-E2/E3/E5 の実行条件。ユーザーモードモデルでは
         // CR0/CR4 は常に許可済みとして、XCR0 と palette 2 を検査する。
         const ACE_XCR0: u64 = 0x16_00e6;
-        if xcr0_tile & ACE_XCR0 != ACE_XCR0 {
+        let need = if insn == Insn::Bsrinit {
+            0x16_0000
+        } else {
+            ACE_XCR0
+        };
+        if xcr0_tile & need != need {
             return Err(amx_ud(eip));
         }
         if env.backend.state[TILECFG_OFF] != 2 {
@@ -7774,18 +8037,18 @@ fn amx_tile_exec(
                 // palette0 は解放、palette1 は AMX、palette2 は ACE。
                 // palette2 は XCR0[20,18:17] が全て有効なときだけ選べる。
                 if cfg[0] > 2 {
-                    return Err(amx_ud(eip));
+                    return Err(amx_gp(eip));
                 }
                 let xcr0 = xcr0_tile;
                 let amx_bits = 1 << 17 | 1 << 18;
                 if cfg[0] == 1 && xcr0 & amx_bits != amx_bits {
-                    return Err(amx_ud(eip));
+                    return Err(amx_gp(eip));
                 }
                 let max_palette = max_palette_tile;
                 if cfg[0] == 2
                     && (max_palette < 2 || xcr0 & (amx_bits | 1 << 20) != (amx_bits | 1 << 20))
                 {
-                    return Err(amx_ud(eip));
+                    return Err(amx_gp(eip));
                 }
                 if cfg[0] == 1 {
                     // bytes2-15 の予約域と、palette1 で使わない
@@ -7794,19 +8057,19 @@ fn amx_tile_exec(
                         || cfg[32..48].iter().any(|&b| b != 0)
                         || cfg[56..64].iter().any(|&b| b != 0)
                     {
-                        return Err(amx_ud(eip));
+                        return Err(amx_gp(eip));
                     }
                     for i in 0..8 {
                         let cb = u16::from_le_bytes([cfg[16 + 2 * i], cfg[17 + 2 * i]]);
                         // colsb<=64・rows<=16・片方だけ 0 は #GP。
                         if cb > 64 || cfg[48 + i] > 16 || (cb == 0) != (cfg[48 + i] == 0) {
-                            return Err(amx_ud(eip));
+                            return Err(amx_gp(eip));
                         }
                     }
                 }
                 // ACE palette は固定形状で、bytes1-63 はすべて予約。
                 if cfg[0] == 2 && cfg[1..].iter().any(|&b| b != 0) {
-                    return Err(amx_ud(eip));
+                    return Err(amx_gp(eip));
                 }
                 st[TILECFG_OFF..TILECFG_OFF + 64].copy_from_slice(&cfg);
                 st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
@@ -7827,17 +8090,22 @@ fn amx_tile_exec(
         }
         _ => {}
     }
-    // 以下は構成済み（palette=1）が前提。
-    if st[TILECFG_OFF] != 1 {
+    // TILEZERO は palette1/2、load/store と内積は palette1 が前提。
+    let palette = st[TILECFG_OFF];
+    if palette != 1 && !(palette == 2 && insn == Insn::Tilezero) {
         return Err(amx_ud(eip));
     }
     let dst = (md.modrm >> 3) & 7;
     match insn {
         Insn::Tilezero => {
-            if !tile_valid(st, dst) || md.rex & 4 != 0 {
+            if md.rex & 4 != 0 || (palette == 1 && !tile_valid(st, dst)) {
                 return Err(amx_ud(eip));
             }
-            let n = tile_rows(st, dst) * tile_colsb(st, dst);
+            let n = if palette == 2 {
+                1024
+            } else {
+                tile_rows(st, dst) * tile_colsb(st, dst)
+            };
             st[TMM_OFF + usize::from(dst) * 1024..TMM_OFF + usize::from(dst) * 1024 + n].fill(0);
             Ok(())
         }

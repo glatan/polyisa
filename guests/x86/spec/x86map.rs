@@ -3997,6 +3997,37 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
         v.push(MapItem::Insn(op, it));
     }
+    // ACE outer product（mod=11 固定）。modrm.reg は tmm、r/m は
+    // src1 の ZMM、vvvv は src2 の ZMM。一部は imm8 で scale groupを選ぶ。
+    for (op, sel, mn) in [
+        (0x5Cu8, PfxSel::PF3, "top2bf16ps"),
+        (0x5E, PfxSel::PF2, "top4bssd"),
+        (0x5E, PfxSel::PF3, "top4bsud"),
+        (0x5E, PfxSel::P66, "top4busd"),
+        (0x5E, PfxSel::Plain, "top4buud"),
+    ] {
+        let mut it = ex(mn, &[RegT, RmX, Vv], sel, 0b100, false, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(false);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        v.push(MapItem::Insn(op, it));
+    }
+    // ACE row convert-and-move の GPR 形。すべて read 専用で W0。
+    for (op, sel, mn) in [
+        (0x4Au8, PfxSel::PF3, "tcvtrowd2ps_gpr"),
+        (0x6D, PfxSel::PF2, "tcvtrowps2bf16h_gpr"),
+        (0x6D, PfxSel::PF3, "tcvtrowps2bf16l_gpr"),
+        (0x6D, PfxSel::Plain, "tcvtrowps2phh_gpr"),
+        (0x6D, PfxSel::P66, "tcvtrowps2phl_gpr"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX], sel, 0b100, false, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(false);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        v.push(MapItem::Insn(op, it));
+    }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
@@ -4530,6 +4561,22 @@ fn build_map_0f3a(m: &mut Model) {
         let mut it = ex(mn, &[RegX, RmX, ib], PfxSel::P66, 0b100, true, "{op}", "alu");
         it.group_mod = Some(true);
         it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        items.push(MapItem::Insn(op, it));
+    }
+    // ACE row convert-and-move の immediate 形。TCVTROWPS2PHL は
+    // opcode 77/F2、残りの low/high は opcode 07 で pp により分かれる。
+    for (op, sel, mn) in [
+        (0x07u8, PfxSel::PF3, "tcvtrowd2ps_imm"),
+        (0x07, PfxSel::PF2, "tcvtrowps2bf16h_imm"),
+        (0x77, PfxSel::PF3, "tcvtrowps2bf16l_imm"),
+        (0x07, PfxSel::Plain, "tcvtrowps2phh_imm"),
+        (0x77, PfxSel::PF2, "tcvtrowps2phl_imm"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX, ib], sel, 0b100, true, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(false);
         it.no_mask = true;
         it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
         items.push(MapItem::Insn(op, it));

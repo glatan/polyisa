@@ -26537,6 +26537,166 @@ fn run64_ace_tilemovrow_imm() {
 }
 
 #[test]
+fn run64_ace_tcvtrow_imm() {
+    // TCVTROW 系 immediate 形。row2 は int32、row3 は fp32 として
+    // 読み、5 種類の変換結果を別々の ZMM へ出す。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    let tile1 = tmm_off + 1024;
+    // row2: [1, -2, 16777217, ...]。col2 は f32 への変換で丸めが効く。
+    let ints = [1i32, -2, 16_777_217];
+    for (c, x) in ints.iter().enumerate() {
+        env.backend.state[tile1 + 2 * 64 + c * 4..tile1 + 2 * 64 + c * 4 + 4]
+            .copy_from_slice(&x.to_le_bytes());
+    }
+    // row3: [1.5, fp32-denormal, ...]。
+    let floats = [0x3fc0_0000u32, 1];
+    for (c, x) in floats.iter().enumerate() {
+        env.backend.state[tile1 + 3 * 64 + c * 4..tile1 + 3 * 64 + c * 4 + 4]
+            .copy_from_slice(&x.to_le_bytes());
+    }
+    let prog: &[u8] = &[
+        0x62, 0xF3, 0x7E, 0x48, 0x07, 0xC1, 0x02, // tcvtrowd2ps zmm0,tmm1,2
+        0x62, 0xF3, 0x7F, 0x48, 0x07, 0xC9, 0x03, // tcvtrowps2bf16h zmm1,tmm1,3
+        0x62, 0xF3, 0x7E, 0x48, 0x77, 0xD1, 0x03, // tcvtrowps2bf16l zmm2,tmm1,3
+        0x62, 0xF3, 0x7C, 0x48, 0x07, 0xD9, 0x03, // tcvtrowps2phh zmm3,tmm1,3
+        0x62, 0xF3, 0x7F, 0x48, 0x77, 0xE1, 0x03, // tcvtrowps2phl zmm4,tmm1,3
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        30,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut lanebytes = |r: u8, lane: usize| {
+        env.backend
+            .get(polyisa_guest_x86::sem::zreg_ref(r, lane / 4))
+            .to_le_bytes()[(lane % 4) * 4..(lane % 4) * 4 + 4]
+            .try_into()
+            .unwrap()
+    };
+    let mut u32lane = |r: u8, lane: usize| u32::from_le_bytes(lanebytes(r, lane));
+    assert_eq!(u32lane(0, 0), 0x3f80_0000, "int 1");
+    assert_eq!(u32lane(0, 1), 0xc000_0000, "int -2");
+    assert_eq!(u32lane(0, 2), 0x4b80_0000, "int RNE");
+    // 1.5 → bf16 0x3fc0。H は bits31:16、L は bits15:0。
+    assert_eq!(u32lane(1, 0), 0x3fc0_0000, "bf16 high");
+    assert_eq!(u32lane(2, 0), 0x0000_3fc0, "bf16 low");
+    // fp32 denormal は DAZ=1 で零。bf16/fp16 とも lane1 は 0。
+    assert_eq!(u32lane(1, 1), 0, "bf16 input denormal");
+    assert_eq!(u32lane(4, 1), 0, "fp16 input denormal");
+    // 1.5 → fp16 0x3e00。
+    assert_eq!(u32lane(3, 0), 0x3e00_0000, "fp16 high");
+    assert_eq!(u32lane(4, 0), 0x0000_3e00, "fp16 low");
+}
+
+#[test]
+fn run64_ace_outer_products_basic() {
+    // TOP4BSSD/TOP2BF16PS の rank-4/rank-2 outer product。
+    // row0/col0 の代表値で整数累積と FP32 累積を確認する。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    let tile1 = tmm_off + 1024;
+    // int32 accumulator row0/col0 = 5、fp32 accumulator row1/col0 = 1.0。
+    env.backend.state[tile1..tile1 + 4].copy_from_slice(&5i32.to_le_bytes());
+    env.backend.state[tmm_off + 2048..tmm_off + 2052]
+        .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
+    // zmm2 lane0: int bytes [1,2,3,4]、bf16 pair [1.0,2.0]。
+    // zmm3 lane0: int bytes [5,6,7,8]、bf16 pair [3.0,4.0]。
+    let z2first = 0x4000_3f80u32;
+    let z3first = 0x4080_4040u32;
+    for (r, first) in [(2u8, z2first), (3u8, z3first)] {
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(
+                first
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain([0u8; 12])
+                    .collect::<Vec<u8>>()
+                    .try_into()
+                    .unwrap(),
+            ),
+        );
+    }
+    // int 側は同じ lane 解釈では都合が悪いので、byte 配列を直接別 lane には置かず、
+    // row0/col0 の int テスト専用値を lane0 へ重ねる前に別々に実行する。
+    // ここでは zmm4/5 に int 用、zmm2/3 に bf16 用を置く。
+    for (r, bytes) in [(4u8, [1u8, 2, 3, 4]), (5u8, [5u8, 6, 7, 8])] {
+        let mut b = [0u8; 16];
+        b[..4].copy_from_slice(&bytes);
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(b),
+        );
+    }
+    let prog: &[u8] = &[
+        // top4bssd tmm1,zmm4,zmm5。vvvv=5 なので P1 の vvvv フィールドは !5=0xa。
+        0x62, 0xF2, 0x57, 0x48, 0x5E, 0xCC,
+        // top2bf16ps tmm1,zmm2,zmm3。vvvv=3 なので !3=0xc。
+        0x62, 0xF2, 0x66, 0x48, 0x5C, 0xD2, 0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00,
+        0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        i32::from_le_bytes(env.backend.state[tile1..tile1 + 4].try_into().unwrap()),
+        75,
+        "5 + 1*5+2*6+3*7+4*8"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 2048..tmm_off + 2052]
+                .try_into()
+                .unwrap()
+        ),
+        0x4140_0000,
+        "1.0 + 1*3 + 2*4 = 12.0"
+    );
+}
+
+#[test]
 fn run64_avx10_vcomxss_flags() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_AVX10_2
