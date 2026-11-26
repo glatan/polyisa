@@ -10,6 +10,13 @@ use polyisa_guest_x86::sem::Gpr;
 use polyisa_mem::{Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
+fn bare_x86_env() -> BareEnv {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    env.backend
+        .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+    env
+}
+
 fn x87_tag(env: &mut BareEnv, slot: usize) -> u16 {
     let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
     (ftw >> (slot * 2)) & 3
@@ -32,7 +39,7 @@ impl TrapHandler for ExitOne {
 
 #[test]
 fn run_add_and_exit() {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     // コード頁（RWX）とスタック頁（RW）を写像する。
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
@@ -58,7 +65,7 @@ fn run_add_and_exit() {
 
 #[test]
 fn self_loop_hits_step_limit_without_advancing() {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     // JMP rel8 -2：自分自身に飛ぶ。taken でも eip は進まない。
@@ -78,7 +85,7 @@ fn run_lea_and_logic_branch() {
     // 0x1006: 59             pop ecx
     // 0x1007: 53             push ebx
     // 0x1008: 5B             pop ebx (placeholder, replaced below)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -112,7 +119,7 @@ fn run_sib_load_store() {
     // SIB base+index 形式を run 経由で回し、exit コードで値を検証する。
     // ebx=0x1500、esi=0x20 を置き、mov [ebx+esi],eax で [0x1520] に書き、
     // mov eax,[ebx+esi] で読み戻して exit コードにする。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -147,7 +154,7 @@ fn run_sib_disp8() {
     // mov eax,0x77; mov [ebx+esi+0x10],eax ([0x1530]=0x77);
     // mov eax,0; mov eax,[ebx+esi+0x10] (eax=0x77);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -182,7 +189,7 @@ fn run_sib_scaled() {
     // mov eax,0x77; mov [ebx+esi*4+0x10],eax ([0x1550]=0x77);
     // mov eax,0; mov eax,[ebx+esi*4+0x10] (eax=0x77);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -217,7 +224,7 @@ fn run_sib_scaled_nd() {
     // mov eax,0x77; mov [ebx+esi*4],eax ([0x1540]=0x77);
     // mov eax,0; mov eax,[ebx+esi*4] (eax=0x77);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -252,7 +259,7 @@ fn run_regreg_matrix() {
     // xor ecx,ecx (31 C9: ecx=0);
     // mov edx,eax (8B D0: edx=3); mov ebx,edx (89 D3: ebx=3);
     // mov eax,1; int 0x80 -> exit(3)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -283,7 +290,7 @@ fn run_mem_disp32_and_absolute() {
     // mov eax,0; mov eax,[ebx+0x20] (eax=0x77);
     // mov [0x1600],eax ([0x1600]=0x77); mov eax,0; mov eax,[0x1600] (eax=0x77);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -317,7 +324,7 @@ fn run_lea_scaled() {
     // mov eax,0x10; push eax; pop esi (esi=0x10);
     // lea eax,[ebx+esi*4+0x10] (eax=0x1550);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x1550)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -346,7 +353,7 @@ fn run_signed_branch() {
     // CMP+JL を run 経由で回す。-5 < 0 で taken、exit(7)。
     // mov eax,-5; cmp eax,0; jl +5 -> mov eax,7 を実行;
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(7)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -375,7 +382,7 @@ fn run_gas_absorbed_cell() {
     // .text（leal cell,%ebx / movl $0x77,%eax / mov %eax,(%ebx) / mov (%ebx),%eax /
     // mov %eax,%ebx / movl $1,%eax / int $0x80）。cell = 0x804b028。
     // gas は disp8=0 を mod=00（89 03 / 8B 03）に畳む。dst=EBX の LEA を含む。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -410,7 +417,7 @@ fn run_sib_disp32() {
     // mov [esi*4+0x1500],eax ([0x1540]=0x77);
     // mov eax,0; mov eax,[esi*4+0x1500] (eax=0x77);
     // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -444,7 +451,7 @@ fn run_sib_disp32() {
 fn run_div_exit_quotient() {
     // F7 F1 の fetch と div ディスパッチを run 経由で検証する。
     // EDX:EAX=17 / ECX=5 -> EAX=3 で exit(3)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -473,7 +480,7 @@ fn run_div_exit_quotient() {
 fn run_imul_rm64() {
     // run 経由で 48 F7 EF (IMUL RDI) を回す。ls -l 0x4a479e 対応.
     // RAX=7、RDI=6 -> RAX=42、RDX=0、eip は 0x1003 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -523,7 +530,7 @@ fn run_rex64_basic() {
     // REX.W 最小形を 64ビットモードで回す。SYSCALL 番号は RAX、引数は RDI。
     // lea rax,[rip+0x10] (rax=0x1017); mov rcx,0x77; add rax,rcx (rax=0x108e);
     // mov rdi,rcx (rdi=0x77); mov rax,60; syscall -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -551,7 +558,7 @@ fn run_rex64_gas_absorbed() {
     // （lea rsi,[rip+msg] / mov rdi,1 / mov rdx,13 / mov rax,1 / syscall /
     // mov rdi,7 / mov rax,60 / syscall）。コードを 0x1000 に置くため
     // msg は 0x1007+0x2029 = 0x3030 に写像する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -582,7 +589,7 @@ fn run_rex_b_and_stack64() {
     // REX.B (R8/R9) と 64ビットスタックを run 経由で回す。
     // mov rax,0x77 (48 C7 C0); mov r8,rax (49 89 C0); push r8 (41 50);
     // pop r9 (41 59); mov rdi,r9 (4C 89 CF); mov rax,60; syscall -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -609,7 +616,7 @@ fn run_rip_relative_norex() {
     // 0x1006: B8 00 00 00 00     mov eax,0
     // 0x100B: 8B 05 EF 0F 00 00  mov eax,[rip+0xfef] ([0x2000])
     // mov rdi,rax (48 89 C7); mov rax,60; syscall -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -633,7 +640,7 @@ fn run_rip_relative_norex() {
 fn run_rep_movsb() {
     // REP MOVSB を run 経由で回す。ECX=3 で [0x1500..0x1502] を [0x1600..] に写す。
     // mov esi,0x1500 相当は push/pop で作る（mov imm は EAX のみ）。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -681,7 +688,7 @@ fn run_rep_stosb_zero_count() {
     // run 経由で F3 AA (REP STOSB) を RCX=0 で回す。od 0x5ad076 対応.
     // RDI=0x2000、[0x2000]=0x00、AL=0xFF、RCX=0 -> [0x2000]==0x00、exit(0)。
     // 旧実装は1バイト格納して 2^64 回ループし step limit になった.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -723,7 +730,7 @@ fn run_sib_generic_regs() {
     // mov eax,0x77; mov [ebx+ecx*4],eax ([0x1540]=0x77);
     // mov eax,0; mov edx,[ebx+ecx*4] (edx=0x77);
     // mov ebx,edx; mov eax,1; int 0x80 -> exit(0x77)
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -755,7 +762,7 @@ fn run_xmm_movd_punpck_pshufd() {
     // 66 0F 70 C0 00 (pshufd); mov rdi,rax; mov rax,60; syscall -> exit(0)
     // ここでは XMM が動くことだけ確かめ、exit コードは固定する。
     // ESI=0x44 -> 全バイト 0x44 の xmm0 を作る。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -785,7 +792,7 @@ fn run_xmm_movd_punpck_pshufd() {
 fn run_por_sibd32() {
     // run 経由で 66 0F EB 84 33 20 00 00 00 (POR xmm0,[RBX+RSI+0x20]) を回す。grep 0x43d15b 対応.
     // RBX=0x2000、RSI=0x10、[0x2020]=0x0F..、xmm0=0xF0.. -> xmm0=0xFF..、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -830,7 +837,7 @@ fn run_movups_memnd_and_near_jcc() {
     // cmp eax,0; je +6 (skip mov eax,1); mov eax,1; ... の代わりに
     // near JE (0F 84) で飛ぶことを確かめ、exit(0x77) する。
     // 簡略化：xmm 往復後に cmp + near je で分岐し、exit コードを変える。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -862,7 +869,7 @@ fn run_lea_rex_x_sib() {
     // Here test via run: mov eax,0x1000; mov r8d,0x20? Need REX for R8. Instead set via env before run and execute single LEA.
     // For run経由: 4A 8D 0C 00 (lea rcx,[rax+r8]); mov rax,60; mov rdi,rcx; syscall exit(rcx low?) -> exit(0x1020 & 0xFF? Actually exit code is low 8? Use exit(0x20?) Hmm.
     // Simpler: verify via sem directly in bare_x86min? Already covered by SIB generic? Add run-level check with REX.X.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -888,7 +895,7 @@ fn run_cmpb_mem8_disp8() {
     // run 経由で 80 /7 mod=01 [base+disp8],imm8 を回す。
     // edi=0x1500、[0x1569]=0 として CMPB $0,0x69(%rdi) で ZF=1、
     // je taken で exit(0x77) になる。fetch 長 4B の検証も兼ねる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -917,7 +924,7 @@ fn run_cmova_reg_direct() {
     // run 経由で 0F47 reg-direct (CMOVA ECX,EDX) を回す。
     // ECX=1、EDX=2、CF=0/ZF=0 なので ECX=2 になり exit(2)。
     // fetch/decode/dispatch のレジスタ抽出 (0F系) の検証も兼ねる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -945,7 +952,7 @@ fn run_cmova_reg_direct() {
 fn run_cmovae_reg_direct() {
     // run 経由で 0F43 reg-direct (CMOVAE ECX,EDX) を回す。
     // ECX=1、EDX=2、CF=0 なので ECX=2 になり exit(2)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -974,7 +981,7 @@ fn run_movb_mem8_disp8() {
     // run 経由で C6 /0 mod=01 [base+disp8],imm8 を回す。
     // RDI=0x1500 として MOVB $0x77,0x69(%RDI) で [0x1569]=0x77 を書き、
     // CMPB $0x77,0x69(%RDI) + je で検証して exit(0x77)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1002,7 +1009,7 @@ fn run_movb_mem8_disp8() {
 fn run_movq_xmm_m64_rip() {
     // run 経由で F3 0F 7E mod=00 [RIP+disp32] (MOVQ xmm0,[0x1500]) を回す。
     // [0x1500]=0x77 として xmm0 低64が 0x77 になることを確かめ、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1032,7 +1039,7 @@ fn run_and_imm8_rip() {
     // run 経由で 83 25 + disp32 + imm8 (ANDL [RIP],imm8) を回す。
     // [0x1500]=0xFFFFFFFF に AND $0xCF で [0x1500]=0xFFFFFFCF になり、exit(0)。
     // fetch長7BとRIP加算の経路検証も兼ねる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1071,7 +1078,7 @@ fn run_and_imm8_rip() {
 fn run_and_imm32_rip() {
     // run 経由で 81 25 + disp32 + imm32 (ANDL [RIP],imm32) を回す。
     // [0x1500]=0xFFFFFFFF に AND $0xFC3FFEF3 で [0x1500]=0xFC3FFEF3 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1111,7 +1118,7 @@ fn run_and_imm32_rip() {
 fn run_pand_reg_direct() {
     // run 経由で 66 0F DB /r (PAND xmm0,xmm1) を回す。
     // movd で xmm0=0xFF / xmm1=0x0F を作り、PAND で xmm0=0x0F になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1140,7 +1147,7 @@ fn run_pand_reg_direct() {
 fn run_xorps_reg_direct() {
     // run 経由で 0F 57 C0 (XORPS xmm0,xmm0) を回す。
     // movd で xmm0=0xFF を作り、XORPS で xmm0=0 になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1168,7 +1175,7 @@ fn run_movdqa_load_xmm_rex() {
     // run 経由で REX.R 66 0F 6F CD (MOVDQA xmm9,xmm5) を回す。
     // movd で xmm5 下位=0xAABBCCDD を作り、転送で xmm9 が等しくなることを確かめる。
     // MOVDQA は MovdquLoadXmm を共用する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1200,7 +1207,7 @@ fn run_movdqa_load_xmm_rex() {
 fn run_paddb_reg_direct_rex() {
     // run 経由で REX.R 66 0F FC C1 (PADDB xmm8,xmm1) を回す。
     // movd で xmm8 下位=0x01 / xmm1 下位=0x02 を作り、PADDB で下位=0x03 になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1231,7 +1238,7 @@ fn run_pcmpgtb_reg_direct_rex() {
     // run 経由で REX.R 66 0F 64 C6 (PCMPGTB xmm8,xmm6) を回す。
     // movd で xmm8 下位=0x02 / xmm6 下位=0x01 を作り、PCMPGTB で下位=0xFF になることを確かめる。
     // 逆（0x01 vs 0x02）では下位=0x00。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1269,7 +1276,7 @@ fn run_pandn_reg_direct_rex() {
     // movd で xmm8 下位=0x0F / xmm7 下位=0x06 を作り、PANDN で下位=0x06 になることを確かめる。
     // (~0x0F)&0x06 = 0xF0&0x06 = 0x00? ではなく (~0x0F)&0xFF... 下位8ビットのみ見る:
     // (~0x0F)&0x06 = 0x00。別値にするため xmm8=0xF0、xmm7=0xFF -> (~0xF0)&0xFF=0x0F。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1299,7 +1306,7 @@ fn run_pandn_reg_direct_rex() {
 fn run_cvtsi2sd_r64() {
     // run 経由で F2 REX.W 0F 2A C0 (CVTSI2SD xmm0,rax) を回す。
     // RAX=5 -> xmm0 下位=5.0 (0x4014000000000000)、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1325,7 +1332,7 @@ fn run_cvtsi2sd_r64() {
 fn run_addsd_reg_direct() {
     // run 経由で F2 0F 58 C8 (ADDSD xmm1,xmm0) を回す。
     // movd で下位=1.0/2.0 を作り、ADDSD で下位=3.0 になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1364,7 +1371,7 @@ fn run_comisd_reg_direct() {
     // run 経由で 66 0F 2F C1 (COMISD xmm0,xmm1) を回す。
     // xmm0=1.0、xmm1=2.0 で CF=1 になり、exit(0)。
     // EFLAGS の読み出しは sem 経由ではできないため、経路の到達のみ確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1396,7 +1403,7 @@ fn run_comisd_reg_direct() {
 fn run_cvttsd2si_rax_rsp() {
     // F2 48 0F 2C 04 24 = cvttsd2si rax, QWORD PTR [rsp]。-1.9 は -1 に切り捨てる。
     // awk int 0x4a345e。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1445,7 +1452,7 @@ fn run_cvttsd2si_rax_rsp() {
 fn run_cvttsd2si_r64() {
     // run 経由で F2 REX.W 0F 2C C0 (CVTTSD2SI rax,xmm0) を回す。
     // xmm0 下位=3.9 -> RAX=3、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1472,7 +1479,7 @@ fn run_cvttsd2si_r64() {
 fn run_subsd_xmm2_rcx_disp32() {
     // F2 0F 5C 91 10 00 00 00 = subsd xmm2, [rcx+0x10]。3.0-1.0 は 2.0。上位64は残る。
     // awk log 0x4c161e。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1529,7 +1536,7 @@ fn run_subsd_xmm2_rcx_disp32() {
 fn run_subsd_xmm0_rip() {
     // F2 0F 5C 05 F8 04 00 00 = subsd xmm0, [rip+0x4f8]。3.0-1.0 は 2.0。上位64は残る。
     // awk substr 0x4a3cbb。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -1576,7 +1583,7 @@ fn run_subsd_xmm0_rip() {
 fn run_subsd_reg_direct() {
     // run 経由で F2 0F 5C C8 (SUBSD xmm1,xmm0) を回す。
     // xmm1=3.0、xmm0=1.0 で下位=2.0 になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1612,7 +1619,7 @@ fn run_subsd_reg_direct() {
 fn run_mulsd_xmm_m64_rip() {
     // run 経由で F2 0F 59 05 + disp32 (MULSD xmm0,[RIP]) を回す.
     // [0x1500]=2.0、xmm0 下位=3.0 -> 6.0、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1645,7 +1652,7 @@ fn run_mulsd_xmm_m64_rip() {
 fn run_movzx_r32_r16() {
     // run 経由で 0F B7 C3 (MOVZX EAX,BX) を回す。
     // EBX=0x1234ABCD -> EAX=0xABCD、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1667,7 +1674,7 @@ fn run_movzx_r32_r16() {
 fn run_bt_r32_imm() {
     // run 経由で 0F BA E3 1E (BT EBX,0x1E) を回す。
     // EBX=0x40000000 で CF=1 になり、exit(0)。経路の到達のみ確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1690,7 +1697,7 @@ fn run_xadd_r32_memnd() {
     // run 経由で F0 0F C1 03 (LOCK XADD EAX,[EBX]) を回す。
     // EAX=5、[0x2000]=3 -> EAX=3、[0x2000]=8、exit(0)。
     // LOCK は単一スレッド試作として無視する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1733,7 +1740,7 @@ fn run_test_m16_imm_rip() {
     // run 経由で 66 F7 05 + disp32 + imm16 (TESTW [RIP],0x202) を回す。
     // [0x1500]=0x0202 で ZF=0 のまま exit(0)。
     // disp は F2/66 込み長さ基準：命令先頭 0x1000、66剥離後8B+接頭辞1B=9B、next=0x1009。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1759,7 +1766,7 @@ fn run_test_m16_imm_rip() {
 fn run_cmovne_r64_sibd() {
     // run 経由で REX.W 0F 45 44 24 50 (CMOVNE RAX,0x50(%rsp)) を回す。
     // ZF=0 で [0x2050] を RAX に移し、exit(RAX下位の0x78)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1784,7 +1791,7 @@ fn run_cmovne_r64_sibd() {
 fn run_nopl_mem8() {
     // run 経由で 0F 1F 40 00 (NOPL [rax]) を回す。
     // 何もせず exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1805,7 +1812,7 @@ fn run_nopl_mem8() {
 fn run_sub_r_sibd() {
     // run 経由で 2B 44 24 08 (SUB EAX,0x8(%rsp)) を回す。
     // EAX=10、[0x2008]=3 -> EAX=7、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1831,7 +1838,7 @@ fn run_sub_r_sibd() {
 fn run_add_r_sibd() {
     // run 経由で 48 03 7C 24 18 (ADD RDI,0x18(%rsp)) を回す。
     // RDI=0x100、[0x2018]=0x23 -> RDI=0x123、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1856,7 +1863,7 @@ fn run_add_r_sibd() {
 fn run_add_r_sibd_indexed() {
     // run 経由で 48 03 7C B4 28 (ADD RDI,[RSP+RSI*4+0x28]) を回す。sha1sum 0x5cab68 対応.
     // RSP=0x2000、RSI=0x10、[0x2068]=5、RDI=3 -> RDI=8、exit(8)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1882,7 +1889,7 @@ fn run_add_r_sibd_indexed() {
 fn run_movsx_r32_m8_rip() {
     // run 経由で 0F BE 05 + disp32 (MOVSX EAX,[RIP]) を回す。
     // [0x1500]=0xFF -> EAX=0xFFFFFFFF、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1904,7 +1911,7 @@ fn run_movsx_r32_m8_rip() {
 fn run_movzx_r32_m16_mem8() {
     // run 経由で 0F B7 56 10 (MOVZX EDX,[RSI+0x10]) を回す。
     // [0x2010]=0xABCD -> EDX=0xABCD、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1931,7 +1938,7 @@ fn run_movzx_r32_m16_mem8() {
 fn run_movzx_r32_m16_memnd() {
     // run 経由で 0F B7 0E (MOVZX ECX,[RSI]) を回す。ls -l 0x4824c4 対応.
     // [0x2000]=0xABCD -> ECX=0xABCD、eip は 0x1003 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1958,7 +1965,7 @@ fn run_movaps_store_mem32() {
     // run 経由で 0F 29 85 E0 FE FF FF (MOVAPS [rbp-0x120],xmm0) を回す。
     // RBP=0x2000、disp=-0x120 -> [0x1EE0]=xmm0、exit(0)。
     // movd で xmm0 下位=0x11223344 を作る。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -1996,7 +2003,7 @@ fn run_movaps_store_mem32() {
 fn run_or_m32_r32_sibd32() {
     // run 経由で 09 94 B0 08 08 00 00 (OR [rax+rsi*4+0x808],edx) を回す。
     // RAX=0x2000、RSI=0、EDX=0x0F、[0x2808]=0xF0 -> 0xFF、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2039,7 +2046,7 @@ fn run_cmp_r_sib() {
     // run 経由で 48 3B 04 07 (CMP RAX,(%rdi,%rax)) を回す。
     // RAX=10、RDI=0、[0x0A]=10 -> ZF=1 のまま exit(0)。
     // [0x0A] はコード頁 (0x1000) と別に 0x0000 頁へ書く。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2067,7 +2074,7 @@ fn run_cmp_r_sib() {
 fn run_sub_m32_r32_mem8() {
     // run 経由で 4C 29 6D A0 (SUB -0x60(%rbp),%r13) を回す。
     // RBP=0x2000、R13=3、[0x1FA0]=10 -> [0x1FA0]=7、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2108,7 +2115,7 @@ fn run_sub_m32_r32_mem8() {
 fn run_mov_m8_r8_sib() {
     // run 経由で 88 14 07 (MOV [rdi+rax],dl) を回す。
     // RDI=0x2000、RAX=0、DL=0x42 -> [0x2000]=0x42、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2146,7 +2153,7 @@ fn run_mov_m8_r8_sib() {
 fn run_mov_m8_r8_sibd32_rex() {
     // run 経由で 88 94 07 36 04 00 00 (MOV [rdi+rax+0x436],dl) を回す。
     // SIBd32 基本形の検証。RDI=0x2000、RAX=0x10、DL=0x42 -> [0x2446]=0x42.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2183,7 +2190,7 @@ fn run_mov_m8_r8_sibd32_rex() {
 fn run_cmp_rm64_imm8_mem32_rex() {
     // run 経由で 48 83 BD E8 FB FF FF 00 (CMPQ $0,-0x418(%rbp)) を回す。
     // seq の停止点に対応。RBP=0x2000、[0x1BE8]=0 -> ZF=1 で exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2208,7 +2215,7 @@ fn run_cmp_rm64_imm8_mem32_rex() {
 fn run_add_m32_r32_sibd() {
     // run 経由で 01 6C 24 18 (ADD 0x18(%rsp),%ebp) を回す。
     // [0x2018]=10、EBP=5 -> [0x2018]=15、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2248,7 +2255,7 @@ fn run_add_m32_r32_sibd() {
 fn run_cmp_rm_imm8_sib() {
     // run 経由で 48 83 3C 24 00 (CMPQ $0,(%rsp)) を回す。
     // [0x2000]=0 で ZF=1 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2273,7 +2280,7 @@ fn run_cmp_rm_imm8_sib() {
 fn run_cmp_rm_imm8_sib_idx() {
     // run 経由で 48 83 3C D3 00 (CMPQ $0,(%rbx,%rdx,8)) を回す。
     // RBX=0x2000、RDX=0、[0x2000]=0 で ZF=1 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2300,7 +2307,7 @@ fn run_cmp_rm_imm8_sib_idx() {
 fn run_test_r_mem8() {
     // run 経由で 44 85 78 04 (TEST R15D,[RAX+4]) を回す。
     // R15=0xFF、RAX=0x2000、[0x2004]=0xFF -> ZF=0 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2327,7 +2334,7 @@ fn run_test_r_mem8() {
 fn run_test_rm32_memnd() {
     // run 経由で 85 07 (TEST EAX,(RDI)) を回す。find 0x5d17f7 対応.
     // EAX=0xFF、RDI=0x2000、[0x2000]=0x0F -> ZF=0、eip は 0x1002 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2357,7 +2364,7 @@ fn run_test_rm32_memnd() {
 fn run_mov_m16_r16_mem32() {
     // run 経由で 66 89 8F 80 00 00 00 (MOV [rdi+0x80],cx) を回す。
     // RDI=0x2000、CX=0x1234 -> [0x2080]=0x1234、exit(0)。MovMemEax32 を共用する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2394,7 +2401,7 @@ fn run_mov_m16_r16_mem32() {
 fn run_or_rm32_imm_memnd() {
     // run 経由で 81 0F 0C 24 00 00 (OR $0x240C,(%rdi)) を回す。
     // RDI=0x2000、[0x2000]=0x1000 -> 0x340C、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2434,7 +2441,7 @@ fn run_or_rm32_imm_memnd() {
 fn run_or_al_imm() {
     // run 経由で 0C 80 (OR AL,0x80) を回す。
     // EAX=1 -> AL=0x81、exit(0x81)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2456,7 +2463,7 @@ fn run_or_al_imm() {
 fn run_or_m8_r8_reg_direct() {
     // run 経由で 08 D0 (OR AL,DL) を回す。
     // EAX=0x01、EDX=0x02 -> AL=0x03、exit(3)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2479,7 +2486,7 @@ fn run_or_m8_r8_reg_direct() {
 fn run_and_r8_m8_mem32() {
     // run 経由で 22 85 40 FB FF FF (AND AL,-0x4C0(%rbp)) を回す。
     // RBP=0x500、AL=0xFF、[0x40]=0x0F -> AL=0x0F、exit(0x0F)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2504,7 +2511,7 @@ fn run_and_r8_m8_mem32() {
 fn run_mov_m16_r16_mem8() {
     // run 経由で 66 89 47 74 (MOV 0x74(%rdi),ax) を回す。
     // RDI=0x2000、AX=0x1234 -> [0x2074]=0x1234、exit(0)。MovMemEax8 を共用する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2541,7 +2548,7 @@ fn run_mov_m16_r16_mem8() {
 fn run_sete_m8_mem32() {
     // run 経由で 0F 94 85 0B FB FF FF (SETE -0x4F5(%rbp)) を回す。
     // RBP=0x500、ZF=1 -> [0x0B]=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2579,7 +2586,7 @@ fn run_sete_m8_mem32() {
 fn run_setle_m8_mem32() {
     // run 経由で 0F 9E 85 73 FD FF FF (SETLE -0x28D(%rbp)) を回す。grep 0x43e091 対応.
     // RBP=0x500、ZF=1 -> [0x273]=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2615,7 +2622,7 @@ fn run_setle_m8_mem32() {
 fn run_sete_m8_mem8() {
     // run 経由で 0F 94 45 97 (SETE -0x69(%rbp)) を回す。grep 0x442245 対応.
     // RBP=0x500、ZF=1 -> [0x497]=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2651,7 +2658,7 @@ fn run_sete_m8_mem8() {
 fn run_setne_m8_mem32() {
     // run 経由で 0F 95 85 C0 FD FF FF (SETNE -0x240(%rbp)) を回す。grep 0x43ddc1 対応.
     // RBP=0x2000、ZF=0 -> [0x1DC0]=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(5).state(), 0x2000);
@@ -2686,7 +2693,7 @@ fn run_setne_m8_mem32() {
 fn run_setne_m8_sibd() {
     // run 経由で 0F 95 44 F0 06 (SETNE 0x06(%rax,%rsi,8)) を回す。ls -l 対応.
     // RAX=0x2000、RSI=0x10、ZF=0 -> [0x2086]=1、eip は 0x1005 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2723,7 +2730,7 @@ fn run_setne_m8_sibd() {
 fn run_test_m8_r8_sibd_rsp() {
     // 84 44 24 0C は test %al, 0xc(%rsp)。taskset 0x47c686。
     // RSP=0x1500、[0x150c]=0xF0、AL=0 なので結果は 0 で ZF が立つ。メモリは変えない。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -2761,7 +2768,7 @@ fn run_test_m8_r8_sibd_rsp() {
 fn run_test_m8_imm_sib() {
     // run 経由で 41 F6 04 24 04 (TESTB $0x04,(%r12)) を回す。ls -l 0x40e342 対応.
     // R12=0x1500、[0x1500]=0x04 -> ZF=0、eip は 0x1005 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2791,7 +2798,7 @@ fn run_test_m8_imm_sib() {
 fn run_cmp_rm8_imm_mem32() {
     // run 経由で 80 BD 50 FB FF FF 20 (CMPB $0x20,-0x4B0(%rbp)) を回す。
     // RBP=0x500、[0x50]=0x20 で ZF=1 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
@@ -2815,7 +2822,7 @@ fn run_cmp_rm8_imm_mem32() {
 fn run_and_rm8_imm_mem8() {
     // run 経由で 80 67 38 90 (ANDB $0x90,0x38(%rdi)) を回す。grep 0x442d1d 対応.
     // RDI=0x2000、[0x2038]=0xFF -> [0x2038]=0x90、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2851,7 +2858,7 @@ fn run_and_rm8_imm_mem8() {
 fn run_or_rm8_imm_mem8() {
     // run 経由で 80 4B 44 02 (ORB $0x02,0x44(%rbx)) を回す。sed 0x5bde04 対応.
     // RBX=0x2000、[0x2044]=0x01 -> [0x2044]=0x03、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2887,7 +2894,7 @@ fn run_or_rm8_imm_mem8() {
 fn run_and_rm8_imm_sibd() {
     // run 経由で 80 64 0F 3A F3 (ANDB $0xF3,0x3A(%rdi,%rcx)) を回す。grep 0x434710 対応.
     // RDI=0x2000、RCX=0x40、[0x207A]=0xFF -> [0x207A]=0xF3、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2924,7 +2931,7 @@ fn run_and_rm8_imm_sibd() {
 fn run_cmp_m32_r32_sibd() {
     // run 経由で 39 54 24 14 (CMP 0x14(%rsp),%edx) を回す。
     // [0x2014]=5、EDX=5 -> ZF=1 のまま exit(0)。no_index は mem8 相当。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2950,7 +2957,7 @@ fn run_cmp_m32_r32_sibd() {
 fn run_movsx_r32_m8_mem8() {
     // run 経由で 0F BE 71 01 (MOVSX ESI,[RCX+1]) を回す。
     // RCX=0x2000、[0x2001]=0xFF -> ESI=0xFFFFFFFF、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2974,7 +2981,7 @@ fn run_movsx_r32_m8_mem8() {
 fn run_cmp_rm8_imm_sibd_no_index() {
     // run 経由で 41 80 7C 24 1A 04 (CMPB $0x04,0x1A(%r12)) を回す。
     // R12=0x2000、[0x201A]=0x04 で ZF=1 のまま exit(0)。no_index は mem8 相当。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -2997,7 +3004,7 @@ fn run_cmp_rm8_imm_sibd_no_index() {
 fn run_cmp_rm8_imm_sibd32() {
     // run 経由で 80 BC 05 F0 FE FF FF 00 (CMPB $0x00,-0x110(%rbp,%rax)) を回す。stat 対応.
     // RBP=0x2000、RAX=0x100、[0x1FF0]=0x00 -> ZF=1、eip は 0x1008 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3020,7 +3027,7 @@ fn run_cmp_rm8_imm_sibd32() {
 fn run_add_m16_imm_sib() {
     // run 経由で 66 83 04 51 01 (ADDW $1,(%rcx,%rdx,2)) を回す。
     // RCX=0x2000、RDX=0、[0x2000]=0x10 -> 0x11、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3061,7 +3068,7 @@ fn run_add_m16_imm_sib() {
 fn run_cmp_rm_imm8_sibd() {
     // run 経由で 83 7C 24 14 00 (CMPL $0,0x14(%rsp)) を回す。
     // [0x2014]=0 で ZF=1 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3086,7 +3093,7 @@ fn run_cmp_rm_imm8_sibd() {
 fn run_cmp_rm_imm8_mem32() {
     // run 経由で 83 BD 14 00 00 00 00 (CMPL $0,0x14(%rbp)) を回す。
     // [0x2014]=0 で ZF=1 のまま exit(0)。seq の停止点に対応.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3111,7 +3118,7 @@ fn run_cmp_rm_imm8_mem32() {
 fn run_and_m8_r8_rex() {
     // run 経由で 40 20 C6 (AND SIL,AL) を回す。REX 付き low8。
     // ESI=0xFF、EAX=0x0F -> SIL=0x0F で exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3134,7 +3141,7 @@ fn run_and_m8_r8_rex() {
 fn run_movsx_r32_m8_sib() {
     // run 経由で 0F BE 0C 24 (MOVSX ECX,[RSP]) を回す。
     // [0x2000]=0xFF -> ECX=0xFFFFFFFF で exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3158,7 +3165,7 @@ fn run_movdqu_load_sib() {
     // run 経由で 66 0F 6F 0C 0E (MOVDQA xmm1,[RSI+RCX]) を回す。
     // RSI=0x2000、RCX=0x100 -> [0x2100] 16B を xmm1 に載せて exit(0)。
     use polyisa_guest_x86::sem::Xmm;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3193,7 +3200,7 @@ fn run_movdqu_load_sib() {
 fn run_nopl_mem32() {
     // run 経由で 0F 1F 80 00 00 00 00 (NOPL [rax]) を回す。
     // 何もせず exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3214,7 +3221,7 @@ fn run_nopl_mem32() {
 fn run_cmp_rm8_imm_sib() {
     // run 経由で 41 80 3C 24 43 (CMPB $0x43,(%r12)) を回す。
     // [0x2000]=0x43 で ZF=1 のまま exit(0)。意味論は memnd 相当。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3238,7 +3245,7 @@ fn run_cmp_rm8_imm_sib() {
 fn run_cmp_rm8_imm_sib_idx() {
     // run 経由で 80 3C 13 00 (CMPB $0x00,(%rbx,%rdx)) を回す。grep 0x43e0e4 対応.
     // RBX=0x2000、RDX=0x10、[0x2010]=0x00 -> ZF=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3265,7 +3272,7 @@ fn run_cmp_rm8_imm_sib_idx() {
 fn run_mov_rm8_imm_mem32() {
     // run 経由で C6 85 50 FB FF FF 20 (MOVB $0x20,-0x4B0(%rbp)) を回す。
     // RBP=0x2000、disp=-0x4B0 -> [0x1B50]=0x20、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3301,7 +3308,7 @@ fn run_mov_rm8_imm_mem32() {
 fn run_mov_rm8_imm_mem32_rbx() {
     // run 経由で C6 83 DC 00 00 00 01 (MOVB $0x1,0xDC(%RBX)) を回す。
     // disp32 下位3bit が 100 でも decode する。RBX=0x2000 -> [0x20DC]=0x1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3342,7 +3349,7 @@ fn run_mov_rm8_imm_mem32_rbx() {
 fn run_mov_rm8_imm_sibd() {
     // run 経由で 42 C6 44 28 FE 3A (MOVB $0x3A,-2(%rax,%r13)) を回す。
     // RAX=0x2000、R13=2 -> [0x2000]=0x3A、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3379,7 +3386,7 @@ fn run_mov_rm8_imm_sibd() {
 fn run_mov_rm16_imm_sibd() {
     // run 経由で 66 C7 44 24 11 53 00 (MOVW $0x53,0x11(%rsp)) を回す。stat 対応.
     // RSP=0x2000 -> [0x2011]=0x53、eip は 0x1007 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3414,7 +3421,7 @@ fn run_mov_rm16_imm_sibd() {
 fn run_mov_rm8_imm_sib() {
     // run 経由で C6 04 16 3A (MOVB $0x3A,(%rsi,%rdx)) を回す。
     // RSI=0x2000、RDX=0 -> [0x2000]=0x3A、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3451,7 +3458,7 @@ fn run_mov_rm8_imm_sib() {
 fn run_mov_m16_r16_memnd() {
     // run 経由で 66 89 38 (MOV [rax],di) を回す。
     // [0x2000]=0x1234 になり、exit(0)。MovMemndEax を共用する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3488,7 +3495,7 @@ fn run_mov_m16_r16_memnd() {
 fn run_and_rm_imm8_sibd() {
     // run 経由で 48 83 64 24 10 00 (ANDQ $0,0x10(%rsp)) を回す。
     // [0x2010]=0xFF -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3527,7 +3534,7 @@ fn run_and_rm_imm8_sibd() {
 fn run_add_rm_imm8_sibd() {
     // run 経由で 48 83 44 24 08 08 (ADDQ $8,0x08(%rsp)) を回す。test 0x5b1d4e 対応.
     // RSP=0x2000、[0x2008]=0 -> 8 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3566,7 +3573,7 @@ fn run_add_rm_imm8_sibd() {
 fn run_or_r_sib_no_index() {
     // run 経由で 0B 04 24 (ORL (%rsp),%eax) を回す。sed 0x5be0c9 対応.
     // RSP=0x2000、[0x2000]=0x0F、EAX=0xF0 -> EAX=0xFF。exit 系列で EAX が潰れるため [0x2100] に退避して検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3607,7 +3614,7 @@ fn run_or_r_sib_no_index() {
 fn run_cmp_rm64_imm8_sibd() {
     // run 経由で 48 83 7C C1 F8 00 (CMPQ $0,-0x8(%rcx,%rax,8)) を回す。seq 10 の停止点 0x45bbd8 対応.
     // RCX=0x2000、RAX=0x10、[0x2078]=0 -> ZF=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3637,7 +3644,7 @@ fn run_cmp_rm64_imm8_sibd() {
 fn run_cmp_m32_r32_sib_no_index() {
     // run 経由で 44 39 2C 24 (CMP [RSP],R13D with REX.R) を回す。paste 0x5ad26b 対応.
     // RSP=0x2000、[0x2000]=5、R13D=5 -> ZF=1、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3671,7 +3678,7 @@ fn run_cmp_m32_r32_sib_no_index() {
 fn run_ucomisd_rip() {
     // run 経由で 66 0F 2E 0D + disp32 (UCOMISD xmm1,[RIP]) を回す。seq の停止点 0x45b763 に対応.
     // [0x2000]=2.0、xmm1=1.0 -> CF=1、ZF=0 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3713,7 +3720,7 @@ fn run_ucomisd_rip() {
 fn run_and_rm_imm8_sibd_indexed() {
     // run 経由で 83 64 97 FC 00 (ANDL $0,-4(%rdi,%rdx,4)) を回す。
     // RDI=0x2000、RDX=0x10、[0x203C]=0xFF -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3753,7 +3760,7 @@ fn run_and_rm_imm8_sibd_indexed() {
 fn run_or_rm_imm8_sibd_indexed() {
     // run 経由で 4A 83 4C 23 08 01 (ORQ $1,0x08(%rbx,%r12)) を回す。ls -l 対応.
     // RBX=0x2000、R12=0x10、[0x2018]=0 -> 1 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3793,7 +3800,7 @@ fn run_or_rm_imm8_sibd_indexed() {
 fn run_and_rm_imm8_sib() {
     // run 経由で 83 24 24 00 (ANDL $0,(%rsp)) を回す。
     // [0x2000]=0xFF -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3832,7 +3839,7 @@ fn run_and_rm_imm8_sib() {
 fn run_inc_rm_sibd_indexed() {
     // run 経由で FF 44 97 FC (INCL -4(%rdi,%rdx,4)) を回す。
     // RDI=0x2000、RDX=0x10、[0x203C]=0xFE -> 0xFF になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3872,7 +3879,7 @@ fn run_inc_rm_sibd_indexed() {
 fn run_and_rm_imm8_sib_indexed_rexx() {
     // run 経由で 42 83 24 88 00 (ANDL $0,(%rax,%r9,4)) を回す。REX.X で R9 を指す。
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3916,7 +3923,7 @@ fn run_and_rm_imm8_sib_indexed_rexx() {
 fn run_cmp_r_sibd_no_index() {
     // run 経由で 3B 4C 24 14 (CMPL 0x14(%rsp),%ecx) を回す。
     // ECX=10、[0x2014]=10 -> ZF=1 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3946,7 +3953,7 @@ fn run_cmp_r_sibd_no_index() {
 fn run_test_r_sibd_no_index() {
     // run 経由で 85 44 24 1C (TESTL 0x1C(%rsp),%eax) を回す。wc の停止点 0x5b3696 に対応.
     // EAX=0xFF、[0x201C]=0x0F -> ZF=0 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -3976,7 +3983,7 @@ fn run_test_r_sibd_no_index() {
 fn run_test_r_sibd32_rex() {
     // run 経由で 4B 85 94 15 A8 00 00 00 (TEST 0xA8(%r13,%r10),%rdx with REX.W/X/B) を回す。
     // grep 0x43d250 対応。R13=0x2000、R10=0x10、[0x20B8]=0x0F、RDX=0xFF -> ZF=0、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4019,7 +4026,7 @@ fn run_test_r_sibd32_rex() {
 fn run_cmp_m32_r32_sibd_indexed() {
     // run 経由で 41 39 44 88 F8 (CMPL %eax,-8(%r8,%rcx,4)) を回す。head のループ停止点に対応.
     // R8=0x2000、RCX=0x10、[0x2038]=10、EAX=10 -> ZF=1 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4054,7 +4061,7 @@ fn run_cmp_m32_r32_sibd_indexed() {
 fn run_cmp_m64_r64_sibd32_no_index() {
     // 48 39 84 24 88 00 00 00: cmpq %rax, 0x88(%rsp)。true 0x4bed0c 対応.
     // RSP=0x2000、[0x2088]=7、RAX=7 -> ZF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4084,7 +4091,7 @@ fn run_cmp_m64_r64_sibd32_no_index() {
 fn run_call_r_sibabs() {
     // 42 FF 14 E5 00 20 00 00: callq *0x2000(,%r12,8)。true 0x403f86 と同形.
     // R12=1、[0x2008]=0x1100 の exit(0) へ飛ぶ。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4114,7 +4121,7 @@ fn run_call_r_sibabs() {
 fn run_cmp_rm_imm8_sibd32_no_index() {
     // 48 83 BC 24 D8 00 00 00 00: cmpq $0, 0xd8(%rsp)。true 0x4bed16 対応.
     // RSP=0x2000、[0x20D8]=0 -> ZF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4143,7 +4150,7 @@ fn run_cmp_rm_imm8_sibd32_no_index() {
 fn run_sub_r_sibd_indexed() {
     // run 経由で 2B 44 B0 50 (SUBL 0x50(%rax,%rsi,4),%eax) を回す。head の停止点に対応.
     // RAX=0x2000、RSI=0x10、[0x2090]=3、EAX=10 -> EAX=7 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4172,7 +4179,7 @@ fn run_sub_r_sibd_indexed() {
 fn run_dec_rm_sibd_no_index() {
     // run 経由で FF 4C 24 0C (DECL 0x0C(%rsp)) を回す。head の停止点に対応.
     // RSP=0x2000、[0x200C]=1 -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4211,7 +4218,7 @@ fn run_dec_rm_sibd_no_index() {
 fn run_or_m32_r32_sib() {
     // run 経由で 41 09 3C B4 (ORL %edi,(%r12,%rsi,4)) を回す。head の停止点に対応.
     // R12=0x2000、RSI=0x10、[0x2040]=0x0F、EDI=0xF0 -> [0x2040]=0xFF になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4256,7 +4263,7 @@ fn run_or_m32_r32_sib() {
 fn run_movsx_r32_r8_rex() {
     // run 経由で 45 0F BE C6 (MOVSX R8D,R14B) を回す。seq の停止点 0x40b775 に対応.
     // R14=0xFF -> R8D=0xFFFFFFFF になり、exit(0)。REX.RB で 8-15 に拡張.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4282,7 +4289,7 @@ fn run_movsx_r32_r8_rex() {
 fn run_jmp_r_sib() {
     // run 経由で FF 24 CA (JMP [RDX+RCX*8]) を回す。seq の停止点 0x40c83b に対応.
     // RDX=0x2000、RCX=0、[0x2000]=0x1010 -> 0x1010 へ飛び、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4308,7 +4315,7 @@ fn run_jmp_r_sib() {
 fn run_jmp_r_mem8() {
     // run 経由で FF 60 18 (JMP [RAX+0x18]) を回す。seq の停止点 0x47e635 に対応.
     // RAX=0x2000、[0x2018]=0x1010 -> 0x1010 へ飛び、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4334,7 +4341,7 @@ fn run_jmp_r_mem8() {
 fn run_or_rm8_imm_sibd() {
     // run 経由で 80 4C 04 F8 00 (ORB $0,-8(%rsp)) を回す。seq の停止点 0x45b828 に対応.
     // RSP=0x2000、[0x1FF8]=0xF0 -> 0xF0 のまま、ZF=0 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x2000);
@@ -4373,7 +4380,7 @@ fn run_or_rm8_imm_sibd() {
 fn run_mov_rm8_imm_sibd_no_index() {
     // run 経由で C6 44 24 0B 00 (MOVB $0,0x0B(%rsp)) を回す。head の停止点 0x5a945a に対応.
     // RSP=0x2000、[0x200B]=0xFF -> 0x00 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4409,7 +4416,7 @@ fn run_mov_rm8_imm_sibd_no_index() {
 fn run_mov_rm8_imm_sib_no_index() {
     // run 経由で C6 04 24 3A (MOVB $0x3A,(%rsp)) を回す。
     // RSP=0x2000、[0x2000]=0 -> 0x3A になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4445,7 +4452,7 @@ fn run_mov_rm8_imm_sib_no_index() {
 fn run_or_r8_m8_sibd() {
     // run 経由で 0A 44 24 0A (OR AL,[RSP+0x0A]) を回す。head の停止点 0x5a96cc に対応.
     // AL=0xF0、[0x200A]=0x0F -> AL=0xFF になり、exit(0)。mov は AL を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4473,7 +4480,7 @@ fn run_or_r8_m8_sibd() {
 fn run_or_r8_m8_rip() {
     // run 経由で 0A 05 + disp32 (OR AL,[RIP]) を回す。find 0x5c44a7 対応.
     // next_rip=0x1006、disp=0xFFA -> [0x2000]=0x0F、AL=0xF0 -> AL=0xFF、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4500,7 +4507,7 @@ fn run_or_r8_m8_rip() {
 fn run_or_r8_r8() {
     // run 経由で 0A C3 (OR AL,BL) を回す。
     // AL=0xF0、BL=0x0F -> AL=0xFF になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4537,7 +4544,7 @@ fn run_or_r8_r8() {
 fn run_shr_rm8_imm8() {
     // run 経由で C0 E8 05 (SHRB $5,%al) を回す。head の停止点 0x4c9097 に対応.
     // AL=0xFF -> AL=0x07、CF=1。exit 系列で AL が潰れるため [0x2000] に退避して検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4577,7 +4584,7 @@ fn run_shr_rm8_imm8() {
 fn run_shr_r11b_rex() {
     // run 経由で 41 C0 EB 05 (SHRB $5,%r11b) を回す。grep 0x439314 対応.
     // R11B=0xFF -> R11B=0x07、CF=1、exit(0)。R11B は exit 系列で潰れない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4607,7 +4614,7 @@ fn run_shr_r11b_rex() {
 fn run_shr_r13b_1_rex() {
     // run 経由で 41 D0 ED (SHRB %r13b) を回す。sed 0x5bdd7d 対応.
     // R13B=0x03 -> R13B=0x01、CF=1、exit(0)。R13B は exit 系列で潰れない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4637,7 +4644,7 @@ fn run_shr_r13b_1_rex() {
 fn run_dec_rm_mem8_nosib() {
     // run 経由で FF 4B 2C (DECL 0x2C(%rbx)) を回す。head の停止点に対応.
     // RBX=0x2000、[0x202C]=1 -> 0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4676,7 +4683,7 @@ fn run_dec_rm_mem8_nosib() {
 fn run_inc_rm_mem8_nosib() {
     // run 経由で FF 43 2C (INCL 0x2C(%rbx)) を回す。
     // RBX=0x2000、[0x202C]=0 -> 1 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4715,7 +4722,7 @@ fn run_inc_rm_mem8_nosib() {
 fn run_and_rm8_imm_sibd32_rsp() {
     // 41 80 A4 24 B1 00 00 00 F7 は andb $0xf7,0xb1(%r12)。nologin 0x454247。
     // R12=0x2000、[0x20b1]=0xff -> 0xf7、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4751,7 +4758,7 @@ fn run_and_rm8_imm_sibd32_rsp() {
 fn run_and_m8_r8_mem8() {
     // 20 47 FF は and %al, -0x1(%rdi)。nologin 0x45a07d。
     // RDI=0x2001、[0x2000]=0xFF、AL=0x0F -> [0x2000]=0x0F、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4788,7 +4795,7 @@ fn run_and_m8_r8_mem8() {
 fn run_inc_m8_rip() {
     // run 経由で FE 05 FA 0F 00 00 (incb 0xFFA(%rip)) を回す。nologin 0x45972a 対応.
     // [0x2000]=0 -> 1 になり、exit(0)。RIP=0x1006 が next_rip.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4823,7 +4830,7 @@ fn run_inc_m8_rip() {
 fn run_inc_rm_rip() {
     // run 経由で FF 05 FA 0F 00 00 (INCL 0xFFA(%rip)) を回す。sed 0x5bdcc0 対応.
     // [0x2000]=0 -> 1 になり、exit(0)。RIP=0x1006 が next_rip.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4861,7 +4868,7 @@ fn run_inc_rm_rip() {
 fn run_dec_rm_rip() {
     // run 経由で FF 0D FA 0F 00 00 (DECL 0xFFA(%rip)) を回す。du -s 0x5a7fe7 対応.
     // [0x2000]=1 -> 0 になり、exit(0)。RIP=0x1006 が next_rip.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4899,7 +4906,7 @@ fn run_dec_rm_rip() {
 fn run_call_r_memnd_rexb() {
     // run 経由で 41 FF 17 (CALL (%r15) with REX.B) を回す。find -name 0x5c3479 対応.
     // R15=0x2400、[0x2400]=0x1100 (exit 系列)、RSP=0x2800。CALL で 0x1100 へ飛び exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4932,7 +4939,7 @@ fn run_call_r_memnd_rexb() {
 fn run_mov_rm16_imm_rip() {
     // run 経由で 66 C7 05 F7 0F 00 00 34 12 (MOVW [RIP+0xFF7],0x1234) を回す。od 0x5ac863 対応.
     // [0x2000]==0x1234 になり、exit(0)。RIP=0x1009 が next_rip.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -4971,7 +4978,7 @@ fn run_mov_rm16_imm_rip() {
 fn run_test_rm32_imm_memnd() {
     // run 経由で F7 00 FD FF FF FF (TESTL $0xFFFFFFFD,(%rax)) を回す。tac 0x5b0ca8 対応.
     // RAX=0x2000、[0x2000]=0xFFFFFFFF -> ZF=0、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5000,7 +5007,7 @@ fn run_test_rm32_imm_memnd() {
 fn run_add_r_sib_indexed() {
     // run 経由で 03 0C 9F (ADD ECX,[RDI+RBX*4]) を回す。md5sum 0x5ca46d 対応 (REX 剥がし済み形).
     // RDI=0x2000、RBX=0x10、[0x2040]=5、ECX=3 -> ECX=8、exit(0)。ECX は exit 系列で潰れない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5028,7 +5035,7 @@ fn run_add_r_sib_indexed() {
 fn run_xor_r8_m8_memnd() {
     // run 経由で 32 06 (XOR AL,[RSI]) を回す。cksum 0x5c7fc7 対応.
     // RSI=0x2000、[0x2000]=0x0F、AL=0x0F -> AL=0、ZF=1、exit(0)。AL は exit 系列で潰れるため ZF で検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5055,7 +5062,7 @@ fn run_xor_r8_m8_memnd() {
 fn run_cmp_r_sib_no_index() {
     // run 経由で 48 3B 04 24 (CMP RAX,[RSP] with REX.W) を回す。mv 0x5ab8fb 対応.
     // RSP=0x2000、[0x2000]=5、RAX=5 -> ZF=1、exit(0)。RAX は exit 系列で潰れるため ZF で検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5086,7 +5093,7 @@ fn run_cmovne_r64_rip() {
     // run 経由で 48 0F 45 1D F9 0F 00 00 (CMOVNE RBX,[RIP+0xFF9]) を回す。ln 0x5a9e44 対応.
     // [0x2000]=0x1122334455667788、RBX=0、ZF=0 -> RBX=[0x2000]、exit(0)。RBX は exit 系列で潰れない.
     // RIP=0x1008 が next_rip.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5113,7 +5120,7 @@ fn run_cmovne_r64_rip() {
 fn run_sete_byte_rip() {
     // 0F 94 05 09 10 00 00 = sete byte [rip+0x1009]。ZF のとき 1。hdparm 0x417940。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5163,7 +5170,7 @@ fn run_sete_byte_rip() {
 fn run_or_byte_rip_al() {
     // 08 05 0A 10 00 00 = or byte [rip+0x100a], al。0xF0|0x0F は 0xFF。hdparm 0x417721。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5210,7 +5217,7 @@ fn run_or_byte_rip_al() {
 fn run_test_dword_rbx_scale_disp32() {
     // 85 2C 9D 10 20 00 00 = test dword [rbx*4+0x2010], ebp。0xF0&0x0F は 0。lsattr 0x49f5e5。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5261,7 +5268,7 @@ fn run_test_dword_rbx_scale_disp32() {
 fn run_push_qword_rsp_disp32() {
     // FF B4 24 10 01 00 00 = push qword [rsp+0x110]。top 0x44e0d6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5322,7 +5329,7 @@ fn run_push_qword_rsp_disp32() {
 fn run_dec_byte_rcx() {
     // FE 09 = dec byte [rcx]。0x10 は 0x0F。CF は残る。dc 0x40abca。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5369,7 +5376,7 @@ fn run_dec_byte_rcx() {
 fn run_sub_byte_rdi_rax_cl() {
     // 28 0C 07 = sub byte [rdi+rax], cl。0x10-1 は 0x0F。dc 0x40abb4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5422,7 +5429,7 @@ fn run_sub_byte_rdi_rax_cl() {
 fn run_sub_m8_r8_reg_direct() {
     // run 経由で 28 D1 (SUB CL,DL) を回す。
     // ECX=5、EDX=3 -> CL=2、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5446,7 +5453,7 @@ fn run_sub_m8_r8_reg_direct() {
 fn run_xor_m8_r8_reg_direct() {
     // run 経由で 30 C0 (XOR AL,AL) を回す。
     // EAX=0xFF -> AL=0、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5468,7 +5475,7 @@ fn run_xor_m8_r8_reg_direct() {
 fn run_movsx_r64_m8_memnd() {
     // run 経由で REX.W 0F BE 13 (MOVSX RDX,[RBX]) を回す。
     // [0x2000]=0xFF -> RDX=0xFFFFFFFFFFFFFFFF、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5495,7 +5502,7 @@ fn run_movsx_r64_m8_memnd() {
 fn run_mov_rm16_imm_sibd32() {
     // 66 C7 84 03 6E 0E 00 00 08 00 = movw $0x8, 0xe6e(%rbx,%rax)。gzip 0x485910。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5531,7 +5538,7 @@ fn run_mov_rm16_imm_sibd32() {
 fn run_mov_rm16_imm_disp32() {
     // 66 C7 83 CE 12 00 00 08 00 = movw $0x8, 0x12ce(%rbx)。gzip 0x485966。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5567,7 +5574,7 @@ fn run_mov_rm16_imm_disp32() {
 fn run_mov_m16_r16_sibd32() {
     // 66 89 8C 93 EC 12 00 00 = movw %cx, 0x12ec(%rbx,%rdx,4)。gzip 0x4859e4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5606,7 +5613,7 @@ fn run_inc_r16_sibd32() {
     // 66 FF 84 B0 84 04 00 00 = incw 0x484(%rax,%rsi,4)。gzip 0x484ac0。
     // 0x7fff は 0x8000 になり、CF は残し OF と SF が立つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5652,7 +5659,7 @@ fn run_shl_m8_1_mem32() {
     // D0 A0 F1 2A 00 00 = shlb 0x2af1(%rax)。gzip 0x484b2e。
     // 0x81 は 0x02 になり、CF と OF が立つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
@@ -5692,7 +5699,7 @@ fn run_cmp_m16_imm8_sib() {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, flags) in [([0x00, 0x00], 0x44u32), ([0x01, 0x00], 0x00)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(7).state(), 0x2000);
@@ -5734,7 +5741,7 @@ fn run_cmp_m16_r16_memnd() {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, src, flags) in [([0xAB, 0x00], 0xABu64, 0x44u32), ([0x02, 0x00], 0x01, 0x00)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(11), 0x2000);
@@ -5761,7 +5768,7 @@ fn run_cmp_m16_r16_sib() {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, src, flags) in [([0xAB, 0x00], 0xABu64, 0x44u32), ([0x02, 0x00], 0x01, 0x00)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(7).state(), 0x2000);
@@ -5787,7 +5794,7 @@ fn run_cmp_m16_r16_sib() {
 fn run_mov_r16_m16_memnd() {
     // 66 8B 06 = movw (%rsi), %ax。gzip 0x4847b6。上位16ビットは残す。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -5817,7 +5824,7 @@ fn run_add_r16_memnd() {
         (0x0002u32, [0x01, 0x00], 0x1111_0003u32, 0x04u32),
         (0x7fff, [0x01, 0x00], 0x1111_8000, 0x894),
     ] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(1).state(), 0x2000);
@@ -5848,7 +5855,7 @@ fn run_dec_rm_mem32() {
         ([0x05, 0x00, 0x00, 0x00], 0x01u32, [0x04, 0x00, 0x00, 0x00]),
         ([0x01, 0x00, 0x00, 0x00], 0x45, [0x00, 0x00, 0x00, 0x00]),
     ] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(3).state(), 0x2000);
@@ -5896,7 +5903,7 @@ fn run_sub_m32_r32_mem32() {
         ),
         ([0x00, 0x00, 0x00, 0x00], 1, 0x95, [0xFF, 0xFF, 0xFF, 0xFF]),
     ] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(3).state(), 0x2000);
@@ -5937,7 +5944,7 @@ fn run_inc_r16_mem32() {
     // 66 FF 82 A8 13 00 00 = incw 0x13a8(%rdx)。gzip 0x484a42。
     // 0x7fff は 0x8000 になり、CF は残し OF と SF が立つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -5987,7 +5994,7 @@ fn run_add_m16_r16_sibd32() {
         ([0x02, 0x00], 0x04u32, [0x03, 0x00]),
         ([0xFF, 0x7F], 0x894, [0x00, 0x80]),
     ] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(2).state(), 0x2000);
@@ -6034,7 +6041,7 @@ fn run_cmp_m16_imm8_sibd32() {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, flags) in [([0x00, 0x00], 0x44u32), ([0x01, 0x00], 0x00)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
         polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(12), 0x2000);
@@ -6076,7 +6083,7 @@ fn run_cmp_m16_imm8_sibd32() {
 fn run_and_m64_r64_memnd() {
     // 48 21 07 = andq %rax, (%rdi)。0xff & 0x0f = 0x0f。%rax は変わらない。chat 0x4d3473。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6122,7 +6129,7 @@ fn run_and_m32_r32_sib() {
     // 41 21 0C 94 = andl %ecx, (%r12,%rdx,4)。bzip2 0x47f93d。
     // 0xff & 0x0f = 0x0f。%ecx は変わらない。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6169,7 +6176,7 @@ fn run_or_m64_r64_sibabs() {
     let code = [0xF0u8, 0x48, 0x09, 0x04, 0xCD, 0x00, 0x20, 0x00, 0x00];
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (rax, mem, flags, out) in [(0x0Fu64, 0xF0u64, 0x04u32, 0xFFu64), (0, 0, 0x44, 0)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(0).state(), rax as u32);
@@ -6211,7 +6218,7 @@ fn run_or_r64_sibd32() {
     let code = [0x48u8, 0x0B, 0x94, 0x07, 0x98, 0x00, 0x00, 0x00];
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (rdx, mem, flags, out) in [(0x0Fu32, 0xF0u64, 0x04u32, 0xFFu64), (0, 0, 0x44, 0)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(7).state(), 0x2000);
@@ -6243,7 +6250,7 @@ fn run_addq_rbx_disp8_imm32() {
     let code = [0x48u8, 0x81, 0x43, 0x50, 0x00, 0x02, 0x00, 0x00];
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, flags, outb) in [(1u64, 0u32, 0x201u64), (0xFFFF_FFFF_FFFF_FF00, 0x05, 0x100)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.step(|b| {
@@ -6292,7 +6299,7 @@ fn run_add_rm64_imm_sibd() {
     let code = [0x48u8, 0x81, 0x44, 0x24, 0x28, 0x02, 0x01, 0x00, 0x00];
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, flags, outb) in [(1u64, 0x04u32, 0x103u64), (0xFFFF_FFFF_FFFF_FF00, 0x01, 2)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(4).state(), 0x2000);
@@ -6335,7 +6342,7 @@ fn run_shl_m32_imm8_mem8() {
         ([0x81, 0x00, 0x00, 0x00], 0x04u32, [0x00, 0x81, 0x00, 0x00]),
         ([0x00, 0x00, 0x00, 0x01], 0x845, [0x00, 0x00, 0x00, 0x00]),
     ] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.backend.set(Gpr(7).state(), 0x2000);
@@ -6373,7 +6380,7 @@ fn run_shl_m32_imm8_mem8() {
 fn run_imul_r64_imm_sib() {
     // 48 69 0C 24 40 42 0F 00 = imulq $0xf4240, (%rsp), %rcx。2*1000000=2000000。
     // dd 0x4067c3。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6403,7 +6410,7 @@ fn run_imul_r64_imm_sib() {
 fn run_or_al_rsp_disp32() {
     // 0A 84 24 10 00 00 00 = or al, [rsp+0x10]。0xF0|0x0F は 0xFF。上位は残る。
     // tar -tf 0x48e5f4。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6454,7 +6461,7 @@ fn run_or_al_rsp_disp32() {
 fn run_or_sil_rcx_disp8() {
     // 40 0A 71 FF = or sil, BYTE PTR [rcx-1]。0xf0|0x0f は 0xff。上位は残る。uudecode 0x49da3e。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6495,7 +6502,7 @@ fn run_or_sil_rcx_disp8() {
 fn run_movzx_r9d_rdx_scale_abs() {
     // 44 0F B7 0C 95 00 20 00 00 = movzx r9d, WORD PTR [rdx*4+0x2000]。上位は消える。microcom 0x4bc4f2。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6542,7 +6549,7 @@ fn run_movzx_r9d_rdx_scale_abs() {
 fn run_movsx_esi_si() {
     // 0F BF F6 = movsx esi, si。0x8000 は 0xffff8000。上位 32 は消える。man 0x4d80c6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(6), 0x1111_2222_3333_8000);
@@ -6563,7 +6570,7 @@ fn run_movsx_esi_si() {
 fn run_div_dl() {
     // F6 F2 = div dl。AX=0x107、DL=5 なら商 0x34、剰余 3。上位とフラグと DL は残る。lzcat 0x48b6ef。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x1111_2222_3333_0107);
@@ -6587,7 +6594,7 @@ fn run_div_dl() {
 fn run_and_ax_r12_scale_disp32() {
     // 66 43 23 84 24 10 00 00 00 = and ax, [r12+r12+0x10]。0xff&0x0f は 0x0f。上位は残る。gunzip 0x48a957。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6632,7 +6639,7 @@ fn run_and_ax_r12_scale_disp32() {
 fn run_xor_rsp_disp8_ecx() {
     // 31 4C 24 08 = xor DWORD PTR [rsp+0x8], ecx。1^1 は 0 で ZF。ecx と rsp は残る。gunzip 0x48a1c3。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6679,7 +6686,7 @@ fn run_cmovae_rax_rsi_disp8() {
     let code = [0x48u8, 0x0F, 0x43, 0x46, 0x08];
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (flags, rax) in [(0u32, 0x1111_2222_3333_4444u64), (1, 0xAAAA_BBBB_CCCC_DDDD)] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
         env.step(|b| {
@@ -6725,7 +6732,7 @@ fn run_cmovae_rax_rsi_disp8() {
 fn run_cmovbe_edx_r8() {
     // 41 0F 46 10 = cmovbe edx, DWORD PTR [r8]。CF があるので移す。上位 32 は消える。gunzip 0x48a025。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6767,7 +6774,7 @@ fn run_cmovbe_edx_r8() {
 fn run_test_r14w_imm() {
     // 66 41 F7 C6 00 02 = test r14w, 0x200。下位16が 0 なので ZF。上位は残る。gunzip 0x48b06a。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(14), 0x1111_2222_3333_0000);
@@ -6788,7 +6795,7 @@ fn run_test_r14w_imm() {
 fn run_cmp_m16_imm_rbx_disp8() {
     // 66 83 7B 04 0A = cmpw $0xa, 0x4(%rbx)。等しいので ZF。メモリと rbx は残る。ping 0x42e7b3。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6829,7 +6836,7 @@ fn run_cmp_m16_imm_rbx_disp8() {
 fn run_test_m8_imm_rsp_disp32() {
     // F6 84 24 10 00 00 00 01 = test BYTE PTR [rsp+0x10], 1。0&1 は ZF。メモリと rsp は残る。ping 0x4c4288。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6872,7 +6879,7 @@ fn run_test_m8_imm_rsp_disp32() {
 fn run_cmp_m16_imm_rdi() {
     // 66 83 3F 02 = cmpw $2, (%rdi)。等しいので ZF。メモリと rdi は残る。ping 0x4be1f1。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6913,7 +6920,7 @@ fn run_cmp_m16_imm_rdi() {
 fn run_minsd_xmm() {
     // F2 0F 5D C1 = minsd xmm0, xmm1。4.0 と 2.0 の小さい方は 2.0。上位64は残る。ping 0x42e6d9。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -6946,7 +6953,7 @@ fn run_minsd_xmm() {
 fn run_mov_dx_r14_disp8() {
     // 66 41 8B 56 12 = movw 0x12(%r14), %dx。下位16だけ置き、上位は残る。pgrep 0x44b629。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -6990,7 +6997,7 @@ fn run_mov_dx_r14_disp8() {
 fn run_imul_eax_rip_imm32() {
     // 69 05 F6 0F 00 00 05 00 00 00 = imul eax, [rip+0xff6], 5。3*5=15。上位は消える。nslookup 0x42bb05。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7034,7 +7041,7 @@ fn run_imul_eax_rip_imm32() {
 fn run_xor_rm8_imm_rax() {
     // 80 30 01 = xorb $1, (%rax)。1^1=0 で ZF。隣接バイトと rax は残る。nmeter 0x44a570。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7074,7 +7081,7 @@ fn run_xor_rm8_imm_rax() {
 fn run_cmp_imm_rsp_disp8() {
     // 81 7C 24 0C FF 00 00 00 = cmpl $0xff, 0xc(%rsp)。等しいので ZF。メモリと rsp は残る。nc 0x4c68d6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7118,7 +7125,7 @@ fn run_cmp_imm_rsp_disp8() {
 fn run_movsx_eax_rsp_disp32() {
     // 0F BE 84 24 FA 00 00 00 = movsbl 0xfa(%rsp), %eax。0x80 は符号拡張。上位は消える。nc 0x4c71fd。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7164,7 +7171,7 @@ fn run_movsx_eax_rsp_disp32() {
 fn run_or_r11d_rdx_scale_disp32() {
     // 44 0B 1C 95 00 20 00 00 = or r11d, [rdx*4+0x2000]。1|2=3。上位は消える。cryptpw 0x4bb2e0。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7211,7 +7218,7 @@ fn run_or_r11d_rdx_scale_disp32() {
 fn run_imul_eax_rdx_scale_disp32() {
     // 0F AF 04 95 00 20 00 00 = imul eax, [rdx*4+0x2000]。3*5=15。上位は消える。フラグは残る。awk 0x4d6114。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7258,7 +7265,7 @@ fn run_imul_eax_rdx_scale_disp32() {
 fn run_cvtsi2sd_rsp_nodisp() {
     // F2 48 0F 2A 0C 24 = cvtsi2sdq (%rsp), %xmm1。整数 2 は 2.0。上位 64 は残る。ntpd 0x42cb3e。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7291,7 +7298,7 @@ fn run_cvtsi2sd_rsp_nodisp() {
 fn run_cvtsi2sd_rsp_disp8() {
     // F2 48 0F 2A 44 24 08 = cvtsi2sdq 0x8(%rsp), %xmm0。整数 2 は 2.0。上位 64 は残る。ntpd 0x42cb2f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7327,7 +7334,7 @@ fn run_cvtsi2sd_rsp_disp8() {
 fn run_or_m8_al_rbx() {
     // 08 43 18 = orb %al, 0x18(%rbx)。0x03 と 0x01 は 0x03。AL は残る。powertop 0x44c15c。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7367,7 +7374,7 @@ fn run_or_m8_al_rbx() {
 fn run_push_m64_rbx_disp8() {
     // FF 73 40 = pushq 0x40(%rbx)。変位の 8 バイトを積み、RSP は 8 減る。旗は残る。vi 0x4ce196。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7427,7 +7434,7 @@ fn run_push_m64_rbx_disp8() {
 fn run_pop_m64_rdi_disp8() {
     // 8F 47 40 = popq 0x40(%rdi)。スタックの 8 バイトを写し、RSP は 8 進む。旗は残る。vi 0x4ce187。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7474,7 +7481,7 @@ fn run_pop_m64_rdi_disp8() {
 fn run_and_rm32_imm_rbx() {
     // 81 23 FF FA FF FF = andl $0xfffffaff, (%rbx)。0x500 は 0。rbx は残る。vi 0x40511c。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7516,7 +7523,7 @@ fn run_and_rm32_imm_rbx() {
 fn run_rol_r12_cl() {
     // 49 D3 C4 = rolq %cl, %r12。4 回で 0x10000001 は 0x100000010。回数 0 は旗を残す。sha3sum 0x4b45f6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(12), 0x1000_0001);
@@ -7550,7 +7557,7 @@ fn run_rol_r12_cl() {
 fn run_xor_m64_rcx_rdx_disp32() {
     // 48 31 8A A0 00 00 00 = xorq %rcx, 0xa0(%rdx)。0xf0 と 0xff は 0x0f。rcx は残る。sha3sum 0x4b45c4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7599,7 +7606,7 @@ fn run_xor_m64_rcx_rdx_disp32() {
 fn run_xor_m64_rcx_rdx_disp8() {
     // 48 31 4A 28 = xorq %rcx, 0x28(%rdx)。0xf0 と 0xff は 0x0f。rcx は残る。sha3sum 0x4b45b8。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7645,7 +7652,7 @@ fn run_xor_m64_rcx_rdx_disp8() {
 fn run_xor_m64_rcx_rdx() {
     // 48 31 0A = xorq %rcx, (%rdx)。0xf0 と 0xff は 0x0f。rcx は残る。sha3sum 0x4b45b5。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7691,7 +7698,7 @@ fn run_xor_m64_rcx_rdx() {
 fn run_add_rm8_imm_rdi_rax() {
     // 80 04 07 80 = addb $-128, (%rdi,%rax,1)。0x01 は 0x81。符号とパリティ。sha3sum 0x4b4f20。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7730,7 +7737,7 @@ fn run_add_rm8_imm_rdi_rax() {
 fn run_xor_m8_r9_rdi_rdx() {
     // 44 30 0C 17 = xorb %r9b, (%rdi,%rdx,1)。0x07 と 0x06 は 0x01。r9 の上位は残る。sha3sum 0x4b4edd。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7774,7 +7781,7 @@ fn run_xor_m8_r9_rdi_rdx() {
 fn run_xor_rm8_imm_rdi_rax() {
     // 80 34 07 06 = xorb $6, (%rdi,%rax,1)。0x07 は 0x01。隣のバイトは残る。sha3sum 0x4b4f14。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7813,7 +7820,7 @@ fn run_xor_rm8_imm_rdi_rax() {
 fn run_and_rm32_imm_rsp() {
     // 81 64 24 14 00 FE FF FF = andl $0xfffffe00, 0x14(%rsp)。全ビットは下位9を落とす。script 0x47b0b7。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7854,7 +7861,7 @@ fn run_and_rm32_imm_rsp() {
 fn run_or_rm32_imm_rsp() {
     // 81 4C 24 1C 80 08 00 00 = orl $0x880, 0x1c(%rsp)。0x0f は 0x88f。キャリーは消える。resize 0x490ea6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7895,7 +7902,7 @@ fn run_or_rm32_imm_rsp() {
 fn run_cmp_m16_imm8_r12() {
     // 66 41 83 7C 24 14 2E = cmpw $0x2e, 0x14(%r12)。等しいとゼロとパリティ。メモリは残る。rdev 0x4b3703。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7936,7 +7943,7 @@ fn run_cmp_m16_imm8_r12() {
 fn run_xor_r13w_self() {
     // 66 45 31 ED = xor %r13w, %r13w。下位 16 ビットが 0 になり、ゼロとパリティが立つ。pgrep 0x44b572。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(13), 0x1234_0000_0000_ABCD);
@@ -7959,7 +7966,7 @@ fn run_xor_r13w_self() {
 fn run_imul_r64_imm8_rsp_nodisp() {
     // 48 6B 2C 24 48 = imul $0x48, (%rsp), %rbp。2*72=144。フラグは残る。mpstat 0x449c01。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -7987,7 +7994,7 @@ fn run_imul_r64_imm8_rsp_nodisp() {
 fn run_sub_m16_r16_mem8() {
     // 66 29 5D 52 = subw %bx, 0x52(%rbp)。0 から 1 を引くと借り。bx の上位は残る。lpq 0x4c3385。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8027,7 +8034,7 @@ fn run_sub_m16_r16_mem8() {
 fn run_movsx_r64_m16_mem8() {
     // 48 0F BF 45 50 = movswq 0x50(%rbp), %rax。0xffff は -1。lpq 0x4c336d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8055,7 +8062,7 @@ fn run_movsx_r64_m16_mem8() {
 fn run_rol_bp_imm8() {
     // 66 C1 C5 08 = rol $8, %bp。0x00ab は 0xab00。上位は残る。httpd 0x4be767。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(5).state(), 0x1234_00AB);
@@ -8077,7 +8084,7 @@ fn run_rol_bp_imm8() {
 fn run_sub_r64_sibd32() {
     // 4A 2B AC 2C C0 00 00 00 = subq 0xc0(%rsp,%r13,1), %rbp。1-2 は借り。iostat 0x448b8e。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8110,7 +8117,7 @@ fn run_sub_r64_sibd32() {
 fn run_xor_rm8_imm_rsp() {
     // 80 74 24 1B 01 = xorb $1, 0x1b(%rsp)。0x03 は 0x02 になり、隣のバイトは残る。iostat 0x448a1f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8148,7 +8155,7 @@ fn run_xor_rm8_imm_rsp() {
 fn run_imul_r64_imm8_rsp() {
     // 48 6B 44 24 28 58 = imul $0x58, 0x28(%rsp), %rax。2*88=176。フラグは残る。iostat 0x44897d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8177,7 +8184,7 @@ fn run_cmp_ax_imm8_sets_flags() {
     // 66 83 F8 FF = cmp $-1, %ax。0 と比較すると借りと補助キャリー。ax は残る。iostat 0x4bea1d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |ax: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(0).state(), ax);
@@ -8200,7 +8207,7 @@ fn run_cmp_ax_imm8_sets_flags() {
 fn run_movsx_r64_m16_sibd32() {
     // 48 0F BF 84 00 00 00 00 00 = movswq (%rax,%rax,1), %rax。0xffff は -1。iostat 0x4be9fb。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8229,7 +8236,7 @@ fn run_movsx_r64_m16_sibd32() {
 fn run_sbb_rm32_imm8_rsp() {
     // 83 5C 24 14 FF = sbbl $-1, 0x14(%rsp)。0 から -1 を引くと 1、借りが出る。fsck 0x4d272f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8267,7 +8274,7 @@ fn run_sbb_rm32_imm8_rsp() {
 fn run_imul_r32_imm_mem8() {
     // 69 43 04 E8 03 00 00 = imul $0x3e8, 0x4(%rbx), %eax。2*1000=2000。旗は残す。ifplugd 0x4264b0。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8296,7 +8303,7 @@ fn run_imul_r32_imm_mem8() {
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8325,7 +8332,7 @@ fn run_imul_r64_imm_sibd() {
 fn run_ror_rm64_by1() {
     // 48 D1 C9 = rorq %rcx。下位1ビットが最上位へ回る。sha512sum 0x4b47c4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 3);
@@ -8346,7 +8353,7 @@ fn run_ror_rm64_by1() {
 fn run_rol_rm32_by1() {
     // run 経由で D1 C2 (ROLL $1,%edx) を回す。head の停止点 0x59eb6c に対応.
     // EDX=0x80000001 -> 0x00000003 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8368,7 +8375,7 @@ fn run_rol_rm32_by1() {
 fn run_add_rm16_imm() {
     // run 経由で 66 81 C6 FF 03 (ADDW $0x03ff,%si) を回す。seq の停止点 0x4c4677 に対応.
     // ESI=0x12340000 -> ESI=0x123403FF になり、exit(0)。mov は ESI を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8390,7 +8397,7 @@ fn run_add_rm16_imm() {
 fn run_cmovne_r32_sibd32_rsp() {
     // 0F 45 8C 24 88 00 00 00 は cmovne 0x88(%rsp), %ecx。free 0x44801c。
     // ZF=0、RSP=0x2000、[0x2088]=0x42、ECX=0 -> ECX=0x42、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8418,7 +8425,7 @@ fn run_cmovne_r32_sibd32_rsp() {
 fn run_xor_rm32_imm_sibd_rsp() {
     // 81 74 24 04 00 01 00 00 は xorl $0x100,0x4(%rsp)。mim 0x45a165。
     // RSP=0x2000、[0x2004]=0 -> 0x100、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8457,7 +8464,7 @@ fn run_xor_rm32_imm_sibd_rsp() {
 fn run_and_rm16_imm_memnd() {
     // 66 81 23 00 FB は andw $0xfb00,(%rbx)。mim 0x458c3a。
     // RBX=0x2000、[0x2000]=0xffff -> 0xfb00、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8496,7 +8503,7 @@ fn run_and_rm16_imm_memnd() {
 fn run_and_rm16_imm() {
     // run 経由で 66 81 E2 FF 08 (ANDW $0x08ff,%dx) を回す。seq の停止点 0x40b7f1 に対応.
     // EDX=0x1234FFFF -> EDX=0x123408FF になり、exit(0)。mov は EDX を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8518,7 +8525,7 @@ fn run_and_rm16_imm() {
 fn run_and_ax_imm16() {
     // run 経由で 66 25 00 0C (ANDW $0x0c00,%ax) を回す。seq の停止点 0x476e57 に対応.
     // EAX=0x1234037F -> EAX=0x12340000。exit 系列で EAX が潰れるため [0x2000] に退避して検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8554,7 +8561,7 @@ fn run_and_ax_imm16() {
 fn run_cmp_ax_imm16() {
     // run 経由で 66 3D 00 08 (CMPW $0x0800,%ax) を回す。seq の停止点 0x476e5b に対応.
     // AX=0 -> CF=1、ZF=0 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8583,7 +8590,7 @@ fn run_cmp_ax_imm16() {
 fn run_shld_r64_cl_rexwr() {
     // run 経由で 4C 0F A5 C8 (SHLD RAX,R9,CL) を回す。seq の RBP 破壊バグに対応.
     // RAX=1、R9=0x8000000000000000、CL=1 -> RAX=3、RBP は保存される。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8620,7 +8627,7 @@ fn run_shrd_r64_cl_rexwr() {
     // run 経由で 4C 0F AD C0 (SHRD RAX,R8,CL) を回す。seq 10 の停止点 0x4c4425 対応.
     // RAX=2、R8=1、CL=1 -> RAX=0x8000000000000001、RBP は保存される。
     // exit 系列で RAX が潰れるため [0x2100] に退避して検証.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8672,7 +8679,7 @@ fn run_and_r13b_mem32_rexr() {
     // run 経由で 44 22 AD 44 FB FF FF (AND R13B,[RBP-0x4BC]) を回す。wc の停止点 0x40bf62 に対応.
     // REX.R で dst を拡張。RBP=0x2000、[0x1B44]=0xF0、R13B=0x0F -> R13B=0x00、ZF=1.
     // REX 追随者ゲートの回帰 (旧実装はゲートで弾いていた)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8704,7 +8711,7 @@ fn run_and_r13b_mem32_rexr() {
 fn run_bt_r32_rm_rexr() {
     // run 経由で 44 0F A3 E8 (BT EAX,R13D) を回す。wc の停止点 0x5b380d に対応.
     // EAX=0x20 (bit5)、R13D=5 -> CF=1 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8734,7 +8741,7 @@ fn run_bt_r32_rm_rexr() {
 fn run_sub_rm_imm8_rip() {
     // run 経由で 83 2D F9 0F 00 00 01 (SUBL $1,0xFF9(%rip)) を回す。head の停止点 0x417b1b に対応.
     // [0x2000]=10 - 1 = 9 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8772,7 +8779,7 @@ fn run_sub_rm_imm8_rip() {
 fn run_fnstcw_mem8() {
     // run 経由で D9 7D C6 (FNSTCW -0x3a(%rbp)) を回す。seq の停止点 0x476e4a に対応.
     // RBP=0x2000、fcw=0x037F -> [0x1FC6]=0x037F になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(5).state(), 0x2000);
@@ -8812,7 +8819,7 @@ fn run_fnstcw_mem8() {
 fn run_movsx_r32_m8_sibd() {
     // run 経由で 0F BE 4C 24 1B (MOVSX ECX,[RSP+0x1B]) を回す。wc の停止点 0x5b385a に対応.
     // [0x201B]=0xFF -> ECX=0xFFFFFFFF になり、exit(0)。mov は ECX を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8835,7 +8842,7 @@ fn run_movsx_r32_m8_sibd() {
 fn run_pminub_mem8() {
     // run 経由で 66 0F DA 40 50 (PMINUB xmm0,0x50(%rax)) を回す。head の停止点 0x4dddd5 に対応.
     // xmm0 low byte 0x05、[0x2050] low byte 0x03 -> 0x03 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8876,7 +8883,7 @@ fn run_pminub_mem8() {
 fn run_ucomisd_self() {
     // run 経由で 66 0F 2E C0 (UCOMISD xmm0,xmm0) を回す。seq の停止点 0x45b74d に対応.
     // xmm0=1.0 との比較は等価 -> ZF=1、PF=CF=0 になり、exit(0)。mov は旗を変えない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8909,7 +8916,7 @@ fn run_ucomisd_self() {
 fn run_movapd_co_use() {
     // run 経由で 66 0F 28 C1 (MOVAPD xmm0,xmm1) を回す。seq の停止点 0x45b757 に対応.
     // MOVAPD は MOVAPS と等価のため Insn 共用 + 66 ガードで対応。xmm1 -> xmm0 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -8946,7 +8953,7 @@ fn run_movapd_co_use() {
 fn run_divsd_xmm() {
     // F2 0F 5E C8 = divsd xmm1, xmm0。4.0/2.0=2.0。上位64は残す。dd 0x492911。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -8980,7 +8987,7 @@ fn run_divsd_xmm() {
 fn run_divsd_xmm_m64_rip() {
     // F2 0F 5E 05 F8 0F 00 00 = divsd xmm0, [rip+0xff8]。4.0/2.0=2.0。上位64は残す。
     // 次命令は 0x1008、宛先は 0x2000。dd 0x4928e8。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9017,7 +9024,7 @@ fn run_divsd_xmm_m64_rip() {
 fn run_mulsd() {
     // run 経由で F2 0F 59 C2 (MULSD xmm0,xmm2) を回す。seq の停止点 0x5adf8c に対応.
     // xmm0 下位=2.0、xmm2=3.0 -> 下位=6.0 (0x4018000000000000)、上位は xmm0 のまま、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9059,7 +9066,7 @@ fn run_mulsd() {
 fn run_addsd_m64_sib() {
     // run 経由で F2 0F 58 04 24 (ADDSD xmm0,[rsp]) を回す。seq の停止点 0x5adf90 に対応.
     // [0x2000]=2.0、xmm0下位=3.0 -> 下位=5.0 (0x4014000000000000) になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9102,7 +9109,7 @@ fn run_movsd_xmm3_rcx_scaled() {
     // F2 0F 10 1C CD 10 00 00 00 = movsd xmm3, [rcx*8+0x10]。下位64を読み、上位64は0
     // （mod!=3 のメモリ形は上位クリア、SDM 準拠）。
     // awk exp 0x4c12f4。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9159,7 +9166,7 @@ fn run_movsd_xmm3_rcx_scaled() {
 fn run_sqrtsd_xmm0() {
     // F2 0F 51 C0 = sqrtsd xmm0,xmm0。4.0 の平方根は 2.0。上位64は残る。awk sqrt 0x4c1dd9。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(
@@ -9185,7 +9192,7 @@ fn run_sqrtsd_xmm0() {
 fn run_addsd_xmm3_rdx_disp32() {
     // F2 0F 58 9A 10 00 00 00 = addsd xmm3, [rdx+0x10]。3.0+2.0 は 5.0。上位64は残る。
     // awk log 0x4c163e。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9242,7 +9249,7 @@ fn run_addsd_xmm3_rdx_disp32() {
 fn run_addsd_xmm_m64_rip() {
     // run 経由で F2 0F 58 05 + disp32 (ADDSD xmm0,[RIP]) を回す.
     // [0x1500]=2.0、xmm0 下位=3.0 -> 5.0、exit(0)。awk の停止点 0x5b72fc に対応.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9275,7 +9282,7 @@ fn run_addsd_xmm_m64_rip() {
 fn run_andpd() {
     // run 経由で 66 0F 54 C1 (ANDPD xmm0,xmm1) を回す。
     // xmm0=0xFF..FF、xmm1=0x0F0F.. -> xmm0=0x0F0F.. になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9317,7 +9324,7 @@ fn run_andpd() {
 fn run_andpd_rip() {
     // run 経由で 66 0F 54 0D + disp32 (ANDPD xmm1,[RIP]) を回す。seq の停止点 0x45b75b に対応.
     // [0x2000]=0x0F0F..、xmm1=0xFF..FF -> xmm1=0x0F0F.. になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9360,7 +9367,7 @@ fn run_andpd_rip() {
 fn run_sar_rm64_cl() {
     // run 経由で REX.W D3 /7 (SAR RDI,CL) を回す。
     // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9382,7 +9389,7 @@ fn run_sar_rm64_cl() {
 fn run_punpcklqdq_reg_direct() {
     // run 経由で 66 0F 6C /r (PUNPCKLQDQ xmm0,xmm0) を回す。
     // movd で xmm0 低32=0x11223344 を作り、PUNPCKLQDQ で [lo,lo] になることを確かめる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9409,7 +9416,7 @@ fn run_punpcklqdq_reg_direct() {
 fn run_imul_r64_imm8_rip() {
     // run 経由で REX.W 6B /r ib + disp32 (IMUL RDX,[RIP+disp],0x38) を回す。
     // [0x1500]=2 * 0x38 = 112=0x70 になり、exit(0x70)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9435,7 +9442,7 @@ fn run_imul_r64_imm8_rip() {
 fn run_movdqu_load_mem8() {
     // run 経由で F3 0F 6F mod=01 (MOVDQU xmm0,[rax+0x20]) を回す。
     // [0x1020] の16B を xmm0 にロードして exit(0)、xmm0 で検証する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9469,7 +9476,7 @@ fn run_movdqu_load_mem8() {
 fn run_movdqu_store_memnd() {
     // run 経由で F3 0F 7F mod=00 (MOVDQU [RDI],xmm0) を回す.
     // xmm0=16B を [0x2000] に格納して exit(0)、メモリで検証する.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9519,7 +9526,7 @@ fn run_movdqu_store_memnd() {
 fn run_add_r_memnd() {
     // run 経由で REX.W 03 /r mod=00 (ADD RDX,[RBX]) を回す。
     // [0x1500]=0x40, RDX=0x10 -> RDX=0x50 になり、exit(0x50)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9546,7 +9553,7 @@ fn run_add_r_memnd() {
 fn run_orb_mem32_disp32() {
     // run 経由で 80 /1 mod=10 [base+disp32],imm8 (ORB) を回す。
     // RBX=0x1000、[0x1356]=0x01 に ORB $0x80 で [0x1356]=0x81 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9585,7 +9592,7 @@ fn run_orb_mem32_disp32() {
 fn run_c7_mem32_generic_base() {
     // run 経由で C7 /0 mod=10 [RBX+disp32],imm32 (汎用base) を回す。
     // [0x1500]=0x11223344 を書き込み、exit(0)。読み戻しで検証する.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9623,7 +9630,7 @@ fn run_movups_mem32_roundtrip() {
     // run 経由で 0F 11/0F 10 mod=10 [base+disp32] の往復を回す (64bit)。
     // movd xmm0,esi (0x77); movups [rbx+0x500],xmm0; movups xmm1,[rbx+0x500];
     // movups [rbx+0x510],xmm1; mov eax,[rbx+0x510]; mov rdi,rax; exit(0x77).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9653,7 +9660,7 @@ fn run_movups_mem32_roundtrip() {
 fn run_cdqe_sign_extend() {
     // run 経由で REX.W 98 (CDQE) を回す。
     // EAX=0x80000000 -> RAX=0xFFFFFFFF80000000 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9677,7 +9684,7 @@ fn run_cdqe_sign_extend() {
 fn run_cdq_sign_extend() {
     // run 経由で 99 (CDQ) を回す。od 0x5acde6 対応.
     // EAX=0xFFFFFFFF -> EDX=0xFFFFFFFF になり、exit(0)。EDX は exit 系列で潰れない.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9700,7 +9707,7 @@ fn run_cdq_sign_extend() {
 fn run_cqo_sign_extend() {
     // run 経由で REX.W 99 (CQO) を回す。
     // RAX=0x8000000000000000 -> RDX=0xFFFFFFFFFFFFFFFF になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9727,7 +9734,7 @@ fn run_cqo_sign_extend() {
 fn run_movzx_r32_m8_rip() {
     // run 経由で 0F B6 05 + disp32 (MOVZX EAX,[RIP+disp]) を回す (64bit)。
     // [0x1500]=0x80 -> EAX=0x80 になり、exit(0x80)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9749,7 +9756,7 @@ fn run_movzx_r32_m8_rip() {
 fn run_mov_r64_rip() {
     // run 経由で REX.W 8B 05 + disp32 (MOV R8,[RIP+disp]) を回す。
     // [0x1500]=-160 -> R8=-160 として exit(0)、R8 で検証する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9779,7 +9786,7 @@ fn run_mov_r64_rip() {
 fn run_cmpb_imm_rip() {
     // run 経由で 80 3D + disp32 + imm8 (CMPB [RIP],imm8) を回す (64bit)。
     // [0x1500]=0 に CMPB $0 で ZF=1、je taken で exit(0x77)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9805,7 +9812,7 @@ fn run_pslldq_dst_is_rm() {
     // run 経由で 66 0F 73 FA 03 (PSLLDQ xmm2,3) を回す。
     // 0F 73 /7 の dst は rm フィールド (xmm2)。reg=111 は拡張子のため xmm7 ではない.
     // movd xmm2,esi (esi=0x11223344) -> pslldq 3 -> xmm2=0x11223344000000.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9836,7 +9843,7 @@ fn run_pslldq_dst_is_rm() {
 #[test]
 fn run_psrldq_dst_is_rm() {
     // run 経由で 66 0F 73 D8 0D (PSRLDQ xmm0,13) を回す。head の停止点に対応.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9858,7 +9865,7 @@ fn run_psrldq_dst_is_rm() {
 fn run_movd_xmm_rip() {
     // run 経由で 66 0F 6E 05 + disp32 (MOVD xmm0,[RIP]) を回す.
     // [0x1500]=0x11223344 として xmm0 低32が一致することを確かめ、exit(0).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9887,7 +9894,7 @@ fn run_movd_xmm_rip() {
 fn run_or_rm8_imm_reg_direct() {
     // run 経由で 80 CD 08 (OR CH,8) を回す。
     // ECX=0x100 (CH=1) -> CH=9 -> ECX=0x900 になり、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9910,7 +9917,7 @@ fn run_or_rm8_imm_reg_direct() {
 fn run_movq_xmm_m64_mem8() {
     // run 経由で F3 0F 7E 43 38 (MOVQ xmm0,[rbx+0x38]) を回す。
     // [0x2038]=0xAABBCCDDEEFF0011 -> xmm0 下位64、上位64は0、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9940,7 +9947,7 @@ fn run_movq_xmm_m64_mem8() {
 fn run_testw_memnd() {
     // run 経由で 66 F7 03 02 02 (TESTW [rbx],0x202) を回す。
     // [0x2000]=0x0202 で ZF=0 のまま exit(0)。fetch/dispatch/sem 経路の検証を兼ねる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9966,7 +9973,7 @@ fn run_testw_memnd() {
 fn run_movhps_xmm_m64_mem8() {
     // run 経由で 0F 16 43 38 (MOVHPS xmm0,[rbx+0x38]) を回す。
     // xmm0 下位=0x1111222233334444 を保ち、上位=[0x2038]=0xAABBCCDDEEFF0011、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -9998,7 +10005,7 @@ fn run_movhps_xmm_m64_mem8() {
 fn run_movlpd_xmm_m64_memnd() {
     // run 経由で 66 0F 12 0F (MOVLPD xmm1,[rdi]) を回す。
     // [0x2000]=0xAABBCCDDEEFF0011 -> xmm1 下位64、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10028,7 +10035,7 @@ fn run_movlpd_xmm_m64_memnd() {
 fn run_movhpd_xmm_m64_mem8() {
     // run 経由で 66 0F 16 43 38 (MOVHPD xmm0,[rbx+0x38]) を回す。
     // MOVHPS と等価：下位64は movd の 0 を保ち、上位64=[0x2038]、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10057,7 +10064,7 @@ fn run_movhpd_xmm_m64_mem8() {
 
 #[test]
 fn run_movsd_load_store_sibd() {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10101,7 +10108,7 @@ fn run_movsd_load_store_sibd() {
 #[test]
 fn run_movq_xmm_r64_rexw() {
     // 66 REX.W 0F 6E C0 (movq xmm0,rax)。RAX=0x4045000000000000 -> xmm0低64。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10140,7 +10147,7 @@ fn run_movq_xmm_r64_rexw() {
 #[test]
 fn run_bts_r64_imm() {
     // 48 0F BA EA 34 (BTS RDX,0x34 REX.W)。RDX=0 -> RDX=1<<52、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10178,7 +10185,7 @@ fn run_bts_r64_imm() {
 fn run_pop_rbx_1p0_keeps_hi() {
     // POP RBX (0x5B) は64ビット既定のため上位を消さない。1.0 の復元を確かめる。
     // RSP=0x2000 に 1.0 を置き、RBX=0 から POP 1回で RBX=1.0・RSP=0x2008 になる.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10214,7 +10221,7 @@ fn run_pop_rbx_1p0_keeps_hi() {
 fn run_mov_rm8_imm_sibd32_stores_byte() {
     // MOVB [RBP+RDX+0x100],0x01 (C6 84 15 00 01 00 00 01) を64ビットで回す.
     // RBP=0x200、RDX=0x10 -> [0x310]=0x01、eip は 0x1008 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10258,7 +10265,7 @@ fn run_mov_rm8_imm_sibd32_stores_byte() {
 fn run_cmove_r64_sibd_moves_on_z() {
     // CMOVE RAX,[RSP+0x60] (48 0F 44 44 24 60) を64ビットで回す.
     // RSP=0x2000、[0x2060]=0x1122...、ZF=1 -> RAX=0x1122...、eip は 0x1006 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10296,7 +10303,7 @@ fn run_cmove_r64_sibd_moves_on_z() {
 fn run_cmovne_r64_mem32_moves_on_nz() {
     // CMOVNE RAX,[RBP-0xA8] (48 0F 45 85 58 FF FF FF) を64ビットで回す。grep 対応.
     // RBP=0x2000、[0x1F58]=0x1122...、ZF=0 -> RAX=0x1122...、eip は 0x1008 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -10336,7 +10343,7 @@ fn run_cmovne_r64_mem32_moves_on_nz() {
 fn run_div_rm32_mem8_quotient_remainder() {
     // DIV EAX,[RDI+4] (F7 77 04) を32ビットで回す.
     // EDX:EAX=17、[0x104]=5 -> EAX=3、EDX=2、eip は 0x1003 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10362,7 +10369,7 @@ fn run_div_rm32_mem8_quotient_remainder() {
 fn run_div_rm32_sib_quotient_remainder() {
     // F7 34 24 = divl (%rsp)。EDX:EAX=17、[rsp]=5 で EAX=3、EDX=2。xxd 0x473876。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10388,7 +10395,7 @@ fn run_div_rm32_sib_quotient_remainder() {
 fn run_mov_rm16_imm_memnd() {
     // 66 41 C7 07 6C 6C = movw $0x6c6c, (%r15)。xxd 0x4b240f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10420,7 +10427,7 @@ fn run_mov_rm16_imm_memnd() {
 fn run_dec_rm_sib_keeps_cf() {
     // FF 0C 24 = decl (%rsp)。10 が 9 になり、CF は残る。xxd 0x4b2bee。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10459,7 +10466,7 @@ fn run_cmp_m8_r8_rip_sets_zf() {
     // 44 38 35 F9 0F 00 00 = cmpb %r14b, 0xff9(%rip)。次の RIP 0x1007 から 0x2000。
     // 両方 0x10 で ZF=1、CF は消える。grep 0x4aec6d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10486,7 +10493,7 @@ fn run_cmp_m8_r8_rip_sets_zf() {
 fn run_div_rm32_sibd_quotient_remainder() {
     // DIV EAX,[RSP+0x0C] (F7 74 24 0C) をdispatch経由で回す.
     // EDX:EAX=17、[0x10C]=5 -> EAX=3、EDX=2、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10512,7 +10519,7 @@ fn run_div_rm32_sibd_quotient_remainder() {
 fn run_bt_m32_imm_sets_cf() {
     // BT [RDI],0x0C (0F BA 27 0C) を32ビットで回す.
     // RDI=0x100、[0x100]=0x1000 (bit12) -> CF=1、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10538,7 +10545,7 @@ fn run_bt_m32_imm_sets_cf() {
 #[test]
 fn run_bt_m32_imm_sib_r12_sets_cf() {
     // BT [R12],9 (41 0F BA 24 24 09)。R12=0x100、[0x100]=0x200 (bit9) -> CF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10565,7 +10572,7 @@ fn run_bt_m32_imm_sib_r12_sets_cf() {
 fn run_bt_m32_imm_rbx_sets_cf() {
     // BT [RBX],0x0B (0F BA 23 0B) を32ビットで回す.
     // RBX=0x100、[0x100]=0x800 (bit11) -> CF=1、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10592,7 +10599,7 @@ fn run_bt_m32_imm_rbx_sets_cf() {
 fn run_or_rm32_imm_mem8_ors() {
     // ORL $0x400,[R13+0x00] (41 81 4D 00 00 04 00 00) を64ビットで回す.
     // R13=0x2000、[0x2000]=0 -> [0x2000]=0x400、eip は 0x1008 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10635,7 +10642,7 @@ fn run_or_rm32_imm_mem8_ors() {
 fn run_cmp_rm32_imm_memnd_sets_zf() {
     // CMPL $0x2100,(%R14) (41 81 3E 00 21 00 00) を64ビットで回す.
     // R14=0x2000、[0x2000]=0x2100 -> ZF=1、eip は 0x1007 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10669,7 +10676,7 @@ fn run_cmp_rm32_imm_memnd_sets_zf() {
 fn run_cmp_rm32_imm_mem32_sets_zf() {
     // CMPL $0x66695A54,-0x100(%RBP) (81 BD 00 FF FF FF 54 5A 69 66) を回す。ls -l 対応.
     // RBP=0x2000、[0x1F00]=0x66695A54 -> ZF=1、eip は 0x100A に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10699,7 +10706,7 @@ fn run_cmp_rm32_imm_mem32_sets_zf() {
 fn run_cvtsi2sd_m32_mem8_converts() {
     // CVTSI2SDL -0x34(%RBX),%xmm0 (F2 0F 2A 43 CC) を64ビットで回す.
     // RBX=0x100、[0xCC]=5 -> xmm0 下位=5.0、eip は 0x1005 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
@@ -10725,7 +10732,7 @@ fn run_cvtsi2sd_m32_mem8_converts() {
 fn run_andw_sibd_zeroes() {
     // ANDW $0x0,0x26(%RSP) (66 83 64 24 26 00) を64ビットで回す.
     // RSP=0x2000、[0x2026]=0xFFFF -> [0x2026]=0x0000、eip は 0x1006 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10765,7 +10772,7 @@ fn run_andw_sibd_zeroes() {
 fn run_bts_r64_rm_sets_bit() {
     // BTS RDX,RSI (48 0F AB F2) を64ビットで回す.
     // RDX=0、RSI=5 -> RDX=0x20、CF=0、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -10802,7 +10809,7 @@ fn run_bts_r64_rm_sets_bit() {
 fn run_bt_m32_imm_sibd_sets_cf() {
     // BTL $0x10,0x18(%RSP) (0F BA 64 24 18 10) を64ビットで回す.
     // RSP=0x2000、[0x2018]=0x10000 (bit16) -> CF=1、eip は 0x1006 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10833,7 +10840,7 @@ fn run_bt_m32_imm_sibd_sets_cf() {
 fn run_cmp_r64_sibd32_sets_zf() {
     // CMP RBX,[R12+0x98] (49 3B 9C 24 98 00 00 00) を64ビットで回す.
     // R12=0x2000、[0x2098]=7、RBX=7 -> ZF=1、eip は 0x1008 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10872,7 +10879,7 @@ fn run_cmp_r64_sibd32_sets_zf() {
 fn run_bswap_ecx() {
     // run 経由で 0F C9 (BSWAP ECX) を回す。ls -l 0x429c02 対応.
     // ECX=0x12345678 -> 0x78563412、eip は 0x1002 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -10890,7 +10897,7 @@ fn run_bswap_ecx() {
 fn run_imul_r_sibd() {
     // run 経由で 41 0F AF 6C 24 14 (IMUL EBP,[R12+0x14]) を回す。hexdump 0x5c8ca2 対応.
     // R12=0x2000、[0x2014]=6、EBP=7 -> EBP=42、exit(42)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10920,7 +10927,7 @@ fn run_imul_r_sibd() {
 fn run_bt_r64_rm_rexw() {
     // run 経由で 49 0F A3 D6 (BT R14,RDX) を回す。hexdump 0x5c8dd9 対応.
     // R14=0x800100003E00、RDX=0x20 -> CF=1、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -10951,7 +10958,7 @@ fn run_bt_r64_rm_rexw() {
 fn run_mov_m16_imm_sib() {
     // run 経由で 66 41 C7 04 24 6C 6C (MOVW [R12],0x6C6C) を回す。hexdump 0x5c82dd 対応.
     // R12=0x2000 -> [0x2000]=0x6C6C、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -10990,7 +10997,7 @@ fn run_mov_m16_imm_sib() {
 fn run_mov_m16_imm_mem8() {
     // run 経由で 66 C7 43 5C 01 01 (MOVW [RBX+0x5C],0x0101) を回す。hexdump 0x5c84f9 対応.
     // RBX=0x2000 -> [0x205C]=0x0101、exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11025,7 +11032,7 @@ fn run_mov_m16_imm_mem8() {
 fn run_test_m16_imm_mem8() {
     // run 経由で 66 F7 45 08 02 04 (TESTW $0x402,[RBP+0x8]) を回す。hexdump 0x5c8822 対応.
     // [0x2008]=0x0402 で ZF=0 のまま exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11050,7 +11057,7 @@ fn run_test_m16_imm_mem8() {
 fn run_sete_m8_sibd() {
     // run 経由で 0F 94 44 24 1F (SETE 0x1F(%rsp)) を回す。df 0x5a797e 対応.
     // RSP=0x2000、ZF=1 -> [0x201F]=1、eip は 0x1005 に進み exit(0)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11086,7 +11093,7 @@ fn run_sete_m8_sibd() {
 fn run_pmaxub_reg_direct() {
     // run 経由で 66 0F DE D8 (PMAXUB xmm3,xmm0) を回す。df 0x4d0bcd 対応.
     // xmm3=0x01、xmm0=0x02 -> xmm3=0x02、eip は 0x1004 に進む.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -11124,7 +11131,7 @@ fn run_pmaxub_reg_direct() {
 fn run_cmovbe_mem8() {
     // 48 0F 46 6B 08 = cmovbq 8(%rbx), %rbp。ZF=1 で 0x42 を取り exit する.
     // Ref: SPEC-X86-INTEL-SDM (v093). test 0x4d2874.
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11152,7 +11159,7 @@ fn run_cmovbe_mem8() {
 fn run_cmovbe_r64_sibd_rsp() {
     // 48 0F 46 5C 24 18 = cmovbe rbx, [rsp+0x18]。softlimit 0x44eece。
     // CF=1 なので [rsp+0x18] の 0x99 を rbx に移す。メモリは変えない。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -11198,7 +11205,7 @@ fn run_test_rax_imm32_sign_extends() {
     // 48 A9 00 F0 FF FF = test rax, 0xfffff000。imm32 は符号拡張され、
     // bit63 だけ立った rax と AND すると ZF=0。basename 0x4bff3f 対応.
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(0).state(), 0u32);
@@ -11224,7 +11231,7 @@ fn run_test_rax_imm32_sign_extends() {
 fn run_sub_r32_sib() {
     // 2B 04 32 = sub eax, [rdx+rsi]。8-5=3。basename 0x4898fc 対応.
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11251,7 +11258,7 @@ fn run_sub_r32_sib() {
 fn run_inc_rm_sibd32_keeps_cf() {
     // FF 84 94 90 02 00 00 = incl 0x290(%rsp,%rdx,4)。CF は残す。basename 0x4899d0。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11293,7 +11300,7 @@ fn run_inc_rm_sibd32_keeps_cf() {
 fn run_add_m32_r32_sibd32() {
     // 01 AC 84 90 02 00 00 = addl %ebp, 0x290(%rsp,%rax,4)。10+3=13。
     // basename 0x48995c。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11334,7 +11341,7 @@ fn run_add_m32_r32_sibd32() {
 fn run_cmp_di_imm16_sets_zf() {
     // 66 81 FF C0 0F = cmpw $0x0fc0, %di。一致なら ZF=1、edi は変えない。
     // basename 0x4bfaa8。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(7).state(), 0x1111_0FC0u32);
@@ -11356,7 +11363,7 @@ fn run_cmp_di_imm16_sets_zf() {
 fn run_test_rm32_imm_rip_sets_zf() {
     // F7 05 disp32 imm32 = testl $0x231, 0xff6(%rip)。メモリは 0 なので ZF=1、CF は消える。
     // 番地は next_rip+disp = 0x2000。ls 0x4963b6。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11381,7 +11388,7 @@ fn run_test_rm32_imm_rip_sets_zf() {
 fn run_sub_m64_r64_sibd() {
     // 48 29 44 24 78 = subq %rax, 0x78(%rsp)。10-3=7。wc 0x49e1db。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11418,7 +11425,7 @@ fn run_sub_m64_r64_sibd() {
 fn run_movaps_store_sib() {
     // 0F 29 04 24 = movaps (%rsp), xmm0。0F 29 44 24 D8 = movaps -0x28(%rsp), xmm0。
     // od 0x49788f と sed 0x400d19。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 2, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x2000u32);
@@ -11457,7 +11464,7 @@ fn run_movaps_store_sib() {
 fn run_or_m64_r64_sibd() {
     // 4C 09 4C C4 D8 = orq %r9, -0x28(%rsp,%rax,8)。0x10|7=0x17。sed 0x400d55。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11495,7 +11502,7 @@ fn run_or_m64_r64_sibd() {
 fn run_cmp_rm_imm8_sibd_rbp() {
     // 83 7C 35 C8 00 = cmpl $0, -0x38(%rbp,%rsi)。0 と比べて ZF=1、CF は消える。
     // sed 0x4c93bc。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11519,7 +11526,7 @@ fn run_cmp_rm_imm8_sibd_rbp() {
 fn run_or_r32_sibd_r12() {
     // 41 0B 44 24 18 = orl 0x18(%r12), %eax。0x7|0x10=0x17。sed 0x4c9424。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11543,7 +11550,7 @@ fn run_or_r32_sibd_r12() {
 fn run_inc_rm_sib_keeps_cf() {
     // FF 04 91 = incl (%rcx,%rdx,4)。10 が 11 になり、CF は残る。sed 0x4ca2c7。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11582,7 +11589,7 @@ fn run_inc_rm_sib_keeps_cf() {
 fn run_or_m8_r8_sibd() {
     // 08 44 24 2F = orb %al, 0x2f(%rsp)。0x10|0x07=0x17。sed 0x4a87dd。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11618,7 +11625,7 @@ fn run_or_m8_r8_sibd() {
 fn run_or_rm32_imm_sib() {
     // 41 81 0C 24 00 04 00 00 = orl $0x400, (%r12)。0x10|0x400=0x410。awk 0x4a4354。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11659,7 +11666,7 @@ fn run_or_rm32_imm_sib() {
 fn run_or_rm32_imm8_sib() {
     // 41 83 0C 24 01 = orl $1, (%r12)。0x10|1=0x11。awk 0x4a1704。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11697,7 +11704,7 @@ fn run_or_rm32_imm8_sib() {
 fn run_test_r32_sib_r14() {
     // 44 85 34 24 = testl %r14d, (%rsp)。0 と比べて ZF=1、CF は消える。awk 0x4a1c82。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11722,7 +11729,7 @@ fn run_fld_m32_rip_pushes_one() {
     // D9 05 FA 0F 00 00 = flds 0xffa(%rip)。次の RIP 0x1006 から 0x2000 の 1.0。
     // 80ビットは指数 0x3fff、仮数の整数ビットだけ。seq 0x402335。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11752,7 +11759,7 @@ fn run_fld_m32_rip_pushes_one() {
 fn run_fstp_st0_pops() {
     // D9 05 … のあと DD D8。1.0 を載せて FSTP ST(0) すると空に戻る。seq 0x4024ee。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11778,7 +11785,7 @@ fn run_fstp_st0_pops() {
 fn run_fild_m32_sibd_pushes_three() {
     // DB 44 24 20 = fildl 0x20(%rsp)。3 は 1.1 * 2^1。seq 0x4018bc。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11809,7 +11816,7 @@ fn run_fild_m32_sibd_pushes_three() {
 fn run_fild_m64_sib_pushes_2_pow_40() {
     // DF 2C 24 = fildq (%rsp)。2^40 は指数 16423、仮数は整数ビットだけ。seq 0x4018c4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11840,7 +11847,7 @@ fn run_fild_m64_sib_pushes_2_pow_40() {
 fn run_fmulp_st1_three_times_one() {
     // DE C9 = fmulp %st(1)。3 * 1 を ST(1) に残して ST(0) を捨てる。seq 0x4018c7。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -11877,7 +11884,7 @@ fn run_fmulp_st1_three_times_one() {
 fn run_fmulp_st1_one_and_a_half_squared() {
     // 1.5 * 1.5 = 2.25。積が 2 以上なので指数が一つ増える。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -11912,7 +11919,7 @@ fn run_fmulp_st1_one_and_a_half_squared() {
 fn run_fstp_m64_sibd_stores_three() {
     // DD 5C 24 08 = fstpl 0x8(%rsp)。3.0 を倍精度で書いて ST(0) を捨てる。seq 0x4d3169。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11950,7 +11957,7 @@ fn run_fstp_m64_sibd_stores_three() {
 fn run_or_m32_r32_sib_no_index_r12() {
     // 41 09 04 24 = orl %eax, (%r12)。index=4 は基底だけ。seq 0x499151。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -11991,7 +11998,7 @@ fn run_or_m32_r32_sib_no_index_r12() {
 fn run_cmp_r12_imm32() {
     // 41 81 3C 24 00 20 07 25 = cmpl $0x25072000, DWORD PTR [r12]。等しいと旗 0x44。awk 0x4a205a。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12039,7 +12046,7 @@ fn run_cmp_r12_imm32() {
 fn run_fld_m64_rsp_pushes_three() {
     // DD 04 24 = fld QWORD PTR [rsp]。3.0 を 80 ビットへ伸ばして載せる。awk length 0x401b17。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12076,7 +12083,7 @@ fn run_fld_m64_rsp_pushes_three() {
 fn run_fld_m64_memnd_pushes_three() {
     // DD 00 = fldl (%rax)。3.0 を 80 ビットへ伸ばして載せる。seq 0x4d0723。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12111,7 +12118,7 @@ fn run_fld_m64_memnd_pushes_three() {
 fn run_fstp_m80_memnd_stores_three() {
     // DB 3F = fstpt (%rdi)。3.0 を 10 バイトで書いて ST(0) を捨てる。seq 0x4d0725。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12159,7 +12166,7 @@ fn run_fstp_m80_memnd_stores_three() {
 fn run_push_m64_sibd_from_rsp() {
     // FF 74 24 68 = pushq 0x68(%rsp)。減算前の番地を読む。seq 0x4d1a81。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12197,7 +12204,7 @@ fn run_push_m64_sibd_from_rsp() {
 fn run_fld_m80_rip_pushes_ten_bytes() {
     // DB 2D FA 0F 00 00 = fldt [rip+0xffa]。次命令 0x1006、宛先 0x2000。dd 0x4d0e58。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12234,7 +12241,7 @@ fn run_fld_m80_rip_pushes_ten_bytes() {
 fn run_fld_m80_sibd32_pushes_three() {
     // DB AC 24 80 1D 00 00 = fldt 0x1d80(%rsp)。10 バイトを載せる。seq 0x4d0853。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12280,7 +12287,7 @@ fn run_fld_m80_sibd32_pushes_three() {
 fn run_fld_st0_duplicates() {
     // D9 C0 = fld %st(0)。同じ値をもう一段載せる。元の段は残る。seq 0x4d0867。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12320,7 +12327,7 @@ fn run_fld_st0_duplicates() {
 fn run_fstp_m80_sib_stores_three() {
     // DB 3C 24 = fstpt (%rsp)。10 バイトを書いて ST(0) を捨てる。seq 0x4d0869。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12368,7 +12375,7 @@ fn run_fstp_m80_sib_stores_three() {
 fn run_fstp_m80_sibd32_stores_three() {
     // DB BC 24 80 1D 00 00 = fstpt 0x1d80(%rsp)。seq 0x4d0874。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12420,7 +12427,7 @@ fn run_fstp_m80_sibd32_stores_three() {
 fn run_fld_m80_sibd_pushes_three() {
     // DB 6C 24 20 = fldt 0x20(%rsp)。10 バイトを載せる。seq 0x4d7466。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12462,7 +12469,7 @@ fn run_fld_m80_sibd_pushes_three() {
 fn run_or_ax_imm16_keeps_high() {
     // 66 0D FE 3F = orw $0x3ffe, %ax。上位は残る。seq 0x4d74c9。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(0).state(), 0x1234_0001);
@@ -12480,7 +12487,7 @@ fn run_or_ax_imm16_keeps_high() {
 fn run_fld_m80_sib_pushes_three() {
     // DB 2C 24 = fldt (%rsp)。10 バイトを載せる。seq 0x4d74d4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12522,7 +12529,7 @@ fn run_fld_m80_sib_pushes_three() {
 fn run_fstp_m80_sibd_stores_three() {
     // DB 7C 24 20 = fstpt 0x20(%rsp)。10 バイトを書いて ST(0) を捨てる。seq 0x4d74d7。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12570,7 +12577,7 @@ fn run_fstp_m80_sibd_stores_three() {
 fn run_fadd_st0_doubles_three() {
     // D8 C0 = fadd %st(0), %st(0)。3+3=6。seq 0x4d097d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12602,7 +12609,7 @@ fn run_fadd_st0_doubles_three() {
 fn run_fadd_st1_one_plus_three() {
     // D8 C1 = fadd %st(0), %st(1)。1+3=4。ST(1) はそのまま。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12642,7 +12649,7 @@ fn run_fadd_st1_one_plus_three() {
 fn run_fadd_st1_three_minus_one() {
     // D8 C1。3+(-1)=2。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12681,7 +12688,7 @@ fn run_fadd_st1_three_minus_one() {
 fn run_fldz_pushes_zero() {
     // D9 EE = fldz。+0 を載せ、元の ST(0) は残る。seq 0x4d097f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12711,7 +12718,7 @@ fn run_fldz_pushes_zero() {
 fn run_fxch_st1_swaps_three_and_one() {
     // D9 C9 = fxch %st(1)。ST(0) と ST(1) を入れ替える。seq 0x4d0981。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12755,7 +12762,7 @@ fn run_fxch_st1_swaps_three_and_one() {
 fn run_fucomip_st1_pops() {
     // DF E9 = fucomip %st(1), %st。等しいときは ZF を立て、先頭の段を捨てる。dd 0x4d0ea6。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12794,7 +12801,7 @@ fn run_fucomi_st1_sets_flags() {
     // DB E9 = fucomi %st(1), %st。OF/SF/AF を消し、ZF/PF/CF だけを書く。seq 0x4d0983。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     fn once(exp0: u16, sig0: u64, exp1: u16, sig1: u64) -> u32 {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -12829,7 +12836,7 @@ fn run_fucomi_st1_sets_flags() {
 fn run_fmul_m32_rip_three_times_two() {
     // D8 0D FA 0F 00 00 = fmuls 0xffa(%rip)。ST(0) の 3 に 2.0 を掛ける。seq 0x4d0bf4。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12866,7 +12873,7 @@ fn run_fmul_m32_rip_three_times_two() {
 fn run_sub_rm_imm8_sibd_rsp() {
     // 83 6C 24 58 1C = subl $0x1c, 0x58(%rsp)。seq 0x4d0bfa。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12904,7 +12911,7 @@ fn run_sub_rm_imm8_sibd_rsp() {
 fn run_fnstcw_sibd_rsp() {
     // D9 7C 24 4E = fnstcw 0x4e(%rsp)。制御ワードを書く。seq 0x4d0c17。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12939,7 +12946,7 @@ fn run_fnstcw_sibd_rsp() {
 fn run_fldcw_sibd_rsp() {
     // D9 6C 24 4C = fldcw 0x4c(%rsp)。制御ワードを読む。seq 0x4d0c2d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -12967,7 +12974,7 @@ fn run_fldcw_sibd_rsp() {
 #[test]
 fn run_x87_fdiv_zero_sets_zero_divide_flag() {
     // 1.0 / +0.0 = +inf で ZE(bit2) が立つ。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -12996,9 +13003,70 @@ fn run_x87_fdiv_zero_sets_zero_divide_flag() {
 }
 
 #[test]
+fn run_x87_push_overflow_sets_sf_c1_and_loads_indefinite() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        let mut prog = Vec::new();
+        for _ in 0..9 {
+            prog.extend_from_slice(&[0xD9, 0xE8]); // fld1
+        }
+        env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 9, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1012 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        )
+    }
+    // IE(bit0)+SF(bit6)+C1(bit9)。masked overflow では 9 個目も
+    // TOP を進め、QNaN floating-point indefinite を置く。
+    let (fsw, top, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x241);
+    assert_eq!(top, 7);
+    assert_eq!(sig, 0xC000_0000_0000_0000);
+    assert_eq!(exp, 0xFFFF);
+    // unmasked overflow では TOP とレジスタを変えない。ES/B は立つ。
+    let (fsw, top, sig, exp) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x82C1);
+    assert_eq!(top, 0);
+    assert_eq!(sig, 0x8000_0000_0000_0000);
+    assert_eq!(exp, 0x3FFF);
+}
+
+#[test]
+fn run_x87_successful_push_clears_c1() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xE8])
+        .unwrap(); // fld1
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend
+        .set(polyisa_guest_x86::sem::fsw_ref(), 1u16 << 9);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & (1 << 9), 0);
+    assert_eq!(fsw & 0x41, 0);
+}
+
+#[test]
 fn run_x87_fop_updates_only_for_unmasked_exception() {
     fn once(fcw: u16) -> (u16, u16, u64) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13040,7 +13108,7 @@ fn run_x87_unmasked_exception_is_deferred_to_next_fp_insn() {
     // FCW=0 で IE を unmasked にする。sqrt(-1) 自体は完了し、
     // 次の fadd の先頭で #MF が起こる。BareEnv では OS 配送が
     // ないため VM 境界の Unimplemented として観測する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13067,7 +13135,7 @@ fn run_x87_pending_exception_blocks_fnop_before_recording_it() {
     // FNOP は last-pointer 上の non-control だが no-wait 制御命令ではない。
     // 前の FSQRT が unmasked IE を残した場合、FNOP は実行前に #MF へ進み、
     // FIP は例外を起こした FSQRT を指したままである。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13095,7 +13163,7 @@ fn run_x87_pending_exception_blocks_fnop_before_recording_it() {
 fn run_x87_pending_exception_blocks_transcendental_hook() {
     // FSIN は concrete hook で実行されるが、dispatch_map と同じく
     // 前の x87 命令で残った unmasked exception を先に #MF へ返す。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13120,7 +13188,7 @@ fn run_x87_pending_exception_blocks_transcendental_hook() {
 #[test]
 fn run_x87_fwait_checks_pending_exception() {
     fn once(fcw: u16) -> Outcome {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13138,7 +13206,7 @@ fn run_x87_fwait_checks_pending_exception() {
 fn run_x87_fnclex_is_not_blocked_by_pending_exception() {
     // IE が unmasked で残っていても FNCLEX は no-wait 命令なので
     // 実行でき、例外状態をクリアする。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13190,7 +13258,7 @@ fn run_x87_pending_exception_blocks_mmx_and_emms() {
     // PADDB と EMMS はどちらも x87 例外の配送点である。IE pending が
     // unmasked のままなら、MMX 状態遷移を行わず #MF へ進む。
     for bytes in [&[0x0F, 0xFC, 0xC0][..], &[0x0F, 0x77][..]] {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13213,7 +13281,7 @@ fn run_x87_pending_exception_blocks_mmx_and_emms() {
 #[test]
 fn run_x87_fclex_clears_exception_state() {
     // DB E2 = fnclex。例外フラグ・SF/ES/B を落とし、条件コードは残す。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13230,7 +13298,7 @@ fn run_x87_fclex_clears_exception_state() {
 
 #[test]
 fn run_x87_fsqrt_negative_sets_invalid_flag() {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13255,7 +13323,7 @@ fn run_x87_fsqrt_negative_sets_invalid_flag() {
 #[test]
 fn run_x87_fdiv_honors_fcw_precision_control() {
     fn once(fcw: u16) -> u64 {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13286,7 +13354,7 @@ fn run_x87_fdiv_honors_fcw_precision_control() {
 
 #[test]
 fn run_x87_denormal_operand_sets_denormal_flag() {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -13315,7 +13383,7 @@ fn run_x87_denormal_operand_sets_denormal_flag() {
 #[test]
 fn run_x87_mul_sets_overflow_and_underflow_flags() {
     fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16) -> (u64, u16, u16) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13355,7 +13423,7 @@ fn run_x87_mul_sets_overflow_and_underflow_flags() {
 #[test]
 fn run_x87_inexact_result_sets_precision_flag() {
     fn once(sig1: u64, exp1: u16) -> u16 {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13395,7 +13463,7 @@ fn run_x87_inexact_result_sets_precision_flag() {
 #[test]
 fn run_x87_fdiv_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> (u64, u16) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13432,7 +13500,7 @@ fn run_x87_fdiv_honors_fcw_rounding_mode() {
 #[test]
 fn run_x87_fadd_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> u64 {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13465,7 +13533,7 @@ fn run_x87_fadd_honors_fcw_rounding_mode() {
 #[test]
 fn run_x87_fmul_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> u64 {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13499,7 +13567,7 @@ fn run_x87_fmul_honors_fcw_rounding_mode() {
 #[test]
 fn run_x87_fmul_propagates_infinity_and_nan_rules() {
     fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13550,7 +13618,7 @@ fn cpuid_leaf_d0_ebx_tracks_current_xcr0() {
     .map(|s| s.to_string())
     .collect();
     let tbl = polyisa_guest_x86::cpuid::derive(&feats, &Default::default());
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     for (i, row) in tbl.iter().enumerate() {
         for (r, v) in row.iter().enumerate() {
             env.backend.set(polyisa_guest_x86::sem::cpuid_ref(i, r), *v);
@@ -13574,7 +13642,7 @@ fn cpuid_leaf_d0_ebx_tracks_current_xcr0() {
 #[test]
 fn run_frndint_honors_fcw_and_preserves_negative_zero() {
     fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -13611,7 +13679,7 @@ fn run_frndint_honors_fcw_and_preserves_negative_zero() {
 fn run_fisttp_m64_truncates_independent_of_fcw() {
     // DD 4C 24 30 = fisttpq 0x30(%rsp)。ST=1.5、FCW=nearest でも
     // FISTTP は常に切り捨てて 1 を書く。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13651,7 +13719,7 @@ fn run_fistp_m64_sibd_honors_rounding() {
     // seq 0x4d0c31 は RC=ゼロ方向。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     fn once(exp: u16, sig: u64, fcw: u16) -> (u64, u16) {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13702,7 +13770,7 @@ fn run_fistp_m64_sibd_honors_rounding() {
 fn run_fild_m64_sibd_pushes_three() {
     // DF 6C 24 30 = fildq 0x30(%rsp)。3 を載せる。seq 0x4d0c4d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13740,7 +13808,7 @@ fn run_fsubp_st1_subtracts_and_pops() {
     let three = (1u64 << 63) | (1u64 << 62);
     let one = 1u64 << 63;
     let run = |st0_exp: u16, st0_sig: u64, st1_exp: u16, st1_sig: u64| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
@@ -13775,7 +13843,7 @@ fn run_fsubp_st1_subtracts_and_pops() {
 fn run_and_r_sibd_edi() {
     // 23 7C 24 3C = andl 0x3c(%rsp), %edi。seq 0x4d0d34。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13804,7 +13872,7 @@ fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
     // 0F 4D 44 24 10 = cmovgel 0x10(%rsp), %eax。SF==OF のときだけ移す。seq 0x4d137a。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |flags: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13833,7 +13901,7 @@ fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
 fn run_mov_r32_imm_clears_high() {
     // BE 80 00 00 00 = movl $0x80, %esi。上位32ビットは消える。nproc の長さ引数。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(6).state(), 0x1111_1111);
@@ -13856,7 +13924,7 @@ fn run_mov_r32_imm_clears_high() {
 fn run_dec_r8_preserves_carry() {
     // FE CA = dec %dl。1 は 0 になり、キャリーは残る。dc 0x40efa1。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(2).state(), 0xAB01);
@@ -13871,7 +13939,7 @@ fn run_dec_r8_preserves_carry() {
     assert_eq!(env.backend.get(Gpr(2).state()), 0xAB00);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x47);
 
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(2).state(), 0x80);
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x3);
@@ -13889,7 +13957,7 @@ fn run_dec_r8_preserves_carry() {
 fn run_xchg_r8_swaps_bytes() {
     // 86 E9 = xchg %ch, %cl。86 D8 = xchg %bl, %al。フラグは残す。base64 0x4bd97a。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(1).state(), 0xABCD_1234);
@@ -13904,7 +13972,7 @@ fn run_xchg_r8_swaps_bytes() {
     assert_eq!(env.backend.get(Gpr(1).state()), 0xABCD_3412);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x8D5);
 
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(0).state(), 0xAA11);
     env.backend.set(Gpr(3).state(), 0xBB22);
@@ -13923,7 +13991,7 @@ fn run_cmovne_r64_mem8() {
     // 48 0F 45 43 30 = cmovne 0x30(%rbx), %rax。ZF=0 のときだけ移す。ed 0x4b5cd8。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |flags: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13952,7 +14020,7 @@ fn run_cmovs_r32_sib_rsp() {
     // 0F 48 0C 24 = cmovsl (%rsp), %ecx。SF=1 のときだけ移す。sed 0x4c9eb0。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |flags: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -13981,7 +14049,7 @@ fn run_cmovl_r32_sib_rsp() {
     // 44 0F 4C 14 24 = cmovll (%rsp), %r10d。SF!=OF のときだけ移す。cut 0x492257。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |flags: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14011,7 +14079,7 @@ fn run_cmovl_r32_sib_rsp() {
 fn run_mulsd_xmm2_rdx_disp32() {
     // F2 0F 59 92 10 00 00 00 = mulsd xmm2, [rdx+0x10]。3.0*2.0 は 6.0。上位64は残る。
     // awk log 0x4c1636。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14068,7 +14136,7 @@ fn run_mulsd_xmm2_rdx_disp32() {
 fn run_mulsd_xmm1_rsp() {
     // F2 0F 59 0C 24 = mulsd xmm1, QWORD PTR [rsp]。3.0*2.0 は 6.0。上位64は残る。awk 乗算 0x4a327c。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14122,7 +14190,7 @@ fn run_mulsd_xmm1_rsp() {
 fn run_mulsd_xmm_m64_sibd_three_times_two() {
     // F2 0F 59 44 24 08 = mulsd 0x8(%rsp), %xmm0。3.0*2.0=6.0。上位64は残す。seq 0x49924a。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14152,7 +14220,7 @@ fn run_mulsd_xmm_m64_sibd_three_times_two() {
 fn run_cvtss2sd_xmm0_rbx() {
     // F3 0F 5A 03 = cvtss2sd xmm0, [rbx]。単精度 1.0 は倍精度 1.0。上位64は残る。
     // od -tfF 0x4973b5。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14206,7 +14274,7 @@ fn run_cvtss2sd_xmm0_rbx() {
 fn run_cvtsd2ss_xmm0_m64_rbx() {
     // F2 0F 5A 03 = cvtsd2ss xmm0, [rbx]。倍精度 4.0 は単精度 4.0。上位96は残る。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14260,7 +14328,7 @@ fn run_cvtsd2ss_xmm0_m64_rbx() {
 fn run_cvtsd2ss_xmm1_from_xmm0() {
     // F2 0F 5A C8 = cvtsd2ss xmm1,xmm0。4.0 の倍精度は単精度 4.0。上位96は残る。
     // awk atan2 0x4d7244。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(
@@ -14294,7 +14362,7 @@ fn run_cvtsd2ss_xmm1_from_xmm0() {
 fn run_subsd_xmm0_rsp_disp8() {
     // F2 0F 5C 44 24 10 = subsd xmm0, [rsp+0x10]。3.0-1.0 は 2.0。上位64は残る。
     // awk の 2^3 が 0x4c199c で使う。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14343,7 +14411,7 @@ fn run_subsd_xmm0_rsp_disp8() {
 fn run_addsd_xmm_m64_sibd_three_plus_two() {
     // F2 0F 58 44 24 10 = addsd 0x10(%rsp), %xmm0。3.0+2.0=5.0。上位64は残す。seq 0x499253。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14373,7 +14441,7 @@ fn run_addsd_xmm_m64_sibd_three_plus_two() {
 fn run_add_m64_r64_sib_scaled() {
     // 4E 01 3C E3 = addq %r15, (%rbx,%r12,8)。5+3=8。sort 0x4d2c0d。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14415,7 +14483,7 @@ fn run_add_m64_r64_sib_scaled() {
 fn run_xor_rm_imm8_sibd_rsp() {
     // 48 83 74 24 10 07 = xorq $0x7, 0x10(%rsp)。sort 0x4d3045。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14453,7 +14521,7 @@ fn run_xor_rm_imm8_sibd_rsp() {
 fn run_movaps_load_sibd_rsp() {
     // 0F 28 44 24 50 = movaps 0x50(%rsp), %xmm0。diff -q 0x4a55eb。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14483,7 +14551,7 @@ fn run_cmp_si_dx_sets_flags() {
     // 66 39 D6 = cmpw %dx, %si。SI-DX の旗だけを更新する。fgrep 0x401227。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let run = |si: u32, dx: u32| {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(6).state(), si);
@@ -14508,7 +14576,7 @@ fn run_cmp_si_dx_sets_flags() {
 
 /// 32ビットプログラムを exit(ebx) で終わらせる補助。
 fn run32(prog: &[u8], steps: u64) -> (Outcome, BareEnv) {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14521,7 +14589,7 @@ fn run32(prog: &[u8], steps: u64) -> (Outcome, BareEnv) {
 
 /// `run32` に挙動パラメータを渡す版。
 fn run32_p(prog: &[u8], steps: u64, params: &polyisa_guest_x86::Params) -> (Outcome, BareEnv) {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14542,7 +14610,7 @@ fn run32_p(prog: &[u8], steps: u64, params: &polyisa_guest_x86::Params) -> (Outc
 
 /// `run32` に機能集合を足す版。既定モデルに無い機能が要る命令用。
 fn run32_ex(prog: &[u8], steps: u64, feats: u128) -> (Outcome, BareEnv) {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -14798,7 +14866,7 @@ fn run32_invalid_lock_forms_ud() {
 #[test]
 fn run_jrcxz64() {
     // 64ビットモードでは JRCXZ が RCX を見る。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     let prog: &[u8] = &[
@@ -14820,7 +14888,7 @@ fn run_jrcxz64() {
 #[test]
 fn run_rep_movsb64() {
     // F3 A4 = rep movsb。rcx 回だけ [rsi]→[rdi]。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -14858,7 +14926,7 @@ fn run_rep_movsb64() {
 #[test]
 fn run_rep_stosb64() {
     // F3 AA = rep stosb。al を [rdi] に rcx 回。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -14882,7 +14950,7 @@ fn run_rep_stosb64() {
 #[test]
 fn run_repe_cmpsb() {
     // F3 A6 = repe cmpsb。等しい間続ける。src="abcx", dst="abcz"。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -14913,7 +14981,7 @@ fn run_repe_cmpsb() {
 #[test]
 fn run_repne_scasb() {
     // F2 AE = repne scasb。al と違う間続ける。al='x'、buf="aaxb"。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -14938,7 +15006,7 @@ fn run_repne_scasb() {
 #[test]
 fn run_movs_lods_scas_single() {
     // 単発 movsb + lodsb。rsi=0x3000('Q'), rdi=0x3100。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -14972,7 +15040,7 @@ fn run_movs_lods_scas_single() {
 #[test]
 fn run_moffs64() {
     // A1 moffs64 = mov rax,[0x3000]。A3 = mov [0x3010],rax。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
@@ -15188,7 +15256,7 @@ fn run_sse_movq_movss() {
 fn run_fistp_m16_overflow_sets_invalid_and_stores_indefinite() {
     // DF 1C 24 = fistp word [rsp]。32768.0 は signed 16bit に入らないので
     // IE が立ち、masked response は integer indefinite の 0x8000。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -15741,7 +15809,7 @@ fn run_sysexit_jumps() {
 #[test]
 fn run_mul_cl_r8() {
     // F6 E1 = mul cl。AL=20*CL=30 -> AX=600。上位非零で CF=OF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15768,7 +15836,7 @@ fn run_mul_cl_r8() {
 #[test]
 fn run_imul_cl_r8() {
     // F6 E9 = imul cl。AL=-2 * CL=3 -> AX=-6=0xFFFA。上位は符号拡張で CF=OF=0。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15794,7 +15862,7 @@ fn run_imul_cl_r8() {
 #[test]
 fn run_mul_ecx_map() {
     // F7 E1 = mul ecx。0x10000*0x10000 -> EDX=1,EAX=0、CF=OF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15821,7 +15889,7 @@ fn run_mul_ecx_map() {
 #[test]
 fn run_mul_rcx_map() {
     // 48 F7 E1 = mul rcx。2^32*2^32 -> RDX=1,RAX=0、CF=OF=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15848,7 +15916,7 @@ fn run_mul_rcx_map() {
 #[test]
 fn run_imul_rcx_neg() {
     // 48 F7 E9 = imul rcx。RAX=-2*3=-6。上位=全1 は符号拡張一致で CF=OF=0。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15885,7 +15953,7 @@ fn run_imul_rcx_neg() {
 #[test]
 fn run_div_cl_map() {
     // F6 F1 = div cl。AX=17/5 -> AL=3, AH=2。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15907,7 +15975,7 @@ fn run_div_cl_map() {
 #[test]
 fn run_div_cl_zero() {
     // F6 F1 で CL=0 は #DE。現段階では例外退出＝Unimplemented。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15934,7 +16002,7 @@ fn run_div_cl_zero() {
 #[test]
 fn run_idiv_ecx_neg() {
     // F7 F9 = idiv ecx。EDX:EAX=-17 / 5 -> EAX=-3, EDX=-2。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15958,7 +16026,7 @@ fn run_idiv_ecx_neg() {
 #[test]
 fn run_idiv_ecx_overflow() {
     // F7 F9 で INT_MIN / -1 は商あふれ #DE。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.step(|b| {
@@ -15986,7 +16054,7 @@ fn run_idiv_ecx_overflow() {
 #[test]
 fn run_fcom_m32_less() {
     // fld [0x2000]=1.0f のあと D8 15 = fcom [0x2004]=2.0f。ST0<2.0 で C0=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16022,7 +16090,7 @@ fn run_fcom_m32_less() {
 #[test]
 fn run_fcomp_m64_greater_pops() {
     // fld [0x2000]=3.0 のあと DC 1D = fcomp [0x2008]=1.0。ST0>1.0 で C=0、pop。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16057,7 +16125,7 @@ fn run_fcomp_m64_greater_pops() {
 #[test]
 fn run_ficom_m16_equal() {
     // fld [0x2000]=1.0f のあと DE 15 = ficom word [0x2004]=1。等しく C3=1。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16092,7 +16160,7 @@ fn run_ficom_m16_equal() {
 #[test]
 fn run_ficomp_m16_pops() {
     // fld 1.0 のあと DE 1D = ficomp word [0x2004]=2。ST0<2 で C0=1、pop。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16128,7 +16196,7 @@ fn run_ficomp_m16_pops() {
 fn run_fnstsw_m16_stores_top_and_c() {
     // fld 1.0; fcom 2.0 (C0=1); DD 3D = fnstsw [0x2100]。
     // TOP=7 が bit11-13 に載り 0x3800|0x0100=0x3900。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16165,7 +16233,7 @@ fn run_fnstsw_m16_stores_top_and_c() {
 #[test]
 fn run_fucomp_st1() {
     // fld 2.0; fld 1.0; DD E9 = fucomp st(1)。ST0=1.0<ST1=2.0 で C0=1、pop。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16201,7 +16269,7 @@ fn run_fucomp_st1() {
 #[test]
 fn run_fnsave_frstor_roundtrip() {
     // fld 1.0; DD 35 = fsave [0x2100]（top=0 に初期化）; DD 25 = frstor [0x2100]。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16242,7 +16310,7 @@ fn run_fnsave_frstor_roundtrip() {
 #[test]
 fn run_fbld_m80() {
     // DF 25 = fbld [0x2000]。パック十進 12345 を積む（top=7、12345=0x3039<<50、exp=0x400C）。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16269,7 +16337,7 @@ fn run_fbld_m80() {
 #[test]
 fn run_fbld_m80_negative() {
     // 符号バイト 0x80 で -12345。exp の bit15 が立つ。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16296,7 +16364,7 @@ fn run_fbld_m80_negative() {
 fn run_fbstp_m80() {
     // fld dword [0x2000]=42.0f のあと DF 35 = fbstp [0x2100]。
     // 書き込みは 0x42 0x00*8 0x00。pop で top=0 に戻る。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16330,7 +16398,7 @@ fn run_fbstp_m80() {
 #[test]
 fn run_fnstsw_ax() {
     // fld 1.0; fcom 2.0 (C0=1); DF E0 = fnstsw ax -> AX=0x3900。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -16363,7 +16431,7 @@ fn run_fnstsw_ax() {
 
 /// 実モード用の env。`entry` は IP。セグメントは個別に sregs へ設定する。
 fn env16(prog: &[u8], entry: u32) -> BareEnv {
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0), 16, rwx).unwrap();
     env.backend
@@ -17041,7 +17109,7 @@ fn run_mmx_movd_padd_movq() {
     // 0F 6E (movd mm,r32); 0F FC (paddb); 0F 7F (movq m64,mm);
     // 0F 74 (pcmpeqb); 0F 70 (pshufw); 0F 71 (psllw ib);
     // 0F D7 (pmovmskb); 0F C5 (pextrw); 0F 77 (emms)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -17103,7 +17171,7 @@ fn run_mmx_movd_padd_movq() {
 #[test]
 fn run_mmx_pack_sadbw_maskmovq() {
     // movq ロード、packuswb、psadbw、maskmovq、emms を通す。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -17191,7 +17259,7 @@ fn run_a1_popcnt() {
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
         0xCD, 0x80,
     ];
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -17284,7 +17352,7 @@ fn run_a1_cmpxchg8b() {
     // 0x2000 ページを使うようアドレスを直す。
     let _ = prog;
     // プログラム側のデータ領域は使わないので別途書き込む。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -17813,7 +17881,7 @@ fn run_x87_trig_out_of_range_does_not_push() {
 #[test]
 fn run_x87_fprem_exact_complete_and_partial_reduction() {
     fn setup_fprem() -> BareEnv {
-        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
@@ -18329,7 +18397,7 @@ fn run16_flags_top_bits() {
 #[test]
 fn run32_lzcnt_adcx_adox() {
     // LZCNT/ADCX/ADOX をマップ経路で回す。フラグ連鎖込み。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -18367,7 +18435,7 @@ fn run32_lzcnt_adcx_adox() {
 fn run32_aes_pclmul() {
     // AESENC の FIPS-197 既知ベクトル＋IMC/DECLAST による復元、
     // AESKEYGENASSIST、PCLMULQDQ をマップ経路で回す。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -18618,7 +18686,7 @@ fn ref_gf8inv(x: u8) -> u8 {
 #[test]
 fn run32_sha_gfni() {
     // SHA-NI・GFNI をマップ経路で回し、スカラ参照実装と比較する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -18811,7 +18879,7 @@ fn run32_sdt_lar() {
     // SGDT/LGDT/SIDT/LIDT・SLDT/STR/LLDT/LTR・VERR/VERW/LAR/LSL。
     // ディスクリプタ機構を持たないので保護系検査は全て失敗
     // （ZF=0）になるモデル規約を検証する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -18970,7 +19038,7 @@ fn run64_fsgsbase_cet() {
     // ユーザー命令。影響スタックはモデル化しないので
     // INCSSP/SETSSBSY/CLRSSBSY/RSTORSSP は no-op、RDSSP は 0 固定、
     // WRSS/WRUSS は通常ストア。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19070,7 +19138,7 @@ fn run_x87_tags_distinguish_zero_valid_and_empty() {
     // FLD1; FLDZ で physical7=valid(1.0)、physical6=zero(+0.0)。
     // FNSTENV は full tag、FXSAVE は abridged tag を書く。データ領域は論理順。
     // Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19131,7 +19199,7 @@ fn run_x87_last_instruction_pointers_update_and_save() {
     // 後の FLDCW/FXSAVE は control/state-save 側なので last instruction
     // record を書き換えない。FNOP 自体も non-control として記録されるが、
     // この列では後続の FSTP が最終記録になる。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19178,7 +19246,7 @@ fn run_x87_last_instruction_pointers_update_and_save() {
 fn run_x87_transcendental_hook_updates_last_instruction() {
     // concrete hook で実行する FSIN も non-control なので FIP を更新する。
     // 入力 0 では結果も正確なので例外なく FOP は残り、register-only 形なので FDP は変えない。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -19199,7 +19267,7 @@ fn run_x87_transcendental_hook_updates_last_instruction() {
 fn run_x87_fnop_updates_last_instruction_pointer() {
     // FNOP はデータレジスタを変えないが、SDM Vol.2 FNOP の記述どおり
     // FPU instruction pointer は FNOP 自身へ更新する。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
@@ -19217,7 +19285,7 @@ fn run_x87_fnop_updates_last_instruction_pointer() {
 fn run_x87_fldenv_restores_instruction_pointers() {
     // 32 ビット保護モード環境形式: FIP=+12、FCS=+16、FOP=+18、
     // FDP=+20、FDS=+24。FLDENV 自体は last pointer を更新しない。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19271,7 +19339,7 @@ fn run_x87_fldenv_recomputes_nonzero_tag_from_data() {
     // FLDENV image の slot0 は valid(00) と書かれていても、実データが
     // +0.0 なら内部 tag は zero(01) へ再計算される。形式は 32 ビット
     // 保護モードの 28 バイト環境。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19302,7 +19370,7 @@ fn run_x87_fldenv_recomputes_nonzero_tag_from_data() {
 fn run_x87_fsave_frstor_restores_tags_and_logical_order() {
     // FLD1; FLDZ のあと FNSAVE/FRSTOR。論理 ST(0)=+0、ST(1)=1.0、
     // physical6=zero、physical7=valid へ戻る。Ref: SPEC-X86-INTEL-SDM (v093).
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19343,7 +19411,7 @@ fn run_x87_fsave_frstor_restores_tags_and_logical_order() {
 fn run64_xsave_xcr0() {
     // XGETBV/XSETBV と FXSAVE/FXRSTOR/XSAVE/XRSTOR/XSAVEOPT。
     // xsave 領域は 0x4000（FXSAVE）、0x4400（XSAVE/XSAVEOPT）。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x4000), 2, Perms::RW).unwrap();
@@ -19476,7 +19544,7 @@ fn xsave_avx512_amx_components_roundtrip() {
     // run64_xsave_xcr0 が既に通している。
     use polyisa_guest_x86::decode::Rm;
     use polyisa_guest_x86::{sem, sem_ea};
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     env.backend.mem.map(VirtAddr(0x4000), 3, Perms::RW).unwrap();
     env.backend.set(sem::xcr0_ref(), 0xe00e7);
     env.backend.set(Gpr(0).state(), 0xe00e7u32);
@@ -19540,7 +19608,7 @@ fn run64_xsavec_compacted_roundtrip() {
     let feats = polyisa_guest_x86::model_feats("x86_64_v3")
         | polyisa_guest_x86::FEAT_XSAVEC
         | polyisa_guest_x86::FEAT_APX;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19661,7 +19729,7 @@ fn run64_vex_avx() {
     // VMOVUPS/VADDPS/VADDSS/VZEROUPPER/VZEROALL と
     // XSAVE/XRSTOR の YMMH 成分を回す。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19804,7 +19872,7 @@ fn run64_vex_haddsub() {
     // SSE3 の水平加減算と ADDSUB の VEX 形。xmm 形の上位クリアと
     // ymm 形の 128 ビットレーン独立性を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -19927,7 +19995,7 @@ fn run64_vex_avx2() {
     // 3 オペランド演算・xmm カウントシフト・即値シフト
     // （Op/En B：vvvv が宛先）・バイトシフトを回す。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20102,7 +20170,7 @@ fn run64_vex_variable_shift() {
     // AVX2 の可変シフト。要素ごとのカウント、幅以上のカウント、
     // 算術右シフトの符号埋め、xmm 形の上位クリアを確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20241,7 +20309,7 @@ fn run64_vex_variable_shift() {
 fn run64_vex_avg_muldq() {
     // VPAVGB/W の丸め付き平均と VPMULDQ の符号付き偶数 dword 積。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20356,7 +20424,7 @@ fn run64_vex_align_blend_perm_ins() {
     // VPALIGNR・VPBLENDD・VPERMPD・VPINSRQ。VPBLENDD は
     // imm[7:4] が上位 128 ビットに効くことを確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20460,7 +20528,7 @@ fn run64_vex_permil2() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_AVX
         | polyisa_guest_x86::FEAT_XOP;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20544,7 +20612,7 @@ fn run64_vex_permil2() {
 fn run64_vex_pclmul() {
     // VPCLMULQDQ。imm の qword 選択と ymm のレーン独立性を見る。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_VPCLMULQDQ;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20606,7 +20674,7 @@ fn run64_vex_aesenc() {
     // VAESENC の FIPS-197 既知ベクトル。xmm 形・メモリ形・ymm の
     // 2 レーンを同じ入力で確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_VAES;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20681,7 +20749,7 @@ fn run64_vex_aeskey_gfni() {
     let feats = polyisa_guest_x86::model_feats("x86_64_v3")
         | polyisa_guest_x86::FEAT_VAES
         | polyisa_guest_x86::FEAT_GFNI;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20786,7 +20854,7 @@ fn run64_vex_ifma() {
     // AVX-IFMA（VEX 形）。52 ビット入力マスク、低位/高位積、
     // dest の累算入力と ymm レーンを確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_AVXIFMA;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20867,7 +20935,7 @@ fn run64_vex_vnni() {
         | polyisa_guest_x86::FEAT_AVXVNNI
         | polyisa_guest_x86::FEAT_AVXVNNIINT8
         | polyisa_guest_x86::FEAT_AVXVNNIINT16;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -20993,7 +21061,7 @@ fn run64_user_system_misc() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_USER_MSR
         | polyisa_guest_x86::FEAT_VIA_PADLOCK_RNG_EN;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21069,7 +21137,7 @@ fn run64_movrs() {
     // MOVRS は read-shared ヒント以外 MOV と同じ値を返す。
     // 8/16 ビットは上位を残し、32 ビットはゼロ拡張する。
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_MOVRS;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21140,7 +21208,7 @@ fn run64_sse_mmx_bridge_rcp() {
     // SSE1/2 の残り: RCP/RSQRT、MMX との整数・浮動小数点変換、
     // MOVDQ2Q/MOVQ2DQ、EMMS の実行到達を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21294,7 +21362,7 @@ fn run64_rao_cmpccxadd() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_RAOINT
         | polyisa_guest_x86::FEAT_CMPCCXADD;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21373,7 +21441,7 @@ fn run64_cmpccxadd_width() {
     // operand-size prefix と混同すると 16 ビットに縮むので、上位
     // ビットを持つ値で writeback と destination を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_CMPCCXADD;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21450,7 +21518,7 @@ fn run64_vcrypto_sha_sm() {
         | polyisa_guest_x86::FEAT_SHA512
         | polyisa_guest_x86::FEAT_SM3
         | polyisa_guest_x86::FEAT_SM4;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21630,7 +21698,7 @@ fn run64_avxneconvert() {
     // AVX-NE-CONVERT。偶奇要素の拡張、broadcast、RNE 固定の
     // BF16 縮小（tie-to-even・NaN quiet・入力非正規フラッシュ）を見る。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3") | polyisa_guest_x86::FEAT_AVXNECONVERT;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -21737,7 +21805,7 @@ fn run64_avxneconvert() {
 fn run64_vex_moves() {
     // VEX のデータ移動・比較・特殊演算（B1b-2）。x86_64_v3。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -22207,7 +22275,7 @@ fn run64_vex_moves() {
 fn run64_vex_cvt_shuf() {
     // VEX の変換・シャッフル系（B1b-3）。x86_64_v3。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -22506,7 +22574,7 @@ fn run64_vex_blend_perm() {
     // VEX の blend・dpp・round・extend・insert/extract・permute・
     // broadcast 系（B1b-4a）。x86_64_v3（avx+avx2 あり）。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -23004,7 +23072,7 @@ fn run64_vex_gather() {
     // マスクされなかったロード要素はフォールト抑制
     // （未写像アドレスの index を混入して確認）。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -23446,7 +23514,7 @@ fn run64_vex_bmi() {
     // 更新、PDEP/PEXT、MULX、SHLX/SHRX/SARX（フラグ不変）、
     // RORX、TZCNT（レガシー F3 0F BC）を検査する。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -23629,7 +23697,7 @@ fn run64_vex_fma_f16c() {
     // FMA（132/213/231・パック/スカラ・6 演算）と F16C
     // （VCVTPH2PS/VCVTPS2PH、imm8 RC・MXCSR.RC の丸め）を検査する。
     let feats = polyisa_guest_x86::model_feats("x86_64_v3");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -23998,7 +24066,7 @@ fn run64_tsx_uintr_pku() {
     // ZF=1、TESTUI は CF=0。XEND/XABORT/UIRET/CLUI/STUI/
     // SENDUIPI は no-op。PKRU は実状態で WRPKRU/RDPKRU が
     // 読み書きする。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -24114,7 +24182,7 @@ fn run64_movdir_waitpkg() {
     // MOVDIR64B/ENQCMD/ENQCMDS は reg の指す宛先への 64 バイト
     // コピーとして近似。UMONITOR/TPAUSE/CLWB/CLFLUSHOPT/
     // CLDEMOTE/HRESET は no-op、UMWAIT は CF=0。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -24231,7 +24299,7 @@ fn run64_evex_movdqu() {
     // ゼロイング、L'L のベクタ長、zmm16-31、disp8*N スケーリング、
     // マスク付きストアのフォールト抑制を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v4");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -24365,7 +24433,7 @@ fn run64_evex_alu() {
     // 512 ビット実行、W 選択、{k} マージ/{z} ゼロイング、埋め込み
     // broadcast（要素スケールの disp8）、{er} 丸め指定を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v4");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -24585,7 +24653,7 @@ fn run64_evex_alu2() {
     // 意味論が 512 ビット演算・W 選択・{k}{z}・broadcast・DQ ゲート
     // で正しく動くことを確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64_v4");
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -24856,7 +24924,7 @@ fn run64_dnow() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_DNOW
         | polyisa_guest_x86::FEAT_DNOWEXT;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25026,7 +25094,7 @@ fn run64_sse4a() {
         | polyisa_guest_x86::FEAT_MWAITX
         | polyisa_guest_x86::FEAT_CLZERO
         | polyisa_guest_x86::FEAT_RDPRU;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25128,7 +25196,7 @@ fn run64_xop() {
         | polyisa_guest_x86::FEAT_XOP
         | polyisa_guest_x86::FEAT_FMA4
         | polyisa_guest_x86::FEAT_TBM;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25296,7 +25364,7 @@ fn run64_xop() {
 fn run64_apx() {
     // APX（B4a）: REX2 拡張 GPR・EVEX map4 の NDD/NF・PUSH2/POP2。
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25415,7 +25483,7 @@ fn run64_apx_cfcmov() {
     // CMOV/CFCMOV: NDD の選択、ND=0 のゼロ化、条件付きストア、
     // 偽条件でのメモリアクセス抑制を確かめる。
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
@@ -25518,7 +25586,7 @@ fn run64_apx_xcr0_ud() {
     // XCR0[19]=0 では REX2/APX 形は #UD。ユーザーモードでは
     // 例外配送を持たない BareEnv 境界で Unimplemented になる。
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.set(Gpr(4).state(), 0x1800);
@@ -25549,7 +25617,7 @@ fn run64_amx() {
         | polyisa_guest_x86::FEAT_AMX_FP16
         | polyisa_guest_x86::FEAT_AMX_COMPLEX
         | polyisa_guest_x86::FEAT_AMX_MOVRS;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25639,7 +25707,7 @@ fn run64_avx10() {
         | polyisa_guest_x86::FEAT_AVX512CD
         | polyisa_guest_x86::FEAT_AVX512DQ
         | polyisa_guest_x86::FEAT_AVX512VL;
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
@@ -25758,7 +25826,7 @@ fn run64_vsyscall() {
     // （mov eax,nr; syscall; ret）をここでも置く。実機の
     // 0xffffffffff600000 は eip の 32 ビット折りたたみで
     // 0xff600000 に届く。失敗なら exit(1..6)、全部通れば exit(42)。
-    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();

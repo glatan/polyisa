@@ -14024,14 +14024,42 @@ pub(crate) fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
 }
 
 /// 80 ビット値を x87 スタックへ載せる。TOP を 1 減らしてから書く。
+/// 移動先が非空なら stack overflow の #IS/SF/C1 を立てる。masked
+/// overflow では QNaN floating-point indefinite を載せ、unmasked では
+/// TOP と source operand を変えない。
 pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
     let top = b.get(top_ref());
     let one16 = b.konst::<W16>(1);
     let dec = b.sub::<W16>(top, one16);
     let seven = b.konst::<W16>(7);
     let new_top = b.and::<W16>(dec, seven);
-    b.set(top_ref(), new_top);
-    write_st(b, new_top, sig, exp_word);
+    let tag = x87_read_tag(b, new_top);
+    let empty_tag = b.konst::<W16>(3);
+    let empty = b.cmp::<W16>(Cmp::Eq, tag, empty_tag);
+    let overflow = bit_not(b, empty);
+    // FLD 系では overflow がなければ C1=0。overflow では
+    // x87_stack_fault が直後に C1=1 へ戻す。
+    let fsw0 = b.get(fsw_ref());
+    let keep_c1 = b.konst::<W16>(!(1u16 << 9));
+    let fsw_c1c = b.and::<W16>(fsw0, keep_c1);
+    b.set(fsw_ref(), fsw_c1c);
+    x87_stack_fault(b, overflow, true);
+
+    let fcw = b.get(fcw_ref());
+    let im = b.konst::<W16>(1);
+    let masked_bits = b.and::<W16>(fcw, im);
+    let z16 = b.konst::<W16>(0);
+    let masked = b.cmp::<W16>(Cmp::Ne, masked_bits, z16);
+    let write_ok = bit_or(b, empty, masked);
+    let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp = b.konst::<W16>(0xffff);
+    let sig_w = b.select::<W64>(overflow, indef_sig, sig);
+    let exp_w = b.select::<W16>(overflow, indef_exp, exp_word);
+    b.if_then(write_ok, |b| {
+        b.set(top_ref(), new_top);
+        write_st(b, new_top, sig_w, exp_w);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -14647,6 +14675,29 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let (sig, exp) = read_st(b, top);
     write_st(b, dst, sig, exp);
     pop_st(b, top)
+}
+
+/// x87 スタック overflow/underflow の #IS/SF/C1 を立てる。
+/// C1 は overflow で 1、underflow で 0。SF は sticky なので
+/// 算術 invalid ではここでクリアしない。
+pub(crate) fn x87_stack_fault<B: Backend>(b: &mut B, occur: B::B, overflow: bool) {
+    x87_exception_flag(b, occur, 1);
+    let old = b.get(fsw_ref());
+    let z16 = b.konst::<W16>(0);
+    let sfv = b.konst::<W16>(1 << 6);
+    let sf = b.select::<W16>(occur, sfv, z16);
+    let with_sf = b.or::<W16>(old, sf);
+    let c1v = b.konst::<W16>(1 << 9);
+    let nv = if overflow {
+        let c1 = b.select::<W16>(occur, c1v, z16);
+        b.or::<W16>(with_sf, c1)
+    } else {
+        let keep = b.konst::<W16>(!(1u16 << 9));
+        let all16 = b.konst::<W16>(0xffff);
+        let clear_mask = b.select::<W16>(occur, keep, all16);
+        b.and::<W16>(with_sf, clear_mask)
+    };
+    b.set(fsw_ref(), nv);
 }
 
 /// x87 の例外フラグを sticky に立てる。対応する FCW マスクが

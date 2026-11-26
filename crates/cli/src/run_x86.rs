@@ -7116,9 +7116,49 @@ fn x87_write_st(env: &mut BareEnv, logical: u16, value: (u64, u16)) {
     x87_write_tag_scalar(env, i, x87_tag_from_value_scalar(value.0, value.1));
 }
 
+fn x87_scalar_exception_flag(env: &mut BareEnv, bit: u16) {
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+    let mut nv = fsw | bit;
+    if fcw & bit == 0 {
+        nv |= 0x8080;
+    }
+    env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
+}
+
+fn x87_scalar_stack_fault(env: &mut BareEnv, overflow: bool) {
+    x87_scalar_exception_flag(env, 1);
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    let mut nv = fsw | (1 << 6);
+    if overflow {
+        nv |= 1 << 9;
+    } else {
+        nv &= !(1u16 << 9);
+    }
+    env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
+}
+
 fn x87_push(env: &mut BareEnv, value: (u64, u16)) {
     let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
     let nt = top.wrapping_sub(1) & 7;
+    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    let tag = (ftw >> (usize::from(nt) * 2)) & 3;
+    // FLD 系と同じく、成功した push では C1=0、overflow では 1。
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    env.backend
+        .set(polyisa_guest_x86::sem::fsw_ref(), fsw & !(1u16 << 9));
+    if tag != 3 {
+        x87_scalar_stack_fault(env, true);
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if fcw & 1 == 0 {
+            return;
+        }
+    }
+    let value = if tag != 3 {
+        (0xC000_0000_0000_0000, 0xffff)
+    } else {
+        value
+    };
     env.backend.set(polyisa_guest_x86::sem::top_ref(), nt);
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(usize::from(nt)), value.0);
