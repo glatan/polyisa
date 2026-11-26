@@ -6072,6 +6072,11 @@ fn amx_tile_step(
             | Insn::Top4bsud
             | Insn::Top4busd
             | Insn::Top4buud
+            | Insn::Top4mxbf8ps
+            | Insn::Top4mxbhf8ps
+            | Insn::Top4mxhbf8ps
+            | Insn::Top4mxhf8ps
+            | Insn::Top4mxbssps
     ) {
         return None;
     }
@@ -6763,6 +6768,108 @@ fn avx10_exec(
     zput(env, dst_r, &out);
     env.backend.fp_flags |= flags;
     Ok(())
+}
+
+/// ACE の fixed-point sum を `x * 2^adjust` として FP32 RNE/FTZ へ変換する。
+fn ace_fixpoint_to_f32(x: i128, adjust: i32) -> u32 {
+    if x == 0 {
+        return 0;
+    }
+    let sign = u32::from(x < 0) << 31;
+    let mag = x.unsigned_abs();
+    let hp = 127 - mag.leading_zeros() as i32;
+    let shift = hp - 23;
+    let mut mant: u64;
+    let mut exp = hp + adjust;
+    if shift > 0 {
+        let sh = shift as u32;
+        mant = (mag >> sh) as u64;
+        let guard = (mag >> (sh - 1)) & 1 != 0;
+        let sticky = sh > 1 && (mag & ((1u128 << (sh - 1)) - 1)) != 0;
+        if guard && (sticky || mant & 1 != 0) {
+            mant += 1;
+        }
+    } else {
+        mant = (mag << (-shift) as u32) as u64;
+    }
+    if mant == 1 << 24 {
+        mant >>= 1;
+        exp += 1;
+    }
+    let biased = exp + 127;
+    if biased > 254 {
+        return sign | 0x7f80_0000;
+    }
+    if biased <= 0 {
+        return sign;
+    }
+    sign | ((biased as u32) << 23) | (mant as u32 & 0x007f_ffff)
+}
+
+/// FTZ=1 で FP32 を加える。NaN は ACE の QNaN indefinite。
+fn ace_add_f32_ftz(a: u32, b: u32) -> u32 {
+    use polyisa_softfloat::{F32, Rm};
+    let flush = |bits: u32| {
+        if bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0 {
+            bits & 0x8000_0000
+        } else {
+            bits
+        }
+    };
+    let x = F32::from_bits(u64::from(flush(a)));
+    let y = F32::from_bits(u64::from(flush(b)));
+    let (r, _) = x.add_rm(y, Rm::Rne);
+    if r.is_nan() {
+        0xffc0_0000
+    } else {
+        flush(r.bits() as u32)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AceFp8Kind {
+    Zero,
+    Finite,
+    Inf,
+    Nan,
+}
+
+fn ace_fp8_kind(byte: u8, hf8: bool) -> AceFp8Kind {
+    let (exp, frac) = if hf8 {
+        (byte >> 3 & 0x0f, byte & 7)
+    } else {
+        (byte >> 2 & 0x1f, byte & 3)
+    };
+    let expmax = if hf8 { 0x0f } else { 0x1f };
+    if exp == 0 && frac == 0 {
+        AceFp8Kind::Zero
+    } else if exp == expmax && (if hf8 { frac == 7 } else { frac != 0 }) {
+        AceFp8Kind::Nan
+    } else if !hf8 && exp == expmax && frac == 0 {
+        AceFp8Kind::Inf
+    } else {
+        AceFp8Kind::Finite
+    }
+}
+
+/// finite FP8 を指定 fixed-point scale 付き整数へ変換する。
+/// BF8 は 2^16、HF8 は 2^9 を 1.0 とする。
+fn ace_fp8_fixed(byte: u8, hf8: bool) -> i64 {
+    let sign = byte & 0x80 != 0;
+    let (exp, frac) = if hf8 {
+        (i32::from(byte >> 3 & 0x0f), i64::from(byte & 7))
+    } else {
+        (i32::from(byte >> 2 & 0x1f), i64::from(byte & 3))
+    };
+    let (mant, shift) = if hf8 {
+        let mant = if exp == 0 { frac } else { frac | 8 };
+        (mant, if exp == 0 { 0 } else { exp - 1 })
+    } else {
+        let mant = if exp == 0 { frac } else { frac | 4 };
+        (mant, if exp == 0 { 0 } else { exp - 1 })
+    };
+    let v = mant << shift;
+    if sign { -v } else { v }
 }
 
 fn amx_ud(eip: u32) -> InterpExit {
@@ -7670,7 +7777,16 @@ fn amx_tile_exec(
     let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
     if matches!(
         insn,
-        Insn::Top2bf16ps | Insn::Top4bssd | Insn::Top4bsud | Insn::Top4busd | Insn::Top4buud
+        Insn::Top2bf16ps
+            | Insn::Top4bssd
+            | Insn::Top4bsud
+            | Insn::Top4busd
+            | Insn::Top4buud
+            | Insn::Top4mxbf8ps
+            | Insn::Top4mxbhf8ps
+            | Insn::Top4mxhbf8ps
+            | Insn::Top4mxhf8ps
+            | Insn::Top4mxbssps
     ) {
         const ACE_XCR0: u64 = 0x16_00e6;
         if xcr0_tile & ACE_XCR0 != ACE_XCR0
@@ -7691,7 +7807,83 @@ fn amx_tile_exec(
             for col in 0..16usize {
                 let bq = u32::from_le_bytes(bvec[col * 4..col * 4 + 4].try_into().unwrap());
                 let at = base + row * 64 + col * 4;
-                if insn == Insn::Top2bf16ps {
+                if matches!(
+                    insn,
+                    Insn::Top4mxbf8ps
+                        | Insn::Top4mxbhf8ps
+                        | Insn::Top4mxhbf8ps
+                        | Insn::Top4mxhf8ps
+                        | Insn::Top4mxbssps
+                ) {
+                    let a_group = (md.imm & 3) as usize;
+                    let b_group = ((md.imm >> 3) & 3) as usize;
+                    let ascale = env.backend.state[SCALEDATA_OFF + 64 + row * 4 + a_group];
+                    let bscale = env.backend.state[SCALEDATA_OFF + col * 4 + b_group];
+                    let sop_fp32 = if ascale == 0xff || bscale == 0xff {
+                        0xffc0_0000
+                    } else if insn == Insn::Top4mxbssps {
+                        let mut sop = 0i128;
+                        for k in 0..4usize {
+                            let av = i128::from((aq >> (k * 8)) as u8 as i8);
+                            let bv = i128::from((bq >> (k * 8)) as u8 as i8);
+                            sop += av * bv;
+                        }
+                        let adjust = -12 + i32::from(ascale) + i32::from(bscale) - 254;
+                        ace_fixpoint_to_f32(sop, adjust)
+                    } else {
+                        let a_hf = matches!(insn, Insn::Top4mxhbf8ps | Insn::Top4mxhf8ps);
+                        let b_hf = matches!(insn, Insn::Top4mxbhf8ps | Insn::Top4mxhf8ps);
+                        let mut sop = 0i128;
+                        let mut inf_sign: Option<bool> = None;
+                        let mut bad = false;
+                        for k in 0..4usize {
+                            let ab = (aq >> (k * 8)) as u8;
+                            let bb = (bq >> (k * 8)) as u8;
+                            let ak = ace_fp8_kind(ab, a_hf);
+                            let bk = ace_fp8_kind(bb, b_hf);
+                            if ak == AceFp8Kind::Nan
+                                || bk == AceFp8Kind::Nan
+                                || (ak == AceFp8Kind::Inf && bk == AceFp8Kind::Zero)
+                                || (bk == AceFp8Kind::Inf && ak == AceFp8Kind::Zero)
+                            {
+                                bad = true;
+                                break;
+                            }
+                            if ak == AceFp8Kind::Inf || bk == AceFp8Kind::Inf {
+                                let neg = (ab ^ bb) & 0x80 != 0;
+                                if inf_sign.is_some_and(|old| old != neg) {
+                                    bad = true;
+                                    break;
+                                }
+                                inf_sign = Some(neg);
+                            } else {
+                                sop += i128::from(ace_fp8_fixed(ab, a_hf))
+                                    * i128::from(ace_fp8_fixed(bb, b_hf));
+                            }
+                        }
+                        if bad {
+                            0xffc0_0000
+                        } else if let Some(neg) = inf_sign {
+                            (u32::from(neg) << 31) | 0x7f80_0000
+                        } else {
+                            let factor = match (a_hf, b_hf) {
+                                (false, false) => 32,
+                                (true, true) => 18,
+                                _ => 25,
+                            };
+                            let adjust = -factor + i32::from(ascale) + i32::from(bscale) - 254;
+                            ace_fixpoint_to_f32(sop, adjust)
+                        }
+                    };
+                    let oldbits =
+                        u32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap());
+                    let out = if sop_fp32 == 0xffc0_0000 {
+                        sop_fp32
+                    } else {
+                        ace_add_f32_ftz(oldbits, sop_fp32)
+                    };
+                    env.backend.state[at..at + 4].copy_from_slice(&out.to_le_bytes());
+                } else if insn == Insn::Top2bf16ps {
                     use polyisa_softfloat::{F32, Rm};
                     let bf = |w: u16| {
                         let x = u32::from(w);

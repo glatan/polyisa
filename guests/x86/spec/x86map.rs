@@ -4565,6 +4565,22 @@ fn build_map_0f3a(m: &mut Model) {
         it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
         items.push(MapItem::Insn(op, it));
     }
+    // ACE MX outer product。modrm.reg は tmm、r/m は src1、vvvv は
+    // src2、imm8 が A/B scale group を選ぶ。
+    for (op, sel, mn) in [
+        (0x8Du8, PfxSel::Plain, "top4mxbf8ps"),
+        (0x8D, PfxSel::PF2, "top4mxbhf8ps"),
+        (0x8D, PfxSel::PF3, "top4mxhbf8ps"),
+        (0x8D, PfxSel::P66, "top4mxhf8ps"),
+        (0x8F, PfxSel::PF2, "top4mxbssps"),
+    ] {
+        let mut it = ex(mn, &[RegT, RmX, Vv, ib], sel, 0b100, false, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(false);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        items.push(MapItem::Insn(op, it));
+    }
     // ACE row convert-and-move の immediate 形。TCVTROWPS2PHL は
     // opcode 77/F2、残りの low/high は opcode 07 で pp により分かれる。
     for (op, sel, mn) in [
