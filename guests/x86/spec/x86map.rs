@@ -2806,6 +2806,7 @@ fn build_map_3dnow(m: &mut Model) {
 fn build_map_avx10(m: &mut Model) {
     use OpKind::*;
     let mut v = Vec::new();
+    let mut v6 = Vec::new();
     // AVX10.2 の BF16 パック演算（EVEX.66.MAP5）。要素は bf16 で
     // broadcast（m16bcst）は b=1 で選ぶ。既定ゲートは
     // apply_gates で avx10_2 に倒す。
@@ -2865,6 +2866,24 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VRCPBF16/VRSQRTBF16（EVEX.NP.MAP6.W0 4C/4E）。単項、
+    // vvvv=1111b、m16bcst を取る。
+    for (op, mn) in [(0x4Cu8, "vrcpbf16"), (0x4E, "vrsqrtbf16")] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::Plain,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v6.push(MapItem::Insn(op, it));
+    }
     // AVX10.2 の FP8 変換（MAP5 系）。1 ソース形は出力が半幅の
     // ベクトル、2 ソース形は出力の下位半分に src2、上位半分に
     // src1 の変換結果を連続配置する。メモリ形は m16bcst を取る。
@@ -2885,6 +2904,13 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    m.maps.push(MapDecl {
+        name: "map_avx10_6".to_string(),
+        vex_code: Some(6),
+        postop: false,
+        rex2_map1: false,
+        items: v6,
+    });
     m.maps.push(MapDecl {
         name: "map_avx10".to_string(),
         vex_code: Some(5),

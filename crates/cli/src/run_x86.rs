@@ -6407,6 +6407,8 @@ fn avx10_step(
             | Insn::Vminbf16XvHvWv
             | Insn::Vmaxbf16XvHvWv
             | Insn::Vsqrtbf16XvWv
+            | Insn::Vrcpbf16XvWv
+            | Insn::Vrsqrtbf16XvWv
             | Insn::Vdpbf16psXvHvWv
             | Insn::Vcvtph2bf8XvWv
             | Insn::Vcvtph2bf8sXvWv
@@ -6555,7 +6557,9 @@ fn avx10_exec(
         | Insn::Vdivbf16XvHvWv
         | Insn::Vminbf16XvHvWv
         | Insn::Vmaxbf16XvHvWv
-        | Insn::Vsqrtbf16XvWv => {
+        | Insn::Vsqrtbf16XvWv
+        | Insn::Vrcpbf16XvWv
+        | Insn::Vrsqrtbf16XvWv => {
             for i in 0..lanes16 {
                 let a = bf_r(&x, i);
                 let c = bf_r(&y, i);
@@ -6568,7 +6572,9 @@ fn avx10_exec(
                     // （非順序・同値を含む）は src2 を返す。
                     Insn::Vminbf16XvHvWv => (if a.lt(c).0 { a } else { c }, 0),
                     Insn::Vmaxbf16XvHvWv => (if c.lt(a).0 { a } else { c }, 0),
-                    _ => c.sqrt_rm(Rm::Rne),
+                    Insn::Vsqrtbf16XvWv => c.sqrt_rm(Rm::Rne),
+                    Insn::Vrcpbf16XvWv => BF16::from_bits(0x3f80).div_rm(c, Rm::Rne),
+                    _ => BF16::from_bits(0x3f80).div_rm(c.sqrt_rm(Rm::Rne).0, Rm::Rne),
                 };
                 flags |= f;
                 out[i * 2..i * 2 + 2].copy_from_slice(&ftz16(g).to_le_bytes());
@@ -16828,6 +16834,8 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vminbf16XvHvWv
             | Insn::Vmaxbf16XvHvWv
             | Insn::Vsqrtbf16XvWv
+            | Insn::Vrcpbf16XvWv
+            | Insn::Vrsqrtbf16XvWv
             | Insn::Vdpbf16psXvHvWv
             | Insn::Vcvtph2bf8XvWv
             | Insn::Vcvtph2bf8sXvWv
