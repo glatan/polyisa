@@ -26384,6 +26384,92 @@ fn run64_ace_palette2_ldtilecfg() {
 }
 
 #[test]
+fn run64_ace_bsr_moves() {
+    // BSRINIT→BSRMOVL write/read。SPEC-ACE v1 §6.3.5/§13 の
+    // エンコードで、lower half が ZMM 経由で往復することを確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    env.backend.state[tilecfg_off] = 2;
+    let scale_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
+    env.backend.state[scale_off..scale_off + 128].fill(0x11);
+    // zmm1 = 00..3f。zget64 は 16 バイト part×4 の順で読む。
+    for p in 0..4usize {
+        let mut b = [0u8; 16];
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = (p * 16 + i) as u8;
+        }
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(1, p),
+            u128::from_le_bytes(b),
+        );
+    }
+    // zmm3 = 80..bf（full move の upper half 用）。
+    for p in 0..4usize {
+        let mut b = [0u8; 16];
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = 0x80 + (p * 16 + i) as u8;
+        }
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(3, p),
+            u128::from_le_bytes(b),
+        );
+    }
+    let prog: &[u8] = &[
+        0xC4, 0xE2, 0xFB, 0x49, 0xC0, // bsrinit
+        0x62, 0xF6, 0xFE, 0x48, 0x95, 0xC1, // bsrmovl bsr0,zmm1
+        0x62, 0xF6, 0x7E, 0x48, 0x95, 0xC2, // bsrmovl zmm2,bsr0
+        0x62, 0xF6, 0xE4, 0x48, 0x95, 0xC1, // bsrmovf bsr0,zmm3,zmm1
+        0x62, 0xF6, 0x7F, 0x48, 0x95, 0xC4, // bsrmovh zmm4,bsr0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for p in 0..4usize {
+        let got = env
+            .backend
+            .get(polyisa_guest_x86::sem::zreg_ref(2, p))
+            .to_le_bytes();
+        for (i, x) in got.iter().enumerate() {
+            assert_eq!(*x, (p * 16 + i) as u8, "zmm2 byte {}", p * 16 + i);
+        }
+    }
+    for p in 0..4usize {
+        let got = env
+            .backend
+            .get(polyisa_guest_x86::sem::zreg_ref(4, p))
+            .to_le_bytes();
+        for (i, x) in got.iter().enumerate() {
+            assert_eq!(*x, 0x80 + (p * 16 + i) as u8, "zmm4 byte {}", p * 16 + i);
+        }
+    }
+    // 最後の BSRMOVF で lower=zmm1、upper=zmm3 になる。
+    assert_eq!(env.backend.state[scale_off], 0);
+    assert_eq!(env.backend.state[scale_off + 63], 63);
+    assert_eq!(env.backend.state[scale_off + 64], 0x80);
+    assert_eq!(env.backend.state[scale_off + 127], 0xbf);
+}
+
+#[test]
 fn run64_avx10_vcomxss_flags() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_AVX10_2

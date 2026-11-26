@@ -5945,6 +5945,75 @@ fn dispatch_map_inner<B: Backend>(
     r
 }
 
+/// ZMM レジスタの 64 バイトを読む。ACE の BSR 転送は常に
+/// 512 ビット幅固定。
+fn zget64(env: &mut BareEnv, r: u8) -> [u8; 64] {
+    let mut v = [0u8; 64];
+    for p in 0..4usize {
+        v[p * 16..p * 16 + 16].copy_from_slice(&env.backend.get(sem::zreg_ref(r, p)).to_le_bytes());
+    }
+    v
+}
+
+/// ZMM レジスタの 64 バイトを書く。
+fn zput64(env: &mut BareEnv, r: u8, v: &[u8; 64]) {
+    for p in 0..4usize {
+        env.backend.set(
+            sem::zreg_ref(r, p),
+            u128::from_le_bytes(v[p * 16..p * 16 + 16].try_into().unwrap()),
+        );
+    }
+}
+
+/// EVEX r/m 被演算子を 64 バイトで読む。レジスタ直接は ZMM、
+/// メモリは m512。
+fn ace_read_rm64(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+) -> Result<[u8; 64], InterpExit> {
+    match polyisa_guest_x86::decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+        polyisa_guest_x86::decode::Rm::Reg(_) => {
+            Ok(zget64(env, polyisa_guest_x86::decode::rm_reg_x5(md)))
+        }
+        polyisa_guest_x86::decode::Rm::Mem { a, .. } => {
+            let mut v = [0u8; 64];
+            let acc = Access {
+                endian: Endian::Le,
+                align: Align::Natural,
+                kind: AccessKind::DataRead,
+            };
+            env.backend
+                .mem
+                .read(VirtAddr(a), &mut v, acc)
+                .map_err(|er| amx_mem_exit(a, er))?;
+            Ok(v)
+        }
+    }
+}
+
+/// EVEX r/m 被演算子へ 64 バイトで書く。
+fn ace_write_rm64(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    v: &[u8; 64],
+) -> Result<(), InterpExit> {
+    match polyisa_guest_x86::decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+        polyisa_guest_x86::decode::Rm::Reg(_) => {
+            zput64(env, polyisa_guest_x86::decode::rm_reg_x5(md), v);
+            Ok(())
+        }
+        polyisa_guest_x86::decode::Rm::Mem { a, .. } => env
+            .backend
+            .mem
+            .write(VirtAddr(a), v)
+            .map_err(|er| amx_mem_exit(a, er)),
+    }
+}
+
 /// AMX タイル命令の実行（B4b）。タイル状態（`CpuState::tmm`/
 /// `tilecfg`）の更新は行数・列バイト数が実行時値なので、IR/意味論
 /// DSL ではなくインタプリタ層の具体値で組む。対象命令なら実行して
@@ -5976,6 +6045,12 @@ fn amx_tile_step(
             | Insn::Tdpfp16ps
             | Insn::Tcmmimfp16ps
             | Insn::Tcmmrlfp16ps
+            | Insn::Bsrinit
+            | Insn::Bsrmovf
+            | Insn::BsrmovhW
+            | Insn::BsrmovhR
+            | Insn::BsrmovlW
+            | Insn::BsrmovlR
     ) {
         return None;
     }
@@ -7563,6 +7638,58 @@ fn amx_tile_exec(
     let insn = md.insn;
     let xcr0_tile = env.backend.get(sem::xcr0_ref());
     let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
+    if matches!(
+        insn,
+        Insn::Bsrinit
+            | Insn::Bsrmovf
+            | Insn::BsrmovhW
+            | Insn::BsrmovhR
+            | Insn::BsrmovlW
+            | Insn::BsrmovlR
+    ) {
+        // ACE-E2/E3/E5 の実行条件。ユーザーモードモデルでは
+        // CR0/CR4 は常に許可済みとして、XCR0 と palette 2 を検査する。
+        const ACE_XCR0: u64 = 0x16_00e6;
+        if xcr0_tile & ACE_XCR0 != ACE_XCR0 {
+            return Err(amx_ud(eip));
+        }
+        if env.backend.state[TILECFG_OFF] != 2 {
+            return Err(amx_ud(eip));
+        }
+        if insn != Insn::Bsrinit {
+            // bsr0 固定（reg の拡張ビット込みで 0）、z/b/opmask なし。
+            if decode::reg_x5(md) != 0 || md.evex_b || md.evex_z || md.evex_aaa != 0 {
+                return Err(amx_ud(eip));
+            }
+        }
+        match insn {
+            Insn::Bsrinit => {
+                env.backend.state[SCALEDATA_OFF..SCALEDATA_OFF + 128].fill(0x7f);
+            }
+            Insn::Bsrmovf => {
+                let upper = zget64(env, md.vex_v);
+                let lower = ace_read_rm64(env, md, next_rip, seg)?;
+                env.backend.state[SCALEDATA_OFF..SCALEDATA_OFF + 64].copy_from_slice(&lower);
+                env.backend.state[SCALEDATA_OFF + 64..SCALEDATA_OFF + 128].copy_from_slice(&upper);
+            }
+            Insn::BsrmovhW | Insn::BsrmovlW => {
+                let v = ace_read_rm64(env, md, next_rip, seg)?;
+                let off = if insn == Insn::BsrmovhW { 64 } else { 0 };
+                env.backend.state[SCALEDATA_OFF + off..SCALEDATA_OFF + off + 64]
+                    .copy_from_slice(&v);
+            }
+            Insn::BsrmovhR | Insn::BsrmovlR => {
+                let off = if insn == Insn::BsrmovhR { 64 } else { 0 };
+                let mut v = [0u8; 64];
+                v.copy_from_slice(
+                    &env.backend.state[SCALEDATA_OFF + off..SCALEDATA_OFF + off + 64],
+                );
+                ace_write_rm64(env, md, next_rip, seg, &v)?;
+            }
+            _ => unreachable!(),
+        }
+        return Ok(());
+    }
     let st = &mut env.backend.state;
     match insn {
         Insn::Ldtilecfg | Insn::Sttilecfg => {

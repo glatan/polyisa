@@ -2911,6 +2911,23 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // ACE BSR move（EVEX.512.MAP6 95）。modrm.reg=000 は bsr0
+    // 固定で、半幅移動は vvvv 未使用、full move は vvvv が A-scale
+    // 側の src1。方向は EVEX.W と pp で分かれる。
+    for (sel, wr, mn, rv, ops) in [
+        (PfxSel::Plain, true, "bsrmovf", false, &[Vv, RmX][..]),
+        (PfxSel::PF2, true, "bsrmovh_w", true, &[RmX][..]),
+        (PfxSel::PF2, false, "bsrmovh_r", true, &[RmX][..]),
+        (PfxSel::PF3, true, "bsrmovl_w", true, &[RmX][..]),
+        (PfxSel::PF3, false, "bsrmovl_r", true, &[RmX][..]),
+    ] {
+        let mut it = ex(mn, ops, sel, 0b100, rv, "{op}", "alu");
+        it.group = Some(0);
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        v6.push(MapItem::Insn(0x95, it));
+    }
     m.maps.push(MapDecl {
         name: "map_avx10_6".to_string(),
         vex_code: Some(6),
@@ -3938,6 +3955,16 @@ fn build_map_0f38(m: &mut Model) {
         it.group_mod = Some(true);
         tile(op, it);
     }
+    // BSRINIT（ACE）。TILEZERO と同じ 0F38 49/F2 だが W1 で
+    // 選別し、modrm.reg/rm はともに 000 固定。
+    let mut it = mi("bsrinit", &[], Some(0), PfxSel::PF2, Pred::True, "bsrinit", "alu");
+    it.vex = Some(VexL::L0);
+    it.vex_rv = true;
+    it.group_mod = Some(true);
+    it.group_rm = Some(0);
+    it.wsel = Some(true);
+    it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+    v.push(MapItem::Insn(0x49, it));
     // AVX10.2（map2 系）: VDPBF16PS（BF16 ペアのドット積 → f32
     // 蓄積）と BF8 変換。VDPBF16PS は AVX512_BF16 の命令でもある
     // （avx512_bf16 フィーチャーは未モデル。ゲートは avx10_2）。
