@@ -2225,6 +2225,28 @@ pub fn build_maps(m: &mut Model) {
             vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "alu"),
         ));
     }
+    // AVX10.2 の enhanced scalar compare（VCOMX/VUCOMX）。EVEX の
+    // み、LL=00、vvvv=1111b、SS/SD は W0/W1 が必須。
+    for (op, sel, w, mn) in [
+        (0x2Eu8, PfxSel::PF3, false, "vucomxss"),
+        (0x2E, PfxSel::PF2, true, "vucomxsd"),
+        (0x2F, PfxSel::PF3, false, "vcomxss"),
+        (0x2F, PfxSel::PF2, true, "vcomxsd"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            sel,
+            0b001,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.wsel = Some(w);
+        it.edisp = if w { 8 } else { 4 };
+        it.when = Pred::Flag("avx10_2".to_string());
+        m0f.push(MapItem::Insn(op, it));
+    }
     // VRSQRTPS/VRCPPS（NP 52/53）とスカラ形 VRSQRTSS/VRCPSS
     // （F3、L0）。パック形は単項、スカラ形は vvvv が第2ソース。
     for (op, mn) in [(0x52u8, "vrsqrtps"), (0x53, "vrcpps")] {
@@ -2826,6 +2848,22 @@ fn build_map_avx10(m: &mut Model) {
         it.wsel = Some(false);
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
+    }
+    // VCOMXSH/VUCOMXSH（EVEX.F3.MAP5.W0 2E/2F、LL=00、vvvv=1111b）。
+    for (op, mn) in [(0x2Eu8, "vucomxsh"), (0x2F, "vcomxsh")] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::PF3,
+            0b001,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.edisp = 2;
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
     }
     // AVX10.2 の FP8 変換（MAP5 系）。1 ソース形は出力が半幅の
     // ベクトル、2 ソース形は出力の下位半分に src2、上位半分に

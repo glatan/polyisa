@@ -4300,6 +4300,9 @@ fn dispatch_map_inner<B: Backend>(
         Insn::UcomisdXvWv | Insn::ComisdXvWv | Insn::VucomisdXvWv | Insn::VcomisdXvWv => {
             sem_ea::ucomis(b, 64, d, &ea)
         }
+        Insn::VcomxssXvWv | Insn::VucomxssXvWv => sem_ea::vcomx(b, 32, d, &ea),
+        Insn::VcomxsdXvWv | Insn::VucomxsdXvWv => sem_ea::vcomx(b, 64, d, &ea),
+        Insn::VcomxshXvWv | Insn::VucomxshXvWv => sem_ea::vcomx(b, 16, d, &ea),
         Insn::RsqrtpsXvWv => sem_ea::rcp_rs(b, true, d, &ea),
         Insn::RcppsXvWv => sem_ea::rcp_rs(b, false, d, &ea),
         Insn::RsqrtssXvWv => sem_ea::rcp_rs_s(b, true, d, &ea),

@@ -26331,6 +26331,53 @@ fn run64_amx() {
 }
 
 #[test]
+fn run64_avx10_vcomxss_flags() {
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F;
+    fn once(feats: u128, a: u32, c: u32) -> u32 {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            u128::from(a),
+        );
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(1)),
+            u128::from(c),
+        );
+        // vcomxss xmm0,xmm1。EVEX map0F/F3/W0/LL=0、vvvv=1111b。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x62, 0xF1, 0x7E, 0x08, 0x2F, 0xC1])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            1,
+            true,
+            feats,
+            &polyisa_guest_x86::model_params("x86_64"),
+        );
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref())
+    }
+    let mask = 0x800 | 0x80 | 0x40 | 0x10 | 0x4 | 0x1;
+    assert_eq!(once(feats, 0x3F80_0000, 0x4000_0000) & mask, 0x801, "less");
+    assert_eq!(once(feats, 0x4000_0000, 0x3F80_0000) & mask, 0, "greater");
+    assert_eq!(once(feats, 0x3F80_0000, 0x3F80_0000) & mask, 0x8C0, "equal");
+    assert_eq!(
+        once(feats, 0x7FC0_0000, 0x3F80_0000) & mask,
+        0x885,
+        "unordered"
+    );
+}
+
+#[test]
 fn run64_avx10() {
     // AVX10.2（B4c-2）: BF16 パック演算・VDPBF16PS・FP8 変換。
     let feats = polyisa_guest_x86::model_feats("x86_64")

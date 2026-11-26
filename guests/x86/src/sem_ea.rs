@@ -5459,6 +5459,79 @@ pub fn ucomis<B: Backend>(
     Ok(())
 }
 
+/// AVX10.2 の enhanced scalar compare。OF/SF/ZF/PF/CF を関係ごとの
+/// 5 ビットパターンへ置き、AF を 0 にする。comx/ucomx の invalid
+/// 例外強度差は MXCSR 例外生成の未モデルとして残る。
+fn comx_parts<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>) -> (B::B, B::B, B::B) {
+    let na = {
+        let e = b.feq::<F>(a, a);
+        sem::bit_not(b, e)
+    };
+    let nc = {
+        let e = b.feq::<F>(c, c);
+        sem::bit_not(b, e)
+    };
+    (sem::bit_or(b, na, nc), b.feq::<F>(a, c), b.flt::<F>(a, c))
+}
+
+/// VCOMXSS/SD/SH と VUCOMXSS/SD/SH。
+pub fn vcomx<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let a128: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c128 = rx(b, ea, fbits)?;
+    let (unord, eq, lt) = if fbits == 64 {
+        let aw: B::V<W64> = b.trunc::<W128, W64>(a128);
+        let cw: B::V<W64> = b.trunc::<W128, W64>(c128);
+        let af = b.trunc::<W64, polyisa_sem::F64>(aw);
+        let cf = b.trunc::<W64, polyisa_sem::F64>(cw);
+        comx_parts::<B, polyisa_sem::F64>(b, af, cf)
+    } else if fbits == 32 {
+        let aw: B::V<W32> = b.trunc::<W128, W32>(a128);
+        let cw: B::V<W32> = b.trunc::<W128, W32>(c128);
+        let af = b.trunc::<W32, polyisa_sem::F32>(aw);
+        let cf = b.trunc::<W32, polyisa_sem::F32>(cw);
+        comx_parts::<B, polyisa_sem::F32>(b, af, cf)
+    } else {
+        let aw: B::V<W16> = b.trunc::<W128, W16>(a128);
+        let cw: B::V<W16> = b.trunc::<W128, W16>(c128);
+        let af = b.trunc::<W16, polyisa_sem::F16>(aw);
+        let cf = b.trunc::<W16, polyisa_sem::F16>(cw);
+        comx_parts::<B, polyisa_sem::F16>(b, af, cf)
+    };
+    let eq_or_lt = sem::bit_or(b, eq, lt);
+    let not_gt = sem::bit_or(b, unord, eq_or_lt);
+    let gt = sem::bit_not(b, not_gt);
+    // OF,SF,ZF,PF,CF は unordered=11011、greater=00000、
+    // less=10001、equal=11100。AF=0。他旗は保存する。
+    let of_v = sem::bit_not(b, gt);
+    let sf_v = sem::bit_or(b, unord, eq);
+    let zf_v = eq;
+    let pf_v = unord;
+    let cf_v = sem::bit_or(b, unord, lt);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(
+        sem::FLAG_ZF | sem::FLAG_PF | sem::FLAG_CF | sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_AF,
+    );
+    let nmask = b.not::<W32>(mask);
+    let kept = b.and::<W32>(f, nmask);
+    let of_b = pick(b, of_v, sem::FLAG_OF);
+    let sf_b = pick(b, sf_v, sem::FLAG_SF);
+    let zf_b = pick(b, zf_v, sem::FLAG_ZF);
+    let pf_b = pick(b, pf_v, sem::FLAG_PF);
+    let cf_b = pick(b, cf_v, sem::FLAG_CF);
+    let mut v = b.or::<W32>(kept, of_b);
+    v = b.or::<W32>(v, sf_b);
+    v = b.or::<W32>(v, zf_b);
+    v = b.or::<W32>(v, pf_b);
+    v = b.or::<W32>(v, cf_b);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
 /// CVTSI2SD/CVTSI2SS の変換値（ゼロ拡張された 128 ビット）。
 fn cvtsi_val<B: Backend>(
     b: &mut B,
