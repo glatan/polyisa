@@ -4095,7 +4095,7 @@ fn dispatch_map_inner<B: Backend>(
         Insn::Wrpkru => sem_ea::wrpkru(b),
         // XCR0 と保存領域。XGETBV/XSETBV は EDX:EAX 経由。
         Insn::Xgetbv => sem_ea::xgetbv(b),
-        Insn::Xsetbv => sem_ea::xsetbv(b),
+        Insn::Xsetbv => sem_ea::xsetbv(b, eip),
         Insn::Fxsave => sem_ea::fxsave(b, &ea, mode),
         Insn::Fxrstor => sem_ea::fxrstor(b, &ea, mode),
         Insn::Xsave | Insn::Xsaveopt => sem_ea::xsave(b, &ea, mode),
@@ -5986,6 +5986,7 @@ fn amx_tile_step(
 /// byte1=startRow、16..=47=colsb[16]、48..=63=rows[16]）。
 const TILECFG_OFF: usize = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
 const TMM_OFF: usize = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+const SCALEDATA_OFF: usize = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
 
 /// タイルの行数。`st` は `CpuState` のバイト列。
 fn tile_rows(st: &[u8], t: u8) -> usize {
@@ -6821,6 +6822,13 @@ fn xsavec_exec(
             xsavec_w64(env, base + u64::from(i) * 8, v)?;
         }
         Ok(())
+    })?;
+    put(env, 20, 0x80, &mut |env, base| {
+        for i in 0..16usize {
+            let v = env.backend.get(sem::scaledata_qref(i));
+            xsavec_w64(env, base + i as u64 * 8, v)?;
+        }
+        Ok(())
     })
 }
 
@@ -6890,6 +6898,7 @@ fn xsavec_size(bit: u64) -> u64 {
         17 => 0x40,
         18 => 0x2000,
         19 => 0x80,
+        20 => 0x80,
         _ => 0,
     }
 }
@@ -7024,6 +7033,19 @@ fn xrstorc_exec(
     } else if ini & (1 << 19) != 0 {
         for i in 0..16u8 {
             env.backend.set(sem::x_ref(sem::Gpr(16 + i)), 0);
+        }
+    }
+    // ACE SCALEDATA。初期値は全バイト 0x7f。
+    let off = xsavec_offset(xcomp, 20);
+    if rst & (1 << 20) != 0 {
+        for i in 0..16usize {
+            let v = xsavec_r64(env, a + off + i as u64 * 8)?;
+            env.backend.set(sem::scaledata_qref(i), v);
+        }
+    } else if ini & (1 << 20) != 0 {
+        for i in 0..16usize {
+            env.backend
+                .set(sem::scaledata_qref(i), 0x7f7f_7f7f_7f7f_7f7f);
         }
     }
     Ok(())
@@ -7539,6 +7561,8 @@ fn amx_tile_exec(
         }
     };
     let insn = md.insn;
+    let xcr0_tile = env.backend.get(sem::xcr0_ref());
+    let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
     let st = &mut env.backend.state;
     match insn {
         Insn::Ldtilecfg | Insn::Sttilecfg => {
@@ -7550,9 +7574,20 @@ fn amx_tile_exec(
                     .mem
                     .read(VirtAddr(ea), &mut cfg, acc_r)
                     .map_err(|e| amx_mem_exit(ea, e))?;
-                // palette>1 は #GP。0 は解放（検査を経ずに全状態を
-                // クリア）。1 なら予約域・tile8-15・寸法を検査する。
-                if cfg[0] > 1 {
+                // palette0 は解放、palette1 は AMX、palette2 は ACE。
+                // palette2 は XCR0[20,18:17] が全て有効なときだけ選べる。
+                if cfg[0] > 2 {
+                    return Err(amx_ud(eip));
+                }
+                let xcr0 = xcr0_tile;
+                let amx_bits = 1 << 17 | 1 << 18;
+                if cfg[0] == 1 && xcr0 & amx_bits != amx_bits {
+                    return Err(amx_ud(eip));
+                }
+                let max_palette = max_palette_tile;
+                if cfg[0] == 2
+                    && (max_palette < 2 || xcr0 & (amx_bits | 1 << 20) != (amx_bits | 1 << 20))
+                {
                     return Err(amx_ud(eip));
                 }
                 if cfg[0] == 1 {
@@ -7572,8 +7607,13 @@ fn amx_tile_exec(
                         }
                     }
                 }
+                // ACE palette は固定形状で、bytes1-63 はすべて予約。
+                if cfg[0] == 2 && cfg[1..].iter().any(|&b| b != 0) {
+                    return Err(amx_ud(eip));
+                }
                 st[TILECFG_OFF..TILECFG_OFF + 64].copy_from_slice(&cfg);
                 st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
+                st[SCALEDATA_OFF..SCALEDATA_OFF + 128].fill(0x7f);
             } else {
                 env.backend
                     .mem
@@ -7585,6 +7625,7 @@ fn amx_tile_exec(
         Insn::Tilerelease => {
             st[TILECFG_OFF..TILECFG_OFF + 64].fill(0);
             st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
+            st[SCALEDATA_OFF..SCALEDATA_OFF + 128].fill(0x7f);
             return Ok(());
         }
         _ => {}
@@ -16235,12 +16276,18 @@ fn run_image_x86_32_impl(
     env.backend
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    for i in 0..16usize {
+        env.backend.set(
+            polyisa_guest_x86::sem::scaledata_qref(i),
+            0x7f7f_7f7f_7f7f_7f7f,
+        );
+    }
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
     // XTILECFG/XTILEDATA だけは Linux の動的成分として最初は外す。
     // APX EGPR は小さい静的成分なので、対応モデルでは最初から有効。
-    let static_supp = supp & !0x6_0000;
+    let static_supp = supp & !0x16_0000;
     env.backend
         .set(polyisa_guest_x86::sem::xcr0_ref(), static_supp);
     env.backend
@@ -16515,12 +16562,18 @@ fn run_image_x86_64_impl(
     env.backend
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    for i in 0..16usize {
+        env.backend.set(
+            polyisa_guest_x86::sem::scaledata_qref(i),
+            0x7f7f_7f7f_7f7f_7f7f,
+        );
+    }
     // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
     // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
     // XTILECFG/XTILEDATA だけは Linux の動的成分として最初は外す。
     // APX EGPR は小さい静的成分なので、対応モデルでは最初から有効。
-    let static_supp = supp & !0x6_0000;
+    let static_supp = supp & !0x16_0000;
     env.backend
         .set(polyisa_guest_x86::sem::xcr0_ref(), static_supp);
     env.backend

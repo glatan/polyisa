@@ -6967,6 +6967,7 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
         (17, 0xb00),      // XTILECFG
         (18, 0x2b00),     // XTILEDATA
         (19, 0x440),      // APX EGPR（MPX 領域を再利用）
+        (20, 0x2b80),     // ACE SCALEDATA
     ] {
         let bm = b.konst::<W64>(1u64 << bit);
         let present = b.and::<W64>(x0, bm);
@@ -7638,6 +7639,11 @@ pub fn kref(i: u8) -> StateRef<W64> {
 /// TILECFG の qword（8 本）を指す。XSAVE の XTILECFG 成分用。
 pub fn tilecfg_qref(i: usize) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tilecfg) + i * 8)
+}
+
+/// ACE SCALEDATA の qword 要素（128 バイト全体で 16 個）。
+pub fn scaledata_qref(i: usize) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, scaledata) + i * 8)
 }
 
 /// TMM 領域全体を qword 列として指す。XSAVE の XTILEDATA 成分用

@@ -14108,18 +14108,45 @@ pub fn xgetbv<B: Backend>(b: &mut B) -> Flow<B> {
 }
 
 /// XSETBV。XCR0=EDX:EAX。bit0（x87）はハードウェアで常時 1 な
-/// ので OR して保持する。他の #GP 条件（未対応ビット、
-/// XCOMP_BV 不整合等）はモデル化しない。
-pub fn xsetbv<B: Backend>(b: &mut B) -> Flow<B> {
+/// ので OR して保持する。未対応成分、TILECFG/TILEDATA の片方だけの
+/// 設定、SCALEDATA を AMX 状態なしで設定する要求は #GP。
+pub fn xsetbv<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     let lo = decode::grd32(b, Gpr(0));
     let hi = decode::grd32(b, Gpr(2));
     let lo64 = b.zext::<W32, W64>(lo);
     let hi64 = b.zext::<W32, W64>(hi);
     let k32 = b.konst::<W64>(32);
     let his = b.shl::<W64>(hi64, k32);
-    let v = b.or::<W64>(lo64, his);
+    let raw = b.or::<W64>(lo64, his);
     let k1 = b.konst::<W64>(1);
-    let v = b.or::<W64>(v, k1);
+    let v = b.or::<W64>(raw, k1);
+    let supp: B::V<W64> = b.get(sem::xcomp_supp_ref());
+    let nsupp = b.not::<W64>(supp);
+    let unsupported = b.and::<W64>(v, nsupp);
+    let z64 = b.konst::<W64>(0);
+    let bad_supp = b.cmp::<W64>(Cmp::Ne, unsupported, z64);
+    let amx_mask = b.konst::<W64>(0x6_0000);
+    let amx = b.and::<W64>(v, amx_mask);
+    let amx_full = b.cmp::<W64>(Cmp::Eq, amx, amx_mask);
+    let amx_partial = b.cmp::<W64>(Cmp::Ne, amx, z64);
+    let amx_not_full = bnot(b, amx_full);
+    let amx_partial = band(b, amx_partial, amx_not_full);
+    let scale_mask = b.konst::<W64>(0x10_0000);
+    let scale = b.and::<W64>(v, scale_mask);
+    let has_scale = b.cmp::<W64>(Cmp::Ne, scale, z64);
+    let amx_not_full2 = bnot(b, amx_full);
+    let scale_without_amx = band(b, has_scale, amx_not_full2);
+    let bad_amx = bor(b, amx_partial, scale_without_amx);
+    let bad = bor(b, bad_supp, bad_amx);
+    use polyisa_sem::{ExceptionKind, GuestException};
+    b.if_then(bad, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 13,
+            addr: Some(u64::from(eip)),
+            in_delay_slot: false,
+        }))
+    })?;
     b.set(sem::xcr0_ref(), v);
     Ok(())
 }
@@ -14594,6 +14621,16 @@ pub fn xsave_area_mask<B: Backend>(
             decode::mem_store::<B, W64>(b, ah, wseg, v)?;
         }
         Ok(())
+    })?;
+    // ACE SCALEDATA（0x2b00、128 バイト）。
+    let wscale = mask_bit(b, m, 20);
+    b.if_then(wscale, |b| {
+        for i in 0..16usize {
+            let v: B::V<W64> = b.get(sem::scaledata_qref(i));
+            let ah = madd(b, a, 0x2b00 + i as u64 * 8);
+            decode::mem_store::<B, W64>(b, ah, wseg, v)?;
+        }
+        Ok(())
     })
 }
 
@@ -14672,6 +14709,14 @@ pub fn xrstor_init_mask<B: Backend>(b: &mut B, m: B::V<W64>) -> Flow<B> {
         let z = b.konst::<W64>(0);
         for i in 0..1024usize {
             b.set(sem::tmm_qref(i), z);
+        }
+        Ok(())
+    })?;
+    let iscale = mask_bit(b, m, 20);
+    b.if_then(iscale, |b| {
+        let v = b.konst::<W64>(0x7f7f_7f7f_7f7f_7f7f);
+        for i in 0..16usize {
+            b.set(sem::scaledata_qref(i), v);
         }
         Ok(())
     })?;
@@ -14843,6 +14888,24 @@ pub fn xrstor_area_mask<B: Backend>(
         let z = b.konst::<W64>(0);
         for i in 0..1024usize {
             b.set(sem::tmm_qref(i), z);
+        }
+        Ok(())
+    })?;
+    // ACE SCALEDATA。初期値は 0 ではなく全バイト 0x7f。
+    let rscale = mask_bit(b, rst, 20);
+    b.if_then(rscale, |b| {
+        for i in 0..16usize {
+            let ah = madd(b, a, 0x2b00 + i as u64 * 8);
+            let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            b.set(sem::scaledata_qref(i), v);
+        }
+        Ok(())
+    })?;
+    let iscale = mask_bit(b, ini, 20);
+    b.if_then(iscale, |b| {
+        let v = b.konst::<W64>(0x7f7f_7f7f_7f7f_7f7f);
+        for i in 0..16usize {
+            b.set(sem::scaledata_qref(i), v);
         }
         Ok(())
     })?;

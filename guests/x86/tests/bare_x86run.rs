@@ -20057,6 +20057,7 @@ fn run64_xsave_xcr0() {
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+    env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 3);
     let prog: &[u8] = &[
         0x48, 0xBB, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x4000
         0xD9, 0xE8, // fld1 → st[top=7]=1.0
@@ -20180,8 +20181,8 @@ fn xsave_avx512_amx_components_roundtrip() {
     use polyisa_guest_x86::{sem, sem_ea};
     let mut env = bare_x86_env();
     env.backend.mem.map(VirtAddr(0x4000), 3, Perms::RW).unwrap();
-    env.backend.set(sem::xcr0_ref(), 0xe00e7);
-    env.backend.set(Gpr(0).state(), 0xe00e7u32);
+    env.backend.set(sem::xcr0_ref(), 0x1e00e7);
+    env.backend.set(Gpr(0).state(), 0x1e00e7u32);
     env.backend.set(Gpr(2).state(), 0u32);
     let k1 = 0x1122_3344_5566_7788u64;
     let z0h = 0x0123_4567_89AB_CDEF_1020_3040_5060_7080u128;
@@ -20195,6 +20196,8 @@ fn xsave_avx512_amx_components_roundtrip() {
     env.backend.set(sem::tilecfg_qref(0), cfg);
     env.backend.set(sem::tmm_qref(0), tile);
     env.backend.set(sem::x_ref(sem::Gpr(20)), egpr);
+    let scale = 0x0123_4567_89ab_cdefu64;
+    env.backend.set(sem::scaledata_qref(0), scale);
     let ea = Rm::Mem {
         a: 0x4000,
         wseg: None,
@@ -20213,19 +20216,21 @@ fn xsave_avx512_amx_components_roundtrip() {
             .unwrap();
         u64::from_le_bytes(b)
     };
-    assert_eq!(q(&mut env, 512), 0xe00e7, "xstate_bv");
+    assert_eq!(q(&mut env, 512), 0x1e00e7, "xstate_bv");
     assert_eq!(q(&mut env, 0x440 + 8), k1, "opmask k1");
     assert_eq!(q(&mut env, 0x480), z0h as u64, "zmm0 hi256 low qword");
     assert_eq!(q(&mut env, 0x680), z16l as u64, "zmm16 low qword");
     assert_eq!(q(&mut env, 0xac0), cfg, "tilecfg qword0");
     assert_eq!(q(&mut env, 0xb00), tile, "tiledata qword0");
     assert_eq!(q(&mut env, 0x3c0 + 4 * 8), egpr, "apx r20");
+    assert_eq!(q(&mut env, 0x2b00), scale, "scaledata qword0");
     env.backend.set(sem::kref(1), 0);
     env.backend.set(sem::zreg_ref(0, 2), 0);
     env.backend.set(sem::zreg_ref(16, 0), 0);
     env.backend.set(sem::tilecfg_qref(0), 0);
     env.backend.set(sem::tmm_qref(0), 0);
     env.backend.set(sem::x_ref(sem::Gpr(20)), 0);
+    env.backend.set(sem::scaledata_qref(0), 0);
     sem_ea::xrstor(&mut env.backend, &ea, 64).unwrap();
     assert_eq!(env.backend.get(sem::kref(1)), k1);
     assert_eq!(env.backend.get(sem::zreg_ref(0, 2)), z0h);
@@ -20233,6 +20238,7 @@ fn xsave_avx512_amx_components_roundtrip() {
     assert_eq!(env.backend.get(sem::tilecfg_qref(0)), cfg);
     assert_eq!(env.backend.get(sem::tmm_qref(0)), tile);
     assert_eq!(env.backend.get(sem::x_ref(sem::Gpr(20))), egpr);
+    assert_eq!(env.backend.get(sem::scaledata_qref(0)), scale);
 }
 
 #[test]
@@ -26328,6 +26334,53 @@ fn run64_amx() {
         .read(VirtAddr(0x2300), &mut back, acc)
         .unwrap();
     assert_eq!(back, cfg, "sttilecfg round-trip");
+}
+
+#[test]
+fn run64_ace_palette2_ldtilecfg() {
+    // ACE palette2 は固定形状で、LDTILECFG 成功時に TILEDATA=0、
+    // SCALEDATA=0x7f へ初期化される。実行には XCR0[20,18:17] が要る。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_AMX_TILE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_0003);
+    env.backend
+        .set(polyisa_guest_x86::sem::cpuid_ref(13, 0), 2u32);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 2;
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::scaledata_qref(0), 0xdead_beef);
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.state[core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg)],
+        2
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::scaledata_qref(0)),
+        0x7f7f_7f7f_7f7f_7f7f
+    );
 }
 
 #[test]

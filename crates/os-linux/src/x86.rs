@@ -1653,9 +1653,10 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     /// 小さい成分は静的で、要求なしに使える。
     const XFEATURE_FIRST_DYNAMIC: u64 = 16;
     /// 成分番号の上限（XFEATURE_MAX）。
-    const XFEATURE_MAX: u64 = 19;
+    const XFEATURE_MAX: u64 = 20;
     const XFEATURE_XTILECFG: u64 = 17;
     const XFEATURE_XTILEDATA: u64 = 18;
+    const XFEATURE_SCALEDATA: u64 = 20;
     if op == ARCH_GET_XCOMP_SUPP || op == ARCH_GET_XCOMP_PERM {
         let which = if op == ARCH_GET_XCOMP_SUPP {
             polyisa_guest_x86::sem::xcomp_supp_ref()
@@ -1681,7 +1682,7 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
         let supp = env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref());
         let perm = env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref());
         // Linux の規約: 番号が上限超なら EINVAL、対応外の成分は
-        // EOPNOTSUPP。XTILEDATA の要求は先に XTILECFG の許可が要る。
+        // EOPNOTSUPP。XTILEDATA/SCALEDATA の要求は依存成分もまとめて許可する。
         if feature > XFEATURE_MAX {
             set64(env, Gpr(0), cx.neg(EINVAL));
             return Some(TrapOutcome::Handled);
@@ -1691,23 +1692,22 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
             set64(env, Gpr(0), cx.neg(EOPNOTSUPP));
             return Some(TrapOutcome::Handled);
         }
-        if feature == XFEATURE_XTILEDATA && perm & (1 << XFEATURE_XTILECFG) == 0 {
-            set64(env, Gpr(0), cx.neg(EINVAL));
-            return Some(TrapOutcome::Handled);
-        }
+        // XTILEDATA の許可は XTILECFG を、SCALEDATA の許可は
+        // XTILECFG/XTILEDATA をまとめて許可する（Linux の facility
+        // 単位の再帰要求と同じ効果）。
+        let set = if bit == (1 << XFEATURE_XTILEDATA) {
+            bit | (1 << XFEATURE_XTILECFG)
+        } else if bit == (1 << XFEATURE_SCALEDATA) {
+            bit | (1 << XFEATURE_XTILECFG) | (1 << XFEATURE_XTILEDATA)
+        } else {
+            bit
+        };
         env.backend
-            .set(polyisa_guest_x86::sem::xcomp_perm_ref(), perm | bit);
+            .set(polyisa_guest_x86::sem::xcomp_perm_ref(), perm | set);
         // 動的成分の許可は XCR0 にも反映される（実機では XSAVE
         // 領域が広がる）。成分の保存実装がない bit は名前だけの追跡。
         if feature >= XFEATURE_FIRST_DYNAMIC {
             let xcr0 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
-            // XTILEDATA の許可はカーネルと同じく XTILECFG にも波及
-            // させる（bit18 の要求で bit17|18 が両方立つ）。
-            let set = if bit == (1 << XFEATURE_XTILEDATA) {
-                bit | (1 << XFEATURE_XTILECFG)
-            } else {
-                bit
-            };
             env.backend
                 .set(polyisa_guest_x86::sem::xcr0_ref(), xcr0 | set);
         }

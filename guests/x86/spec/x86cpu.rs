@@ -218,6 +218,11 @@ fn declare_features(m: &mut Model) {
     // ACE の命令は AMX のタイル状態も使う（ACE 仕様 §3.1 の前提）。
     feat(m, "ace", &["avx10", "amx_tile", "avx10_v1_aux", "avx10_v2_aux"]);
     feat(m, "ace_v2", &["ace"]);
+    // ACE v2 の任意 outer product。Tile Palette 2 Sub-Leaf の
+    // EAX[16:18] に列挙される（Ref: SPEC-X86-ACE-V2）。
+    feat(m, "ace_op_fp16", &["ace_v2"]);
+    feat(m, "ace_op_fp32", &["ace_v2"]);
+    feat(m, "ace_op_fp64", &["ace_v2"]);
     // Leaf 0x8000_0001 EDX。
     feat(m, "syscall", &[]);
     feat(m, "nx", &[]);

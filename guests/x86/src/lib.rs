@@ -82,7 +82,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 24],
+    pub cpuid: [[u32; 4]; 26],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -135,6 +135,9 @@ pub struct CpuState {
     /// bytes16-47=colsb[16]（u16 LE）、bytes48-63=rows[16]。
     /// XSAVE の XTILECFG 成分に対応する。
     pub tilecfg: [u8; 64],
+    /// ACE の Block Scale Register（128 バイト、XSAVE SCALEDATA
+    /// 成分）。初期値は全バイト 0x7f（E8M0 の 2^0）。
+    pub scaledata: [u8; 128],
 }
 
 impl Default for CpuState {
@@ -182,6 +185,7 @@ impl Default for CpuState {
             x2: Default::default(),
             tmm: [[0; 1024]; 8],
             tilecfg: [0; 64],
+            scaledata: [0x7f; 128],
         }
     }
 }
@@ -216,27 +220,27 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 512);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 520);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 384 を
+        // mxcsr（sregs 12 + fsw 2 + cpuid 416 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 928);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 960);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 984);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 992);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 1000);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 1008);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1264);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1776);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2800);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2864);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2992);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2992 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11248);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 1016);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 1024);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 1032);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 1040);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1296);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1808);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2832);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2896);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 3024);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 3024 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11408);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2350);
+        assert_eq!(INSNS.len(), 2358);
     }
 
     #[test]
@@ -2286,6 +2290,12 @@ mod tests {
             "avx10_2",
             "avx10_v1_aux",
             "avx10_v2_aux",
+            "amx_tile",
+            "ace",
+            "ace_v2",
+            "ace_op_fp16",
+            "ace_op_fp32",
+            "ace_op_fp64",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2297,16 +2307,16 @@ mod tests {
         assert_eq!(tbl[3][0] & (1 << 31), 1 << 31, "movrs");
         assert_eq!(tbl[3][3] & (1 << 5), 1 << 5, "avxneconvert");
         assert_eq!(tbl[3][3] & (1 << 15), 1 << 15, "user_msr");
-        assert_eq!(tbl[4][0] & 0xe_00e7, 0xe_00e7, "leaf d xcr0 components");
-        assert_eq!(tbl[4][1], 0x2b00, "leaf d xsave max size");
-        assert_eq!(tbl[5], [3, 0x2a40, 0, 0], "leaf d xsaveopt/xsavec");
+        assert_eq!(tbl[4][0] & 0x1e_00e7, 0x1e_00e7, "leaf d xcr0 components");
+        assert_eq!(tbl[4][1], 0x2b80, "leaf d xsave max size");
+        assert_eq!(tbl[5], [3, 0x2ac0, 0, 0], "leaf d xsaveopt/xsavec");
         assert_eq!(tbl[7], [0x40, 0x440, 0, 0], "leaf d opmask component");
         assert_eq!(tbl[8], [0x200, 0x480, 0, 0], "leaf d zmm_hi256 component");
         assert_eq!(tbl[9], [0x400, 0x680, 0, 0], "leaf d hi16_zmm component");
         assert_eq!(tbl[10], [0x40, 0xac0, 2, 0], "leaf d xtilecfg component");
         assert_eq!(tbl[11], [0x2000, 0xb00, 2, 0], "leaf d xtiledata component");
         assert_eq!(tbl[12], [0x80, 0x3c0, 2, 0], "leaf d apx egpr component");
-        assert_eq!(tbl[13][0], 1, "leaf 1d max palette");
+        assert_eq!(tbl[13][0], 2, "leaf 1d max palette");
         assert_eq!(tbl[14][0], 0x0400_2000, "leaf 1d tile geometry eax");
         assert_eq!(tbl[14][1], 0x0008_0040, "leaf 1d tile geometry ebx");
         assert_eq!(tbl[14][2], 0x10, "leaf 1d max rows");
@@ -2322,6 +2332,8 @@ mod tests {
         assert_eq!(tbl[3][3] & (1 << 19), 1 << 19, "leaf7 avx10");
         assert_eq!(tbl[22], [1, 0x7_0002, 0, 0], "leaf24 avx10 version");
         assert_eq!(tbl[23], [0, 0, 0xC, 0], "leaf24 aux bits");
+        assert_eq!(tbl[24], [2 | 0x7_0000, 0, 0, 0], "leaf1d ace palette");
+        assert_eq!(tbl[25], [0x80, 0x2b00, 2, 0], "leaf d scaledata component");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());
@@ -2332,6 +2344,8 @@ mod tests {
         assert_eq!(tbl[20], [0; 4]);
         assert_eq!(tbl[22], [0; 4]);
         assert_eq!(tbl[23], [0; 4]);
+        assert_eq!(tbl[24], [0; 4]);
+        assert_eq!(tbl[25], [0; 4]);
     }
 
     #[test]

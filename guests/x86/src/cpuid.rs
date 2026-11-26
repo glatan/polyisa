@@ -17,7 +17,7 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 24] = [
+pub const LEAF_IDS: [(u32, u32); 26] = [
     (0, 0),
     (1, 0),
     (7, 0),
@@ -42,6 +42,8 @@ pub const LEAF_IDS: [(u32, u32); 24] = [
     (0xC000_0001, 0),
     (0x24, 0),
     (0x24, 1),
+    (0x1D, 2),
+    (0xD, 20),
 ];
 
 /// 最大ベーシックリーフの既定（leaf 0 の EAX）。`xsave` 機能が
@@ -65,6 +67,8 @@ pub const XSAVE_HI16ZMM_OFF: u32 = 0x680;
 pub const XSAVE_TILECFG_OFF: u32 = 0xac0;
 pub const XSAVE_TILEDATA_OFF: u32 = 0xb00;
 pub const XSAVE_AMX_END: u32 = XSAVE_TILEDATA_OFF + 0x2000;
+pub const XSAVE_SCALEDATA_OFF: u32 = XSAVE_AMX_END;
+pub const XSAVE_SCALEDATA_END: u32 = XSAVE_SCALEDATA_OFF + 0x80;
 
 fn get_ident<'a>(ident: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
     ident.get(key).map(String::as_str)
@@ -94,7 +98,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 24] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 26] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -159,6 +163,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             (17, 0x40, true),
             (18, 0x2000, true),
             (19, XSAVE_APX_SIZE, true),
+            (20, 0x80, true),
         ] {
             if xcomp_supp(features) & (1u64 << bit) != 0 {
                 if align64 {
@@ -216,6 +221,9 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             if features.contains("amx_tile") {
                 sz = sz.max(XSAVE_AMX_END);
             }
+            if features.contains("ace") {
+                sz = sz.max(XSAVE_SCALEDATA_END);
+            }
             [xcomp_supp(features) as u32, sz, sz, 0]
         } else {
             [0; 4]
@@ -272,7 +280,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         // palette 1 は 8 枚×最大 16 行×64 バイト（計 8192 バイト、
         // 1 枚 1024 バイト）。AMX-TILE がなければ葉全体を 0 にする。
         if features.contains("amx_tile") {
-            [1, 0, 0, 0]
+            [if features.contains("ace") { 2 } else { 1 }, 0, 0, 0]
         } else {
             [0; 4]
         },
@@ -349,6 +357,29 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         } else {
             [0; 4]
         },
+        // leaf 1D subleaf 2: ACE palette。EAX[7:0] は ACE の major
+        // version、EAX[16:18] は ACE v2 の任意 outer product。
+        if features.contains("ace") {
+            let mut eax = if features.contains("ace_v2") { 2 } else { 1 };
+            if features.contains("ace_op_fp16") {
+                eax |= 1 << 16;
+            }
+            if features.contains("ace_op_fp32") {
+                eax |= 1 << 17;
+            }
+            if features.contains("ace_op_fp64") {
+                eax |= 1 << 18;
+            }
+            [eax, 0, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D subleaf 20: ACE SCALEDATA（128 バイト）。
+        if features.contains("ace") {
+            [0x80, XSAVE_SCALEDATA_OFF, 2, 0]
+        } else {
+            [0; 4]
+        },
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。
@@ -382,6 +413,7 @@ pub fn xstate_size(mask: u64) -> u64 {
         (17, 0xb00),
         (18, 0x2b00),
         (19, 0x440),
+        (20, 0x2b80),
     ] {
         if mask & (1u64 << bit) != 0 {
             size = size.max(end);
@@ -411,6 +443,9 @@ pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
     }
     if features.contains("apx") {
         m |= 0x8_0000;
+    }
+    if features.contains("ace") {
+        m |= 0x10_0000;
     }
     m
 }
