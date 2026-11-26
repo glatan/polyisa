@@ -103,7 +103,7 @@ pub(crate) fn generate_status_md(root: &Path) -> Result<String, String> {
     s.push_str(NOTICE);
     s.push_str("\n\n");
     s.push_str(
-        "各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で `target/status/` に書き出せる。\n\n",
+        "各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で、命令×テスト層の静的証拠は `cargo run -p polyisa-devtool -- coverage` で `target/status/` に書き出せる。\n\n",
     );
 
     s.push_str("## ISA 対応マトリクス\n\n");

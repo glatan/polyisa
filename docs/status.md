@@ -2,7 +2,7 @@
 
 このファイルは `task status` が自動生成する。手で編集しない。
 
-各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で `target/status/` に書き出せる。
+各表は ISADL の仕様定義（`guests/*/spec/`）、OS パーソナリティの実装（`crates/os-*`）、CLI ランナ（`crates/cli`）、テストバイナリ（`crates/*/tests/`・`guests/*/tests/`）、`Taskfile.yml`、`docs/known-issues.md` から機械的に集計した現在地を示す。命令単位の詳細一覧と機能旗ごとのカバレッジ（`when` 条件での使用数とモデル参照数）は `task status:dump` で、命令×テスト層の静的証拠は `cargo run -p polyisa-devtool -- coverage` で `target/status/` に書き出せる。
 
 ## ISA 対応マトリクス
 
@@ -70,14 +70,14 @@
 
 ## 横断課題の要約
 
-詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 6 件、暫定は 13 件である。
+詳細は [横断的な未実装・暫定課題](known-issues.md) にある。未着手は 5 件、暫定は 14 件である。
 
 | ID | 区分 | 関連文書 |
 |---|---|---|
 | GAP-0002 | 暫定 | [OS 層](architecture/os-layer.md) |
 | GAP-0009 | 暫定 | [浮動小数点と十進演算](architecture/arithmetic.md) |
 | GAP-0010 | 暫定 | [テストガイド](guides/testing.md) |
-| GAP-0021 | 未着手 | [テストガイド](guides/testing.md) |
+| GAP-0021 | 暫定 | [テストガイド](guides/testing.md) |
 | GAP-0023 | 暫定 | [ISA 記述とコード生成](architecture/isadl.md) |
 | GAP-0024 | 暫定 | [命令意味論・実行エンジン・JIT](architecture/execution.md) |
 | GAP-0026 | 暫定 | [OS 層](architecture/os-layer.md) |

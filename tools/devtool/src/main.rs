@@ -4,6 +4,7 @@
 //!
 //! タスクから呼ぶ薄い入口にし、条件分岐とデータ処理はここに書く.
 
+mod coverage;
 mod dump;
 mod gaps;
 mod specs;
@@ -19,12 +20,13 @@ fn main() {
         "testdata:fetch" => cmd_testdata_fetch(),
         "hooks:install" => cmd_hooks_install(),
         "status" => cmd_status(args.next().as_deref()),
+        "coverage" => cmd_coverage(),
         "test:plan" => cmd_test_plan(args.next().as_deref()),
         "isagen:dump" => cmd_isagen_dump(args.next()),
         _ => {
             eprintln!("unknown subcommand: {cmd}");
             eprintln!(
-                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|isagen:dump|test:plan>"
+                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|coverage|isagen:dump|test:plan>"
             );
             1
         }
@@ -34,7 +36,7 @@ fn main() {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|isagen:dump|test:plan>"
+        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status [--dump]|coverage|isagen:dump|test:plan>"
     );
     std::process::exit(2);
 }
@@ -81,6 +83,22 @@ fn cmd_status(arg: Option<&str>) -> i32 {
                 eprintln!("status: {e}");
                 1
             }
+        }
+    }
+}
+
+fn cmd_coverage() -> i32 {
+    let root = workspace_root();
+    match coverage::write_coverage(&root) {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("coverage: {e}");
+            1
         }
     }
 }

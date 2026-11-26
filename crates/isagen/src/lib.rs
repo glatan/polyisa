@@ -64,7 +64,7 @@ pub struct Generated {
 
 /// `map` 内の命令項目を名前順・重複なしで集める。同一命令が複数の
 /// オペコード値に並ぶ（+r 系）ため、名前でまとめる。
-fn map_insns(model: &Model) -> Vec<&polyisa_isadl::model::MapInsn> {
+pub fn map_insns(model: &Model) -> Vec<&polyisa_isadl::model::MapInsn> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for map in &model.maps {
