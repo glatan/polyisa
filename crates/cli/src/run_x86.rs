@@ -6051,6 +6051,12 @@ fn amx_tile_step(
             | Insn::BsrmovhR
             | Insn::BsrmovlW
             | Insn::BsrmovlR
+            | Insn::TilemovrowRGpr
+            | Insn::TilemovrowRImm
+            | Insn::TilemovrowWGpr
+            | Insn::TilemovrowWImm
+            | Insn::TilemovcolWGpr
+            | Insn::TilemovcolWImm
     ) {
         return None;
     }
@@ -7638,6 +7644,70 @@ fn amx_tile_exec(
     let insn = md.insn;
     let xcr0_tile = env.backend.get(sem::xcr0_ref());
     let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
+    if matches!(
+        insn,
+        Insn::TilemovrowRGpr
+            | Insn::TilemovrowRImm
+            | Insn::TilemovrowWGpr
+            | Insn::TilemovrowWImm
+            | Insn::TilemovcolWGpr
+            | Insn::TilemovcolWImm
+    ) {
+        const ACE_XCR0: u64 = 0x16_00e6;
+        let read_form = matches!(insn, Insn::TilemovrowRGpr | Insn::TilemovrowRImm);
+        let imm_form = matches!(
+            insn,
+            Insn::TilemovrowRImm | Insn::TilemovrowWImm | Insn::TilemovcolWImm
+        );
+        if xcr0_tile & ACE_XCR0 != ACE_XCR0
+            || env.backend.state[TILECFG_OFF] != 2
+            || md.evex_b
+            || md.evex_z
+            || md.evex_aaa != 0
+        {
+            return Err(amx_ud(eip));
+        }
+        let rowcol = if imm_form {
+            md.imm & 0xf
+        } else {
+            // GPR 形では vvvv が row/column 指定レジスタ。V'=1 なので
+            // 上位ビットは使えない。
+            if md.vex_v & 0x10 != 0 {
+                return Err(amx_ud(eip));
+            }
+            sem::read64(&mut env.backend, sem::Gpr(md.vex_v)) & 0xf
+        };
+        let tmm_off = |t: u8| TMM_OFF + usize::from(t) * 1024;
+        if read_form {
+            let dst = decode::reg_x5(md);
+            let t = md.modrm & 7;
+            if decode::rm_reg_x5(md) >= 8 {
+                return Err(amx_ud(eip));
+            }
+            let mut v = [0u8; 64];
+            let base = tmm_off(t) + rowcol as usize * 64;
+            v.copy_from_slice(&env.backend.state[base..base + 64]);
+            zput64(env, dst, &v);
+        } else {
+            let t = md.modrm >> 3 & 7;
+            if decode::reg_x5(md) >= 8 {
+                return Err(amx_ud(eip));
+            }
+            let src = zget64(env, decode::rm_reg_x5(md));
+            let base = tmm_off(t);
+            if matches!(insn, Insn::TilemovrowWGpr | Insn::TilemovrowWImm) {
+                let row = base + rowcol as usize * 64;
+                env.backend.state[row..row + 64].copy_from_slice(&src);
+            } else {
+                for r in 0..16usize {
+                    let dword = u32::from_le_bytes(src[r * 4..r * 4 + 4].try_into().unwrap());
+                    let at = base + r * 64 + rowcol as usize * 4;
+                    env.backend.state[at..at + 4].copy_from_slice(&dword.to_le_bytes());
+                }
+            }
+        }
+        return Ok(());
+    }
     if matches!(
         insn,
         Insn::Bsrinit

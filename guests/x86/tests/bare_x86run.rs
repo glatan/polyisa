@@ -26470,6 +26470,73 @@ fn run64_ace_bsr_moves() {
 }
 
 #[test]
+fn run64_ace_tilemovrow_imm() {
+    // TILEMOVROW immediate 形の read/write。palette2 の固定形状
+    // 16 行×64 バイトで row 3 を読み、row 4 へ書く。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    for i in 0..64usize {
+        env.backend.state[tmm_off + 1024 + 3 * 64 + i] = i as u8;
+        env.backend.state[tmm_off + 1024 + 4 * 64 + i] = 0xaa;
+    }
+    for p in 0..4usize {
+        let mut b = [0u8; 16];
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = 0x80 + (p * 16 + i) as u8;
+        }
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(2, p),
+            u128::from_le_bytes(b),
+        );
+    }
+    let prog: &[u8] = &[
+        0x62, 0xF3, 0x7D, 0x48, 0x07, 0xC1, 0x03, // tilemovrow zmm0,tmm1,3
+        0x62, 0xF3, 0xFD, 0x48, 0x07, 0xCA, 0x04, // tilemovrow tmm1,zmm2,4
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for p in 0..4usize {
+        let got = env
+            .backend
+            .get(polyisa_guest_x86::sem::zreg_ref(0, p))
+            .to_le_bytes();
+        for (i, x) in got.iter().enumerate() {
+            assert_eq!(*x, (p * 16 + i) as u8);
+        }
+    }
+    for i in 0..64usize {
+        assert_eq!(
+            env.backend.state[tmm_off + 1024 + 4 * 64 + i],
+            0x80 + i as u8,
+            "row4 byte {i}"
+        );
+    }
+}
+
+#[test]
 fn run64_avx10_vcomxss_flags() {
     let feats = polyisa_guest_x86::model_feats("x86_64")
         | polyisa_guest_x86::FEAT_AVX10_2

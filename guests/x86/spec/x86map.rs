@@ -3983,6 +3983,20 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // ACE tile move row/col の GPR 指定形（mod=11 固定）。reg/rm
+    // の一方は tmm なので汎用ベクタ意味論ではなく concrete 実行へ渡す。
+    for (op, wr, mn) in [
+        (0x4Au8, false, "tilemovrow_r_gpr"),
+        (0x4A, true, "tilemovrow_w_gpr"),
+        (0x4B, true, "tilemovcol_w_gpr"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX], PfxSel::P66, 0b100, false, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        v.push(MapItem::Insn(op, it));
+    }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
@@ -4506,6 +4520,19 @@ fn build_map_0f3a(m: &mut Model) {
                 ),
             ));
         }
+    }
+    // ACE tile move row/col の immediate 指定形。vvvv は未使用。
+    for (op, wr, mn) in [
+        (0x07u8, false, "tilemovrow_r_imm"),
+        (0x07, true, "tilemovrow_w_imm"),
+        (0x2F, true, "tilemovcol_w_imm"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX, ib], PfxSel::P66, 0b100, true, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        items.push(MapItem::Insn(op, it));
     }
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
