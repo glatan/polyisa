@@ -14058,8 +14058,7 @@ pub(crate) fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
 /// overflow では QNaN floating-point indefinite を載せ、unmasked では
 /// TOP と source operand を変えない。
 pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
-    let z16 = b.konst::<W16>(0);
-    let no_prior_fault = b.cmp::<W16>(Cmp::Ne, z16, z16);
+    let no_prior_fault = bool_false(b);
     push_ext_with_fault(b, sig, exp_word, no_prior_fault)
 }
 
@@ -14625,32 +14624,41 @@ pub(crate) fn cmp_f80<B: Backend>(
 
 /// FUCOMI ST(0), ST(i) (DB E8+i)。比較結果を EFLAGS に書き、スタックは戻さない。seq 0x4d0983 対応.
 pub fn fucomi_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    fucomi_impl(b, i, false)
+}
+
+fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
+    let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
-    let (sig1, exp1) = read_st(b, src);
-    let (zf, pf, cf) = cmp_f80(b, sig0, exp0, sig1, exp1);
-    let old = b.get(eflags_ref());
-    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
-    let cleared = b.and::<W32>(old, clear_mask);
-    let zf_bit = pick(b, zf, FLAG_ZF);
-    let pf_bit = pick(b, pf, FLAG_PF);
-    let cf_bit = pick(b, cf, FLAG_CF);
-    let with_zf = b.or::<W32>(cleared, zf_bit);
-    let with_pf = b.or::<W32>(with_zf, pf_bit);
-    let flags = b.or::<W32>(with_pf, cf_bit);
-    b.set(eflags_ref(), flags);
-    Ok(())
+    let (sig1, exp1, fault1) = read_st_source(b, src);
+    let fault = bit_or(b, fault0, fault1);
+    let commit = x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let (zf, pf, cf) = cmp_f80(b, sig0, exp0, sig1, exp1);
+        let old = b.get(eflags_ref());
+        let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+        let cleared = b.and::<W32>(old, clear_mask);
+        let zf_bit = pick(b, zf, FLAG_ZF);
+        let pf_bit = pick(b, pf, FLAG_PF);
+        let cf_bit = pick(b, cf, FLAG_CF);
+        let with_zf = b.or::<W32>(cleared, zf_bit);
+        let with_pf = b.or::<W32>(with_zf, pf_bit);
+        let flags = b.or::<W32>(with_pf, cf_bit);
+        b.set(eflags_ref(), flags);
+        if pop {
+            pop_st(b, top)?;
+        }
+        Ok(())
+    })
 }
 
 /// FUCOMIP ST(0), ST(i) (DF E8+i)。比較のあと先頭の段を捨てる。dd 0x4d0ea6 対応.
 pub fn fucomip_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
-    fucomi_st(b, i)?;
-    let top = b.get(top_ref());
-    pop_st(b, top)
+    fucomi_impl(b, i, true)
 }
 
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
@@ -14723,6 +14731,12 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let (sig, exp) = read_st(b, top);
     write_st(b, dst, sig, exp);
     pop_st(b, top)
+}
+
+/// backend 上の false 定数。
+pub(crate) fn bool_false<B: Backend>(b: &mut B) -> B::B {
+    let z16 = b.konst::<W16>(0);
+    b.cmp::<W16>(Cmp::Ne, z16, z16)
 }
 
 /// FCW の invalid-operation mask が立っているか。

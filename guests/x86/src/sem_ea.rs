@@ -9888,21 +9888,37 @@ pub fn farith_m<B: Backend>(
 ) -> Result<(), B::Exit> {
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
-        let (sm, em) = if fbits == 32 {
-            let v: B::V<W32> = decode::mem_load::<B, W32>(b, a, *wseg)?;
-            let denormal = sem::f32_denormal(b, v);
-            sem::x87_exception_flag(b, denormal, 1 << 1);
-            sem::f32_to_ext(b, v)
-        } else {
-            let v: B::V<W64> = decode::mem_load::<B, W64>(b, a, *wseg)?;
-            let denormal = sem::f64_denormal(b, v);
-            sem::x87_exception_flag(b, denormal, 1 << 1);
-            sem::f64_to_ext(b, v)
-        };
+        let wseg = *wseg;
         let top = b.get(sem::top_ref());
-        let (s0, e0) = sem::read_st(b, top);
-        let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
-        sem::write_st(b, top, sr, er);
+        let (s0, e0, fault) = sem::read_st_source(b, top);
+        let commit = sem::x87_commit_after_fault(b, fault);
+        b.if_then(commit, |b| {
+            let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+            let indef_exp = b.konst::<W16>(0xffff);
+            b.if_then_else(
+                fault,
+                |b| {
+                    sem::write_st(b, top, indef_sig, indef_exp);
+                    Ok(())
+                },
+                |b| {
+                    let (sm, em) = if fbits == 32 {
+                        let v: B::V<W32> = decode::mem_load::<B, W32>(b, a, wseg)?;
+                        let denormal = sem::f32_denormal(b, v);
+                        sem::x87_exception_flag(b, denormal, 1 << 1);
+                        sem::f32_to_ext(b, v)
+                    } else {
+                        let v: B::V<W64> = decode::mem_load::<B, W64>(b, a, wseg)?;
+                        let denormal = sem::f64_denormal(b, v);
+                        sem::x87_exception_flag(b, denormal, 1 << 1);
+                        sem::f64_to_ext(b, v)
+                    };
+                    let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
+                    sem::write_st(b, top, sr, er);
+                    Ok(())
+                },
+            )
+        })?;
     }
     Ok(())
 }
@@ -9916,18 +9932,34 @@ pub fn fiarith_m<B: Backend>(
 ) -> Result<(), B::Exit> {
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
-        let v64 = if bits == 16 {
-            let v: B::V<W16> = decode::mem_load::<B, W16>(b, a, *wseg)?;
-            b.sext::<W16, W64>(v)
-        } else {
-            let v: B::V<W32> = decode::mem_load::<B, W32>(b, a, *wseg)?;
-            b.sext::<W32, W64>(v)
-        };
-        let (sm, em) = sem::i64_to_ext(b, v64);
+        let wseg = *wseg;
         let top = b.get(sem::top_ref());
-        let (s0, e0) = sem::read_st(b, top);
-        let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
-        sem::write_st(b, top, sr, er);
+        let (s0, e0, fault) = sem::read_st_source(b, top);
+        let commit = sem::x87_commit_after_fault(b, fault);
+        b.if_then(commit, |b| {
+            let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+            let indef_exp = b.konst::<W16>(0xffff);
+            b.if_then_else(
+                fault,
+                |b| {
+                    sem::write_st(b, top, indef_sig, indef_exp);
+                    Ok(())
+                },
+                |b| {
+                    let v64 = if bits == 16 {
+                        let v: B::V<W16> = decode::mem_load::<B, W16>(b, a, wseg)?;
+                        b.sext::<W16, W64>(v)
+                    } else {
+                        let v: B::V<W32> = decode::mem_load::<B, W32>(b, a, wseg)?;
+                        b.sext::<W32, W64>(v)
+                    };
+                    let (sm, em) = sem::i64_to_ext(b, v64);
+                    let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
+                    sem::write_st(b, top, sr, er);
+                    Ok(())
+                },
+            )
+        })?;
     }
     Ok(())
 }
@@ -9937,20 +9969,38 @@ pub fn fiarith_m<B: Backend>(
 /// `pop` で ST(0) を捨てる（DE 形）。
 pub fn farith_st<B: Backend>(b: &mut B, op: FAr, i: u8, rev: bool, pop: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (s0, e0) = sem::read_st(b, top);
+    let (s0, e0, fault0) = sem::read_st_source(b, top);
     let slot = st_slot(b, i);
-    let (s1, e1) = sem::read_st(b, slot);
-    let (sr, er) = if rev {
-        ext_arith(b, op, s1, e1, s0, e0)
-    } else {
-        ext_arith(b, op, s0, e0, s1, e1)
-    };
+    let (s1, e1, fault1) = sem::read_st_source(b, slot);
+    let fault = sem::bit_or(b, fault0, fault1);
+    let commit = sem::x87_commit_after_fault(b, fault);
     let dst = if rev { slot } else { top };
-    sem::write_st(b, dst, sr, er);
-    if pop {
-        sem::pop_st(b, top)?;
-    }
-    Ok(())
+    b.if_then(commit, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                sem::write_st(b, dst, indef_sig, indef_exp);
+                if pop {
+                    sem::pop_st(b, top)?;
+                }
+                Ok(())
+            },
+            |b| {
+                let (sr, er) = if rev {
+                    ext_arith(b, op, s1, e1, s0, e0)
+                } else {
+                    ext_arith(b, op, s0, e0, s1, e1)
+                };
+                sem::write_st(b, dst, sr, er);
+                if pop {
+                    sem::pop_st(b, top)?;
+                }
+                Ok(())
+            },
+        )
+    })
 }
 
 /// FCMOVcc。cond が真なら ST(0) = ST(i)。
@@ -11718,28 +11768,46 @@ const X87_CC_MASK: u16 = X87_C_MASK | X87_C1;
 /// ST(0) と (sig,exp) を比較して fsw の C0/C2/C3 を更新する。
 /// `pop` で 1 段捨てる（FCOMP/FICOMP）。
 fn fcom_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, pop: bool) -> Flow<B> {
+    let no_fault = sem::bool_false(b);
+    fcom_ext_with_fault(b, sig, exp, pop, no_fault)
+}
+
+/// `src_fault` は ST(i) source operand の empty 検査。ST(0) と合わせ、
+/// unmasked では C ビットとスタックを変えない。masked response は
+/// indefinite による unordered 比較となり、pop 形では pop する。
+fn fcom_ext_with_fault<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+    pop: bool,
+    src_fault: B::B,
+) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (s0, e0) = sem::read_st(b, top);
-    let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
-    let old: B::V<W16> = b.get(sem::fsw_ref());
-    // FCOM 系は C1 も 0 にする（C1=1 はスタックフォルト時のみ）。
-    let keep = b.konst::<W16>(!X87_CC_MASK);
-    let cleared = b.and::<W16>(old, keep);
-    let k0 = b.konst::<W16>(0);
-    let kc0 = b.konst::<W16>(X87_C0);
-    let kc2 = b.konst::<W16>(X87_C2);
-    let kc3 = b.konst::<W16>(X87_C3);
-    let c0 = b.select::<W16>(cf, kc0, k0);
-    let c2 = b.select::<W16>(unord, kc2, k0);
-    let c3 = b.select::<W16>(zf, kc3, k0);
-    let c02 = b.or::<W16>(c0, c2);
-    let cbits = b.or::<W16>(c02, c3);
-    let nv = b.or::<W16>(cleared, cbits);
-    b.set(sem::fsw_ref(), nv);
-    if pop {
-        sem::pop_st(b, top)?;
-    }
-    Ok(())
+    let (s0, e0, fault0) = sem::read_st_source(b, top);
+    let fault = sem::bit_or(b, fault0, src_fault);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
+        let old: B::V<W16> = b.get(sem::fsw_ref());
+        // FCOM 系は C1 も 0 にする（C1=1 はスタックフォルト時のみ）。
+        let keep = b.konst::<W16>(!X87_CC_MASK);
+        let cleared = b.and::<W16>(old, keep);
+        let k0 = b.konst::<W16>(0);
+        let kc0 = b.konst::<W16>(X87_C0);
+        let kc2 = b.konst::<W16>(X87_C2);
+        let kc3 = b.konst::<W16>(X87_C3);
+        let c0 = b.select::<W16>(cf, kc0, k0);
+        let c2 = b.select::<W16>(unord, kc2, k0);
+        let c3 = b.select::<W16>(zf, kc3, k0);
+        let c02 = b.or::<W16>(c0, c2);
+        let cbits = b.or::<W16>(c02, c3);
+        let nv = b.or::<W16>(cleared, cbits);
+        b.set(sem::fsw_ref(), nv);
+        if pop {
+            sem::pop_st(b, top)?;
+        }
+        Ok(())
+    })
 }
 
 /// FCOM/FCOMP m32/m64（bits で読み幅）。mod=11 では ST(i) との比較。
@@ -11757,8 +11825,8 @@ pub fn fcom_m<B: Backend>(
         let summed = b.add::<W16>(top, ii);
         let seven = b.konst::<W16>(7);
         let slot = b.and::<W16>(summed, seven);
-        let (s1, e1) = sem::read_st(b, slot);
-        return fcom_ext(b, s1, e1, pop);
+        let (s1, e1, fault) = sem::read_st_source(b, slot);
+        return fcom_ext_with_fault(b, s1, e1, pop, fault);
     }
     let (sig, exp) = match ea {
         Rm::Mem { a, wseg } => {
@@ -11795,16 +11863,43 @@ pub fn fcom_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let slot = b.and::<W16>(summed, seven);
-    let (s1, e1) = sem::read_st(b, slot);
-    fcom_ext(b, s1, e1, pop)
+    let (s1, e1, fault) = sem::read_st_source(b, slot);
+    fcom_ext_with_fault(b, s1, e1, pop, fault)
 }
 
 /// FCOMPP/FUCOMPP。ST(0) と ST(1) を比較して C ビットを更新し、
 /// 2 段ポップする（FUCOMPP との #IA 違いは例外状態未モデルのため同一動作）。
 pub fn fcompp_st<B: Backend>(b: &mut B) -> Flow<B> {
-    fcom_sti(b, 1, true)?;
     let top = b.get(sem::top_ref());
-    sem::pop_st(b, top)
+    let (s0, e0, fault0) = sem::read_st_source(b, top);
+    let slot = st_slot(b, 1);
+    let (s1, e1, fault1) = sem::read_st_source(b, slot);
+    let fault = sem::bit_or(b, fault0, fault1);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, s1, e1);
+        let old: B::V<W16> = b.get(sem::fsw_ref());
+        let keep = b.konst::<W16>(!X87_CC_MASK);
+        let cleared = b.and::<W16>(old, keep);
+        let k0 = b.konst::<W16>(0);
+        let kc0 = b.konst::<W16>(X87_C0);
+        let kc2 = b.konst::<W16>(X87_C2);
+        let kc3 = b.konst::<W16>(X87_C3);
+        let c0 = b.select::<W16>(cf, kc0, k0);
+        let c2 = b.select::<W16>(unord, kc2, k0);
+        let c3 = b.select::<W16>(zf, kc3, k0);
+        let c02 = b.or::<W16>(c0, c2);
+        let cbits = b.or::<W16>(c02, c3);
+        let nv = b.or::<W16>(cleared, cbits);
+        b.set(sem::fsw_ref(), nv);
+        let one = b.konst::<W16>(1);
+        let inc = b.add::<W16>(top, one);
+        let seven = b.konst::<W16>(7);
+        let top1 = b.and::<W16>(inc, seven);
+        sem::pop_st(b, top)?;
+        sem::pop_st(b, top1)?;
+        Ok(())
+    })
 }
 
 /// FTST。ST(0) と +0.0 を比較して C ビットを更新する（ポップなし）。

@@ -22,16 +22,42 @@ fn x87_tag(env: &mut BareEnv, slot: usize) -> u16 {
     (ftw >> (slot * 2)) & 3
 }
 
+fn x87_tag_from_bits(sig: u64, exp: u16) -> u16 {
+    let ef = exp & 0x7fff;
+    if ef == 0 && sig == 0 {
+        1
+    } else if ef != 0 && ef != 0x7fff && sig & (1u64 << 63) != 0 {
+        0
+    } else {
+        2
+    }
+}
+
+fn x87_write_tag(env: &mut BareEnv, physical: usize, tag: u16) {
+    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    let shift = physical * 2;
+    env.backend.set(
+        polyisa_guest_x86::sem::ftw_ref(),
+        (ftw & !(3u16 << shift)) | ((tag & 3) << shift),
+    );
+}
+
+fn x87_recalc_tag(env: &mut BareEnv, physical: usize) {
+    let sig: u64 = env
+        .backend
+        .get(polyisa_guest_x86::sem::st_sig_ref(physical));
+    let exp: u16 = env
+        .backend
+        .get(polyisa_guest_x86::sem::st_exp_ref(physical));
+    x87_write_tag(env, physical, x87_tag_from_bits(sig, exp));
+}
+
 fn x87_seed_valid(env: &mut BareEnv, physical: usize, sig: u64, exp: u16) {
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(physical), sig);
     env.backend
         .set(polyisa_guest_x86::sem::st_exp_ref(physical), exp);
-    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
-    env.backend.set(
-        polyisa_guest_x86::sem::ftw_ref(),
-        ftw & !(3u16 << (physical * 2)),
-    );
+    x87_write_tag(env, physical, x87_tag_from_bits(sig, exp));
 }
 
 /// `exit(ebx)` だけ処理する。番号は EAX、引数は EBX から読む。
@@ -11877,6 +11903,8 @@ fn run_fmulp_st1_three_times_one() {
         .mem
         .write(VirtAddr(0x1000), &[0xDE, 0xC9])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -11913,6 +11941,8 @@ fn run_fmulp_st1_one_and_a_half_squared() {
         .mem
         .write(VirtAddr(0x1000), &[0xDE, 0xC9])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -12609,6 +12639,7 @@ fn run_fadd_st0_doubles_three() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0xC0])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -12645,6 +12676,8 @@ fn run_fadd_st1_one_plus_three() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0xC1])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -12685,6 +12718,8 @@ fn run_fadd_st1_three_minus_one() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0xC1])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -12794,6 +12829,8 @@ fn run_fucomip_st1_pops() {
         .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000u16);
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(1), three);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDF, 0xE9])
@@ -12828,6 +12865,8 @@ fn run_fucomi_st1_sets_flags() {
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
         env.backend.set(polyisa_guest_x86::sem::st_exp_ref(1), exp1);
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), sig1);
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         env.backend
             .mem
             .write(VirtAddr(0x1000), &[0xDB, 0xE9])
@@ -12873,6 +12912,7 @@ fn run_fmul_m32_rip_three_times_two() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0x0D, 0xFA, 0x0F, 0x00, 0x00])
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
@@ -12990,6 +13030,72 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_fadd_empty_source_underflow_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1])
+            .unwrap(); // fadd st(0),st(1)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // ST(1) は empty。masked underflow では ST(0) が extended indefinite になる。
+    let (fsw, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
+    // unmasked では結果を commit せず、元の 1.0 が残る。
+    let (fsw, sig, exp) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3FFF));
+}
+
+#[test]
+fn run_x87_fcomp_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xD9])
+            .unwrap(); // fcomp st(1)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    // masked #IS では unordered (C3=C2=C0=1) を置いて pop する。
+    let (fsw, top) = once(0x037F);
+    assert_eq!(fsw & 0x4541, 0x4541);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!(top, 1);
+    // unmasked では C ビットと TOP を変えない。
+    let (fsw, top) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!(fsw & 0x4500, 0);
+    assert_eq!(top, 0);
+}
+
+#[test]
 fn run_x87_fdiv_zero_sets_zero_divide_flag() {
     // 1.0 / +0.0 = +inf で ZE(bit2) が立つ。
     let mut env = bare_x86_env();
@@ -13006,6 +13112,8 @@ fn run_x87_fdiv_zero_sets_zero_divide_flag() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_seed_valid(&mut env, 1, 0, 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13249,6 +13357,8 @@ fn run_x87_fop_updates_only_for_unmasked_exception() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_seed_valid(&mut env, 1, 0, 0);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13508,6 +13618,8 @@ fn run_x87_fdiv_honors_fcw_precision_control() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13539,6 +13651,8 @@ fn run_x87_denormal_operand_sets_denormal_flag() {
         .mem
         .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
         .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13568,6 +13682,8 @@ fn run_x87_mul_sets_overflow_and_underflow_flags() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13609,6 +13725,7 @@ fn run_x87_inexact_result_sets_precision_flag() {
                 polyisa_guest_x86::sem::st_exp_ref(slot),
                 if slot == 0 { 0x3FFF } else { exp1 },
             );
+            x87_recalc_tag(&mut env, slot);
         }
         env.backend
             .mem
@@ -13649,6 +13766,8 @@ fn run_x87_fdiv_honors_fcw_rounding_mode() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13686,6 +13805,8 @@ fn run_x87_fadd_honors_fcw_rounding_mode() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13715,6 +13836,7 @@ fn run_x87_fmul_honors_fcw_rounding_mode() {
             );
             env.backend
                 .set(polyisa_guest_x86::sem::st_exp_ref(slot), 0x3FFF);
+            x87_recalc_tag(&mut env, slot);
         }
         env.backend
             .mem
@@ -13748,6 +13870,8 @@ fn run_x87_fmul_propagates_infinity_and_nan_rules() {
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
@@ -13991,6 +14115,8 @@ fn run_fsubp_st1_subtracts_and_pops() {
             .mem
             .write(VirtAddr(0x1000), &[0xDE, 0xE9])
             .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
         assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
