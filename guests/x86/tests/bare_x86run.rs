@@ -17922,6 +17922,121 @@ fn bsf_zero_input_param() {
     assert_eq!(out, Outcome::Exit(0));
 }
 
+#[test]
+fn run16_x87_fnstenv_real16_layout() {
+    // 16-bit real-address mode format（SDM Figure 8-12）。
+    // FLD m32 は non-control で FIP/FOP/FDP を残し、FNSTENV は 14 バイト形式を書く。
+    let prog: &[u8] = &[
+        0xD9, 0x06, 0x00, 0x30, // fld dword [0x3000] @0x1000
+        0xD9, 0x36, 0x00, 0x20, // fnstenv [0x2000]  @0x1004
+    ];
+    let mut env = env16(prog, 0x1000);
+    let out = run16m(&mut env, 0x1000, "x86_64", 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let h16 = |a: u64| {
+        let mut b = [0u8; 2];
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u16::from_le_bytes(b)
+    };
+    assert_eq!(h16(0x2006), 0x1000, "FIP[15:0]");
+    assert_eq!(h16(0x2008), 0x0106, "FIP[19:16]=0 + FOP");
+    assert_eq!(h16(0x200a), 0x3000, "FDP[15:0]");
+    assert_eq!(h16(0x200c), 0, "FDP[19:16] と予約 bits");
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x3000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x0106);
+}
+
+#[test]
+fn run16_x87_fnstenv_real32_layout() {
+    // operand-size override 付き FNSTENV は 32-bit real-address mode format
+    // （SDM Figure 8-10）を書く。
+    let prog: &[u8] = &[
+        0xD9, 0x06, 0x00, 0x30, // fld dword [0x3000] @0x1000
+        0x66, 0xD9, 0x36, 0x00, 0x20, // fnstenv [0x2000] @0x1004
+    ];
+    let mut env = env16(prog, 0x1000);
+    let out = run16m(&mut env, 0x1000, "x86_64", 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let h16 = |a: u64| {
+        let mut b = [0u8; 2];
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u16::from_le_bytes(b)
+    };
+    assert_eq!(h16(0x2000), 0, "FCW 初期値");
+    assert_eq!(h16(0x2002), 0, "FCW 上位予約");
+    assert_eq!(h16(0x200c), 0x1000, "FIP[15:0]");
+    assert_eq!(h16(0x200e), 0, "FIP low word の上位予約");
+    assert_eq!(h16(0x2010), 0x0106, "FOP[10:0]");
+    assert_eq!(h16(0x2012), 0, "FIP[31:16] の低位 12bit");
+    assert_eq!(h16(0x2014), 0x3000, "FDP[15:0]");
+    assert_eq!(h16(0x2016), 0, "FDP low word の上位予約");
+    assert_eq!(h16(0x2018), 0, "予約 low half");
+    assert_eq!(h16(0x201a), 0, "FDP[31:16] の低位 12bit");
+}
+
+#[test]
+fn run16_x87_fnsave_real16_data_offset() {
+    // 14 バイト環境の直後（+14）から ST image が始まる。
+    let prog: &[u8] = &[
+        0xD9, 0x06, 0x00, 0x30, // fld dword [0x3000]
+        0xDD, 0x36, 0x00, 0x20, // fnsave [0x2000]
+    ];
+    let mut env = env16(prog, 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x3000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    let out = run16m(&mut env, 0x1000, "x86_64", 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
+    let mut image = [0u8; 10];
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    env.backend
+        .mem
+        .read(VirtAddr(0x200e), &mut image, acc)
+        .unwrap();
+    assert_eq!(&image[..8], &(1u64 << 63).to_le_bytes());
+    assert_eq!(&image[8..], &0x3fffu16.to_le_bytes());
+}
+
+#[test]
+fn run_x87_fnstenv_protected16_layout() {
+    // 32 ビット保護モードで 66 を付けた FNSTENVは 16-bit protected format
+    // （SDM Figure 8-11）を書く。FOP はこの形式に無い。
+    let prog: &[u8] = &[
+        0xD9, 0x05, 0x00, 0x30, 0x00, 0x00, // fld dword [0x3000] @0x1000
+        0x66, 0xD9, 0x35, 0x00, 0x20, 0x00, 0x00, // fnstenv [0x2000]
+    ];
+    let (out, mut env) = run32(prog, 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100d });
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut b = [0u8; 2];
+    let mut h16 = |a: u64, env: &mut BareEnv| {
+        env.backend.mem.read(VirtAddr(a), &mut b, acc).unwrap();
+        u16::from_le_bytes(b)
+    };
+    assert_eq!(h16(0x2006, &mut env), 0x1000, "FIP low16");
+    assert_eq!(h16(0x200a, &mut env), 0x3000, "FDP low16");
+}
+
 // ---- A0: 80186/80286 世代差 ----
 
 /// `model` 名で m16 を回すヘルパー。
@@ -18020,7 +18135,7 @@ fn run16_286_smsw_lmsw() {
     // PE=0 の LMSW は状態を変えない。
     let prog = &[0x0F, 0x01, 0xE0, 0x0F, 0x01, 0xF0];
     let mut env = env16(prog, 0x1000);
-    let out = run16m(&mut env, 0x1000, "i286", 2);
+    let out = run16m(&mut env, 0x1000, "x86_64", 2);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFFF0);
 }

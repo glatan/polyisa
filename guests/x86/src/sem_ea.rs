@@ -12104,10 +12104,380 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     sem::push_ext(b, sig, new_e)
 }
 
+/// 環境イメージ内の 16 ビット値を書く。
+fn env_st16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    off: u64,
+    v: B::V<W16>,
+) -> Flow<B> {
+    let k = b.konst::<W64>(off);
+    let ad = b.add::<W64>(a, k);
+    decode::mem_store::<B, W16>(b, ad, wseg, v)
+}
+
+/// 環境イメージ内の 16 ビット値を読む。
+fn env_ld16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    off: u64,
+) -> Result<B::V<W16>, B::Exit> {
+    let k = b.konst::<W64>(off);
+    let ad = b.add::<W64>(a, k);
+    decode::mem_load::<B, W16>(b, ad, wseg)
+}
+
+/// 16 ビット保護モード形式（Figure 8-11）を書く。FOP はこの形式に無い。
+fn x87_env_store_prot16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    env_st16(b, a, wseg, 0, fcw)?;
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh);
+    let fswv = b.or::<W16>(fsw, tbits);
+    env_st16(b, a, wseg, 2, fswv)?;
+    let ftw: B::V<W16> = b.get(sem::ftw_ref());
+    env_st16(b, a, wseg, 4, ftw)?;
+    let fip64: B::V<W64> = b.get(sem::fip_ref());
+    let fip: B::V<W16> = b.trunc::<W64, W16>(fip64);
+    env_st16(b, a, wseg, 6, fip)?;
+    let fcs: B::V<W16> = b.get(sem::fcs_ref());
+    env_st16(b, a, wseg, 8, fcs)?;
+    let fdp64: B::V<W64> = b.get(sem::fdp_ref());
+    let fdp: B::V<W16> = b.trunc::<W64, W16>(fdp64);
+    env_st16(b, a, wseg, 10, fdp)?;
+    let fds: B::V<W16> = b.get(sem::fds_ref());
+    env_st16(b, a, wseg, 12, fds)
+}
+
+/// 16 ビット保護モード形式を読む。FOP は形式に無いので 0 にする。
+fn x87_env_load_prot16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let fcw = env_ld16(b, a, wseg, 0)?;
+    b.set(sem::fcw_ref(), fcw);
+    let fsw = env_ld16(b, a, wseg, 2)?;
+    let sh = b.konst::<W16>(11);
+    let t = b.shr_l::<W16>(fsw, sh);
+    let seven = b.konst::<W16>(7);
+    let top = b.and::<W16>(t, seven);
+    let keep = b.konst::<W16>(!0x3800u16);
+    let fsw_n = b.and::<W16>(fsw, keep);
+    b.set(sem::fsw_ref(), fsw_n);
+    b.set(sem::top_ref(), top);
+    let ftw = env_ld16(b, a, wseg, 4)?;
+    b.set(sem::ftw_ref(), ftw);
+    let fip = env_ld16(b, a, wseg, 6)?;
+    let fip64 = b.zext::<W16, W64>(fip);
+    b.set(sem::fip_ref(), fip64);
+    let fcs = env_ld16(b, a, wseg, 8)?;
+    b.set(sem::fcs_ref(), fcs);
+    let fdp = env_ld16(b, a, wseg, 10)?;
+    let fdp64 = b.zext::<W16, W64>(fdp);
+    b.set(sem::fdp_ref(), fdp64);
+    let fds = env_ld16(b, a, wseg, 12)?;
+    b.set(sem::fds_ref(), fds);
+    let z16 = b.konst::<W16>(0);
+    b.set(sem::fop_ref(), z16);
+    Ok(())
+}
+
+/// real-address mode 32-bit format（Figure 8-10）を書く。
+/// 図の上位 4 ビットは 0 で、FIP/FDP の上位側は 12 ビットだけを保持する。
+fn x87_env_store_real32<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let z16 = b.konst::<W16>(0);
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    env_st16(b, a, wseg, 0, fcw)?;
+    env_st16(b, a, wseg, 2, z16)?;
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh11 = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh11);
+    let fswv = b.or::<W16>(fsw, tbits);
+    env_st16(b, a, wseg, 4, fswv)?;
+    env_st16(b, a, wseg, 6, z16)?;
+    let ftw: B::V<W16> = b.get(sem::ftw_ref());
+    env_st16(b, a, wseg, 8, ftw)?;
+    env_st16(b, a, wseg, 10, z16)?;
+    let fip64: B::V<W64> = b.get(sem::fip_ref());
+    let fip32: B::V<W32> = b.trunc::<W64, W32>(fip64);
+    let fipl: B::V<W16> = b.trunc::<W32, W16>(fip32);
+    env_st16(b, a, wseg, 12, fipl)?;
+    env_st16(b, a, wseg, 14, z16)?;
+    let fop: B::V<W16> = b.get(sem::fop_ref());
+    let opmask = b.konst::<W16>(0x7ff);
+    let fop11 = b.and::<W16>(fop, opmask);
+    // +16 dword の bits27:12 に FIP[31:16] が連続して入る。
+    // したがって +16 は FIP[19:16]<<12|FOP、+18 は FIP[31:20]。
+    let sh16w = b.konst::<W32>(16);
+    let fiph32 = b.shr_l::<W32>(fip32, sh16w);
+    let maskfw = b.konst::<W32>(0xf);
+    let fipln = b.and::<W32>(fiph32, maskfw);
+    let sh12w32 = b.konst::<W32>(12);
+    let fipln_pos = b.shl::<W32>(fipln, sh12w32);
+    let fop32 = b.zext::<W16, W32>(fop11);
+    let lowmix = b.or::<W32>(fipln_pos, fop32);
+    let lowmix16: B::V<W16> = b.trunc::<W32, W16>(lowmix);
+    env_st16(b, a, wseg, 16, lowmix16)?;
+    let sh20w = b.konst::<W32>(20);
+    let fiph32 = b.shr_l::<W32>(fip32, sh20w);
+    let mask12w = b.konst::<W32>(0xfff);
+    let fiph12 = b.and::<W32>(fiph32, mask12w);
+    let fiph: B::V<W16> = b.trunc::<W32, W16>(fiph12);
+    env_st16(b, a, wseg, 18, fiph)?;
+    let fdp64: B::V<W64> = b.get(sem::fdp_ref());
+    let fdp32: B::V<W32> = b.trunc::<W64, W32>(fdp64);
+    let fdpl: B::V<W16> = b.trunc::<W32, W16>(fdp32);
+    env_st16(b, a, wseg, 20, fdpl)?;
+    env_st16(b, a, wseg, 22, z16)?;
+    let fdph32 = b.shr_l::<W32>(fdp32, sh16w);
+    let fdpln = b.and::<W32>(fdph32, maskfw);
+    let fdpln_pos = b.shl::<W32>(fdpln, sh12w32);
+    let fdplow16: B::V<W16> = b.trunc::<W32, W16>(fdpln_pos);
+    env_st16(b, a, wseg, 24, fdplow16)?;
+    let fdph32 = b.shr_l::<W32>(fdp32, sh20w);
+    let fdph12 = b.and::<W32>(fdph32, mask12w);
+    let fdph: B::V<W16> = b.trunc::<W32, W16>(fdph12);
+    env_st16(b, a, wseg, 26, fdph)
+}
+
+/// real-address mode 32-bit format を読む。selector は real mode なので clear。
+fn x87_env_load_real32<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let fcw = env_ld16(b, a, wseg, 0)?;
+    b.set(sem::fcw_ref(), fcw);
+    let fsw = env_ld16(b, a, wseg, 4)?;
+    let sh = b.konst::<W16>(11);
+    let t = b.shr_l::<W16>(fsw, sh);
+    let seven = b.konst::<W16>(7);
+    let top = b.and::<W16>(t, seven);
+    let keep = b.konst::<W16>(!0x3800u16);
+    let fsw_n = b.and::<W16>(fsw, keep);
+    b.set(sem::fsw_ref(), fsw_n);
+    b.set(sem::top_ref(), top);
+    let ftw = env_ld16(b, a, wseg, 8)?;
+    b.set(sem::ftw_ref(), ftw);
+    let lo16 = env_ld16(b, a, wseg, 12)?;
+    let hi16 = env_ld16(b, a, wseg, 18)?;
+    let lo32 = b.zext::<W16, W32>(lo16);
+    let hi32 = b.zext::<W16, W32>(hi16);
+    let sh16 = b.konst::<W32>(16);
+    let mix = env_ld16(b, a, wseg, 16)?;
+    let mix32 = b.zext::<W16, W32>(mix);
+    let sh12 = b.konst::<W32>(12);
+    let ip_ln0 = b.shr_l::<W32>(mix32, sh12);
+    let mask4 = b.konst::<W32>(0xf);
+    let ip_ln = b.and::<W32>(ip_ln0, mask4);
+    let ip_ln_pos = b.shl::<W32>(ip_ln, sh16);
+    let mask12 = b.konst::<W32>(0xfff);
+    let ip_hi12 = b.and::<W32>(hi32, mask12);
+    let sh20 = b.konst::<W32>(20);
+    let ip_hi_pos = b.shl::<W32>(ip_hi12, sh20);
+    let fip_lo = b.or::<W32>(lo32, ip_ln_pos);
+    let fip32 = b.or::<W32>(fip_lo, ip_hi_pos);
+    let fip64 = b.zext::<W32, W64>(fip32);
+    b.set(sem::fip_ref(), fip64);
+    let fop = env_ld16(b, a, wseg, 16)?;
+    let opmask = b.konst::<W16>(0x7ff);
+    let fop11 = b.and::<W16>(fop, opmask);
+    b.set(sem::fop_ref(), fop11);
+    let dlo16 = env_ld16(b, a, wseg, 20)?;
+    let dhi16 = env_ld16(b, a, wseg, 26)?;
+    let dlo32 = b.zext::<W16, W32>(dlo16);
+    let dhi32 = b.zext::<W16, W32>(dhi16);
+    let dmix = env_ld16(b, a, wseg, 24)?;
+    let dmix32 = b.zext::<W16, W32>(dmix);
+    let dp_ln0 = b.shr_l::<W32>(dmix32, sh12);
+    let dp_ln = b.and::<W32>(dp_ln0, mask4);
+    let dp_ln_pos = b.shl::<W32>(dp_ln, sh16);
+    let dp_hi12 = b.and::<W32>(dhi32, mask12);
+    let dp_hi_pos = b.shl::<W32>(dp_hi12, sh20);
+    let fdp_lo = b.or::<W32>(dlo32, dp_ln_pos);
+    let fdp32 = b.or::<W32>(fdp_lo, dp_hi_pos);
+    let fdp64 = b.zext::<W32, W64>(fdp32);
+    b.set(sem::fdp_ref(), fdp64);
+    let z16 = b.konst::<W16>(0);
+    b.set(sem::fcs_ref(), z16);
+    b.set(sem::fds_ref(), z16);
+    Ok(())
+}
+
+/// real-address mode 16-bit format（Figure 8-12）を書く。
+fn x87_env_store_real16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    env_st16(b, a, wseg, 0, fcw)?;
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh11 = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh11);
+    let fswv = b.or::<W16>(fsw, tbits);
+    env_st16(b, a, wseg, 2, fswv)?;
+    let ftw: B::V<W16> = b.get(sem::ftw_ref());
+    env_st16(b, a, wseg, 4, ftw)?;
+    let fip64: B::V<W64> = b.get(sem::fip_ref());
+    let fip32: B::V<W32> = b.trunc::<W64, W32>(fip64);
+    let fipl: B::V<W16> = b.trunc::<W32, W16>(fip32);
+    env_st16(b, a, wseg, 6, fipl)?;
+    let sh16w = b.konst::<W32>(16);
+    let fiph = b.shr_l::<W32>(fip32, sh16w);
+    let mask4w = b.konst::<W32>(0xf);
+    let fiph4 = b.and::<W32>(fiph, mask4w);
+    let sh12w = b.konst::<W32>(12);
+    let fiph_pos = b.shl::<W32>(fiph4, sh12w);
+    let fop: B::V<W16> = b.get(sem::fop_ref());
+    let fop32 = b.zext::<W16, W32>(fop);
+    let maskop = b.konst::<W32>(0x7ff);
+    let fop11 = b.and::<W32>(fop32, maskop);
+    let mixed = b.or::<W32>(fiph_pos, fop11);
+    let mixed16: B::V<W16> = b.trunc::<W32, W16>(mixed);
+    env_st16(b, a, wseg, 8, mixed16)?;
+    let fdp64: B::V<W64> = b.get(sem::fdp_ref());
+    let fdp32: B::V<W32> = b.trunc::<W64, W32>(fdp64);
+    let fdpl: B::V<W16> = b.trunc::<W32, W16>(fdp32);
+    env_st16(b, a, wseg, 10, fdpl)?;
+    let fdph = b.shr_l::<W32>(fdp32, sh16w);
+    let fdph4 = b.and::<W32>(fdph, mask4w);
+    let fdph_pos = b.shl::<W32>(fdph4, sh12w);
+    let fdph16: B::V<W16> = b.trunc::<W32, W16>(fdph_pos);
+    env_st16(b, a, wseg, 12, fdph16)
+}
+
+/// real-address mode 16-bit format を読む。selector は real mode なので clear。
+fn x87_env_load_real16<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
+    let fcw = env_ld16(b, a, wseg, 0)?;
+    b.set(sem::fcw_ref(), fcw);
+    let fsw = env_ld16(b, a, wseg, 2)?;
+    let sh = b.konst::<W16>(11);
+    let t = b.shr_l::<W16>(fsw, sh);
+    let seven = b.konst::<W16>(7);
+    let top = b.and::<W16>(t, seven);
+    let keep = b.konst::<W16>(!0x3800u16);
+    let fsw_n = b.and::<W16>(fsw, keep);
+    b.set(sem::fsw_ref(), fsw_n);
+    b.set(sem::top_ref(), top);
+    let ftw = env_ld16(b, a, wseg, 4)?;
+    b.set(sem::ftw_ref(), ftw);
+    let lo = env_ld16(b, a, wseg, 6)?;
+    let mixed = env_ld16(b, a, wseg, 8)?;
+    let lo32 = b.zext::<W16, W32>(lo);
+    let mixed32 = b.zext::<W16, W32>(mixed);
+    let sh12 = b.konst::<W32>(12);
+    let hi_nib0 = b.shr_l::<W32>(mixed32, sh12);
+    let mask4 = b.konst::<W32>(0xf);
+    let hi_nib = b.and::<W32>(hi_nib0, mask4);
+    let sh16 = b.konst::<W32>(16);
+    let hi20 = b.shl::<W32>(hi_nib, sh16);
+    let fip32 = b.or::<W32>(lo32, hi20);
+    let fip64 = b.zext::<W32, W64>(fip32);
+    b.set(sem::fip_ref(), fip64);
+    let opmask = b.konst::<W16>(0x7ff);
+    let fop = b.and::<W16>(mixed, opmask);
+    b.set(sem::fop_ref(), fop);
+    let dlo = env_ld16(b, a, wseg, 10)?;
+    let dhi = env_ld16(b, a, wseg, 12)?;
+    let dlo32 = b.zext::<W16, W32>(dlo);
+    let dhi32 = b.zext::<W16, W32>(dhi);
+    let dhi_nib0 = b.shr_l::<W32>(dhi32, sh12);
+    let dhi_nib = b.and::<W32>(dhi_nib0, mask4);
+    let dhi20 = b.shl::<W32>(dhi_nib, sh16);
+    let fdp32 = b.or::<W32>(dlo32, dhi20);
+    let fdp64 = b.zext::<W32, W64>(fdp32);
+    b.set(sem::fdp_ref(), fdp64);
+    let z16 = b.konst::<W16>(0);
+    b.set(sem::fcs_ref(), z16);
+    b.set(sem::fds_ref(), z16);
+    Ok(())
+}
+
+/// 環境形式を選んで書く。戻り値の size は後続 ST image の開始 offset。
+fn x87_env_store<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    osize: u8,
+) -> Result<u64, B::Exit> {
+    if mode == 16 {
+        if osize == 16 {
+            x87_env_store_real16(b, a, wseg)?;
+            Ok(14)
+        } else {
+            x87_env_store_real32(b, a, wseg)?;
+            Ok(28)
+        }
+    } else if osize == 16 {
+        x87_env_store_prot16(b, a, wseg)?;
+        Ok(14)
+    } else {
+        x87_env_store_prot32(b, a, wseg)?;
+        Ok(28)
+    }
+}
+
+/// 環境形式を選んで読む。戻り値の size は後続 ST image の開始 offset。
+fn x87_env_load<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    osize: u8,
+) -> Result<u64, B::Exit> {
+    if mode == 16 {
+        if osize == 16 {
+            x87_env_load_real16(b, a, wseg)?;
+            Ok(14)
+        } else {
+            x87_env_load_real32(b, a, wseg)?;
+            Ok(28)
+        }
+    } else if osize == 16 {
+        x87_env_load_prot16(b, a, wseg)?;
+        Ok(14)
+    } else {
+        x87_env_load_prot32(b, a, wseg)?;
+        Ok(28)
+    }
+}
+
 /// FNSAVE/FNSTENV 共通の環境 28 バイト書き込み。
+/// 32 ビット保護モード形式。/// FNSAVE/FNSTENV 共通の環境 28 バイト書き込み。
 /// 32 ビット保護モード形式。各 32 ビット語の下位に FCW/FSW/FTW を置き、
 /// 上位は 0。FIP/FCS/FOP/FDP/FDS は追跡未実装なので 0 を書く。
-fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64>)>) -> Flow<B> {
+fn x87_env_store_prot32<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
     let fcw: B::V<W16> = b.get(sem::fcw_ref());
     decode::mem_store::<B, W16>(b, a, wseg, fcw)?;
     let z16 = b.konst::<W16>(0);
@@ -12146,7 +12516,9 @@ fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W6
     let a18 = b.konst::<W64>(18);
     let aw = b.add::<W64>(a, a18);
     let fop: B::V<W16> = b.get(sem::fop_ref());
-    decode::mem_store::<B, W16>(b, aw, wseg, fop)?;
+    let opmask = b.konst::<W16>(0x7ff);
+    let fop11 = b.and::<W16>(fop, opmask);
+    decode::mem_store::<B, W16>(b, aw, wseg, fop11)?;
     let a20 = b.konst::<W64>(20);
     let aw = b.add::<W64>(a, a20);
     let fdp: B::V<W64> = b.get(sem::fdp_ref());
@@ -12165,7 +12537,11 @@ fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W6
 /// FRSTOR/FLDENV 共通の環境読み出し。32 ビット保護モード形式の
 /// FCW・FSW（C ビット+TOP）・FTW を戻す。FRSTOR 側はこの FTW の
 /// empty/non-empty だけを使い、非空タグをデータから再計算する。
-fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64>)>) -> Flow<B> {
+fn x87_env_load_prot32<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Flow<B> {
     let fcw = decode::mem_load::<B, W16>(b, a, wseg)?;
     b.set(sem::fcw_ref(), fcw);
     let a4 = b.konst::<W64>(4);
@@ -12196,7 +12572,9 @@ fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>, wseg: Option<(u64, B::V<W64
     let a18 = b.konst::<W64>(18);
     let aw = b.add::<W64>(a, a18);
     let fop = decode::mem_load::<B, W16>(b, aw, wseg)?;
-    b.set(sem::fop_ref(), fop);
+    let opmask = b.konst::<W16>(0x7ff);
+    let fop11 = b.and::<W16>(fop, opmask);
+    b.set(sem::fop_ref(), fop11);
     let a20 = b.konst::<W64>(20);
     let aw = b.add::<W64>(a, a20);
     let fdp32: B::V<W32> = decode::mem_load::<B, W32>(b, aw, wseg)?;
@@ -12224,23 +12602,23 @@ fn x87_recompute_tags_from_data<B: Backend>(b: &mut B) {
     }
 }
 
-/// FLDENV m28。環境を読み戻す（FIP/FCS/FOP/FDP/FDS はモデル外）。
-pub fn fldenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+/// FLDENV m14/28byte。現在の mode/osize に応じた環境形式を読み戻す。
+pub fn fldenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8, osize: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
-    x87_env_load(b, *a, *wseg)?;
+    x87_env_load(b, *a, *wseg, mode, osize)?;
     x87_recompute_tags_from_data(b);
     Ok(())
 }
 
-/// FNSTENV m28。環境を書き出し、全浮動小数点例外をマスクする（FCW|=0x3f）。
-pub fn fnstenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+/// FNSTENV m14/28byte。環境を書き出し、全浮動小数点例外をマスクする（FCW|=0x3f）。
+pub fn fnstenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8, osize: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
     let a = *a;
-    x87_env_store(b, a, *wseg)?;
+    x87_env_store(b, a, *wseg, mode, osize)?;
     let fcw: B::V<W16> = b.get(sem::fcw_ref());
     let mask = b.konst::<W16>(0x3f);
     let m = b.or::<W16>(fcw, mask);
@@ -12260,19 +12638,18 @@ pub fn fnstsw_m16<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Ex
     decode::wr16(b, ea, v)
 }
 
-/// FNSAVE m108。28 バイトの環境 + 8×10 バイトの ST を書き、
+/// FNSAVE m94/108byte。14/28 バイトの環境 + 8×10 バイトの ST を書き、
 /// 書き終わると FPU を初期化する（FCW=0x037F、スタックは空）。
-/// FIP/FCS/FOP/FDP/FDS はモデル外のため 0 を書く。
-pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8, osize: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
     let a = *a;
-    x87_env_store(b, a, *wseg)?;
+    let env_size = x87_env_store(b, a, *wseg, mode, osize)?;
     // ST レジスタ: 論理順（ST(0) から）で sig(8B)+exp(2B)。
     let top = b.get(sem::top_ref());
     let seven = b.konst::<W16>(7);
-    let a28 = b.konst::<W64>(28);
+    let a28 = b.konst::<W64>(env_size);
     for i in 0..8u32 {
         let ii = b.konst::<W16>(i as u16);
         let summed = b.add::<W16>(top, ii);
@@ -12303,17 +12680,17 @@ pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     Ok(())
 }
 
-/// FRSTOR m108。FNSAVE が書いた形式から環境と ST を戻す。
+/// FRSTOR m94/108byte。FSAVE/FNSAVE が書いた形式から環境と ST を戻す。
 /// FSW から TOP を `top` へ、C ビットを `fsw` へ反映する。
-pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8, osize: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
     let a = *a;
-    x87_env_load(b, a, *wseg)?;
+    let env_size = x87_env_load(b, a, *wseg, mode, osize)?;
     let top = b.get(sem::top_ref());
     let seven = b.konst::<W16>(7);
-    let a28 = b.konst::<W64>(28);
+    let a28 = b.konst::<W64>(env_size);
     for i in 0..8u32 {
         let off = b.konst::<W64>(u64::from(i) * 10);
         let base = b.add::<W64>(a, a28);

@@ -5490,7 +5490,7 @@ fn dispatch_map_inner<B: Backend>(
                     _ => return Ok(false),
                 }
             } else {
-                sem_ea::fldenv_m(b, &ea)
+                sem_ea::fldenv_m(b, &ea, mode, d.osize)
             }
         }
         Insn::FldcwM16 => {
@@ -5515,7 +5515,7 @@ fn dispatch_map_inner<B: Backend>(
                     _ => return Ok(false),
                 }
             } else {
-                sem_ea::fnstenv_m(b, &ea)
+                sem_ea::fnstenv_m(b, &ea, mode, d.osize)
             }
         }
         Insn::FnstcwM16 => {
@@ -5755,7 +5755,7 @@ fn dispatch_map_inner<B: Backend>(
             if d.modrm >= 0xC0 {
                 sem_ea::fcom_sti(b, d.modrm & 7, false)
             } else {
-                sem_ea::frstor_m(b, &ea)
+                sem_ea::frstor_m(b, &ea, mode, d.osize)
             }
         }
         Insn::X87dd5 => {
@@ -5771,7 +5771,7 @@ fn dispatch_map_inner<B: Backend>(
             if d.modrm >= 0xC0 {
                 return Ok(false);
             }
-            sem_ea::fnsave_m(b, &ea)
+            sem_ea::fnsave_m(b, &ea, mode, d.osize)
         }
         Insn::FnstswM16 => {
             // DD /7: mem=FNSTSW m16、mod=11 は DD F8+i FSTP st(i)。
