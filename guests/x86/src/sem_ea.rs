@@ -9703,6 +9703,59 @@ pub fn fild_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<()
     }
 }
 
+/// FIST 系の整数化。丸めで値が変われば PE、NaN/無限大や
+/// 出力幅に入らない値なら IE を立てる。denormal 入力では DE も立てる。
+fn fist_apply_exceptions<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+    bits: u32,
+    v: B::V<W64>,
+    inexact: B::B,
+    bad64: B::B,
+) -> B::V<W64> {
+    use polyisa_sem::{Cmp, W16, W64};
+    let z64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let false0 = b.cmp::<W64>(Cmp::Eq, z64, one64);
+    let mut width_bad = false0;
+    if bits == 16 {
+        let max = b.konst::<W64>(0x7fff);
+        let min = b.konst::<W64>(0xffff_ffff_ffff_8000);
+        let pos = b.cmp::<W64>(Cmp::GtS, v, max);
+        let neg = b.cmp::<W64>(Cmp::LtS, v, min);
+        width_bad = sem::bit_or(b, pos, neg);
+    } else if bits == 32 {
+        let max = b.konst::<W64>(0x7fff_ffff);
+        let min = b.konst::<W64>(0xffff_ffff_8000_0000);
+        let pos = b.cmp::<W64>(Cmp::GtS, v, max);
+        let neg = b.cmp::<W64>(Cmp::LtS, v, min);
+        width_bad = sem::bit_or(b, pos, neg);
+    }
+    let invalid = sem::bit_or(b, bad64, width_bad);
+    sem::x87_exception_flag(b, invalid, 1);
+    sem::x87_exception_flag(b, inexact, 1 << 5);
+
+    let exp64 = b.zext::<W16, W64>(exp);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(exp64, mask15);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
+    let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, z64);
+    let denormal = sem::bit_and(b, exp_zero, sig_nz);
+    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let indef = match bits {
+        16 => b.konst::<W64>(0x8000),
+        32 => b.konst::<W64>(0x8000_0000),
+        _ => b.konst::<W64>(1u64 << 63),
+    };
+    b.select::<W64>(invalid, indef, v)
+}
+
+fn fist_convert<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, bits: u32) -> B::V<W64> {
+    let (v, inexact, bad64) = sem::f80_to_i64_occ(b, sig, exp);
+    fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64)
+}
+
 /// FIST/FISTP m16/m32/m64。
 pub fn fist_m<B: Backend>(
     b: &mut B,
@@ -9712,7 +9765,7 @@ pub fn fist_m<B: Backend>(
 ) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
-    let v = sem::f80_to_i64(b, sig, exp);
+    let v = fist_convert(b, sig, exp, bits);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
         match bits {
@@ -9738,23 +9791,28 @@ pub fn fist_m<B: Backend>(
 /// FISTTP 用の切り捨て変換。FISTTP は FCW の RC に関係なく
 /// 常に truncation なので、丸め制御だけを一時的に切り捨てへ
 /// 合わせて共通変換を使う。
-fn f80_to_i64_trunc<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+fn f80_to_i64_trunc_occ<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+) -> (B::V<W64>, B::B, B::B) {
     let old = b.get(sem::fcw_ref());
     let keep = b.konst::<W16>(!0x0c00u16);
     let base = b.and::<W16>(old, keep);
     let trunc = b.konst::<W16>(0x0c00);
     let cw = b.or::<W16>(base, trunc);
     b.set(sem::fcw_ref(), cw);
-    let v = sem::f80_to_i64(b, sig, exp);
+    let r = sem::f80_to_i64_occ(b, sig, exp);
     b.set(sem::fcw_ref(), old);
-    v
+    r
 }
 
 /// FISTTP m16/m32/m64。常に切り捨てで整数化し、pop する。
 pub fn fisttp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
-    let v = f80_to_i64_trunc(b, sig, exp);
+    let (v, inexact, bad64) = f80_to_i64_trunc_occ(b, sig, exp);
+    let v = fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
         match bits {
@@ -12042,7 +12100,7 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let (s0, e0) = sem::read_st(b, top);
     let slot = st_slot(b, 1);
     let (s1, e1) = sem::read_st(b, slot);
-    let n = f80_to_i64_trunc(b, s1, e1);
+    let n = f80_to_i64_trunc_occ(b, s1, e1).0;
     let hi = b.konst::<W64>(0x8000);
     let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
     let nhi = b.cmp::<W64>(Cmp::GtS, n, hi);

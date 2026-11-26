@@ -13630,6 +13630,7 @@ fn run_fisttp_m64_truncates_independent_of_fcw() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x037F);
+    assert_ne!(env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x20, 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
@@ -15181,6 +15182,43 @@ fn run_sse_movq_movss() {
     let mut sys = ExitOne;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
     assert_eq!(out, Outcome::Exit(0x3322_1100));
+}
+
+#[test]
+fn run_fistp_m16_overflow_sets_invalid_and_stores_indefinite() {
+    // DF 1C 24 = fistp word [rsp]。32768.0 は signed 16bit に入らないので
+    // IE が立ち、masked response は integer indefinite の 0x8000。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::fcw_ref(), 0x037Fu16);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 1u64 << 63);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x400Eu16);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDF, 0x1C, 0x24])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_ne!(env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 1, 0);
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut got = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut got, acc)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(got), 0x8000);
 }
 
 #[test]

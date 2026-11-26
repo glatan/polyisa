@@ -15597,7 +15597,11 @@ pub(crate) fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) 
 
 /// 80 ビットを符号付き 64 ビット整数へ丸める。丸め方向は FCW の RC。
 /// 入らない値と非数は不定整数 0x8000_0000_0000_0000。
-pub(crate) fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+pub(crate) fn f80_to_i64_occ<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+) -> (B::V<W64>, B::B, B::B) {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -15701,7 +15705,21 @@ pub(crate) fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) 
     let bad_hi = bit_or(b, is_special, above);
     let bad_ovf = bit_or(b, ovf_63, ovf_norm);
     let bad = bit_or(b, bad_hi, bad_ovf);
-    b.select::<W64>(bad, indef, signed)
+    let value = b.select::<W64>(bad, indef, signed);
+    // 整数化で値が変われば precision exception。指数部 0 の
+    // denormal でも仮数が非零なら小数であり、1 未満の有限値も同様。
+    let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
+    let finite_nz = bit_and(b, sig_nz, not_special);
+    let small = bit_and(b, finite_nz, not_ge);
+    let norm_frac = bit_and(b, any_frac, in_norm);
+    let inexact = bit_or(b, small, norm_frac);
+    (value, inexact, bad)
+}
+
+/// 80 ビットを符号付き 64 ビット整数へ丸める。例外発生の有無を
+/// 必要としない呼び出し側向け。
+pub(crate) fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+    f80_to_i64_occ(b, sig, exp).0
 }
 
 /// FISTP m64。整数を書いてから ST(0) を捨てる。
