@@ -14522,30 +14522,43 @@ pub fn fldz<B: Backend>(b: &mut B) -> Flow<B> {
 /// FXCH ST(i) (D9 C8+i)。ST(0) と ST(i) を入れ替える。seq 0x4d0981 対応.
 pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
+    let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
-    let (sig1, exp1) = read_st(b, src);
+    let (sig1, exp1, fault1) = read_st_source(b, src);
+    let fault = bit_or(b, fault0, fault1);
+    let commit = x87_commit_after_fault(b, fault);
     let tag0 = x87_read_tag(b, top);
     let tag1 = x87_read_tag(b, src);
-    for slot in 0..8 {
-        let idx = b.konst::<W16>(slot as u16);
-        let hit_top = b.cmp::<W16>(Cmp::Eq, top, idx);
-        let hit_src = b.cmp::<W16>(Cmp::Eq, src, idx);
-        let old_sig = b.get(st_sig_ref(slot));
-        let old_exp = b.get(st_exp_ref(slot));
-        let sig_top = b.select::<W64>(hit_top, sig1, old_sig);
-        let exp_top = b.select::<W16>(hit_top, exp1, old_exp);
-        let new_sig = b.select::<W64>(hit_src, sig0, sig_top);
-        let new_exp = b.select::<W16>(hit_src, exp0, exp_top);
-        b.set(st_sig_ref(slot), new_sig);
-        b.set(st_exp_ref(slot), new_exp);
-    }
-    x87_write_tag(b, top, tag1);
-    x87_write_tag(b, src, tag0);
-    Ok(())
+    let special = b.konst::<W16>(2);
+    let eff_tag0 = b.select::<W16>(fault0, special, tag0);
+    let eff_tag1 = b.select::<W16>(fault1, special, tag1);
+    // FXCH は成功時に C1=0。underflow では x87_stack_fault が
+    // すでに C1=0 へしているが、通常の交換でも同じ規則にする。
+    let old_fsw: B::V<W16> = b.get(fsw_ref());
+    let keep_c1 = b.konst::<W16>(!(1u16 << 9));
+    let fsw_c1c = b.and::<W16>(old_fsw, keep_c1);
+    b.set(fsw_ref(), fsw_c1c);
+    b.if_then(commit, |b| {
+        for slot in 0..8 {
+            let idx = b.konst::<W16>(slot as u16);
+            let hit_top = b.cmp::<W16>(Cmp::Eq, top, idx);
+            let hit_src = b.cmp::<W16>(Cmp::Eq, src, idx);
+            let old_sig = b.get(st_sig_ref(slot));
+            let old_exp = b.get(st_exp_ref(slot));
+            let sig_top = b.select::<W64>(hit_top, sig1, old_sig);
+            let exp_top = b.select::<W16>(hit_top, exp1, old_exp);
+            let new_sig = b.select::<W64>(hit_src, sig0, sig_top);
+            let new_exp = b.select::<W16>(hit_src, exp0, exp_top);
+            b.set(st_sig_ref(slot), new_sig);
+            b.set(st_exp_ref(slot), new_exp);
+        }
+        x87_write_tag(b, top, eff_tag1);
+        x87_write_tag(b, src, eff_tag0);
+        Ok(())
+    })
 }
 
 /// ST(0) と ST(i) の比較。戻り値は ZF、PF、CF。NaN は unordered。

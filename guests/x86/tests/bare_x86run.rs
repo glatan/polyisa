@@ -12785,6 +12785,8 @@ fn run_fxch_st1_swaps_three_and_one() {
         .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3FFFu16);
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(1), 1u64 << 63);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xD9, 0xC9])
@@ -13027,6 +13029,81 @@ fn run_fldcw_sibd_rsp() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x0C00);
+}
+
+#[test]
+fn run_x87_fcmov_empty_source_false_condition() {
+    fn once(fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDA, 0xC1])
+            .unwrap(); // fcmovb st(1), st(0)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0u32);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0xC000_0000_0000_0000, 0x4000);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // 条件が偽でも source operand は empty として検査され、masked では
+    // destination が indefinite になる。
+    let (fsw, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
+    let (fsw, sig, exp) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x4000));
+}
+
+#[test]
+fn run_x87_fxch_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u64, u16, u64, u16, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xC9])
+            .unwrap(); // fxch st(1)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0xC000_0000_0000_0000, 0x4000);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            x87_tag(&mut env, 0),
+            x87_tag(&mut env, 1),
+        )
+    }
+    // empty だった ST(1) に indefinite を入れてから交換する。
+    let (fsw, sig0, exp0, sig1, exp1, tag0, tag1) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((sig0, exp0), (0xC000_0000_0000_0000, 0xFFFF));
+    assert_eq!((sig1, exp1), (0xC000_0000_0000_0000, 0x4000));
+    assert_eq!((tag0, tag1), (2, 0));
+    // unmasked では交換しない。
+    let (fsw, sig0, exp0, sig1, exp1, tag0, tag1) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((sig0, exp0), (0xC000_0000_0000_0000, 0x4000));
+    assert_eq!((sig1, exp1), (0, 0));
+    assert_eq!((tag0, tag1), (0, 3));
 }
 
 #[test]

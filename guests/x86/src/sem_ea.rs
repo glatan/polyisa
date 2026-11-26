@@ -10047,13 +10047,28 @@ pub fn fcmov_cc<B: Backend>(b: &mut B, code: u8, i: u8) -> Flow<B> {
 /// FCMOVcc。cond が真なら ST(0) = ST(i)。
 pub fn fcmov<B: Backend>(b: &mut B, cond: B::B, i: u8) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (s0, e0) = sem::read_st(b, top);
+    let (_s0, _e0, fault0) = sem::read_st_source(b, top);
     let slot = st_slot(b, i);
-    let (s1, e1) = sem::read_st(b, slot);
-    let sig = b.select::<W64>(cond, s1, s0);
-    let exp = b.select::<W16>(cond, e1, e0);
-    sem::write_st(b, top, sig, exp);
-    Ok(())
+    let (s1, e1, fault1) = sem::read_st_source(b, slot);
+    let fault = sem::bit_or(b, fault0, fault1);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                sem::write_st(b, top, indef_sig, indef_exp);
+                Ok(())
+            },
+            |b| {
+                b.if_then(cond, |b| {
+                    sem::write_st(b, top, s1, e1);
+                    Ok(())
+                })
+            },
+        )
+    })
 }
 
 /// FCHS（符号反転）/FABS（符号クリア）。
