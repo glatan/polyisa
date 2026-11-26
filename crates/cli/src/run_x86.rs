@@ -2700,12 +2700,202 @@ fn dx_port<B: Backend>(b: &mut B) -> B::V<polyisa_sem::W64> {
     b.zext::<W32, W64>(d16)
 }
 
+/// EMMS/FEMMS 以外に MMX 状態遷移を起こす命令。P/Q operand を持つ
+/// MMX/3DNow! 形と、MMX レジスタを読み書きする SSE 混在形を含める。
+fn is_mmx_nonemms(insn: Insn) -> bool {
+    use Insn::*;
+    matches!(
+        insn,
+        Cvttps2piPvWv
+            | Cvttpd2piPvWv
+            | Cvtps2piPvWv
+            | Cvtpd2piPvWv
+            | Movdq2qPvXv
+            | Movq2dqXvQv
+            | PsrlwQvIb
+            | PsrawQvIb
+            | PsllwQvIb
+            | PsrldQvIb
+            | PsradQvIb
+            | PslldQvIb
+            | PsrlqQvIb
+            | PsllqQvIb
+            | PunpcklbwPvQv
+            | PunpcklwdPvQv
+            | PunpckldqPvQv
+            | PacksswbPvQv
+            | PcmpgtbPvQv
+            | PcmpgtwPvQv
+            | PcmpgtdPvQv
+            | PackuswbPvQv
+            | PunpckhbwPvQv
+            | PunpckhwdPvQv
+            | PunpckhdqPvQv
+            | PackssdwPvQv
+            | PcmpeqbPvQv
+            | PcmpeqwPvQv
+            | PcmpeqdPvQv
+            | PsrlwPvQv
+            | PsrldPvQv
+            | PsrlqPvQv
+            | PaddqPvQv
+            | PmullwPvQv
+            | PsubusbPvQv
+            | PsubuswPvQv
+            | PminubPvQv
+            | PandPvQv
+            | PaddusbPvQv
+            | PadduswPvQv
+            | PmaxubPvQv
+            | PandnPvQv
+            | PavgbPvQv
+            | PsrawPvQv
+            | PsradPvQv
+            | PavgwPvQv
+            | PmulhuwPvQv
+            | PmulhwPvQv
+            | PsubsbPvQv
+            | PsubswPvQv
+            | PminswPvQv
+            | PorPvQv
+            | PaddsbPvQv
+            | PaddswPvQv
+            | PmaxswPvQv
+            | PxorPvQv
+            | PsllwPvQv
+            | PslldPvQv
+            | PsllqPvQv
+            | PmuludqPvQv
+            | PmaddwdPvQv
+            | PsadbwPvQv
+            | PsubbPvQv
+            | PsubwPvQv
+            | PsubdPvQv
+            | PsubqPvQv
+            | PaddbPvQv
+            | PaddwPvQv
+            | PadddPvQv
+            | MovdPvEv
+            | MovdEvPv
+            | MovqPvQv
+            | MovqQvPv
+            | PshufwPvQvIb
+            | PinsrwPvEwIb
+            | PextrwGvPvIb
+            | PmovmskbGvQv
+            | MovntqQvPv
+            | MaskmovqPvQv
+            | PshufbPvQv
+            | PhaddwPvQv
+            | PhadddPvQv
+            | PhaddswPvQv
+            | PmaddubswPvQv
+            | PhsubwPvQv
+            | PhsubdPvQv
+            | PhsubswPvQv
+            | PsignbPvQv
+            | PsignwPvQv
+            | PsigndPvQv
+            | PmulhrswPvQv
+            | PabsbPvQv
+            | PabswPvQv
+            | PabsdPvQv
+            | Pi2fdPqQq
+            | Pf2idPqQq
+            | PfnaccPqQq
+            | PfpnaccPqQq
+            | PfcmpgePqQq
+            | PfminPqQq
+            | PfrcpPqQq
+            | PfrsqrtPqQq
+            | PfsubPqQq
+            | PfaddPqQq
+            | PfcmpgtPqQq
+            | PfmaxPqQq
+            | Pfrcpit1PqQq
+            | Pfrsqit1PqQq
+            | PfsubrPqQq
+            | PfaccPqQq
+            | PfcmpeqPqQq
+            | PfmulPqQq
+            | Pfrcpit2PqQq
+            | PmulhrwPqQq
+            | PavgusbPqQq
+            | Pi2fwPqQq
+            | Pf2iwPqQq
+            | PswapdPqQq
+    )
+}
+
+/// 実行が MMX レジスタへ書いたときの物理スロット。メモリ出力や
+/// MMX を読むだけの命令では None。
+fn mmx_written_slot(insn: Insn, modrm: u8) -> Option<usize> {
+    use Insn::*;
+    if matches!(
+        insn,
+        MovdEvPv
+            | PextrwGvPvIb
+            | PmovmskbGvQv
+            | MovntqQvPv
+            | MaskmovqPvQv
+            | Movq2dqXvQv
+            | Cvtpi2psXvQv
+            | Cvtpi2pdXvQv
+    ) {
+        return None;
+    }
+    if matches!(insn, MovqQvPv) {
+        return (modrm >= 0xC0).then_some(usize::from(modrm & 7));
+    }
+    if matches!(
+        insn,
+        PsrlwQvIb
+            | PsrawQvIb
+            | PsllwQvIb
+            | PsrldQvIb
+            | PsradQvIb
+            | PslldQvIb
+            | PsrlqQvIb
+            | PsllqQvIb
+    ) {
+        return Some(usize::from(modrm & 7));
+    }
+    Some(usize::from((modrm >> 3) & 7))
+}
+
+/// map 実行が成功した MMX 命令へ、TOP/tag/写込先 exponent の
+/// x87 状態遷移を適用する。フォールト・未移行では適用しない。
+#[allow(clippy::too_many_arguments)]
+fn dispatch_map<B: Backend>(
+    b: &mut B,
+    d: &polyisa_guest_x86::MapDec,
+    eip: u32,
+    next_rip: u64,
+    seg: u64,
+    seg_ss: bool,
+    sseg: u64,
+    es: u64,
+    mode: u8,
+    feats: u128,
+) -> Result<bool, B::Exit> {
+    let done = dispatch_map_inner(b, d, eip, next_rip, seg, seg_ss, sseg, es, mode, feats)?;
+    let uses_mm_register =
+        !matches!(d.insn, Insn::Cvtpi2psXvQv | Insn::Cvtpi2pdXvQv) || d.modrm >= 0xC0;
+    if done && is_mmx_nonemms(d.insn) && uses_mm_register {
+        polyisa_guest_x86::sem_ea::mmx_entry(b);
+        if let Some(slot) = mmx_written_slot(d.insn, d.modrm) {
+            polyisa_guest_x86::sem_ea::mmx_written(b, slot);
+        }
+    }
+    Ok(done)
+}
+
 /// map デコード結果を実行する。`Ok(true)` は実行済み、`Ok(false)` は
 /// 未移行で、呼び出し側が旧デコード経路へフォールバックする。
 // Ref: SPEC-X86-INTEL-SDM (v093).
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-fn dispatch_map<B: Backend>(
+fn dispatch_map_inner<B: Backend>(
     b: &mut B,
     d: &polyisa_guest_x86::MapDec,
     eip: u32,
@@ -2752,6 +2942,17 @@ fn dispatch_map<B: Backend>(
             } else {
                 b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))?;
             }
+        }
+    }
+    // MMX 命令も x87 例外の配送点である。EMMS/FEMMS を含め、
+    // 保留中の unmasked x87 exception があるときは MMX 状態遷移や
+    // 実効より先に #MF へ進む。
+    if is_mmx_nonemms(d.insn) || matches!(d.insn, Insn::Emms | Insn::Femms) {
+        let has_pending = sem_ea::x87_has_unmasked_pending(b);
+        if mode == 16 {
+            b.if_then(has_pending, |b| sem_ea::int_real(b, eip, 0, 16, sa, sseg))?;
+        } else {
+            b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))?;
         }
     }
     // 80286+80287 の ESC は実行成功時にポート F8/FC へ命令語と文脈

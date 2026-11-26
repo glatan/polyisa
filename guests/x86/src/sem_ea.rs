@@ -8730,9 +8730,25 @@ pub fn dnow<B: Backend>(b: &mut B, op: Dop, d: &MapDec, ea: &Rm<B::V<W64>>) -> R
     Ok(())
 }
 
-/// FEMMS。MMX 状態の解放（EMMS と同じ。タグワードは未モデル化）。
-pub fn femms<B: Backend>(_b: &mut B) -> Flow<B> {
-    Ok(())
+/// FEMMS。MMX 状態の解放（EMMS と同じく全 x87 tag を empty にする）。
+pub fn femms<B: Backend>(b: &mut B) -> Flow<B> {
+    emms(b)
+}
+
+/// EMMS 以外の MMX 命令が成功したときの x87 状態遷移。
+/// SDM Vol.1 Chapter 9/10: TOP=0、全 tag は valid。MMX レジスタへの
+/// 書き込みでは、対応する x87 80 ビットレジスタの上位 16 ビットが
+/// 全 1 になる。
+pub fn mmx_entry<B: Backend>(b: &mut B) {
+    let z16 = b.konst::<W16>(0);
+    b.set(sem::top_ref(), z16);
+    b.set(sem::ftw_ref(), z16);
+}
+
+/// MMX レジスタ write に伴う exponent/sign 部の更新。
+pub fn mmx_written<B: Backend>(b: &mut B, slot: usize) {
+    let ones = b.konst::<W16>(0xffff);
+    b.set(sem::st_exp_ref(slot), ones);
 }
 
 // ===== SSE4a（AMD 拡張）=====

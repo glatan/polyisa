@@ -13086,6 +13086,62 @@ fn run_x87_fnclex_is_not_blocked_by_pending_exception() {
 }
 
 #[test]
+fn run_mmx_entry_and_emms_update_x87_tags() {
+    // FLD1 で x87 スタックを nonempty にしたあと PADDB mm0,mm0 を
+    // 実行すると、MMX 遷移で TOP=0・全 tag valid・MM0 に対応する
+    // exponent/sign は全 1 になる。EMMS は全 tag を empty に戻す。
+    let prog: &[u8] = &[
+        0xD9, 0xE8, // fld1
+        0x0F, 0xFC, 0xC0, // paddb mm0,mm0
+        0x0F, 0x77, // emms
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, mut env) = run32(prog, 10);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::ftw_ref()), 0xffff);
+
+    let prog2: &[u8] = &[
+        0xD9, 0xE8, // fld1
+        0x0F, 0xFC, 0xC0, // paddb mm0,mm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, mut env) = run32(prog2, 10);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::ftw_ref()), 0);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0xffff
+    );
+}
+
+#[test]
+fn run_x87_pending_exception_blocks_mmx_and_emms() {
+    // PADDB と EMMS はどちらも x87 例外の配送点である。IE pending が
+    // unmasked のままなら、MMX 状態遷移を行わず #MF へ進む。
+    for bytes in [&[0x0F, 0xFC, 0xC0][..], &[0x0F, 0x77][..]] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0);
+        env.backend.set(polyisa_guest_x86::sem::fsw_ref(), 1);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 5u16);
+        env.backend.set(polyisa_guest_x86::sem::ftw_ref(), 0xaaaa);
+        env.backend.mem.write(VirtAddr(0x1000), bytes).unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert!(
+            matches!(out, Outcome::Unimplemented { pc: 0x1000, .. }),
+            "{bytes:?}: {out:?}"
+        );
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 5);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::ftw_ref()), 0xaaaa);
+    }
+}
+
+#[test]
 fn run_x87_fclex_clears_exception_state() {
     // DB E2 = fnclex。例外フラグ・SF/ES/B を落とし、条件コードは残す。
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
