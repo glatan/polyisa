@@ -12369,7 +12369,11 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
 /// 符号保持）、ST(1)=指数（実数化）。±0/±inf/NaN の各クラス結果は近似。
 pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
+    let fsw0 = b.get(sem::fsw_ref());
+    let keep_c1 = b.konst::<W16>(!(1u16 << 9));
+    let fsw_c1c = b.and::<W16>(fsw0, keep_c1);
+    b.set(sem::fsw_ref(), fsw_c1c);
+    let (sig, exp, underflow) = sem::read_st_source(b, top);
     let e64 = b.zext::<W16, W64>(exp);
     let m7fff = b.konst::<W64>(0x7fff);
     let eb = b.and::<W64>(e64, m7fff);
@@ -12380,9 +12384,33 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     let sgn = b.and::<W16>(exp, m8000);
     let k3fff = b.konst::<W16>(0x3fff);
     let new_e = b.or::<W16>(sgn, k3fff);
-    // 旧トップに指数を置き、仮数を積む → ST(0)=仮数、ST(1)=指数。
-    sem::write_st(b, top, es, ee);
-    sem::push_ext(b, sig, new_e)
+
+    let one16 = b.konst::<W16>(1);
+    let dec = b.sub::<W16>(top, one16);
+    let seven = b.konst::<W16>(7);
+    let new_top = b.and::<W16>(dec, seven);
+    let target_tag = sem::x87_read_tag(b, new_top);
+    let empty_tag = b.konst::<W16>(3);
+    let target_empty = b.cmp::<W16>(Cmp::Eq, target_tag, empty_tag);
+    let target_occupied = sem::bit_not(b, target_empty);
+    let no_underflow = sem::bit_not(b, underflow);
+    let overflow = sem::bit_and(b, target_occupied, no_underflow);
+    sem::x87_stack_fault(b, overflow, true);
+
+    let fault = sem::bit_or(b, underflow, overflow);
+    let commit = sem::x87_commit_after_fault(b, fault);
+    let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp = b.konst::<W16>(0xffff);
+    let exp_sig_w = b.select::<W64>(fault, indef_sig, es);
+    let exp_exp_w = b.select::<W16>(fault, indef_exp, ee);
+    let mant_sig_w = b.select::<W64>(fault, indef_sig, sig);
+    let mant_exp_w = b.select::<W16>(fault, indef_exp, new_e);
+    b.if_then(commit, |b| {
+        sem::write_st(b, top, exp_sig_w, exp_exp_w);
+        b.set(sem::top_ref(), new_top);
+        sem::write_st(b, new_top, mant_sig_w, mant_exp_w);
+        Ok(())
+    })
 }
 
 /// 環境イメージ内の 16 ビット値を書く。

@@ -7089,6 +7089,12 @@ fn x87_read_st(env: &mut BareEnv, logical: u16) -> (u64, u16) {
     )
 }
 
+fn x87_logical_tag(env: &mut BareEnv, logical: u16) -> u16 {
+    let i = x87_st_index(env, logical);
+    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    (ftw >> (i * 2)) & 3
+}
+
 fn x87_tag_from_value_scalar(sig: u64, exp: u16) -> u16 {
     let ef = exp & 0x7fff;
     if ef == 0 && sig == 0 {
@@ -7185,7 +7191,58 @@ fn x87_set_c2(env: &mut BareEnv, on: bool) {
 }
 
 fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
+    let empty0 = x87_logical_tag(env, 0) == 3;
+    let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
+    let empty1 = binary && x87_logical_tag(env, 1) == 3;
+    if empty0 || empty1 {
+        if matches!(op, 0xFB | 0xF2 | 0xFE | 0xFF) {
+            x87_set_c2(env, false);
+        }
+        x87_scalar_stack_fault(env, false);
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if fcw & 1 == 0 {
+            return;
+        }
+        let indef = (0xC000_0000_0000_0000u64, 0xffffu16);
+        match op {
+            // 単一結果命令は ST(0) へ indefinite を返す。
+            0xFE | 0xFF | 0xF0 => x87_write_st(env, 0, indef),
+            // push 系は旧 ST(0) と push 側の両方が indefinite。
+            0xFB | 0xF2 => {
+                x87_write_st(env, 0, indef);
+                let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+                let nt = top.wrapping_sub(1) & 7;
+                env.backend.set(polyisa_guest_x86::sem::top_ref(), nt);
+                x87_write_st(env, 0, indef);
+            }
+            // 二項命令は ST(1) へ結果を置いて pop する。
+            0xF1 | 0xF3 | 0xF9 => {
+                x87_write_st(env, 1, indef);
+                x87_pop(env);
+            }
+            _ => unreachable!(),
+        }
+        return;
+    }
     let (s0, e0) = x87_read_st(env, 0);
+    // push 系は range 判定より先に full-stack overflow を検査する。
+    if matches!(op, 0xFB | 0xF2) {
+        let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+        let nt = top.wrapping_sub(1) & 7;
+        let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+        let target_tag = (ftw >> (usize::from(nt) * 2)) & 3;
+        if target_tag != 3 {
+            x87_scalar_stack_fault(env, true);
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            if fcw & 1 != 0 {
+                let indef = (0xC000_0000_0000_0000u64, 0xffffu16);
+                x87_write_st(env, 0, indef);
+                env.backend.set(polyisa_guest_x86::sem::top_ref(), nt);
+                x87_write_st(env, 0, indef);
+            }
+            return;
+        }
+    }
     // FSIN/FCOS/FSINCOS/FPTAN の有限入力は |x| < 2^63。範囲外では
     // C2=1、ST(0) 不変で、push 系も push しない。`exp` は bias 付き
     // なので 2^63 は 16383+63=16446。Infinity/NaN の invalid-operation
