@@ -11441,6 +11441,19 @@ pub fn fp_exception<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     }))
 }
 
+/// 実モード側の #MF 通知。実行を例外 exit で打ち切り、呼び出し側が
+/// IVT vector 16 へ配送する。`int_real` を直接呼ぶと jump だけでは
+/// 命令本体の残りを打ち切れないため、この例外を使う。
+pub fn fp_exception_real<B: Backend>(b: &mut B) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Trap,
+        code: 16,
+        addr: None,
+        in_delay_slot: false,
+    }))
+}
+
 /// 特権違反・保護違反（#GP(0)相当）。
 pub fn protection<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     use polyisa_sem::{ExceptionKind, GuestException};

@@ -2863,6 +2863,74 @@ fn mmx_written_slot(insn: Insn, modrm: u8) -> Option<usize> {
     Some(usize::from((modrm >> 3) & 7))
 }
 
+/// last instruction pointer を変えない x87 control instruction を判別する。
+/// SDM Vol.1 8.1.8 の一覧に基づく。FNOP/FFREE/FINCSTP/FDECSTP は
+/// 機能分類上の control でも、この一覧にはなく last pointer を更新する。
+fn is_x87_control(opcode: u8, modrm: u8) -> bool {
+    if modrm < 0xC0 {
+        let r = (modrm >> 3) & 7;
+        return match opcode {
+            // FLDENV/FLDCW/FNSTENV/FNSTCW
+            0xD9 => matches!(r, 4..=7),
+            // FRSTOR/FNSAVE/FNSTSW
+            0xDD => matches!(r, 4 | 6 | 7),
+            _ => false,
+        };
+    }
+    match opcode {
+        // FNCLEX、FNINIT
+        0xDB => matches!(modrm, 0xE2 | 0xE3),
+        // FNSTSW AX
+        0xDF => modrm == 0xE0,
+        _ => false,
+    }
+}
+
+/// x87 メモリオペランドのデータセレクタ。明示 override を優先し、
+/// なければ BP/SP 系アクセスは SS、それ以外は DS とする。
+fn x87_fds_index(d: &polyisa_guest_x86::MapDec, seg_ss: bool) -> u8 {
+    match d.seg {
+        0x26 => 0,
+        0x2E => 1,
+        0x36 => 2,
+        0x3E => 3,
+        0x64 => 4,
+        0x65 => 5,
+        _ => {
+            if seg_ss || polyisa_guest_x86::decode::ea_uses_ss(d) {
+                2
+            } else {
+                3
+            }
+        }
+    }
+}
+
+/// 成功した non-control x87 命令の FIP/FCS/FOP と、メモリ形では
+/// FDP/FDS を記録する。FOP は low 3 bits of the first opcode byte と
+/// 第 2 バイト（通常 ModRM）を連結した 11 ビット。
+fn x87_record_last<B: Backend>(
+    b: &mut B,
+    d: &polyisa_guest_x86::MapDec,
+    eip: u32,
+    fdp_offset: Option<B::V<polyisa_sem::W64>>,
+    fds_index: u8,
+) {
+    use polyisa_sem::{W16, W64};
+    let ip = b.konst::<W64>(u64::from(eip));
+    b.set(polyisa_guest_x86::sem::fip_ref(), ip);
+    let cs: B::V<W16> = b.get(polyisa_guest_x86::sem::sreg_ref(1));
+    b.set(polyisa_guest_x86::sem::fcs_ref(), cs);
+    let fopv = (u16::from(d.opcode & 7) << 8) | u16::from(d.modrm);
+    let fop = b.konst::<W16>(fopv);
+    b.set(polyisa_guest_x86::sem::fop_ref(), fop);
+    if let Some(off) = fdp_offset {
+        b.set(polyisa_guest_x86::sem::fdp_ref(), off);
+        let fds: B::V<W16> = b.get(polyisa_guest_x86::sem::sreg_ref(fds_index));
+        b.set(polyisa_guest_x86::sem::fds_ref(), fds);
+    }
+}
+
 /// map 実行が成功した MMX 命令へ、TOP/tag/写込先 exponent の
 /// x87 状態遷移を適用する。フォールト・未移行では適用しない。
 #[allow(clippy::too_many_arguments)]
@@ -2878,7 +2946,26 @@ fn dispatch_map<B: Backend>(
     mode: u8,
     feats: u128,
 ) -> Result<bool, B::Exit> {
+    let track_x87 = (0xD8..=0xDF).contains(&d.opcode) && !is_x87_control(d.opcode, d.modrm);
+    let fdp_offset = if track_x87 && d.has_modrm && d.modrm < 0xC0 {
+        match polyisa_guest_x86::decode::rm_of(b, d, next_rip, seg, seg_ss, mode == 16) {
+            polyisa_guest_x86::decode::Rm::Mem { a, .. } => {
+                if seg == 0 {
+                    Some(a)
+                } else {
+                    let sb = b.konst::<polyisa_sem::W64>(seg);
+                    Some(b.sub::<polyisa_sem::W64>(a, sb))
+                }
+            }
+            polyisa_guest_x86::decode::Rm::Reg(_) => None,
+        }
+    } else {
+        None
+    };
     let done = dispatch_map_inner(b, d, eip, next_rip, seg, seg_ss, sseg, es, mode, feats)?;
+    if done && track_x87 {
+        x87_record_last(b, d, eip, fdp_offset, x87_fds_index(d, seg_ss));
+    }
     let uses_mm_register =
         !matches!(d.insn, Insn::Cvtpi2psXvQv | Insn::Cvtpi2pdXvQv) || d.modrm >= 0xC0;
     if done && is_mmx_nonemms(d.insn) && uses_mm_register {
@@ -2938,7 +3025,7 @@ fn dispatch_map_inner<B: Backend>(
         if !no_wait {
             let has_pending = sem_ea::x87_has_unmasked_pending(b);
             if mode == 16 {
-                b.if_then(has_pending, |b| sem_ea::int_real(b, eip, 0, 16, sa, sseg))?;
+                b.if_then(has_pending, |b| sem_ea::fp_exception_real(b))?;
             } else {
                 b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))?;
             }
@@ -2950,7 +3037,7 @@ fn dispatch_map_inner<B: Backend>(
     if is_mmx_nonemms(d.insn) || matches!(d.insn, Insn::Emms | Insn::Femms) {
         let has_pending = sem_ea::x87_has_unmasked_pending(b);
         if mode == 16 {
-            b.if_then(has_pending, |b| sem_ea::int_real(b, eip, 0, 16, sa, sseg))?;
+            b.if_then(has_pending, |b| sem_ea::fp_exception_real(b))?;
         } else {
             b.if_then(has_pending, |b| sem_ea::fp_exception(b, eip))?;
         }
@@ -7136,6 +7223,12 @@ fn x87_transcendental_step(
             })));
         }
         x87_transcendental_exec(env, op);
+        env.backend
+            .set(polyisa_guest_x86::sem::fip_ref(), u64::from(eip));
+        let cs: u16 = env.backend.get(polyisa_guest_x86::sem::sreg_ref(1));
+        env.backend.set(polyisa_guest_x86::sem::fcs_ref(), cs);
+        let fop = (u16::from(md.opcode & 7) << 8) | u16::from(md.modrm);
+        env.backend.set(polyisa_guest_x86::sem::fop_ref(), fop);
         Some(Ok(()))
     } else {
         None

@@ -18904,6 +18904,145 @@ fn run_x87_tags_distinguish_zero_valid_and_empty() {
 }
 
 #[test]
+fn run_x87_last_instruction_pointers_update_and_save() {
+    // FLD/FSTP は non-control なので FIP/FOP/FDP を更新する。
+    // 後の FLDCW/FXSAVE は control/state-save 側なので last instruction
+    // record を書き換えない。FNOP 自体も non-control として記録されるが、
+    // この列では後続の FSTP が最終記録になる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2000
+        0xDD, 0x03, // fld qword [rbx]         @0x100a
+        0xD9, 0xD0, // fnop                   @0x100c
+        0xDD, 0x1B, // fstp qword [rbx]       @0x100e
+        0xD9, 0x2B, // fldcw [rbx]            @0x1010
+        0x0F, 0xAE, 0x43, 0x40, // fxsave [rbx+0x40] @0x1012
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 6, true);
+    assert_eq!(
+        out,
+        Outcome::StepLimit {
+            pc: 0x1000 + prog.len() as u64
+        }
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x100e);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x051b);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x2000);
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut fx = [0u8; 24];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2040), &mut fx, acc)
+        .unwrap();
+    let q = |i: usize| u64::from_le_bytes(fx[i..i + 8].try_into().unwrap());
+    let h = |i: usize| u16::from_le_bytes(fx[i..i + 2].try_into().unwrap());
+    assert_eq!(h(6), 0x051b, "FXSAVE FOP");
+    assert_eq!(q(8), 0x100e, "FXSAVE FIP");
+    assert_eq!(q(16), 0x2000, "FXSAVE FDP");
+}
+
+#[test]
+fn run_x87_transcendental_hook_updates_last_instruction() {
+    // concrete hook で実行する FSIN も non-control なので FIP/FOP を
+    // 更新する。register-only 形なので FDP は変えない。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xE8, 0xD9, 0xFE])
+        .unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::fdp_ref(), 0x5555u64);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1002);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x01fe);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x5555);
+}
+
+#[test]
+fn run_x87_fnop_updates_last_instruction_pointer() {
+    // FNOP はデータレジスタを変えないが、SDM Vol.2 FNOP の記述どおり
+    // FPU instruction pointer は FNOP 自身へ更新する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xE8, 0xD9, 0xD0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1002);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x01d0);
+}
+
+#[test]
+fn run_x87_fldenv_restores_instruction_pointers() {
+    // 32 ビット保護モード環境形式: FIP=+12、FCS=+16、FOP=+18、
+    // FDP=+20、FDS=+24。FLDENV 自体は last pointer を更新しない。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x200c), &0x1234_5678u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0x001bu16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2012), &0x0123u16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2014), &0x2345_6789u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &0x002bu16.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xD9, 0x23, // fldenv [rbx]
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(
+        out,
+        Outcome::StepLimit {
+            pc: 0x1000 + prog.len() as u64
+        }
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fip_ref()),
+        0x1234_5678
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcs_ref()), 0x001b);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x0123);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fdp_ref()),
+        0x2345_6789
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fds_ref()), 0x002b);
+}
+
+#[test]
 fn run_x87_fldenv_recomputes_nonzero_tag_from_data() {
     // FLDENV image の slot0 は valid(00) と書かれていても、実データが
     // +0.0 なら内部 tag は zero(01) へ再計算される。形式は 32 ビット
