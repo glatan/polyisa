@@ -2915,14 +2915,30 @@ fn x87_record_last<B: Backend>(
     eip: u32,
     fdp_offset: Option<B::V<polyisa_sem::W64>>,
     fds_index: u8,
+    fsw_before: B::V<polyisa_sem::W16>,
 ) {
-    use polyisa_sem::{W16, W64};
+    use polyisa_sem::{Cmp, W16, W64};
     let ip = b.konst::<W64>(u64::from(eip));
     b.set(polyisa_guest_x86::sem::fip_ref(), ip);
     let cs: B::V<W16> = b.get(polyisa_guest_x86::sem::sreg_ref(1));
     b.set(polyisa_guest_x86::sem::fcs_ref(), cs);
+    // fopcode compatibility mode を持たない現行モデルでは、FOP は
+    // unmasked exception を新たに発生させた non-control 命令だけが更新する。
+    // FIP/FDP は成功した non-control 命令で常に更新される。
+    let fsw_after: B::V<W16> = b.get(polyisa_guest_x86::sem::fsw_ref());
+    let not_before = b.not::<W16>(fsw_before);
+    let raised = b.and::<W16>(fsw_after, not_before);
+    let fcw: B::V<W16> = b.get(polyisa_guest_x86::sem::fcw_ref());
+    let not_fcw = b.not::<W16>(fcw);
+    let unmasked = b.and::<W16>(raised, not_fcw);
+    let exc_mask = b.konst::<W16>(0x3f);
+    let unmasked = b.and::<W16>(unmasked, exc_mask);
+    let z16 = b.konst::<W16>(0);
+    let update_fop = b.cmp::<W16>(Cmp::Ne, unmasked, z16);
     let fopv = (u16::from(d.opcode & 7) << 8) | u16::from(d.modrm);
-    let fop = b.konst::<W16>(fopv);
+    let fop_new = b.konst::<W16>(fopv);
+    let fop_old: B::V<W16> = b.get(polyisa_guest_x86::sem::fop_ref());
+    let fop = b.select::<W16>(update_fop, fop_new, fop_old);
     b.set(polyisa_guest_x86::sem::fop_ref(), fop);
     if let Some(off) = fdp_offset {
         b.set(polyisa_guest_x86::sem::fdp_ref(), off);
@@ -2962,9 +2978,21 @@ fn dispatch_map<B: Backend>(
     } else {
         None
     };
+    let fsw_before = if track_x87 {
+        Some(b.get::<polyisa_sem::W16>(polyisa_guest_x86::sem::fsw_ref()))
+    } else {
+        None
+    };
     let done = dispatch_map_inner(b, d, eip, next_rip, seg, seg_ss, sseg, es, mode, feats)?;
     if done && track_x87 {
-        x87_record_last(b, d, eip, fdp_offset, x87_fds_index(d, seg_ss));
+        x87_record_last(
+            b,
+            d,
+            eip,
+            fdp_offset,
+            x87_fds_index(d, seg_ss),
+            fsw_before.expect("x87 tracking captures fsw"),
+        );
     }
     let uses_mm_register =
         !matches!(d.insn, Insn::Cvtpi2psXvQv | Insn::Cvtpi2pdXvQv) || d.modrm >= 0xC0;
@@ -3012,11 +3040,12 @@ fn dispatch_map_inner<B: Backend>(
     }
     // マスクされていない x87 例外は、それを起こした命令ではなく
     // 次の x87 命令で #MF となる。FNCLEX/FNINIT/FNST* などの
-    // no-wait 制御命令は例外を処理するため配送対象から外す。
+    // no-wait 制御命令は例外を処理するため配送対象から外す。FNOP は
+    // last-pointer 上は non-control だが wait する通常命令なので除外しない。
     if (0xD8..=0xDF).contains(&d.opcode) {
         let rmreg = (d.modrm >> 3) & 7;
         let no_wait = match d.opcode {
-            0xD9 => d.modrm == 0xD0 || (d.modrm < 0xC0 && matches!(rmreg, 6 | 7)),
+            0xD9 => d.modrm < 0xC0 && matches!(rmreg, 6 | 7),
             0xDB => matches!(d.modrm, 0xE2 | 0xE3),
             0xDD => d.modrm < 0xC0 && matches!(rmreg, 6 | 7),
             0xDF => d.modrm == 0xE0,
@@ -7222,13 +7251,18 @@ fn x87_transcendental_step(
                 in_delay_slot: false,
             })));
         }
+        let fsw_before: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
         x87_transcendental_exec(env, op);
         env.backend
             .set(polyisa_guest_x86::sem::fip_ref(), u64::from(eip));
         let cs: u16 = env.backend.get(polyisa_guest_x86::sem::sreg_ref(1));
         env.backend.set(polyisa_guest_x86::sem::fcs_ref(), cs);
-        let fop = (u16::from(md.opcode & 7) << 8) | u16::from(md.modrm);
-        env.backend.set(polyisa_guest_x86::sem::fop_ref(), fop);
+        let fsw_after: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+        let fcw_after: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if (fsw_after & !fsw_before & !fcw_after & 0x3f) != 0 {
+            let fop = (u16::from(md.opcode & 7) << 8) | u16::from(md.modrm);
+            env.backend.set(polyisa_guest_x86::sem::fop_ref(), fop);
+        }
         Some(Ok(()))
     } else {
         None

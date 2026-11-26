@@ -12996,6 +12996,46 @@ fn run_x87_fdiv_zero_sets_zero_divide_flag() {
 }
 
 #[test]
+fn run_x87_fop_updates_only_for_unmasked_exception() {
+    fn once(fcw: u16) -> (u16, u16, u64) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+        env.backend
+            .set(polyisa_guest_x86::sem::fop_ref(), 0x0123u16);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::fop_ref()),
+            env.backend.get(polyisa_guest_x86::sem::fip_ref()),
+        )
+    }
+    // masked では ZE は sticky に立つが FOP は残る。
+    let (fsw, fop, fip) = once(0x037F);
+    assert_ne!(fsw & 4, 0);
+    assert_eq!(fop, 0x0123);
+    assert_eq!(fip, 0x1000);
+    // ZE(bit2) を unmask すると FOP は FDIV の 11bit opcode になる。
+    let (fsw, fop, fip) = once(0x037B);
+    assert_ne!(fsw & 4, 0);
+    assert_eq!(fop, 0x00F1);
+    assert_eq!(fip, 0x1000);
+}
+
+#[test]
 fn run_x87_unmasked_exception_is_deferred_to_next_fp_insn() {
     // FCW=0 で IE を unmasked にする。sqrt(-1) 自体は完了し、
     // 次の fadd の先頭で #MF が起こる。BareEnv では OS 配送が
@@ -13020,6 +13060,35 @@ fn run_x87_unmasked_exception_is_deferred_to_next_fp_insn() {
         matches!(out, Outcome::Unimplemented { pc: 0x1002, .. }),
         "{out:?}"
     );
+}
+
+#[test]
+fn run_x87_pending_exception_blocks_fnop_before_recording_it() {
+    // FNOP は last-pointer 上の non-control だが no-wait 制御命令ではない。
+    // 前の FSQRT が unmasked IE を残した場合、FNOP は実行前に #MF へ進み、
+    // FIP は例外を起こした FSQRT を指したままである。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0xBFFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xFA, 0xD9, 0xD0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert!(
+        matches!(out, Outcome::Unimplemented { pc: 0x1002, .. }),
+        "{out:?}"
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x01FA);
 }
 
 #[test]
@@ -17925,7 +17994,7 @@ fn bsf_zero_input_param() {
 #[test]
 fn run16_x87_fnstenv_real16_layout() {
     // 16-bit real-address mode format（SDM Figure 8-12）。
-    // FLD m32 は non-control で FIP/FOP/FDP を残し、FNSTENV は 14 バイト形式を書く。
+    // FLD m32 は non-control で FIP/FDP を残す。例外がないので FOP は変わらず、FNSTENV は 14 バイト形式を書く。
     let prog: &[u8] = &[
         0xD9, 0x06, 0x00, 0x30, // fld dword [0x3000] @0x1000
         0xD9, 0x36, 0x00, 0x20, // fnstenv [0x2000]  @0x1004
@@ -17944,12 +18013,12 @@ fn run16_x87_fnstenv_real16_layout() {
         u16::from_le_bytes(b)
     };
     assert_eq!(h16(0x2006), 0x1000, "FIP[15:0]");
-    assert_eq!(h16(0x2008), 0x0106, "FIP[19:16]=0 + FOP");
+    assert_eq!(h16(0x2008), 0, "FIP[19:16]=0、例外なしでは FOP は残る");
     assert_eq!(h16(0x200a), 0x3000, "FDP[15:0]");
     assert_eq!(h16(0x200c), 0, "FDP[19:16] と予約 bits");
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x3000);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x0106);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0);
 }
 
 #[test]
@@ -17977,7 +18046,7 @@ fn run16_x87_fnstenv_real32_layout() {
     assert_eq!(h16(0x2002), 0, "FCW 上位予約");
     assert_eq!(h16(0x200c), 0x1000, "FIP[15:0]");
     assert_eq!(h16(0x200e), 0, "FIP low word の上位予約");
-    assert_eq!(h16(0x2010), 0x0106, "FOP[10:0]");
+    assert_eq!(h16(0x2010), 0, "例外なしでは FOP は残る");
     assert_eq!(h16(0x2012), 0, "FIP[31:16] の低位 12bit");
     assert_eq!(h16(0x2014), 0x3000, "FDP[15:0]");
     assert_eq!(h16(0x2016), 0, "FDP low word の上位予約");
@@ -19020,7 +19089,7 @@ fn run_x87_tags_distinguish_zero_valid_and_empty() {
 
 #[test]
 fn run_x87_last_instruction_pointers_update_and_save() {
-    // FLD/FSTP は non-control なので FIP/FOP/FDP を更新する。
+    // FLD/FSTP は non-control なので FIP/FDP を更新する。例外がないので FOP は残る。
     // 後の FLDCW/FXSAVE は control/state-save 側なので last instruction
     // record を書き換えない。FNOP 自体も non-control として記録されるが、
     // この列では後続の FSTP が最終記録になる。
@@ -19037,6 +19106,8 @@ fn run_x87_last_instruction_pointers_update_and_save() {
         0x0F, 0xAE, 0x43, 0x40, // fxsave [rbx+0x40] @0x1012
     ];
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::fop_ref(), 0x0123u16);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 6, true);
     assert_eq!(
@@ -19046,7 +19117,7 @@ fn run_x87_last_instruction_pointers_update_and_save() {
         }
     );
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x100e);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x051b);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x0123);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x2000);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
@@ -19060,21 +19131,21 @@ fn run_x87_last_instruction_pointers_update_and_save() {
         .unwrap();
     let q = |i: usize| u64::from_le_bytes(fx[i..i + 8].try_into().unwrap());
     let h = |i: usize| u16::from_le_bytes(fx[i..i + 2].try_into().unwrap());
-    assert_eq!(h(6), 0x051b, "FXSAVE FOP");
+    assert_eq!(h(6), 0x0123, "例外なしでは FXSAVE FOP は残る");
     assert_eq!(q(8), 0x100e, "FXSAVE FIP");
     assert_eq!(q(16), 0x2000, "FXSAVE FDP");
 }
 
 #[test]
 fn run_x87_transcendental_hook_updates_last_instruction() {
-    // concrete hook で実行する FSIN も non-control なので FIP/FOP を
-    // 更新する。register-only 形なので FDP は変えない。
+    // concrete hook で実行する FSIN も non-control なので FIP を更新する。
+    // 入力 0 では結果も正確なので例外なく FOP は残り、register-only 形なので FDP は変えない。
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
     env.backend
         .mem
-        .write(VirtAddr(0x1000), &[0xD9, 0xE8, 0xD9, 0xFE])
+        .write(VirtAddr(0x1000), &[0xD9, 0xEE, 0xD9, 0xFE])
         .unwrap();
     env.backend
         .set(polyisa_guest_x86::sem::fdp_ref(), 0x5555u64);
@@ -19082,7 +19153,7 @@ fn run_x87_transcendental_hook_updates_last_instruction() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1002);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x01fe);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fdp_ref()), 0x5555);
 }
 
@@ -19101,7 +19172,7 @@ fn run_x87_fnop_updates_last_instruction_pointer() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fip_ref()), 0x1002);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0x01d0);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fop_ref()), 0);
 }
 
 #[test]
