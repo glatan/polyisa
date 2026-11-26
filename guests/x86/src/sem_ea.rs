@@ -9638,31 +9638,38 @@ pub fn fst_m<B: Backend>(
     pop: bool,
 ) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
-        match bits {
-            32 => {
-                let v64 = sem::f80_to_f64(b, sig, exp);
-                let f = b.trunc::<W64, polyisa_sem::F64>(v64);
-                let v32 = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
-                let bits32 = b.trunc::<polyisa_sem::F32, W32>(v32);
-                decode::mem_store::<B, W32>(b, a, *wseg, bits32)?;
+        let wseg = *wseg;
+        b.if_then(commit, |b| {
+            match bits {
+                32 => {
+                    let v64 = sem::f80_to_f64(b, sig, exp);
+                    let f = b.trunc::<W64, polyisa_sem::F64>(v64);
+                    let v32 = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
+                    let bits32 = b.trunc::<polyisa_sem::F32, W32>(v32);
+                    let indef32 = b.konst::<W32>(0xffc0_0000);
+                    let store32 = b.select::<W32>(fault, indef32, bits32);
+                    decode::mem_store::<B, W32>(b, a, wseg, store32)?;
+                }
+                80 => {
+                    decode::mem_store::<B, W64>(b, a, wseg, sig)?;
+                    let a8 = b.konst::<W64>(8);
+                    let a2 = b.add::<W64>(a, a8);
+                    decode::mem_store::<B, W16>(b, a2, wseg, exp)?;
+                }
+                _ => {
+                    let v = sem::f80_to_f64(b, sig, exp);
+                    decode::mem_store::<B, W64>(b, a, wseg, v)?;
+                }
             }
-            80 => {
-                decode::mem_store::<B, W64>(b, a, *wseg, sig)?;
-                let a8 = b.konst::<W64>(8);
-                let a2 = b.add::<W64>(a, a8);
-                decode::mem_store::<B, W16>(b, a2, *wseg, exp)?;
+            if pop {
+                sem::pop_st(b, top)?;
             }
-            _ => {
-                let v = sem::f80_to_f64(b, sig, exp);
-                decode::mem_store::<B, W64>(b, a, *wseg, v)?;
-            }
-        }
-    }
-    if pop {
-        sem::pop_st(b, top)?;
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -9670,13 +9677,16 @@ pub fn fst_m<B: Backend>(
 /// FST/FSTP ST(i)（DD D0/D8+i）。
 pub fn fst_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
     let dst = st_slot(b, i);
-    sem::write_st(b, dst, sig, exp);
-    if pop {
-        sem::pop_st(b, top)?;
-    }
-    Ok(())
+    b.if_then(commit, |b| {
+        sem::write_st(b, dst, sig, exp);
+        if pop {
+            sem::pop_st(b, top)?;
+        }
+        Ok(())
+    })
 }
 
 /// FILD m16/m32/m64。

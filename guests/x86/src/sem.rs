@@ -14028,6 +14028,20 @@ pub(crate) fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
 /// overflow では QNaN floating-point indefinite を載せ、unmasked では
 /// TOP と source operand を変えない。
 pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
+    let z16 = b.konst::<W16>(0);
+    let no_prior_fault = b.cmp::<W16>(Cmp::Ne, z16, z16);
+    push_ext_with_fault(b, sig, exp_word, no_prior_fault)
+}
+
+/// `prior_fault` は push 前の source operand で検出した stack underflow。
+/// fault 済みの命令は IE masked のときだけ indefinite を commit し、
+/// unmasked では TOP とレジスタを変えない。
+pub(crate) fn push_ext_with_fault<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp_word: B::V<W16>,
+    prior_fault: B::B,
+) -> Flow<B> {
     let top = b.get(top_ref());
     let one16 = b.konst::<W16>(1);
     let dec = b.sub::<W16>(top, one16);
@@ -14043,18 +14057,20 @@ pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16
     let keep_c1 = b.konst::<W16>(!(1u16 << 9));
     let fsw_c1c = b.and::<W16>(fsw0, keep_c1);
     b.set(fsw_ref(), fsw_c1c);
-    x87_stack_fault(b, overflow, true);
+    // source operand の underflow は push 先の占有検査より先に確定する。
+    // 両方が重なっても overflow へ格上げしない。
+    let no_prior = bit_not(b, prior_fault);
+    let overflow_eff = bit_and(b, overflow, no_prior);
+    x87_stack_fault(b, overflow_eff, true);
 
-    let fcw = b.get(fcw_ref());
-    let im = b.konst::<W16>(1);
-    let masked_bits = b.and::<W16>(fcw, im);
-    let z16 = b.konst::<W16>(0);
-    let masked = b.cmp::<W16>(Cmp::Ne, masked_bits, z16);
-    let write_ok = bit_or(b, empty, masked);
+    let fault = bit_or(b, prior_fault, overflow_eff);
+    let nofault = bit_not(b, fault);
+    let masked = x87_ie_masked(b);
+    let write_ok = bit_or(b, nofault, masked);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
-    let sig_w = b.select::<W64>(overflow, indef_sig, sig);
-    let exp_w = b.select::<W16>(overflow, indef_exp, exp_word);
+    let sig_w = b.select::<W64>(fault, indef_sig, sig);
+    let exp_w = b.select::<W16>(fault, indef_exp, exp_word);
     b.if_then(write_ok, |b| {
         b.set(top_ref(), new_top);
         write_st(b, new_top, sig_w, exp_w);
@@ -14612,8 +14628,8 @@ pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
-    let (sig, exp) = read_st(b, src);
-    push_ext(b, sig, exp)
+    let (sig, exp, fault) = read_st_source(b, src);
+    push_ext_with_fault(b, sig, exp, fault)
 }
 
 /// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
@@ -14675,6 +14691,42 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let (sig, exp) = read_st(b, top);
     write_st(b, dst, sig, exp);
     pop_st(b, top)
+}
+
+/// FCW の invalid-operation mask が立っているか。
+pub(crate) fn x87_ie_masked<B: Backend>(b: &mut B) -> B::B {
+    let fcw = b.get(fcw_ref());
+    let im = b.konst::<W16>(1);
+    let masked_bits = b.and::<W16>(fcw, im);
+    let z16 = b.konst::<W16>(0);
+    b.cmp::<W16>(Cmp::Ne, masked_bits, z16)
+}
+
+/// stack fault 後に命令の通常効果を commit できるか。
+/// fault がなければ常に commit し、fault 時は IE masked のときだけ commit する。
+pub(crate) fn x87_commit_after_fault<B: Backend>(b: &mut B, fault: B::B) -> B::B {
+    let nofault = bit_not(b, fault);
+    let masked = x87_ie_masked(b);
+    bit_or(b, nofault, masked)
+}
+
+/// x87 レジスタを source operand として読む。empty なら #IS/SF/C1=0 を立て、
+/// masked response 用に QNaN floating-point indefinite へ置き換える。
+/// raw state save や FXAM には使わない。
+pub(crate) fn read_st_source<B: Backend>(
+    b: &mut B,
+    slot: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>, B::B) {
+    let (sig, exp) = read_st(b, slot);
+    let tag = x87_read_tag(b, slot);
+    let empty_tag = b.konst::<W16>(3);
+    let empty = b.cmp::<W16>(Cmp::Eq, tag, empty_tag);
+    x87_stack_fault(b, empty, false);
+    let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp = b.konst::<W16>(0xffff);
+    let sig_v = b.select::<W64>(empty, indef_sig, sig);
+    let exp_v = b.select::<W16>(empty, indef_exp, exp);
+    (sig_v, exp_v, empty)
 }
 
 /// x87 スタック overflow/underflow の #IS/SF/C1 を立てる。

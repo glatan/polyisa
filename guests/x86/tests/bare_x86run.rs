@@ -22,6 +22,18 @@ fn x87_tag(env: &mut BareEnv, slot: usize) -> u16 {
     (ftw >> (slot * 2)) & 3
 }
 
+fn x87_seed_valid(env: &mut BareEnv, physical: usize, sig: u64, exp: u16) {
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(physical), sig);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(physical), exp);
+    let ftw: u16 = env.backend.get(polyisa_guest_x86::sem::ftw_ref());
+    env.backend.set(
+        polyisa_guest_x86::sem::ftw_ref(),
+        ftw & !(3u16 << (physical * 2)),
+    );
+}
+
 /// `exit(ebx)` だけ処理する。番号は EAX、引数は EBX から読む。
 struct ExitOne;
 
@@ -11931,6 +11943,7 @@ fn run_fstp_m64_sibd_stores_three() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDD, 0x5C, 0x24, 0x08])
@@ -12134,6 +12147,7 @@ fn run_fstp_m80_memnd_stores_three() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDB, 0x3F])
@@ -12297,6 +12311,7 @@ fn run_fld_st0_duplicates() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xD9, 0xC0])
@@ -12343,6 +12358,7 @@ fn run_fstp_m80_sib_stores_three() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDB, 0x3C, 0x24])
@@ -12392,6 +12408,7 @@ fn run_fstp_m80_sibd32_stores_three() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(
@@ -12545,6 +12562,7 @@ fn run_fstp_m80_sibd_stores_three() {
         polyisa_guest_x86::sem::st_sig_ref(0),
         (1u64 << 63) | (1u64 << 62),
     );
+    x87_seed_valid(&mut env, 0, (1u64 << 63) | (1u64 << 62), 0x4000);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDB, 0x7C, 0x24, 0x20])
@@ -13009,6 +13027,8 @@ fn run_x87_push_overflow_sets_sf_c1_and_loads_indefinite() {
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend
+            .set(polyisa_guest_x86::sem::fsw_ref(), 1u16 << 9);
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         env.backend
             .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
@@ -13040,6 +13060,118 @@ fn run_x87_push_overflow_sets_sf_c1_and_loads_indefinite() {
     assert_eq!(top, 0);
     assert_eq!(sig, 0x8000_0000_0000_0000);
     assert_eq!(exp, 0x3FFF);
+}
+
+#[test]
+fn run_x87_fld_st_underflow_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xC0])
+            .unwrap(); // fld st(0)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend
+            .set(polyisa_guest_x86::sem::fsw_ref(), 1u16 << 9);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+            x87_tag(&mut env, 7),
+        )
+    }
+    let (fsw, top, sig, exp, tag7) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!(top, 7);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
+    assert_eq!(tag7, 2);
+    let (fsw, top, sig, exp, tag7) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!(fsw & (1 << 9), 0);
+    assert_eq!(top, 0);
+    assert_eq!((sig, exp), (0, 0));
+    assert_eq!(tag7, 3);
+}
+
+#[test]
+fn run_x87_fstp_m64_underflow_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0x1B])
+            .unwrap(); // fstp qword [rbx]
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x1122_3344_5566_7788u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut mem = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut mem, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            u64::from_le_bytes(mem),
+        )
+    }
+    let (fsw, top, mem) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!(top, 1);
+    assert_eq!(mem, 0xFFF8_0000_0000_0000);
+    let (fsw, top, mem) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!(fsw & (1 << 9), 0);
+    assert_eq!(top, 0);
+    assert_eq!(mem, 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn run_x87_fstp_m32_underflow_stores_single_indefinite() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0x1B])
+        .unwrap(); // fstp dword [rbx]
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend
+        .set(polyisa_guest_x86::sem::fsw_ref(), 1u16 << 9);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let mut mem = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut mem, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(mem), 0xFFC0_0000);
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
 }
 
 #[test]
