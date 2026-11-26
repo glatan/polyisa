@@ -207,12 +207,16 @@ fn declare_features(m: &mut Model) {
     // AVX-512 の中核部分集合（F/VL/BW/DQ/CD）を前提にする。
     feat(m, "avx10", &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"]);
     // AVX10.2/10.3 は版で分かれる（CPUID.0x24 の版報告は未モデル）。
-    feat(m, "avx10_2", &["avx10"]);
-    feat(m, "avx10_3", &["avx10_2"]);
+    feat(m, "avx10_2", &["avx10", "avx10_v1_aux"]);
+    feat(m, "avx10_3", &["avx10_2", "avx10_v2_aux"]);
+    // AVX10 leaf 0x24 subleaf 1 の補助機能 bit。V1_AUX は AVX10.2 の
+    // dot product/convert 群、V2_AUX は FP32↔FP8 と MX 変換の補助群。
+    feat(m, "avx10_v1_aux", &["avx10"]);
+    feat(m, "avx10_v2_aux", &["avx10"]);
     // Leaf 7.1 ECX。ACE（Advanced Compute Extensions）。v2 は版
     // （CPUID.0x1D 系の版報告は未モデル）で分かれる。
     // ACE の命令は AMX のタイル状態も使う（ACE 仕様 §3.1 の前提）。
-    feat(m, "ace", &["avx10", "amx_tile"]);
+    feat(m, "ace", &["avx10", "amx_tile", "avx10_v1_aux", "avx10_v2_aux"]);
     feat(m, "ace_v2", &["ace"]);
     // Leaf 0x8000_0001 EDX。
     feat(m, "syscall", &[]);

@@ -6936,7 +6936,7 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
         // ECX をサブリーフとして読むのは 7・0xD・AMX の
         // 0x1D/0x1E 系。他のリーフは入力 ECX を無視する（1 回目の
         // CPUID が ECX を上書きするため、無条件照合だと続けて読めない）。
-        let hit = if *sid == 0 && !matches!(*id, 7 | 0xD | 0x1D | 0x1E) {
+        let hit = if *sid == 0 && !matches!(*id, 7 | 0xD | 0x1D | 0x1E | 0x24) {
             is
         } else {
             let sk = b.konst::<W32>(*sid);

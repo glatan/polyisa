@@ -82,7 +82,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 22],
+    pub cpuid: [[u32; 4]; 24],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -216,21 +216,21 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 512);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 520);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 352 を
+        // mxcsr（sregs 12 + fsw 2 + cpuid 384 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 896);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 928);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 952);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 960);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 968);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 976);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1232);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1744);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2768);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 2832);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2960);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2960 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11216);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 984);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 992);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 1000);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 1008);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1264);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1776);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2800);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2864);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2992);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2992 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11248);
     }
 
     #[test]
@@ -2262,6 +2262,10 @@ mod tests {
             "xsavec",
             "avx",
             "avx512f",
+            "avx10",
+            "avx10_2",
+            "avx10_v1_aux",
+            "avx10_v2_aux",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2294,6 +2298,10 @@ mod tests {
         assert_eq!(tbl[19][0], 0x3020, "addr size");
         assert_eq!(tbl[20][0], 0xC000_0001, "via max leaf");
         assert_eq!(tbl[21][3] & 0xC, 0xC, "padlock present+enabled");
+        assert_eq!(tbl[0][0], 0x24, "max basic leaf");
+        assert_eq!(tbl[3][3] & (1 << 19), 1 << 19, "leaf7 avx10");
+        assert_eq!(tbl[22], [1, 0x7_0002, 0, 0], "leaf24 avx10 version");
+        assert_eq!(tbl[23], [0, 0, 0xC, 0], "leaf24 aux bits");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());
@@ -2302,7 +2310,8 @@ mod tests {
         assert_eq!(tbl[13], [0; 4]);
         assert_eq!(tbl[21], [0; 4]);
         assert_eq!(tbl[20], [0; 4]);
-        assert_eq!(tbl[20], [0; 4]);
+        assert_eq!(tbl[22], [0; 4]);
+        assert_eq!(tbl[23], [0; 4]);
     }
 
     #[test]

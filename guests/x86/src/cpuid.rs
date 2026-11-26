@@ -17,7 +17,7 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 22] = [
+pub const LEAF_IDS: [(u32, u32); 24] = [
     (0, 0),
     (1, 0),
     (7, 0),
@@ -40,6 +40,8 @@ pub const LEAF_IDS: [(u32, u32); 22] = [
     (0x8000_0008, 0),
     (0xC000_0000, 0),
     (0xC000_0001, 0),
+    (0x24, 0),
+    (0x24, 1),
 ];
 
 /// 最大ベーシックリーフの既定（leaf 0 の EAX）。`xsave` 機能が
@@ -92,7 +94,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 22] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 24] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -125,7 +127,10 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         | (((model >> 4) & 0xf) << 16)
         | (((family >> 4) & 0xff) << 20);
 
-    let def_max = if features.contains("amx_tile") {
+    let def_max = if features.contains("avx10") {
+        // AVX10 の converged vector ISA leaf 0x24 まで報告する。
+        0x24
+    } else if features.contains("amx_tile") {
         // AMX の情報葉 0x1D/0x1E まで報告する。
         0x1E
     } else if features.contains("xsave") {
@@ -133,7 +138,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
     } else {
         MAX_BASIC
     };
-    let max_basic = num(ident, "cpuid.max_basic", def_max);
+    let max_basic = num(ident, "cpuid.max_basic", def_max).max(def_max);
     let max_ext = num(ident, "cpuid.max_ext", MAX_EXT);
     let max_via = if features.contains("via_padlock_rng") {
         0xC000_0001
@@ -315,6 +320,35 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(0xC000_0001, 0, "ecx"),
             reg_of(0xC000_0001, 0, "edx"),
         ],
+        // leaf 0x24 subleaf 0: AVX10 Converged Vector ISA Main Leaf。
+        // EBX[7:0] は累積版番号。現行仕様では全実装が 128/256/512
+        // ビット幅を持つため EBX[18:16] は 111 固定。
+        if features.contains("avx10") {
+            let version = if features.contains("avx10_3") {
+                3
+            } else if features.contains("avx10_2") {
+                2
+            } else {
+                1
+            };
+            [1, version | 0x7_0000, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf 0x24 subleaf 1: AVX10 auxiliary feature leaf。
+        // ECX[2]=AVX10_V1_AUX、ECX[3]=AVX10_V2_AUX。
+        if features.contains("avx10") {
+            let mut ecx = 0;
+            if features.contains("avx10_v1_aux") {
+                ecx |= 1 << 2;
+            }
+            if features.contains("avx10_v2_aux") {
+                ecx |= 1 << 3;
+            }
+            [0, 0, ecx, 0]
+        } else {
+            [0; 4]
+        },
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。
