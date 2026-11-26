@@ -1017,7 +1017,9 @@ impl Linux {
         if act.flags & crate::x86::SA_RESETHAND != 0 {
             self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
         }
-        let ok = if self.is64 {
+        let ok = if self.x32 {
+            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, si_code, si_addr)
+        } else if self.is64 {
             crate::x86::rt_sigframe_write_ex(env, sig, &act, old, si_code, si_addr)
         } else {
             crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, si_code, si_addr)
@@ -1037,8 +1039,8 @@ impl Linux {
     // Gap: GAP-0026 — CPU 例外→シグナルの変換、i386 フレーム、
     // 既定動作（SIGKILL 以外）による終了、他プロセス/他スレッド
     // への配送、タイマ由来のシグナル、sigaltstack はない。
-    // x32 は配送を x86-64 の rt フレーム形式で行う（カーネルの
-    // compat フレームとは異なるが、rt_sigreturn と対で一貫）。
+    // x32 は rt_sigframe_x32 形式で配送する。syscall 番号ではなく
+    // プロセス ABI で戻り形式を選ぶ近似は残る。
     fn deliver_pending(&mut self, env: &mut BareEnv) {
         let deliver = self.sig_pending & !self.sig_mask;
         if deliver == 0 {
@@ -1067,7 +1069,9 @@ impl Linux {
             self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
         }
         let pid = self.pid;
-        let ok = if self.is64 {
+        let ok = if self.x32 {
+            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, 0, pid)
+        } else if self.is64 {
             crate::x86::rt_sigframe_write(env, sig, &act, old, pid)
         } else {
             crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid)
@@ -3720,14 +3724,18 @@ fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 
 fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     // x86-64/i386 それぞれの rt フレームから復元する。
-    let frame = if sys.is64 {
+    let frame = if sys.x32 {
+        crate::x86::rt_sigframe_x32_read(env)
+    } else if sys.is64 {
         crate::x86::rt_sigframe_read(env)
     } else {
         crate::x86::rt_sigframe32_read(env)
     };
     match frame {
         Some(mask) => {
-            sys.sig_mask = mask;
+            // set_current_blocked と同じく SIGKILL/SIGSTOP は frame 経由で
+            // block できない。
+            sys.sig_mask = mask & !(1 << 8 | 1 << 18);
             Some(TrapOutcome::Handled)
         }
         // 壊れたフレーム。実機は SIGSEGV で殺す。
@@ -5985,6 +5993,91 @@ mod tests {
         assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
         assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x027F);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0x1122_3344
+        );
+    }
+
+    #[test]
+    fn exception_delivers_x32_sigsegv_frame_and_sigreturn() {
+        let mut sys = Linux::x86_x32();
+        let mut env = bare();
+        env.backend.mem.map(VirtAddr(0x6000), 6, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344,
+        );
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[10] = crate::x86::SigAct {
+            handler: 0x9000,
+            flags: crate::x86::SA_RESTORER,
+            restorer: 0x9100,
+            mask: 0,
+        };
+        set64(&mut env, Gpr(4), 0x8000);
+        set64(&mut env, Gpr(3), 0xAAAA);
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        let ex = polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::PageFault,
+            code: 0,
+            addr: Some(0xDEAD_0000),
+            in_delay_slot: false,
+        };
+        assert!(matches!(
+            sys.handle_exception(&mut env, ex),
+            TrapOutcome::Handled
+        ));
+        let f = get64(&mut env, Gpr(4));
+        assert_eq!(f % 16, 8, "x32 も関数入口と同じ stack 整列");
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(get64(&mut env, Gpr(7)), 11);
+        assert_eq!(get64(&mut env, Gpr(6)), f + 296);
+        assert_eq!(get64(&mut env, Gpr(2)), f + 8);
+        assert_eq!(rd8(&mut env, f), 0x9100, "pretcode");
+        assert_eq!(rd8(&mut env, f + 8) & 0xFFFF_FFFF, 6, "uc_flags");
+        assert_eq!(rd8(&mut env, f + 288), 0, "uc_sigmask");
+        assert_eq!(rd8(&mut env, f + 296) & 0xFFFF_FFFF, 11, "si_signo");
+        assert_eq!(rd8(&mut env, f + 296 + 8) & 0xFFFF_FFFF, 1, "si_code");
+        assert_eq!(
+            rd8(&mut env, f + 296 + 12) & 0xFFFF_FFFF,
+            0xDEAD_0000,
+            "si_addr"
+        );
+        assert_eq!(rd8(&mut env, f + 32 + 128), 0x4000, "sigcontext rip");
+        assert_eq!(rd8(&mut env, f + 32 + 88), 0xAAAA, "sigcontext rbx");
+        let fp = rd8(&mut env, f + 32 + 184);
+        assert_eq!(fp % 64, 0);
+        assert_eq!(rd8(&mut env, fp + 160), 0x1122_3344);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0,
+            "ハンドラ開始時の user FP state は初期化される"
+        );
+        set64(&mut env, Gpr(3), 0xBBBB);
+        // frame 内 mask を書き換えても SIGKILL/SIGSTOP は block できない。
+        env.backend
+            .mem
+            .write(
+                VirtAddr(f + 288),
+                &(1u64 << 8 | 1 << 18 | 1 << 9).to_le_bytes(),
+            )
+            .unwrap();
+        set64(&mut env, Gpr(4), f + 8);
+        set64(&mut env, Gpr(0), crate::x86_x32::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x4000);
+        assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
+        assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
+        assert_eq!(sys.sig_mask, 1 << 9);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::xmm_ref(
                 polyisa_guest_x86::sem::Xmm(0)

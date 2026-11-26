@@ -3032,6 +3032,12 @@ pub const SA_RESETHAND: u64 = 0x8000_0000;
 pub const SA_RESTORER: u64 = 0x0400_0000;
 /// 代替スタックなしを表す ss_flags の値。
 pub const SS_DISABLE: u64 = 2;
+/// ucontext.uc_flags。xsave fpstate が sigcontext にある。
+pub const UC_FP_XSTATE: u64 = 1;
+/// sigcontext.ss が有効。
+pub const UC_SIGCONTEXT_SS: u64 = 2;
+/// ss の復元を厳密にする 64 ビットモードの印。
+pub const UC_STRICT_RESTORE_SS: u64 = 4;
 /// rt_sigprocmask の how。現行マスクに加える。
 pub const SIG_BLOCK: u64 = 0;
 /// rt_sigprocmask の how。現行マスクから外す。
@@ -3199,6 +3205,112 @@ fn fsave32_x87_fold(env: &mut BareEnv, fp: u64) -> bool {
     polyisa_guest_x86::sem_ea::frstor_m(b, &ea, 32, 32).is_ok()
 }
 
+/// x86-64/x32 共通の fpstate を書く。返り値は書き込み成功。
+/// xsave 対応では標準 XSAVE レイアウトと SW 予約域、非対応では
+/// 512 バイトの FXSAVE 配置を使う。
+fn fpstate64_write(env: &mut BareEnv, fp: u64) -> bool {
+    let use_xsave = signal_use_xsave(env);
+    let user_xfeatures = signal_user_xfeatures(env);
+    let xstate_size = if use_xsave {
+        polyisa_guest_x86::cpuid::xstate_size(user_xfeatures)
+    } else {
+        512
+    };
+    if use_xsave {
+        for off in (512..576).step_by(8) {
+            if !fwr(env, fp + off, 0, 8) {
+                return false;
+            }
+        }
+        let b = &mut env.backend;
+        let mask = b.konst::<W64>(user_xfeatures);
+        if polyisa_guest_x86::sem_ea::xsave_area_mask(b, fp, None, 64, mask).is_err() {
+            return false;
+        }
+        fwr(env, fp.wrapping_add(464), u64::from(FP_XSTATE_MAGIC1), 4)
+            && fwr(env, fp.wrapping_add(468), xstate_size + 4, 4)
+            && fwr(env, fp.wrapping_add(472), user_xfeatures, 8)
+            && fwr(env, fp.wrapping_add(480), xstate_size, 4)
+            && fwr(env, fp + xstate_size, u64::from(FP_XSTATE_MAGIC2), 4)
+    } else {
+        let b = &mut env.backend;
+        polyisa_guest_x86::sem_ea::fxsave_area(b, fp, None, 64, true, true).is_ok()
+    }
+}
+
+/// x86-64/x32 共通の fpstate を復元する。`fp=0` は user xfeatures を
+/// init state へ戻す。xstate metadata が不正なら FP/SSE だけを復元する。
+fn fpstate64_restore(env: &mut BareEnv, fp: u64) -> Option<()> {
+    let use_xsave = signal_use_xsave(env);
+    if fp == 0 {
+        let enabled = signal_user_xfeatures(env);
+        let b = &mut env.backend;
+        let mi = b.konst::<W64>(enabled);
+        polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
+        return Some(());
+    }
+    if use_xsave {
+        let magic1 = fp.checked_add(464).and_then(|a| frd32(env, a))?;
+        let mut xstate_mask = 0x3;
+        let mut as_xstate = false;
+        if magic1 == FP_XSTATE_MAGIC1 {
+            let extended_size = fp.checked_add(468).and_then(|a| frd32(env, a))?;
+            let sw_xfeatures = fp.checked_add(472).and_then(|a| frd64(env, a))?;
+            let xstate_size = fp.checked_add(480).and_then(|a| frd32(env, a))?;
+            let enabled = signal_user_xfeatures(env);
+            let max_size = polyisa_guest_x86::cpuid::xstate_size(enabled) as u32;
+            if xstate_size >= 576 && xstate_size <= max_size && xstate_size <= extended_size {
+                let magic2 = fp
+                    .checked_add(u64::from(xstate_size))
+                    .and_then(|a| frd32(env, a))?;
+                if magic2 == FP_XSTATE_MAGIC2 {
+                    xstate_mask = sw_xfeatures & enabled;
+                    as_xstate = true;
+                }
+            }
+        }
+        let enabled = signal_user_xfeatures(env);
+        let b = &mut env.backend;
+        if as_xstate {
+            let mask = b.konst::<W64>(xstate_mask);
+            polyisa_guest_x86::sem_ea::xrstor_area_mask(b, fp, None, 64, mask).ok()?;
+        } else {
+            polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
+        }
+        let missing = enabled & !xstate_mask;
+        if missing != 0 {
+            let mi = b.konst::<W64>(missing);
+            polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
+        }
+    } else {
+        let b = &mut env.backend;
+        polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
+    }
+    Some(())
+}
+
+/// x86-64 形式 sigcontext の整数レジスタを復元し、fpstate ポインタを返す。
+/// `sc` は sigcontext 先頭のフレーム内アドレス。
+fn sigcontext64_read(env: &mut BareEnv, sc: u64) -> Option<u64> {
+    let fp = frd64(env, sc + 184)?;
+    let mut g = [0u64; 23];
+    for (i, v) in g.iter_mut().enumerate() {
+        *v = frd64(env, sc + 8 * i as u64)?;
+    }
+    for (i, v) in g.iter().enumerate().take(8) {
+        set64(env, Gpr(8 + i as u8), *v);
+    }
+    for (i, r) in [7u8, 6, 5, 3, 2, 0, 1].iter().enumerate() {
+        set64(env, Gpr(*r), g[8 + i]);
+    }
+    set64(env, Gpr(4), g[15]);
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), g[17] as u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), g[16] as u32);
+    Some(fp)
+}
+
 /// x86-64 の rt シグナルフレームをスタックに作り、RIP を
 /// ハンドラ入口に向ける。失敗（未写像など）なら偽を返す。
 /// 配置（`struct rt_sigframe` 相当）:
@@ -3250,7 +3362,16 @@ pub fn rt_sigframe_write_ex(
     // ucontext の固定部と siginfo。
     let fields: [(u64, u64); 10] = [
         (f, act.restorer),
-        (f + 8, 0),                // uc_flags
+        (
+            f + 8,
+            UC_SIGCONTEXT_SS
+                | UC_STRICT_RESTORE_SS
+                | if signal_use_xsave(env) {
+                    UC_FP_XSTATE
+                } else {
+                    0
+                },
+        ), // uc_flags
         (f + 16, 0),               // uc_link
         (f + 24, 0),               // uc_stack.ss_sp
         (f + 32, SS_DISABLE),      // uc_stack.ss_flags
@@ -3281,45 +3402,16 @@ pub fn rt_sigframe_write_ex(
     g[16] = u64::from(env.backend.get(polyisa_guest_x86::sem::eip_ref()));
     g[17] = u64::from(env.backend.get(polyisa_guest_x86::sem::eflags_ref()));
     let cs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)));
-    let gs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(5)));
-    let fs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(4)));
-    g[18] = cs | (gs << 16) | (fs << 32);
+    let ss = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(2)));
+    g[18] = cs | (ss << 48);
     g[21] = old_mask;
     for (i, v) in g.iter().enumerate() {
         if !fwr(env, f + GREGB + 8 * i as u64, *v, 8) {
             return false;
         }
     }
-    // fpstate。xsave 対応では XSAVE 標準レイアウトと SW 予約域を書き、
-    // 非対応では 512 バイトの FXSAVE 配置だけを書く。
-    if use_xsave {
-        // 新しいフレームの XSAVE header は 0 初期化してから XSAVE 相当の
-        // 成分保存へ渡す。XSTATE_BV の RFBM 外ビットが残らないようにする。
-        for off in (512..576).step_by(8) {
-            if !fwr(env, fp + off, 0, 8) {
-                return false;
-            }
-        }
-        let b = &mut env.backend;
-        let mask = b.konst::<W64>(user_xfeatures);
-        if polyisa_guest_x86::sem_ea::xsave_area_mask(b, fp, None, 64, mask).is_err() {
-            return false;
-        }
-        // struct _fpx_sw_bytes は FXSAVE 領域 +464。extended_size には
-        // 末尾の FP_XSTATE_MAGIC2 を含む。
-        if !fwr(env, fp.wrapping_add(464), u64::from(FP_XSTATE_MAGIC1), 4)
-            || !fwr(env, fp.wrapping_add(468), xstate_size + 4, 4)
-            || !fwr(env, fp.wrapping_add(472), user_xfeatures, 8)
-            || !fwr(env, fp.wrapping_add(480), xstate_size, 4)
-            || !fwr(env, fp + xstate_size, u64::from(FP_XSTATE_MAGIC2), 4)
-        {
-            return false;
-        }
-    } else {
-        let b = &mut env.backend;
-        if polyisa_guest_x86::sem_ea::fxsave_area(b, fp, None, 64, true, true).is_err() {
-            return false;
-        }
+    if !fpstate64_write(env, fp) {
+        return false;
     }
     // ハンドラへ入る引数とスタック。
     set64(env, Gpr(4), f);
@@ -3330,6 +3422,110 @@ pub fn rt_sigframe_write_ex(
     env.backend
         .set(polyisa_guest_x86::sem::eip_ref(), act.handler as u32);
     true
+}
+
+/// x32 の rt シグナルフレームをスタックに作る。x32 は ia32 ではなく
+/// 64 ビットモードの compat ABI なので、fpstate は x86-64 と同じく
+/// FXSAVE/XSAVE 領域を直接置き、sigcontext も 64 ビット形式である。
+/// レイアウトは `struct rt_sigframe_x32`（424 バイト）:
+///   +0 pretcode(u64), +8 ucontext_x32, +32 sigcontext,
+///   +288 compat_sigset_t, +296 compat_siginfo(128 バイト)。
+// Ref: SRC-LINUX (7.3) arch/x86/kernel/signal_64.c x32_setup_rt_frame.
+pub fn rt_sigframe_x32_write_ex(
+    env: &mut BareEnv,
+    sig: u32,
+    act: &SigAct,
+    old_mask: u64,
+    si_code: u64,
+    si_union: u64,
+) -> bool {
+    const FRAME: u64 = 424;
+    const SC: u64 = 32;
+    let rsp = get64(env, Gpr(4));
+    let use_xsave = signal_use_xsave(env);
+    let user_xfeatures = signal_user_xfeatures(env);
+    let xstate_size = if use_xsave {
+        polyisa_guest_x86::cpuid::xstate_size(user_xfeatures)
+    } else {
+        512
+    };
+    let fpstate_size = xstate_size + u64::from(use_xsave) * 4;
+    let fp = rsp.wrapping_sub(128).wrapping_sub(fpstate_size) & !63;
+    // カーネルの round_down(fp - sizeof(frame), 16) - 8。fp は 64 整列。
+    let f = (fp.wrapping_sub(FRAME) & !15).wrapping_sub(8);
+    if !fwr(env, f, act.restorer, 8) {
+        return false;
+    }
+    let uc_flags =
+        UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS | if use_xsave { UC_FP_XSTATE } else { 0 };
+    for (a, v) in [
+        (f + 8, uc_flags),    // uc_flags
+        (f + 12, 0),          // uc_link
+        (f + 16, 0),          // uc_stack.ss_sp
+        (f + 20, SS_DISABLE), // uc_stack.ss_flags
+        (f + 24, 0),          // uc_stack.ss_size
+        (f + 28, 0),          // uc__pad0
+    ] {
+        if !fwr(env, a, v, 4) {
+            return false;
+        }
+    }
+    if !fwr(env, f + SC + 184, fp, 8) || !fwr(env, f + 288, old_mask, 8) {
+        return false;
+    }
+    // compat_siginfo は 128 バイト全体を 0 初期化してから書く。
+    for off in (0..128).step_by(8) {
+        if !fwr(env, f + 296 + off, 0, 8) {
+            return false;
+        }
+    }
+    if !fwr(env, f + 296, u64::from(sig), 4)
+        || !fwr(env, f + 296 + 8, si_code, 4)
+        || !fwr(env, f + 296 + 12, si_union, 4)
+    {
+        return false;
+    }
+    // 64 ビット sigcontext の gregs。x32 でもレイアウトは x86-64 と同じ。
+    let mut g = [0u64; 23];
+    for (i, v) in g.iter_mut().enumerate().take(8) {
+        *v = get64(env, Gpr(8 + i as u8));
+    }
+    for (i, r) in [7u8, 6, 5, 3, 2, 0, 1, 4].iter().enumerate() {
+        g[8 + i] = get64(env, Gpr(*r));
+    }
+    g[16] = u64::from(env.backend.get(polyisa_guest_x86::sem::eip_ref()));
+    g[17] = u64::from(env.backend.get(polyisa_guest_x86::sem::eflags_ref()));
+    let cs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)));
+    let ss = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(2)));
+    g[18] = cs | (ss << 48);
+    // x32 では sigcontext.oldmask に入るのは compat sigset の下位 32 ビット。
+    g[21] = old_mask & 0xffff_ffff;
+    for (i, v) in g.iter().enumerate() {
+        if !fwr(env, f + SC + 8 * i as u64, *v, 8) {
+            return false;
+        }
+    }
+    if !fpstate64_write(env, fp) {
+        return false;
+    }
+    set64(env, Gpr(4), f);
+    set64(env, Gpr(7), u64::from(sig));
+    set64(env, Gpr(6), f + 296);
+    set64(env, Gpr(2), f + 8);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), act.handler as u32);
+    true
+}
+
+/// x32 の rt_sigreturn。`regs->sp - 8` がフレーム基底。sigcontext は
+/// x86-64 形式、uc_sigmask は 8 バイトの compat sigset。
+pub fn rt_sigframe_x32_read(env: &mut BareEnv) -> Option<u64> {
+    const SC: u64 = 32;
+    let f = get64(env, Gpr(4)).wrapping_sub(8);
+    let mask = frd64(env, f + 288)?;
+    let fp = sigcontext64_read(env, f + SC)?;
+    fpstate64_restore(env, fp)?;
+    Some(mask)
 }
 
 /// i386 の rt シグナルフレームをスタックに作り、EIP を
@@ -3604,69 +3800,8 @@ pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
     const GREGB: u64 = 48;
     let f = get64(env, Gpr(4)).wrapping_sub(8);
     let mask = frd64(env, f + 304)?;
-    let fp = frd64(env, f + GREGB + 184)?;
-    let mut g = [0u64; 23];
-    for (i, v) in g.iter_mut().enumerate() {
-        *v = frd64(env, f + GREGB + 8 * i as u64)?;
-    }
-    for (i, v) in g.iter().enumerate().take(8) {
-        set64(env, Gpr(8 + i as u8), *v);
-    }
-    for (i, r) in [7u8, 6, 5, 3, 2, 0, 1].iter().enumerate() {
-        set64(env, Gpr(*r), g[8 + i]);
-    }
-    let use_xsave = signal_use_xsave(env);
-    if fp == 0 {
-        // fpstate=0 は FP/SSE/拡張状態を初期状態へ戻す。
-        let enabled = signal_user_xfeatures(env);
-        let b = &mut env.backend;
-        let mi = b.konst::<W64>(enabled);
-        polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
-    } else if use_xsave {
-        // SW 予約域と末尾 magic がある場合だけ xstate として復元する。
-        // 不正または legacy なら FP/SSE だけを FXRSTOR 相当で復元する。
-        let magic1 = fp.checked_add(464).and_then(|a| frd32(env, a))?;
-        let mut xstate_mask = 0x3;
-        let mut as_xstate = false;
-        if magic1 == FP_XSTATE_MAGIC1 {
-            let extended_size = fp.checked_add(468).and_then(|a| frd32(env, a))?;
-            let sw_xfeatures = fp.checked_add(472).and_then(|a| frd64(env, a))?;
-            let xstate_size = fp.checked_add(480).and_then(|a| frd32(env, a))?;
-            let enabled = signal_user_xfeatures(env);
-            let max_size = polyisa_guest_x86::cpuid::xstate_size(enabled) as u32;
-            if xstate_size >= 576 && xstate_size <= max_size && xstate_size <= extended_size {
-                let magic2 = fp
-                    .checked_add(u64::from(xstate_size))
-                    .and_then(|a| frd32(env, a))?;
-                if magic2 == FP_XSTATE_MAGIC2 {
-                    xstate_mask = sw_xfeatures & enabled;
-                    as_xstate = true;
-                }
-            }
-        }
-        let enabled = signal_user_xfeatures(env);
-        let b = &mut env.backend;
-        if as_xstate {
-            let mask = b.konst::<W64>(xstate_mask);
-            polyisa_guest_x86::sem_ea::xrstor_area_mask(b, fp, None, 64, mask).ok()?;
-        } else {
-            polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
-        }
-        // sigreturn はフレームに含まれなかった有効成分を初期状態へ戻す。
-        let missing = enabled & !xstate_mask;
-        if missing != 0 {
-            let mi = b.konst::<W64>(missing);
-            polyisa_guest_x86::sem_ea::xrstor_init_mask(b, mi).ok()?;
-        }
-    } else {
-        let b = &mut env.backend;
-        polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, 3, 0).ok()?;
-    }
-    set64(env, Gpr(4), g[15]);
-    env.backend
-        .set(polyisa_guest_x86::sem::eflags_ref(), g[17] as u32);
-    env.backend
-        .set(polyisa_guest_x86::sem::eip_ref(), g[16] as u32);
+    let fp = sigcontext64_read(env, f + GREGB)?;
+    fpstate64_restore(env, fp)?;
     Some(mask)
 }
 
