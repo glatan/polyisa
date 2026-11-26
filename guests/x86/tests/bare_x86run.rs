@@ -13032,6 +13032,89 @@ fn run_fldcw_sibd_rsp() {
 }
 
 #[test]
+fn run_x87_fbstp_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, [u8; 10]) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDF, 0x33])
+            .unwrap(); // fbstp tbyte [rbx]
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut buf = [0u8; 10];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            buf,
+        )
+    }
+    let (fsw, top, mem) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!(
+        (top, mem),
+        (
+            1,
+            [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF]
+        )
+    );
+    let (fsw, top, mem) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, mem), (0, [0; 10]));
+}
+
+#[test]
+fn run_x87_fistp_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u32) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .map(VirtAddr(0x2000), 1, Perms(Perms::R.0 | Perms::W.0))
+            .unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDB, 0x1B])
+            .unwrap(); // fistp dword [rbx]
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            u32::from_le_bytes(buf),
+        )
+    }
+    let (fsw, top, mem) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, mem), (1, 0x8000_0000));
+    let (fsw, top, mem) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, mem), (0, 0));
+}
+
+#[test]
 fn run_x87_binary_empty_source_masked_and_unmasked() {
     fn once(opcode: u8, fcw: u16) -> (u16, u64, u16) {
         let mut env = bare_x86_env();
@@ -14167,6 +14250,7 @@ fn run_fisttp_m64_truncates_independent_of_fcw() {
         .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(0), 0xC000_0000_0000_0000);
+    x87_recalc_tag(&mut env, 0);
     env.backend
         .mem
         .write(VirtAddr(0x1000), &[0xDD, 0x4C, 0x24, 0x30])
@@ -14210,6 +14294,7 @@ fn run_fistp_m64_sibd_honors_rounding() {
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
         env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        x87_recalc_tag(&mut env, 0);
         env.backend
             .mem
             .write(VirtAddr(0x1000), &[0xDF, 0x7C, 0x24, 0x30])

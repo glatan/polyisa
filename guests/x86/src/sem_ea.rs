@@ -9766,6 +9766,27 @@ fn fist_convert<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, bits: u32
     fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64)
 }
 
+/// FIST 系の整数値を出力幅でメモリへ書く。
+fn fist_store_at<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    bits: u32,
+    v: B::V<W64>,
+) -> Result<(), B::Exit> {
+    match bits {
+        16 => {
+            let v16: B::V<W16> = b.trunc::<W64, W16>(v);
+            decode::mem_store::<B, W16>(b, a, wseg, v16)
+        }
+        32 => {
+            let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+            decode::mem_store::<B, W32>(b, a, wseg, v32)
+        }
+        _ => decode::mem_store::<B, W64>(b, a, wseg, v),
+    }
+}
+
 /// FIST/FISTP m16/m32/m64。
 pub fn fist_m<B: Backend>(
     b: &mut B,
@@ -9774,26 +9795,36 @@ pub fn fist_m<B: Backend>(
     pop: bool,
 ) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
-    let v = fist_convert(b, sig, exp, bits);
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
-        match bits {
-            16 => {
-                let v16: B::V<W16> = b.trunc::<W64, W16>(v);
-                decode::mem_store::<B, W16>(b, a, *wseg, v16)?;
-            }
-            32 => {
-                let v32: B::V<W32> = b.trunc::<W64, W32>(v);
-                decode::mem_store::<B, W32>(b, a, *wseg, v32)?;
-            }
-            _ => {
-                decode::mem_store::<B, W64>(b, a, *wseg, v)?;
-            }
-        }
-    }
-    if pop {
-        sem::pop_st(b, top)?;
+        let wseg = *wseg;
+        b.if_then(commit, |b| {
+            b.if_then_else(
+                fault,
+                |b| {
+                    let indef = match bits {
+                        16 => b.konst::<W64>(0x8000),
+                        32 => b.konst::<W64>(0x8000_0000),
+                        _ => b.konst::<W64>(1u64 << 63),
+                    };
+                    fist_store_at(b, a, wseg, bits, indef)?;
+                    if pop {
+                        sem::pop_st(b, top)?;
+                    }
+                    Ok(())
+                },
+                |b| {
+                    let v = fist_convert(b, sig, exp, bits);
+                    fist_store_at(b, a, wseg, bits, v)?;
+                    if pop {
+                        sem::pop_st(b, top)?;
+                    }
+                    Ok(())
+                },
+            )
+        })?;
     }
     Ok(())
 }
@@ -9820,26 +9851,33 @@ fn f80_to_i64_trunc_occ<B: Backend>(
 /// FISTTP m16/m32/m64。常に切り捨てで整数化し、pop する。
 pub fn fisttp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
-    let (v, inexact, bad64) = f80_to_i64_trunc_occ(b, sig, exp);
-    let v = fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64);
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
-        match bits {
-            16 => {
-                let v16: B::V<W16> = b.trunc::<W64, W16>(v);
-                decode::mem_store::<B, W16>(b, a, *wseg, v16)?;
-            }
-            32 => {
-                let v32: B::V<W32> = b.trunc::<W64, W32>(v);
-                decode::mem_store::<B, W32>(b, a, *wseg, v32)?;
-            }
-            _ => {
-                decode::mem_store::<B, W64>(b, a, *wseg, v)?;
-            }
-        }
+        let wseg = *wseg;
+        b.if_then(commit, |b| {
+            b.if_then_else(
+                fault,
+                |b| {
+                    let indef = match bits {
+                        16 => b.konst::<W64>(0x8000),
+                        32 => b.konst::<W64>(0x8000_0000),
+                        _ => b.konst::<W64>(1u64 << 63),
+                    };
+                    fist_store_at(b, a, wseg, bits, indef)?;
+                    sem::pop_st(b, top)
+                },
+                |b| {
+                    let (v, inexact, bad64) = f80_to_i64_trunc_occ(b, sig, exp);
+                    let v = fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64);
+                    fist_store_at(b, a, wseg, bits, v)?;
+                    sem::pop_st(b, top)
+                },
+            )
+        })?;
     }
-    sem::pop_st(b, top)
+    Ok(())
 }
 
 /// x87 のメモリ二項演算（fadd/fmul/fsub/fsubr/fdiv/fdivr）。
@@ -13020,7 +13058,8 @@ pub fn fbstp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
         decode::seg_limit_chk_n(b, off, seg, 10)?;
     }
     let top = b.get(sem::top_ref());
-    let (sig, exp) = sem::read_st(b, top);
+    let (sig, exp, fault) = sem::read_st_source(b, top);
+    let commit = sem::x87_commit_after_fault(b, fault);
     let v = sem::f80_to_i64(b, sig, exp);
     let indef = b.konst::<W64>(1u64 << 63);
     let raw_indef = b.cmp::<W64>(Cmp::Eq, v, indef);
@@ -13035,31 +13074,41 @@ pub fn fbstp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     // 18 桁（< 10^18）に収まる範囲だけを書く。
     let lim = b.konst::<W64>(1_000_000_000_000_000_000);
     let big = b.cmp::<W64>(Cmp::GeU, mag, lim);
-    let is_indef = sem::bit_or(b, raw_indef, big);
+    let is_indef0 = sem::bit_or(b, raw_indef, big);
+    let is_indef = sem::bit_or(b, is_indef0, fault);
     let ten = b.konst::<W64>(10);
     let s4 = b.konst::<W64>(4);
     let ff8 = b.konst::<W8>(0xFF);
     let mut m = mag;
-    for i in 0..9u64 {
-        let addr = decode::wseg_byte_addr(b, a, woff, i);
-        let d0 = b.urem::<W64>(m, ten);
-        let m1 = b.udiv::<W64>(m, ten);
-        let d1 = b.urem::<W64>(m1, ten);
-        let m2 = b.udiv::<W64>(m1, ten);
-        let d1s = b.shl::<W64>(d1, s4);
-        let pair = b.or::<W64>(d0, d1s);
-        let pair8: B::V<W8> = b.trunc::<W64, W8>(pair);
-        let byte = b.select::<W8>(is_indef, ff8, pair8);
-        b.store::<W8>(addr, byte, sem::DATA_WRITE)?;
-        m = m2;
-    }
-    let addr9 = decode::wseg_byte_addr(b, a, woff, 9);
-    let s8 = b.konst::<W8>(0x80);
-    let z8 = b.konst::<W8>(0);
-    let sval = b.select::<W8>(neg, s8, z8);
-    let sbyte = b.select::<W8>(is_indef, ff8, sval);
-    b.store::<W8>(addr9, sbyte, sem::DATA_WRITE)?;
-    sem::pop_st(b, top)
+    b.if_then(commit, |b| {
+        for i in 0..9u64 {
+            let addr = decode::wseg_byte_addr(b, a, woff, i);
+            let d0 = b.urem::<W64>(m, ten);
+            let m1 = b.udiv::<W64>(m, ten);
+            let d1 = b.urem::<W64>(m1, ten);
+            let m2 = b.udiv::<W64>(m1, ten);
+            let d1s = b.shl::<W64>(d1, s4);
+            let pair = b.or::<W64>(d0, d1s);
+            let pair8: B::V<W8> = b.trunc::<W64, W8>(pair);
+            let indef_digit = if i == 7 {
+                b.konst::<W8>(0xC0)
+            } else if i == 8 {
+                b.konst::<W8>(0xFF)
+            } else {
+                b.konst::<W8>(0)
+            };
+            let byte = b.select::<W8>(is_indef, indef_digit, pair8);
+            b.store::<W8>(addr, byte, sem::DATA_WRITE)?;
+            m = m2;
+        }
+        let addr9 = decode::wseg_byte_addr(b, a, woff, 9);
+        let s8 = b.konst::<W8>(0x80);
+        let z8 = b.konst::<W8>(0);
+        let sval = b.select::<W8>(neg, s8, z8);
+        let sbyte = b.select::<W8>(is_indef, ff8, sval);
+        b.store::<W8>(addr9, sbyte, sem::DATA_WRITE)?;
+        sem::pop_st(b, top)
+    })
 }
 
 /// FNSTSW AX（DF E0）。fsw に TOP を合成して AX へ書く。

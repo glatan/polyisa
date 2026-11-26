@@ -15887,10 +15887,15 @@ pub(crate) fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) 
 /// FISTP m64。整数を書いてから ST(0) を捨てる。
 pub(crate) fn fistp_m64_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
-    let bits = f80_to_i64(b, sig, exp);
-    b.store::<W64>(addr, bits, DATA_WRITE)?;
-    pop_st(b, top)
+    let (sig, exp, fault) = read_st_source(b, top);
+    let commit = x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let indef = b.konst::<W64>(1u64 << 63);
+        let bits0 = f80_to_i64(b, sig, exp);
+        let bits = b.select::<W64>(fault, indef, bits0);
+        b.store::<W64>(addr, bits, DATA_WRITE)?;
+        pop_st(b, top)
+    })
 }
 
 /// FISTP m64 [base+disp8] (DF /7 SIB mod=01, no_index)。seq 0x4d0c31 対応.
