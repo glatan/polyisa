@@ -6563,6 +6563,10 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf162uf8XvWv
+            | Insn::Vcvtbf162uf8sXvWv
+            | Insn::Vcvt2bf162uf8XvHvWv
+            | Insn::Vcvt2bf162uf8sXvHvWv
             | Insn::Vcvtbiasbf162bf8XvHvWv
             | Insn::Vcvtbiasbf162bf8sXvHvWv
             | Insn::Vcvtbiasbf162hf8XvHvWv
@@ -7381,6 +7385,82 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvtbf162uf8XvWv
+        | Insn::Vcvtbf162uf8sXvWv
+        | Insn::Vcvt2bf162uf8XvHvWv
+        | Insn::Vcvt2bf162uf8sXvHvWv => {
+            let sat = matches!(insn, Insn::Vcvtbf162uf8sXvWv | Insn::Vcvt2bf162uf8sXvHvWv);
+            let two = matches!(insn, Insn::Vcvt2bf162uf8XvHvWv | Insn::Vcvt2bf162uf8sXvHvWv);
+            let cvt = |w: u16| -> u8 {
+                let exp8 = i32::from((w >> 7) & 0xff);
+                let mant7 = u32::from(w & 0x7f);
+                if exp8 == 0xff {
+                    return if mant7 != 0 {
+                        0xff
+                    } else if sat {
+                        0xfe
+                    } else {
+                        0xff
+                    };
+                }
+                if exp8 == 0 {
+                    return 0;
+                }
+                let mut exp5 = exp8 - 112;
+                if exp5 >= 32 {
+                    return if sat { 0xfe } else { 0xff };
+                }
+                let (mut mant3, guard, sticky) = if exp5 >= 1 {
+                    (mant7 >> 4, (mant7 >> 3) & 1, u32::from((mant7 & 7) != 0))
+                } else if exp5 >= -3 {
+                    let shift = 1 - exp5;
+                    let full = (1u32 << 7) | mant7;
+                    let s_total = 4 + shift;
+                    let mant3 = full >> s_total;
+                    let guard = (full >> (s_total - 1)) & 1;
+                    let sticky = u32::from(s_total > 1 && (full & ((1 << (s_total - 1)) - 1)) != 0);
+                    exp5 = 0;
+                    (mant3, guard, sticky)
+                } else {
+                    return 0;
+                };
+                if guard != 0 && (sticky != 0 || mant3 & 1 != 0) {
+                    mant3 += 1;
+                }
+                if mant3 >> 3 != 0 {
+                    mant3 = 0;
+                    exp5 += 1;
+                    if exp5 >= 32 {
+                        return if sat { 0xfe } else { 0xff };
+                    }
+                }
+                let result = (((exp5 as u8) & 0x1f) << 3) | ((mant3 as u8) & 7);
+                if result == 0xff && sat { 0xfe } else { result }
+            };
+            if two {
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(rd16(&y, i));
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                    let hi = lanes16 + i;
+                    if k >> hi & 1 != 0 {
+                        out[hi] = cvt(rd16(&x, i));
+                    } else {
+                        out[hi] = if md.evex_z { 0 } else { old[hi] };
+                    }
+                }
+            } else {
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(rd16(&y, i));
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                }
+            }
         }
         Insn::Vcvtbiasbf162bf8XvHvWv
         | Insn::Vcvtbiasbf162bf8sXvHvWv
@@ -19322,6 +19402,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf162uf8XvWv
+            | Insn::Vcvtbf162uf8sXvWv
+            | Insn::Vcvt2bf162uf8XvHvWv
+            | Insn::Vcvt2bf162uf8sXvHvWv
             | Insn::Vcvtbiasbf162bf8XvHvWv
             | Insn::Vcvtbiasbf162bf8sXvHvWv
             | Insn::Vcvtbiasbf162hf8XvHvWv

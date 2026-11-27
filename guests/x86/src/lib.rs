@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2475);
+        assert_eq!(INSNS.len(), 2479);
     }
 
     #[test]
@@ -3085,6 +3085,25 @@ fn avx10_decode() {
         ),
     ] {
         let d = decode_map(&bytes, modes, f).unwrap_or_else(|| panic!("no decode {bytes:02x?}"));
+        assert_eq!(d.insn, insn);
+    }
+    // AVX10.3 BF16→UF8: MAP5.W1 16/17。
+    for (bytes, insn) in [
+        ([0x62, 0xF5, 0xFE, 0x28, 0x16, 0xC2], Insn::Vcvtbf162uf8XvWv),
+        (
+            [0x62, 0xF5, 0xFF, 0x28, 0x16, 0xC2],
+            Insn::Vcvt2bf162uf8XvHvWv,
+        ),
+        (
+            [0x62, 0xF5, 0xFE, 0x28, 0x17, 0xC2],
+            Insn::Vcvtbf162uf8sXvWv,
+        ),
+        (
+            [0x62, 0xF5, 0xFF, 0x28, 0x17, 0xC2],
+            Insn::Vcvt2bf162uf8sXvHvWv,
+        ),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap();
         assert_eq!(d.insn, insn);
     }
     // AVX10.3 bias 付き BF16→FP8: NP.W1。

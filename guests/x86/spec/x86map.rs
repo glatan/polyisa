@@ -3065,6 +3065,22 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10.3 の BF16→UF8（E5M3、MAP5 16/17）。
+    for (op, sel, mn, rv) in [
+        (0x16u8, PfxSel::PF3, "vcvtbf162uf8_xv_wv", true),
+        (0x16, PfxSel::PF2, "vcvt2bf162uf8_xv_hv_wv", false),
+        (0x17, PfxSel::PF3, "vcvtbf162uf8s_xv_wv", true),
+        (0x17, PfxSel::PF2, "vcvt2bf162uf8s_xv_hv_wv", false),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(true);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // AVX10.3 の bias 付き BF16→FP8（MAP5、NP）。
     for (op, mn) in [
         (0x74u8, "vcvtbiasbf162bf8s"),
