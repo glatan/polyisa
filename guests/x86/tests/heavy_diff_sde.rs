@@ -695,16 +695,21 @@ mod imp {
                 };
                 (v, if nf { 0 } else { FLAG_MASK })
             }
-            // EVEX map4 の INC/DEC/NOT/NEG と CL カウントの SHL/SHR/SAR。NOT だけ NF なし。
+            // EVEX map4 の INC/DEC/NOT/NEG と 1/CL カウントの SHL/SHR/SAR。NOT だけ NF なし。
             13 => {
+                let shift_op = if rng.next().is_multiple_of(2) {
+                    0xD1u8
+                } else {
+                    0xD3
+                };
                 let (op, grp, nf_ok) = [
                     (0xFFu8, 0u8, true),
                     (0xFF, 1, true),
                     (0xF7, 2, false),
                     (0xF7, 3, true),
-                    (0xD1, 4, true),
-                    (0xD1, 5, true),
-                    (0xD1, 7, true),
+                    (shift_op, 4, true),
+                    (shift_op, 5, true),
+                    (shift_op, 7, true),
                 ][(rng.next() % 7) as usize];
                 let d = reg(rng);
                 let nf = nf_ok && rng.next().is_multiple_of(2);
