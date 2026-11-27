@@ -4669,6 +4669,23 @@ fn build_map_0f3a(m: &mut Model) {
             ));
         }
     }
+    // VMINMAXBF16（2 ソース + imm8）。
+    {
+        let mut it = ex(
+            "vminmaxbf16_xv_hv_wv_ib",
+            &[RegX, Vv, RmX, ib],
+            PfxSel::PF2,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0x52, it));
+    }
     // AVX10.2 の BF16 unary immediate 命令。いずれも m16bcst を取り、
     // vvvv=1111b 必須。
     for (op, mn) in [

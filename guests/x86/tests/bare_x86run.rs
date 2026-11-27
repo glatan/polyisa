@@ -27723,6 +27723,7 @@ fn run64_avx10_bf16_unary_scale() {
                 0x62, 0xF3, 0x7F, 0x28, 0x08, 0xFB, 0x00, // vrndscalebf16 ymm7,ymm3,0
                 0x62, 0xF3, 0x7F, 0x28, 0x56, 0xE3, 0x00, // vreducebf16 ymm4,ymm3,0
                 0x62, 0xF3, 0x7F, 0x28, 0x26, 0xC1, 0x00, // vgetmantbf16 ymm0,ymm1,0
+                0x62, 0xF3, 0x77, 0x28, 0x52, 0xCA, 0x00, // vminmaxbf16 ymm1,ymm1,ymm2,0
                 0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
                 0x48, 0x31, 0xFF, // xor rdi,rdi
                 0x0F, 0x05, // syscall
@@ -27749,6 +27750,7 @@ fn run64_avx10_bf16_unary_scale() {
     assert_eq!(lane0(&mut env, 7), 0x4000, "round(1.75)=2");
     assert_eq!(lane0(&mut env, 4), 0xbe80, "reduce(1.75)=-0.25");
     assert_eq!(lane0(&mut env, 0), 0x3fc0, "getmant(3)=1.5");
+    assert_eq!(lane0(&mut env, 1), 0x3fc0, "min(3,1.5)=1.5");
 }
 
 #[test]

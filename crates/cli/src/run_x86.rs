@@ -6514,7 +6514,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvt2ps2phxXvHvWv
+        Insn::Vminmaxbf16XvHvWvIb
+            | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv
             | Insn::Vrndscalebf16XvWvIb
@@ -6691,6 +6692,68 @@ fn avx10_exec(
         }
     };
     match insn {
+        Insn::Vminmaxbf16XvHvWvIb => {
+            for i in 0..lanes16 {
+                let a = bf_r(&x, i);
+                let b = bf_r(&y, i);
+                let aw = a.bits() as u16;
+                let bw = b.bits() as u16;
+                let op = md.imm & 3;
+                let number = md.imm & 0x10 != 0;
+                let an = a.is_nan();
+                let bn = b.is_nan();
+                let mut r = if an || bn {
+                    if number && !(an && bn) {
+                        if an { bw } else { aw }
+                    } else if an {
+                        aw | 0x40
+                    } else {
+                        bw | 0x40
+                    }
+                } else {
+                    let av = bf64(a);
+                    let bv = bf64(b);
+                    let mag = op >= 2;
+                    let (xcmp, ycmp) = if mag { (av.abs(), bv.abs()) } else { (av, bv) };
+                    let take_a = if xcmp < ycmp {
+                        op == 0 || op == 2
+                    } else if xcmp > ycmp {
+                        op == 1 || op == 3
+                    } else if mag {
+                        // magnitude が等しいときは minimum/maximum に落ちる。
+                        if av == 0.0 && bv == 0.0 {
+                            let aneg = aw & 0x8000 != 0;
+                            if op == 2 { aneg } else { !(aneg) }
+                        } else if op == 2 {
+                            aw <= bw
+                        } else {
+                            aw >= bw
+                        }
+                    } else if av == 0.0 && bv == 0.0 {
+                        let aneg = aw & 0x8000 != 0;
+                        if op == 0 { aneg } else { !(aneg) }
+                    } else {
+                        aw <= bw
+                    };
+                    if take_a { aw } else { bw }
+                };
+                let rnan = (r & 0x7f80) == 0x7f80 && r & 0x7f != 0;
+                if !rnan {
+                    let sign = match (md.imm >> 2) & 3 {
+                        0 => aw & 0x8000,
+                        1 => r & 0x8000,
+                        2 => 0,
+                        _ => 0x8000,
+                    };
+                    r = (r & 0x7fff) | sign;
+                }
+                if r & 0x7f80 == 0 && r & 0x7f != 0 {
+                    r &= 0x8000;
+                }
+                out[i * 2..i * 2 + 2].copy_from_slice(&r.to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vcvt2ps2phxXvHvWv => {
             let half = vbytes / 4;
             for i in 0..lanes16 {
@@ -18184,6 +18247,8 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vminmaxbf16XvHvWvIb
+            | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv
             | Insn::Vrndscalebf16XvWvIb
