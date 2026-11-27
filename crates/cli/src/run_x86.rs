@@ -6966,7 +6966,11 @@ fn ace_scaled_fixpoint_to_f32(acc: i128, sa: u8, sb: u8, fmt: u64, adjust: i32) 
     let e5 = fmt & 1 != 0;
     let (ma, ea) = ace_scale_int_mantissa(sa, e5);
     let (mb, eb) = ace_scale_int_mantissa(sb, e5);
-    ace_fixpoint_to_f32(acc * ma * mb, adjust + ea + eb)
+    let scaled = acc * ma * mb;
+    if scaled == 0 && acc != 0 {
+        return u32::from(acc < 0) << 31;
+    }
+    ace_fixpoint_to_f32(scaled, adjust + ea + eb)
 }
 
 fn ace_fp4_fixed(nib: u8) -> i32 {

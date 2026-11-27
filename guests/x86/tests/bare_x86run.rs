@@ -26681,6 +26681,86 @@ fn run64_ace_mx_fp8_exceptional_values() {
 }
 
 #[test]
+fn run64_ace_mx_scale_format_corners() {
+    // E5M3 zero scale は acc の符号を持つ zero を作る。ACE v2 の
+    // MX INT8 sign extension は E8M0 固定なので、imm8[6] は FMT として
+    // 解釈せず、scale 0x00 を 2^-127 として扱う。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE
+        | polyisa_guest_x86::FEAT_ACE_V2;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let scale_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
+    env.backend.state[tilecfg_off] = 2;
+    // row0 col0 の accumulator を -0 にすると、scale 後の sop が
+    // 正しく -0 なら -0 + -0 = -0、誤って +0 なら RNE で +0 になる。
+    env.backend.state[tmm_off + 5 * 1024..tmm_off + 5 * 1024 + 4]
+        .copy_from_slice(&0x8000_0000u32.to_le_bytes());
+    // E5M3 の 1.0 は exponent=15,mantissa=0 の 0x78。col0 だけ zero。
+    env.backend.state[scale_off..scale_off + 128].fill(0x78);
+    env.backend.state[scale_off] = 0;
+    // INT8 は group1 を選び、A-scale だけ E8M0 unit、B-scale を 0x00 にする。
+    env.backend.state[scale_off + 1] = 0;
+    env.backend.state[scale_off + 65] = 0x7f;
+    let set32 = |env: &mut BareEnv, r: u8, lane: usize, v: u32| {
+        let part = polyisa_guest_x86::sem::zreg_ref(r, lane / 4);
+        let cur: u128 = env.backend.get(part);
+        let mut b = cur.to_le_bytes();
+        b[(lane % 4) * 4..(lane % 4) * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(part, u128::from_le_bytes(b));
+    };
+    // INT4: row0 の nibble0=-1、row1 の nibble0=+1。B col0=+1。
+    set32(&mut env, 12, 0, 0x0000_000f);
+    set32(&mut env, 12, 1, 0x0000_0001);
+    set32(&mut env, 13, 0, 0x0000_0001);
+    // INT8: 4 項とも 127。scale0=0 は E8M0 なら 2^-127。
+    set32(&mut env, 6, 0, 0x7f7f_7f7f);
+    set32(&mut env, 7, 0, 0x7f7f_7f7f);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xD3, 0x17, 0x48, 0x8E, 0xEC,
+                0x40, // top8fmxnssps tmm5,zmm12,zmm13,0x40
+                0x62, 0xF3, 0x47, 0x48, 0x8F, 0xDE, 0x49, // top4mxbssps tmm3,zmm6,zmm7,0x49
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let got = |tile: usize, row: usize| {
+        let at = tmm_off + tile * 1024 + row * 64;
+        u32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap())
+    };
+    assert_eq!(got(5, 0), 0x8000_0000, "negative acc with E5M3 zero scale");
+    assert_eq!(got(5, 1), 0, "positive acc with E5M3 zero scale");
+    assert_eq!(
+        got(3, 0),
+        0x01fc_0400,
+        "INT8 treats scale 0x00 as E8M0 even when imm8[6]=1"
+    );
+}
+
+#[test]
 fn run64_ace_top1ps_unmasked_invalid_faults_before_tile_write() {
     // inf*0 は IE を立てる。IM=0 なら ACE-E7 の #XM fault で、
     // MXCSR は更新されるが tile は fault 前の値を保つ。
