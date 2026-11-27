@@ -10040,6 +10040,38 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             return;
         }
     }
+    // FYL2XP1 の log2(1+x) domain。x=-1 は log2(0)、x<-1 と
+    // -inf は invalid。+inf は乗数の符号を持つ infinity になる。
+    if op == 0xF9 {
+        let sign0 = e0 & 0x8000 != 0;
+        let sign1 = e1 & 0x8000 != 0;
+        let ef0 = e0 & 0x7fff;
+        let intbit = 1u64 << 63;
+        let minus_one = sign0 && ef0 == 0x3fff && s0 == intbit;
+        let below_minus_one =
+            sign0 && ef0 != 0x7fff && (ef0 > 0x3fff || (ef0 == 0x3fff && s0 > intbit));
+        let neg_inf = sign0 && ef0 == 0x7fff && s0 == intbit;
+        let pos_inf = !sign0 && ef0 == 0x7fff && s0 == intbit;
+        let zero1 = (e1 & 0x7fff) == 0 && s1 == 0;
+        let invalid = below_minus_one || neg_inf || (minus_one && zero1) || (pos_inf && zero1);
+        if invalid {
+            x87_scalar_exception_flag(env, 1);
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            if fcw & 1 != 0 {
+                x87_trans_write_result(env, op, (0xC000_0000_0000_0000, 0xffff));
+            }
+            return;
+        }
+        if minus_one || pos_inf {
+            if minus_one {
+                x87_scalar_exception_flag(env, 4);
+            }
+            let negative = if minus_one { !sign1 } else { sign1 };
+            let exp = if negative { 0xffff } else { 0x7fff };
+            x87_trans_write_result(env, op, (intbit, exp));
+            return;
+        }
+    }
     // push 系は range 判定より先に full-stack overflow を検査する。
     if matches!(op, 0xFB | 0xF2) {
         let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
