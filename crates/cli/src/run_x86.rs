@@ -6514,7 +6514,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvthf82phXvWv
+        Insn::VdpphpsXvHvWv
+            | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
@@ -6644,8 +6645,10 @@ fn avx10_exec(
             decode::Rm::Mem { a, .. } => {
                 let mut v = [0u8; 64];
                 if md.evex_b {
-                    let ebw = if matches!(md.insn, Insn::Vdpbf16psXvHvWv | Insn::Vcvt2ps2phxXvHvWv)
-                    {
+                    let ebw = if matches!(
+                        md.insn,
+                        Insn::Vdpbf16psXvHvWv | Insn::VdpphpsXvHvWv | Insn::Vcvt2ps2phxXvHvWv
+                    ) {
                         4
                     } else {
                         2
@@ -7146,6 +7149,39 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&ftz16(g).to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::VdpphpsXvHvWv => {
+            let lanes32 = vbytes / 4;
+            let f16f = |w: u16| {
+                F32::from_bits(u64::from(
+                    F16::from_bits(u64::from(w)).to_f32(Rm::Rne).0.bits() as u32,
+                ))
+            };
+            for i in 0..lanes32 {
+                if k >> i & 1 == 0 {
+                    let keep: [u8; 4] = if md.evex_z {
+                        [0; 4]
+                    } else {
+                        old[i * 4..i * 4 + 4].try_into().unwrap()
+                    };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&keep);
+                    continue;
+                }
+                let mut accb = u32::from_le_bytes(old[i * 4..i * 4 + 4].try_into().unwrap());
+                let m = accb & 0x7fff_ffff;
+                if m != 0 && m < 0x0080_0000 {
+                    accb &= 0x8000_0000;
+                }
+                let acc = F32::from_bits(u64::from(accb));
+                let s1o = f16f(rd16(&x, 2 * i + 1));
+                let s2o = f16f(rd16(&y, 2 * i + 1));
+                let s1e = f16f(rd16(&x, 2 * i));
+                let s2e = f16f(rd16(&y, 2 * i));
+                let (mid, f1) = s1o.fmadd_rm(s2o, acc, Rm::Rne);
+                let (res, f2) = s1e.fmadd_rm(s2e, mid, Rm::Rne);
+                flags |= f1 | f2;
+                out[i * 4..i * 4 + 4].copy_from_slice(&ftz32(res).to_le_bytes());
+            }
         }
         Insn::Vdpbf16psXvHvWv => {
             // bf16 要素対の積を f32 へ蓄積するドット積。DAZ 入力・
@@ -18347,6 +18383,7 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::VdpphpsXvHvWv
             | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv

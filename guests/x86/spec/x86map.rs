@@ -4113,6 +4113,23 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VDPPHPS（FP16 要素対のドット積を FP32 へ蓄積）。
+    {
+        let mut it = ex(
+            "vdpphps_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 4;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(0x52, it));
+    }
     // VCVT2PS2PHX（2 入力の FP32 ベクタを FP16 へ縮退して連結）。
     {
         let mut it = ex(
