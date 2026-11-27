@@ -15548,7 +15548,12 @@ pub(crate) fn mul_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    x87_exception_flag(b, denormal_in, 1 << 1);
+    // SNaN invalid は denormal operand より優先される。SNaN が
+    // あれば invalid 応答だけを行い、DE は報告しない。
+    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
+    let no_snan_pre = bit_not(b, snan_pre);
+    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
     let lo = b.mul::<W64>(sig_na, sig_nb);
@@ -15688,7 +15693,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let exp_word = b.trunc::<W64, W16>(exp_word64);
     let (rs, re) = x87_apply_precision(b, sig_out, exp_word);
     let invalid_um = x87_unmasked_exception(b, invalid_any, 1);
-    let denormal_um = x87_unmasked_exception(b, denormal_in, 1 << 1);
+    let denormal_um = x87_unmasked_exception(b, denormal_report, 1 << 1);
     let suppress = bit_or(b, invalid_um, denormal_um);
     (rs, re, suppress)
 }
@@ -15819,7 +15824,12 @@ pub(crate) fn add_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    x87_exception_flag(b, denormal_in, 1 << 1);
+    // SNaN invalid は denormal operand より優先される。SNaN が
+    // あれば invalid 応答だけを行い、DE は報告しない。
+    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
+    let no_snan_pre = bit_not(b, snan_pre);
+    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
@@ -16056,7 +16066,7 @@ pub(crate) fn add_ext<B: Backend>(
     let exp_word = b.trunc::<W64, W16>(packed);
     let (rs, re) = x87_apply_precision(b, sig_final, exp_word);
     let invalid_um = x87_unmasked_exception(b, invalid_any, 1);
-    let denormal_um = x87_unmasked_exception(b, denormal_in, 1 << 1);
+    let denormal_um = x87_unmasked_exception(b, denormal_report, 1 << 1);
     let suppress = bit_or(b, invalid_um, denormal_um);
     (rs, re, suppress)
 }
@@ -16139,7 +16149,12 @@ pub(crate) fn div_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    x87_exception_flag(b, denormal_in, 1 << 1);
+    // SNaN invalid は denormal operand より優先される。SNaN が
+    // あれば invalid 応答だけを行い、DE は報告しない。
+    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
+    let no_snan_pre = bit_not(b, snan_pre);
+    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
@@ -16303,7 +16318,7 @@ pub(crate) fn div_ext<B: Backend>(
     let exp_word = b.trunc::<W64, W16>(e_word);
     let (rs, re) = x87_apply_precision(b, s_out, exp_word);
     let invalid_um = x87_unmasked_exception(b, invalid_any, 1);
-    let denormal_um = x87_unmasked_exception(b, denormal_in, 1 << 1);
+    let denormal_um = x87_unmasked_exception(b, denormal_report, 1 << 1);
     let zero_um = x87_unmasked_exception(b, zero_div, 1 << 2);
     let suppress0 = bit_or(b, invalid_um, denormal_um);
     let suppress = bit_or(b, suppress0, zero_um);
