@@ -98,6 +98,11 @@ pub fn fop_ref() -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fop))
 }
 
+/// IA32_MISC_ENABLE (MSR 0x1a0) のモデル化された値を指す。
+pub fn misc_enable_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, misc_enable))
+}
+
 /// 汎用レジスタの上位32ビットを指す（x86-64 用、0-7 のみ）。
 pub fn hi_ref(r: Gpr) -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, h) + (r.0 as usize) * 4)

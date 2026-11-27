@@ -138,6 +138,10 @@ pub struct CpuState {
     /// ACE の Block Scale Register（128 バイト、XSAVE SCALEDATA
     /// 成分）。初期値は全バイト 0x7f（E8M0 の 2^0）。
     pub scaledata: [u8; 128],
+    /// IA32_MISC_ENABLE (MSR 0x1a0) のうちエミュレータが観測する値。
+    /// bit2 は x87 fopcode compatibility mode。システムモードの
+    /// RDMSR/WRMSR が読み書きする。
+    pub misc_enable: u64,
 }
 
 impl Default for CpuState {
@@ -186,6 +190,7 @@ impl Default for CpuState {
             tmm: [[0; 1024]; 8],
             tilecfg: [0; 64],
             scaledata: [0x7f; 128],
+            misc_enable: 0,
         }
     }
 }
@@ -234,7 +239,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, x2), 3024);
         assert_eq!(core::mem::offset_of!(CpuState, tmm), 3152);
         assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 3152 + 8 * 1024);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11536);
+        assert_eq!(core::mem::offset_of!(CpuState, misc_enable), 11536);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11544);
     }
 
     #[test]

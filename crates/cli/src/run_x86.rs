@@ -2910,6 +2910,17 @@ fn x87_fds_index(d: &polyisa_guest_x86::MapDec, seg_ss: bool) -> u8 {
     }
 }
 
+/// 真偽値の和。Backend の bool は opaque なので W32 経由で組み立てる。
+fn bor_bool<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    use polyisa_sem::{Cmp, W32};
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let a = b.select::<W32>(x, one, zero);
+    let c = b.select::<W32>(y, one, zero);
+    let s = b.or::<W32>(a, c);
+    b.cmp::<W32>(Cmp::Ne, s, zero)
+}
+
 /// 成功した non-control x87 命令の FIP/FCS/FOP と、メモリ形では
 /// FDP/FDS を記録する。FOP は low 3 bits of the first opcode byte と
 /// 第 2 バイト（通常 ModRM）を連結した 11 ビット。
@@ -2926,9 +2937,9 @@ fn x87_record_last<B: Backend>(
     b.set(polyisa_guest_x86::sem::fip_ref(), ip);
     let cs: B::V<W16> = b.get(polyisa_guest_x86::sem::sreg_ref(1));
     b.set(polyisa_guest_x86::sem::fcs_ref(), cs);
-    // fopcode compatibility mode を持たない現行モデルでは、FOP は
-    // unmasked exception を新たに発生させた non-control 命令だけが更新する。
-    // FIP/FDP は成功した non-control 命令で常に更新される。
+    // FOP は通常、unmasked exception を新たに発生させた non-control 命令だけが
+    // 更新する。IA32_MISC_ENABLE bit2 の fopcode compatibility mode では、
+    // 例外の有無に関係なく成功した non-control 命令ごとに更新する。
     let fsw_after: B::V<W16> = b.get(polyisa_guest_x86::sem::fsw_ref());
     let not_before = b.not::<W16>(fsw_before);
     let raised = b.and::<W16>(fsw_after, not_before);
@@ -2938,7 +2949,13 @@ fn x87_record_last<B: Backend>(
     let exc_mask = b.konst::<W16>(0x3f);
     let unmasked = b.and::<W16>(unmasked, exc_mask);
     let z16 = b.konst::<W16>(0);
-    let update_fop = b.cmp::<W16>(Cmp::Ne, unmasked, z16);
+    let exception_update = b.cmp::<W16>(Cmp::Ne, unmasked, z16);
+    let misc: B::V<W64> = b.get(polyisa_guest_x86::sem::misc_enable_ref());
+    let compat_bit = b.konst::<W64>(4);
+    let compat_masked = b.and::<W64>(misc, compat_bit);
+    let z64 = b.konst::<W64>(0);
+    let compat = b.cmp::<W64>(Cmp::Ne, compat_masked, z64);
+    let update_fop = bor_bool(b, exception_update, compat);
     let fopv = (u16::from(d.opcode & 7) << 8) | u16::from(d.modrm);
     let fop_new = b.konst::<W16>(fopv);
     let fop_old: B::V<W16> = b.get(polyisa_guest_x86::sem::fop_ref());
@@ -3899,14 +3916,14 @@ fn dispatch_map_inner<B: Backend>(
         // MSR 空間を持たない最小近似（RDMSR=0、WRMSR=no-op）。
         Insn::Rdmsr => {
             if mode == 16 {
-                sem_ea::rdmsr_zero(b)
+                sem_ea::rdmsr(b)
             } else {
                 sem_ea::protection(b, eip)
             }
         }
         Insn::Wrmsr => {
             if mode == 16 {
-                sem_ea::nop(b)
+                sem_ea::wrmsr(b)
             } else {
                 sem_ea::protection(b, eip)
             }
@@ -21306,6 +21323,42 @@ mod tests {
         file[ph + 40..ph + 48].copy_from_slice(&len.to_le_bytes());
         file[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
         file
+    }
+
+    #[test]
+    fn misc_enable_msr_round_trips_in_system_mode_semantics() {
+        let mut env = bare();
+        sem::write64(&mut env.backend, Gpr(1), 0x1a0);
+        sem::write64(&mut env.backend, Gpr(0), 4);
+        sem::write64(&mut env.backend, Gpr(2), 0);
+        env.step(polyisa_guest_x86::sem_ea::wrmsr).unwrap();
+        assert_eq!(env.backend.get(sem::misc_enable_ref()), 4);
+        sem::write64(&mut env.backend, Gpr(0), 0);
+        env.step(polyisa_guest_x86::sem_ea::rdmsr).unwrap();
+        assert_eq!(sem::read64(&mut env.backend, Gpr(0)) & 0xffff_ffff, 4);
+        assert_eq!(sem::read64(&mut env.backend, Gpr(2)) & 0xffff_ffff, 0);
+
+        sem::write64(&mut env.backend, Gpr(1), 0x1b0);
+        sem::write64(&mut env.backend, Gpr(0), 0xffff);
+        env.step(polyisa_guest_x86::sem_ea::wrmsr).unwrap();
+        assert_eq!(env.backend.get(sem::misc_enable_ref()), 4);
+        env.step(polyisa_guest_x86::sem_ea::rdmsr).unwrap();
+        assert_eq!(sem::read64(&mut env.backend, Gpr(0)) & 0xffff_ffff, 0);
+    }
+
+    #[test]
+    fn fopcode_compatibility_mode_updates_fop_without_an_exception() {
+        for (misc, expected) in [(0u64, 0u16), (4, 0x1ee)] {
+            let mut env = diff_env(&[0xd9, 0xee]); // fldz
+            env.backend.set(sem::misc_enable_ref(), misc);
+            env.backend.set(sem::fcw_ref(), 0x037f);
+            env.backend.set(sem::ftw_ref(), 0xffffu16);
+            let mut sys = Linux::x86_64();
+            let mut hist = std::collections::VecDeque::new();
+            let r = step_x86_map(&mut env, &mut sys, 64, 0, &mut hist).unwrap();
+            assert!(r.is_ok(), "misc={misc}: {r:?}");
+            assert_eq!(env.backend.get(sem::fop_ref()), expected, "misc={misc}");
+        }
     }
 
     #[test]

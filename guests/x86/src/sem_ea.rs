@@ -11910,12 +11910,41 @@ pub fn protection<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     }))
 }
 
-/// システムモード側の RDMSR 近似。MSR 空間はモデル化しないので
-/// 既知の制御値も 0 とし、EDX:EAX=0 を返す。
-pub fn rdmsr_zero<B: Backend>(b: &mut B) -> Flow<B> {
+/// システムモード側の RDMSR。IA32_MISC_ENABLE (0x1a0) だけを
+/// モデル化し、その他の MSR は 0 を返す最小近似にする。
+pub fn rdmsr<B: Backend>(b: &mut B) -> Flow<B> {
+    let ecx = decode::grd32(b, Gpr(1));
+    let ia32_misc = b.konst::<W32>(0x1a0);
+    let is_misc = b.cmp::<W32>(Cmp::Eq, ecx, ia32_misc);
+    let v: B::V<W64> = b.get(crate::sem::misc_enable_ref());
+    let lo = b.trunc::<W64, W32>(v);
+    let sh = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(v, sh);
+    let hi = b.trunc::<W64, W32>(hi64);
     let z = b.konst::<W32>(0);
-    decode::gwr32(b, Gpr(0), z);
-    decode::gwr32(b, Gpr(2), z);
+    let eax = b.select::<W32>(is_misc, lo, z);
+    let edx = b.select::<W32>(is_misc, hi, z);
+    decode::gwr32(b, Gpr(0), eax);
+    decode::gwr32(b, Gpr(2), edx);
+    Ok(())
+}
+
+/// システムモード側の WRMSR。IA32_MISC_ENABLE だけを保持し、
+/// その他の MSR への書き込みは無視する最小近似にする。
+pub fn wrmsr<B: Backend>(b: &mut B) -> Flow<B> {
+    let ecx = decode::grd32(b, Gpr(1));
+    let ia32_misc = b.konst::<W32>(0x1a0);
+    let is_misc = b.cmp::<W32>(Cmp::Eq, ecx, ia32_misc);
+    let lo32 = decode::grd32(b, Gpr(0));
+    let hi32 = decode::grd32(b, Gpr(2));
+    let lo = b.zext::<W32, W64>(lo32);
+    let hi0 = b.zext::<W32, W64>(hi32);
+    let sh = b.konst::<W64>(32);
+    let hi = b.shl::<W64>(hi0, sh);
+    let v = b.or::<W64>(lo, hi);
+    let old: B::V<W64> = b.get(crate::sem::misc_enable_ref());
+    let new = b.select::<W64>(is_misc, v, old);
+    b.set(crate::sem::misc_enable_ref(), new);
     Ok(())
 }
 
