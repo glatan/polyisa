@@ -15335,6 +15335,84 @@ pub(crate) fn x87_encode_normalized<B: Backend>(
     (sig_out, b.trunc::<W64, W16>(packed))
 }
 
+/// 2 入力 x87 算術の NaN 選択。返り値は「NaN 入力があるか」、
+/// 「SNaN による invalid か」、伝播させる quieted significand、その符号。
+/// x87 は SNaN/QNaN が混在すれば QNaN、同種なら significand の大きい方を
+/// 選び、SNaN は bit62 を立てて quiet 化する。
+pub(crate) struct X87NanSelect<B: Backend> {
+    pub(crate) any: B::B,
+    pub(crate) snan_invalid: B::B,
+    pub(crate) sig: B::V<W64>,
+    pub(crate) sign: B::V<W64>,
+}
+
+pub(crate) fn x87_nan_select2<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+) -> X87NanSelect<B> {
+    let zero = b.konst::<W64>(0);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let exp_a64 = b.zext::<W16, W64>(exp_a);
+    let exp_b64 = b.zext::<W16, W64>(exp_b);
+    let ea = b.and::<W64>(exp_a64, mask15);
+    let eb = b.and::<W64>(exp_b64, mask15);
+    let sign_a = b.shr_l::<W64>(exp_a64, s15);
+    let sign_b = b.shr_l::<W64>(exp_b64, s15);
+    let sp_a = b.cmp::<W64>(Cmp::Eq, ea, mask15);
+    let sp_b = b.cmp::<W64>(Cmp::Eq, eb, mask15);
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let fa = b.and::<W64>(sig_a, frac_mask);
+    let fb = b.and::<W64>(sig_b, frac_mask);
+    let fa_nz = b.cmp::<W64>(Cmp::Ne, fa, zero);
+    let fb_nz = b.cmp::<W64>(Cmp::Ne, fb, zero);
+    let nan_a = bit_and(b, sp_a, fa_nz);
+    let nan_b = bit_and(b, sp_b, fb_nz);
+    let qbit = b.konst::<W64>(1u64 << 62);
+    let qa = b.and::<W64>(sig_a, qbit);
+    let qb = b.and::<W64>(sig_b, qbit);
+    let qa_set = b.cmp::<W64>(Cmp::Ne, qa, zero);
+    let qb_set = b.cmp::<W64>(Cmp::Ne, qb, zero);
+    let qa_clear = bit_not(b, qa_set);
+    let qb_clear = bit_not(b, qb_set);
+    let snan_a = bit_and(b, nan_a, qa_clear);
+    let snan_b = bit_and(b, nan_b, qb_clear);
+    let snan_any = bit_or(b, snan_a, snan_b);
+    let both_nan = bit_and(b, nan_a, nan_b);
+    let diff_ab = bit_and(b, snan_a, qb_set);
+    let diff_ba = bit_and(b, snan_b, qa_set);
+    let kinds_differ = bit_or(b, diff_ab, diff_ba);
+    // kind が違えば QNaN 側、同じなら significand の大きい側を選ぶ。
+    let a_q_when_diff = qa_set;
+    let a_ge = b.cmp::<W64>(Cmp::GeU, sig_a, sig_b);
+    let pref_a_same = a_ge;
+    let pref_a_diff = a_q_when_diff;
+    let pref_a_choice = bool_or_select_impl(b, kinds_differ, pref_a_diff, pref_a_same);
+    let not_nan_b = bit_not(b, nan_b);
+    let only_a = bit_and(b, nan_a, not_nan_b);
+    let use_a = bool_or_select_impl(b, both_nan, pref_a_choice, only_a);
+    let sig_sel = b.select::<W64>(use_a, sig_a, sig_b);
+    let sign_sel = b.select::<W64>(use_a, sign_a, sign_b);
+    let sig_quiet = b.or::<W64>(sig_sel, qbit);
+    let any = bit_or(b, nan_a, nan_b);
+    X87NanSelect {
+        any,
+        snan_invalid: snan_any,
+        sig: sig_quiet,
+        sign: sign_sel,
+    }
+}
+
+fn bool_or_select_impl<B: Backend>(b: &mut B, sel: B::B, a: B::B, c: B::B) -> B::B {
+    let ns = bit_not(b, sel);
+    let aa = bit_and(b, sel, a);
+    let cc = bit_and(b, ns, c);
+    bit_or(b, aa, cc)
+}
+
 /// overflow した x87 結果の masked response。RC によって無限大か
 /// 最大有限値を選ぶ。返す指数は符号なしの magnitude 部分だけ。
 pub(crate) fn x87_overflow_masked_response<B: Backend>(
@@ -15521,8 +15599,6 @@ pub(crate) fn mul_ext<B: Backend>(
     let frac_b = b.and::<W64>(sig_b, frac_mask);
     let frac_a_nz = b.cmp::<W64>(Cmp::Ne, frac_a, zero64);
     let frac_b_nz = b.cmp::<W64>(Cmp::Ne, frac_b, zero64);
-    let nan_a = bit_and(b, sp_a, frac_a_nz);
-    let nan_b = bit_and(b, sp_b, frac_b_nz);
     let frac_a_z = bit_not(b, frac_a_nz);
     let frac_b_z = bit_not(b, frac_b_nz);
     let inf_a = bit_and(b, sp_a, frac_a_z);
@@ -15530,18 +15606,27 @@ pub(crate) fn mul_ext<B: Backend>(
     let inf_a_zb = bit_and(b, inf_a, z_b);
     let inf_b_za = bit_and(b, inf_b, z_a);
     let invalid_inf_zero = bit_or(b, inf_a_zb, inf_b_za);
-    x87_exception_flag(b, invalid_inf_zero, 1);
-    let nan_in = bit_or(b, nan_a, nan_b);
-    let result_nan = bit_or(b, nan_in, invalid_inf_zero);
+    let nan_sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
+    let nan_input = nan_sel.any;
+    let snan_invalid = nan_sel.snan_invalid;
+    let nan_prop_sig = nan_sel.sig;
+    let nan_prop_sign = nan_sel.sign;
+    let invalid_any = bit_or(b, invalid_inf_zero, snan_invalid);
+    x87_exception_flag(b, invalid_any, 1);
+    let result_nan = bit_or(b, nan_input, invalid_inf_zero);
     let inf_in = bit_or(b, inf_a, inf_b);
     let not_nan = bit_not(b, result_nan);
     let result_inf = bit_and(b, inf_in, not_nan);
     let int_bit64 = b.konst::<W64>(1u64 << 63);
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
-    let special_sig = b.select::<W64>(result_inf, int_bit64, nan_sig);
+    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let special_sig = b.select::<W64>(result_inf, int_bit64, nan_out_sig);
     let exp_mag = b.select::<W64>(is_special, special_exp, exp_fin);
     let sig_out = b.select::<W64>(is_special, special_sig, sig_fin);
-    let exp_word64 = b.or::<W64>(exp_mag, sign_bit);
+    let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
+    let special_sign = b.select::<W64>(nan_input, nan_sign_bit, sign_bit);
+    let out_sign = b.select::<W64>(is_special, special_sign, sign_bit);
+    let exp_word64 = b.or::<W64>(exp_mag, out_sign);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
     x87_apply_precision(b, sig_out, exp_word)
 }
@@ -15882,22 +15967,27 @@ pub(crate) fn add_ext<B: Backend>(
     let exp_after_z = b.select::<W64>(use_zero, exp_zero_case, exp_mag);
     let sign_after_z = b.select::<W64>(use_zero, sign_zero_case, sign_num);
 
-    let sig_a_not_inf = b.cmp::<W64>(Cmp::Ne, sig_a, int_bit);
-    let nan_a = bit_and(b, sp_a, sig_a_not_inf);
-    let sig_b_not_inf = b.cmp::<W64>(Cmp::Ne, sig_b, int_bit);
-    let nan_b = bit_and(b, sp_b, sig_b_not_inf);
     let signs_differ = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
     let both_sp = bit_and(b, sp_a, sp_b);
     let inf_cancel = bit_and(b, both_sp, signs_differ);
-    x87_exception_flag(b, inf_cancel, 1);
-    let nan_either = bit_or(b, nan_a, nan_b);
-    let any_nan = bit_or(b, nan_either, inf_cancel);
-    let sp_sig = b.select::<W64>(any_nan, nan_sig, int_bit);
-    let sp_sign = b.select::<W64>(sp_a, sign_a, sign_b);
-    let nan_sign = b.select::<W64>(any_nan, sign_a, sp_sign);
+    let nan_sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
+    let nan_input = nan_sel.any;
+    let snan_invalid = nan_sel.snan_invalid;
+    let nan_prop_sig = nan_sel.sig;
+    let nan_prop_sign = nan_sel.sign;
+    let invalid_any = bit_or(b, inf_cancel, snan_invalid);
+    x87_exception_flag(b, invalid_any, 1);
+    let nan_case = bit_or(b, nan_input, inf_cancel);
+    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let sp_sig = b.select::<W64>(nan_case, nan_out_sig, int_bit);
+    let inf_sign = b.select::<W64>(sp_a, sign_a, sign_b);
+    // 入力 NaN は選択した payload の符号を使う。inf同士の cancel が
+    // 作る indefinite は従来どおり第一入力側の符号にしておく。
+    let nan_sign = b.select::<W64>(nan_input, nan_prop_sign, sign_a);
+    let sp_sign = b.select::<W64>(nan_case, nan_sign, inf_sign);
     let sig_final = b.select::<W64>(any_sp, sp_sig, sig_after_z);
     let exp_final = b.select::<W64>(any_sp, special, exp_after_z);
-    let sign_final = b.select::<W64>(any_sp, nan_sign, sign_after_z);
+    let sign_final = b.select::<W64>(any_sp, sp_sign, sign_after_z);
 
     let sign_bit = b.shl::<W64>(sign_final, s15);
     let packed = b.or::<W64>(exp_final, sign_bit);
@@ -16106,7 +16196,13 @@ pub(crate) fn div_ext<B: Backend>(
     let inf_inf = bit_and(b, inf_a, inf_b);
     let z_z = bit_and(b, z_a, z_b);
     let invalid_div = bit_or(b, inf_inf, z_z);
-    x87_exception_flag(b, invalid_div, 1);
+    let nan_sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
+    let nan_input = nan_sel.any;
+    let snan_invalid = nan_sel.snan_invalid;
+    let nan_prop_sig = nan_sel.sig;
+    let nan_prop_sign = nan_sel.sign;
+    let invalid_any = bit_or(b, invalid_div, snan_invalid);
+    x87_exception_flag(b, invalid_any, 1);
     // 有限非零の 0 除算は zero-divide。0/0 は invalid、
     // inf/0 は規則上 inf で zero-divide ではない。
     let not_za = bit_not(b, z_a);
@@ -16121,15 +16217,22 @@ pub(crate) fn div_ext<B: Backend>(
     let res_inf = bit_or(b, inf_a, z_b);
     let res_zero = bit_or(b, inf_b, z_a);
 
-    let e_out = b.select::<W64>(bad, nan_exp, e_under_z);
-    let s_out = b.select::<W64>(bad, nan_sig, sig_under);
+    // inf/inf と 0/0 は res_inf/res_zero の条件も満たすが、
+    // invalid NaN の方が優先される。まず zero/inf の通常応答を選び、
+    // 最後に bad で上書きする。
+    let e_out = b.select::<W64>(res_zero, zero, e_under_z);
+    let s_out = b.select::<W64>(res_zero, zero, sig_under);
     let e_out = b.select::<W64>(res_inf, special, e_out);
     let s_out = b.select::<W64>(res_inf, int_bit, s_out);
-    let e_out = b.select::<W64>(res_zero, zero, e_out);
-    let s_out = b.select::<W64>(res_zero, zero, s_out);
-    // nan は符号なし。
+    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let e_out = b.select::<W64>(bad, nan_exp, e_out);
+    let s_out = b.select::<W64>(bad, nan_out_sig, s_out);
+    // 入力 NaN は符号も伝播する。算術 invalid が作る indefinite は
+    // 従来どおり符号なしとする。
     let sign_bit = b.shl::<W64>(sign_r, s15);
-    let sign_sel = b.select::<W64>(bad, zero, sign_bit);
+    let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
+    let bad_sign = b.select::<W64>(nan_input, nan_sign_bit, zero);
+    let sign_sel = b.select::<W64>(bad, bad_sign, sign_bit);
     let e_word = b.or::<W64>(e_out, sign_sel);
     let exp_word = b.trunc::<W64, W16>(e_word);
     x87_apply_precision(b, s_out, exp_word)

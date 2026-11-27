@@ -13463,6 +13463,58 @@ fn run_x87_fdiv_zero_sets_zero_divide_flag() {
 }
 
 #[test]
+fn run_x87_fdiv_nan_and_invalid_priority() {
+    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp0);
+        x87_recalc_tag(&mut env, 0);
+        x87_seed_valid(&mut env, 1, sig1, exp1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let one = (0x8000_0000_0000_0000u64, 0x3FFFu16);
+    let inf = (0x8000_0000_0000_0000u64, 0x7FFFu16);
+    // inf/inf と 0/0 は infinity/zero の通常規則より invalid NaN が優先。
+    assert_eq!(
+        once(inf.0, inf.1, inf.0, inf.1),
+        (0xC000_0000_0000_0000, 0x7FFF, 1),
+        "inf/inf"
+    );
+    assert_eq!(once(0, 0, 0, 0), (0xC000_0000_0000_0000, 0x7FFF, 1), "0/0");
+    // QNaN は payload と符号を保って伝播し、IE は立たない。
+    let qnan = (0xC000_0000_0000_0123u64, 0xFFFFu16);
+    assert_eq!(
+        once(qnan.0, qnan.1, one.0, one.1),
+        (qnan.0, qnan.1, 0),
+        "QNaN propagation"
+    );
+    // SNaN は quiet 化して伝播し、IE を立てる。分母が zero でも
+    // SNaN invalid が zero-divide より優先される。
+    let snan = (0x8000_0000_0000_0123u64, 0x7FFFu16);
+    assert_eq!(
+        once(snan.0, snan.1, 0, 0),
+        (0xC000_0000_0000_0123, 0x7FFF, 1),
+        "SNaN over zero"
+    );
+}
+
+#[test]
 fn run_x87_push_overflow_sets_sf_c1_and_loads_indefinite() {
     fn once(fcw: u16) -> (u16, u16, u64, u16) {
         let mut env = bare_x86_env();
@@ -14768,6 +14820,54 @@ fn run_x87_inexact_result_sets_precision_flag() {
 }
 
 #[test]
+fn run_x87_fadd_nan_and_invalid_rules() {
+    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp0);
+        x87_recalc_tag(&mut env, 0);
+        x87_seed_valid(&mut env, 1, sig1, exp1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let one = (0x8000_0000_0000_0000u64, 0x3FFFu16);
+    let inf = (0x8000_0000_0000_0000u64, 0x7FFFu16);
+    // +inf + -inf は invalid。indefinite を返して IE を立てる。
+    let (sig, exp, fsw) = once(inf.0, inf.1, inf.0, inf.1 | 0x8000);
+    assert_eq!((sig, exp & 0x7fff), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_ne!(fsw & 1, 0);
+    // QNaN が第二入力だけでも payload と符号を伝播する。
+    let qnan = (0xC000_0000_0000_0123u64, 0xFFFFu16);
+    assert_eq!(
+        once(one.0, one.1, qnan.0, qnan.1),
+        (qnan.0, qnan.1, 0),
+        "QNaN propagation"
+    );
+    // SNaN は quiet 化し、IE を立てる。
+    let snan = (0x8000_0000_0000_0123u64, 0x7FFFu16);
+    assert_eq!(
+        once(snan.0, snan.1, one.0, one.1),
+        (0xC000_0000_0000_0123, 0x7FFF, 1),
+        "SNaN quieting"
+    );
+}
+
+#[test]
 fn run_x87_fdiv_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> (u64, u16) {
         let mut env = bare_x86_env();
@@ -15035,6 +15135,36 @@ fn run_x87_fmul_propagates_infinity_and_nan_rules() {
         once(inf.0, inf.1, 0, 0),
         (0xC000_0000_0000_0000, 0x7FFF, 1),
         "inf * 0 is NaN and sets IE"
+    );
+
+    // QNaN は payload と符号を保って伝播する。
+    let qnan = (0xC000_0000_0000_0123u64, 0x7FFFu16);
+    assert_eq!(
+        once(qnan.0, qnan.1, two.0, two.1),
+        (qnan.0, qnan.1, 0),
+        "QNaN payload propagation"
+    );
+    // SNaN は quiet bit を立てて伝播し、IE を立てる。
+    let snan = (0x8000_0000_0000_0123u64, 0xFFFFu16);
+    assert_eq!(
+        once(snan.0, snan.1, two.0, two.1),
+        (0xC000_0000_0000_0123, 0xFFFF, 1),
+        "SNaN is quieted and sets IE"
+    );
+    // 同種の NaN 同士では significand の大きい方を選ぶ。
+    let small_q = (0xC000_0000_0000_0100u64, 0x7FFFu16);
+    let large_q = (0xC000_0000_0000_0200u64, 0xFFFFu16);
+    assert_eq!(
+        once(small_q.0, small_q.1, large_q.0, large_q.1),
+        (large_q.0, large_q.1, 0),
+        "larger QNaN significand wins"
+    );
+    // SNaN/QNaN の混在では、SNaN の方が大きくても QNaN 側を選ぶ。
+    let big_s = (0xBFFF_FFFF_FFFF_FFFFu64, 0xFFFFu16);
+    assert_eq!(
+        once(big_s.0, big_s.1, small_q.0, small_q.1),
+        (small_q.0, small_q.1, 1),
+        "QNaN wins over SNaN"
     );
 }
 
