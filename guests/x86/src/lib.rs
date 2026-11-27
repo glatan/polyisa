@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2449);
+        assert_eq!(INSNS.len(), 2457);
     }
 
     #[test]
@@ -2957,6 +2957,20 @@ fn avx10_decode() {
         ([0x62, 0xF5, 0x7D, 0x28, 0x69, 0xC2], Insn::Vcvtps2ibsXvWv),
         ([0x62, 0xF5, 0x7D, 0x28, 0x6A, 0xC2], Insn::Vcvttps2iubsXvWv),
         ([0x62, 0xF5, 0x7D, 0x28, 0x6B, 0xC2], Insn::Vcvtps2iubsXvWv),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap();
+        assert_eq!(d.insn, insn);
+    }
+    // VCVTT{PD,PS}2{D,Q,UD,UQ}S: MAP5.6C/6D、pp/W で型を分ける。
+    for (bytes, insn) in [
+        ([0x62, 0xF5, 0xFC, 0x28, 0x6D, 0xC2], Insn::Vcvttpd2dqsXvWv),
+        ([0x62, 0xF5, 0xFD, 0x28, 0x6D, 0xC2], Insn::Vcvttpd2qqsXvWv),
+        ([0x62, 0xF5, 0xFC, 0x28, 0x6C, 0xC2], Insn::Vcvttpd2udqsXvWv),
+        ([0x62, 0xF5, 0xFD, 0x28, 0x6C, 0xC2], Insn::Vcvttpd2uqqsXvWv),
+        ([0x62, 0xF5, 0x7C, 0x28, 0x6D, 0xC2], Insn::Vcvttps2dqsXvWv),
+        ([0x62, 0xF5, 0x7D, 0x28, 0x6D, 0xC2], Insn::Vcvttps2qqsXvWv),
+        ([0x62, 0xF5, 0x7C, 0x28, 0x6C, 0xC2], Insn::Vcvttps2udqsXvWv),
+        ([0x62, 0xF5, 0x7D, 0x28, 0x6C, 0xC2], Insn::Vcvttps2uqqsXvWv),
     ] {
         let d = decode_map(&bytes, modes, f).unwrap();
         assert_eq!(d.insn, insn);

@@ -2889,6 +2889,34 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VCVTT{PD,PS}2{D,Q,U DQ,UQ}S（truncating saturating integer conversion）。
+    // opcode 6C/6D、pp/W で入出力型を分ける。
+    for (op, sel, w, ed, mn) in [
+        (0x6Du8, PfxSel::Plain, true, 8u8, "vcvttpd2dqs"),
+        (0x6D, PfxSel::P66, true, 8, "vcvttpd2qqs"),
+        (0x6C, PfxSel::Plain, true, 8, "vcvttpd2udqs"),
+        (0x6C, PfxSel::P66, true, 8, "vcvttpd2uqqs"),
+        (0x6D, PfxSel::Plain, false, 4, "vcvttps2dqs"),
+        (0x6D, PfxSel::P66, false, 4, "vcvttps2qqs"),
+        (0x6C, PfxSel::Plain, false, 4, "vcvttps2udqs"),
+        (0x6C, PfxSel::P66, false, 4, "vcvttps2uqqs"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            sel,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = ed;
+        it.sae = true;
+        it.wsel = Some(w);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVT[,T]PS2I[,U]BS（FP32→byte saturating conversion）。
     // byte は対応 dword 要素の下位へ置き、上位 3 byte は 0 にする。
     for (op, mn, trunc) in [

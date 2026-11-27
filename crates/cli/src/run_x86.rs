@@ -6514,7 +6514,15 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvttps2ibsXvWv
+        Insn::Vcvttpd2dqsXvWv
+            | Insn::Vcvttpd2qqsXvWv
+            | Insn::Vcvttpd2udqsXvWv
+            | Insn::Vcvttpd2uqqsXvWv
+            | Insn::Vcvttps2dqsXvWv
+            | Insn::Vcvttps2qqsXvWv
+            | Insn::Vcvttps2udqsXvWv
+            | Insn::Vcvttps2uqqsXvWv
+            | Insn::Vcvttps2ibsXvWv
             | Insn::Vcvtps2ibsXvWv
             | Insn::Vcvttps2iubsXvWv
             | Insn::Vcvtps2iubsXvWv
@@ -6678,7 +6686,25 @@ fn avx10_exec(
                 if md.evex_b {
                     let ebw = if matches!(
                         md.insn,
-                        Insn::Vdpbf16psXvHvWv | Insn::VdpphpsXvHvWv | Insn::Vcvt2ps2phxXvHvWv
+                        Insn::Vcvttpd2dqsXvWv
+                            | Insn::Vcvttpd2qqsXvWv
+                            | Insn::Vcvttpd2udqsXvWv
+                            | Insn::Vcvttpd2uqqsXvWv
+                    ) {
+                        8
+                    } else if matches!(
+                        md.insn,
+                        Insn::Vdpbf16psXvHvWv
+                            | Insn::VdpphpsXvHvWv
+                            | Insn::Vcvt2ps2phxXvHvWv
+                            | Insn::Vcvttps2ibsXvWv
+                            | Insn::Vcvtps2ibsXvWv
+                            | Insn::Vcvttps2iubsXvWv
+                            | Insn::Vcvtps2iubsXvWv
+                            | Insn::Vcvttps2dqsXvWv
+                            | Insn::Vcvttps2qqsXvWv
+                            | Insn::Vcvttps2udqsXvWv
+                            | Insn::Vcvttps2uqqsXvWv
                     ) {
                         4
                     } else {
@@ -6695,7 +6721,9 @@ fn avx10_exec(
                 } else {
                     let n = if md.insn == Insn::Vcomisbf16XvWv {
                         2
-                    } else if md.insn == Insn::Vcvthf82phXvWv {
+                    } else if md.insn == Insn::Vcvthf82phXvWv
+                        || matches!(md.insn, Insn::Vcvttps2qqsXvWv | Insn::Vcvttps2uqqsXvWv)
+                    {
                         vbytes / 2
                     } else {
                         vbytes
@@ -6848,6 +6876,108 @@ fn avx10_exec(
                 out[i * 2 + 1] = 0;
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvttpd2dqsXvWv
+        | Insn::Vcvttpd2qqsXvWv
+        | Insn::Vcvttpd2udqsXvWv
+        | Insn::Vcvttpd2uqqsXvWv
+        | Insn::Vcvttps2dqsXvWv
+        | Insn::Vcvttps2qqsXvWv
+        | Insn::Vcvttps2udqsXvWv
+        | Insn::Vcvttps2uqqsXvWv => {
+            let pd = matches!(
+                insn,
+                Insn::Vcvttpd2dqsXvWv
+                    | Insn::Vcvttpd2qqsXvWv
+                    | Insn::Vcvttpd2udqsXvWv
+                    | Insn::Vcvttpd2uqqsXvWv
+            );
+            let qout = matches!(
+                insn,
+                Insn::Vcvttpd2qqsXvWv
+                    | Insn::Vcvttpd2uqqsXvWv
+                    | Insn::Vcvttps2qqsXvWv
+                    | Insn::Vcvttps2uqqsXvWv
+            );
+            let unsigned = matches!(
+                insn,
+                Insn::Vcvttpd2udqsXvWv
+                    | Insn::Vcvttpd2uqqsXvWv
+                    | Insn::Vcvttps2udqsXvWv
+                    | Insn::Vcvttps2uqqsXvWv
+            );
+            let ibw = if pd { 8usize } else { 4 };
+            let obw = if qout { 8usize } else { 4 };
+            let lanes = vbytes / ibw;
+            let rdi = |vbuf: &[u8; 64], i: usize| -> u64 {
+                let mut x = 0u64;
+                for j in 0..ibw {
+                    x |= u64::from(vbuf[i * ibw + j]) << (8 * j);
+                }
+                x
+            };
+            for i in 0..lanes {
+                if k >> i & 1 == 0 {
+                    for j in 0..obw {
+                        out[i * obw + j] = if md.evex_z { 0 } else { old[i * obw + j] };
+                    }
+                    continue;
+                }
+                let bits = rdi(&y, i);
+                let v = if pd {
+                    let mut b = bits;
+                    if vcvt2_mxcsr & 0x40 != 0
+                        && b & 0x7ff0_0000_0000_0000 == 0
+                        && b & 0x000f_ffff_ffff_ffff != 0
+                    {
+                        b &= 0x8000_0000_0000_0000;
+                    }
+                    f64::from_bits(b)
+                } else {
+                    let mut b = bits as u32;
+                    if vcvt2_mxcsr & 0x40 != 0 && b & 0x7f80_0000 == 0 && b & 0x007f_ffff != 0 {
+                        b &= 0x8000_0000;
+                    }
+                    f32::from_bits(b) as f64
+                };
+                let tv = v.trunc();
+                let val: u64 = if tv.is_nan() {
+                    0
+                } else if qout {
+                    if unsigned {
+                        if tv >= 18_446_744_073_709_551_616.0 {
+                            u64::MAX
+                        } else if tv <= 0.0 {
+                            0
+                        } else {
+                            tv as u64
+                        }
+                    } else if tv >= 9_223_372_036_854_775_808.0 {
+                        i64::MAX as u64
+                    } else if tv <= -9_223_372_036_854_775_808.0 {
+                        i64::MIN as u64
+                    } else {
+                        (tv as i64) as u64
+                    }
+                } else if unsigned {
+                    if tv >= 4_294_967_296.0 {
+                        u32::MAX as u64
+                    } else if tv <= 0.0 {
+                        0
+                    } else {
+                        u64::from(tv as u32)
+                    }
+                } else if tv >= 2_147_483_648.0 {
+                    i32::MAX as u32 as u64
+                } else if tv <= -2_147_483_648.0 {
+                    i32::MIN as u32 as u64
+                } else {
+                    (tv as i32) as u32 as u64
+                };
+                for j in 0..obw {
+                    out[i * obw + j] = (val >> (8 * j)) as u8;
+                }
+            }
         }
         Insn::Vcvttps2ibsXvWv
         | Insn::Vcvtps2ibsXvWv
@@ -18771,6 +18901,14 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
+            | Insn::Vcvttpd2dqsXvWv
+            | Insn::Vcvttpd2qqsXvWv
+            | Insn::Vcvttpd2udqsXvWv
+            | Insn::Vcvttpd2uqqsXvWv
+            | Insn::Vcvttps2dqsXvWv
+            | Insn::Vcvttps2qqsXvWv
+            | Insn::Vcvttps2udqsXvWv
+            | Insn::Vcvttps2uqqsXvWv
             | Insn::Vcvttps2ibsXvWv
             | Insn::Vcvtps2ibsXvWv
             | Insn::Vcvttps2iubsXvWv
