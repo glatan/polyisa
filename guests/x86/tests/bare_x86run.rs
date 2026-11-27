@@ -13588,6 +13588,148 @@ fn run_x87_fstp_m64_underflow_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_fstp_m64_rounds_by_fcw_and_reports_precision() {
+    fn once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0x1B])
+            .unwrap(); // fstp qword [rbx]
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // 1+2^-53。倍精度では 1.0 と 1+2^-52 の中間。
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0400);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3FFF);
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut mem = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut mem, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            u64::from_le_bytes(mem),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    let (mem, fsw, top) = once(0x037F);
+    assert_eq!(mem, 0x3FF0_0000_0000_0000);
+    assert_ne!(fsw & (1 << 5), 0);
+    assert_eq!(top, 1);
+    let (mem, _, _) = once(0x0F7F);
+    assert_eq!(mem, 0x3FF0_0000_0000_0000);
+    let (mem, _, _) = once(0x0B7F);
+    assert_eq!(mem, 0x3FF0_0000_0000_0001);
+}
+
+#[test]
+fn run_x87_fstp_m64_numeric_underflow_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0x1B])
+            .unwrap(); // fstp qword [rbx]
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x1122_3344_5566_7788u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // 2^-1074。倍精度の最小 subnormal にちょうど等しい。
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3BCD);
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut mem = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut mem, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            u64::from_le_bytes(mem),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    let (mem, fsw, top) = once(0x037F);
+    assert_eq!(mem, 1);
+    assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+    assert_eq!(top, 1);
+    let (mem, fsw, top) = once(0x036F);
+    assert_eq!(mem, 0x1122_3344_5566_7788);
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_eq!(fsw & (1 << 5), 0);
+    assert_eq!(top, 0);
+}
+
+#[test]
+fn run_x87_fstp_m64_numeric_overflow_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0x1B])
+            .unwrap(); // fstp qword [rbx]
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x1122_3344_5566_7788u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        // 2^1024 は倍精度の有限範囲を超える。
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x43FF);
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut mem = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut mem, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            u64::from_le_bytes(mem),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    let (mem, fsw, top) = once(0x037F);
+    assert_eq!(mem, 0x7FF0_0000_0000_0000);
+    assert_ne!(fsw & (1 << 3), 0);
+    assert_ne!(fsw & (1 << 5), 0);
+    assert_eq!(top, 1);
+    let (mem, fsw, top) = once(0x0377);
+    assert_eq!(mem, 0x1122_3344_5566_7788);
+    assert_ne!(fsw & (1 << 3), 0);
+    assert_eq!(top, 0);
+}
+
+#[test]
 fn run_x87_fstp_m32_underflow_stores_single_indefinite() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);

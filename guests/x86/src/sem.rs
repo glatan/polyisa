@@ -14955,6 +14955,198 @@ pub(crate) fn x87_round_up<B: Backend>(
     bit_or(b, up, ceil_up)
 }
 
+/// `sig` を `shift` ビット右へ落として FCW.RC で丸める。
+/// shift が 64 を超えるときは商 0、round bit 0、sticky は入力の非零で
+/// 表す。返り値は丸め後の整数と、捨てた bit があったかである。
+pub(crate) fn x87_round_shift64<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    shift: B::V<W64>,
+    sign: B::V<W64>,
+) -> (B::V<W64>, B::B) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let k64 = b.konst::<W64>(64);
+    let sh_zero = b.cmp::<W64>(Cmp::Eq, shift, zero);
+    let sh_gt64 = b.cmp::<W64>(Cmp::GtU, shift, k64);
+    let sh_cap = b.select::<W64>(sh_gt64, k64, shift);
+    let sh_m1 = b.sub::<W64>(sh_cap, one);
+    let round_sh = b.select::<W64>(sh_zero, zero, sh_m1);
+    let round_raw = b.shr_l::<W64>(sig, round_sh);
+    let round_raw_bit = b.and::<W64>(round_raw, one);
+    let round0 = b.select::<W64>(sh_zero, zero, round_raw_bit);
+    let round1 = b.select::<W64>(sh_gt64, zero, round0);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round1, one);
+    let one_round = b.shl::<W64>(one, round_sh);
+    let sticky_mask = b.sub::<W64>(one_round, one);
+    let sticky_bits = b.and::<W64>(sig, sticky_mask);
+    let sticky_nz0 = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero);
+    let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
+    let sticky_far = bit_and(b, sh_gt64, sig_nz);
+    let sticky0 = bit_or(b, sticky_nz0, sticky_far);
+    let sh_nonzero = bit_not(b, sh_zero);
+    let sticky = bit_and(b, sticky0, sh_nonzero);
+    let kept = b.shr_l::<W64>(sig, sh_cap);
+    let lsb = b.and::<W64>(kept, one);
+    let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
+    let up = x87_round_up(b, sign, round_set, sticky, lsb_set);
+    let inc = b.select::<W64>(up, one, zero);
+    let rounded = b.add::<W64>(kept, inc);
+    let inexact = bit_or(b, round_set, sticky);
+    (rounded, inexact)
+}
+
+/// 80 ビット拡張値を単精度または倍精度の IEEE bit 列へ変換する。
+/// 丸めは FCW.RC に従い、PE/OE/UE をここで立てる。memory destination で
+/// OM/UM が外れている fault 応答になるときは第二返り値が true で、
+/// 呼び出し側は store と pop を抑止しなければならない。
+pub(crate) fn x87_ext_to_ieee_bits<B: Backend>(
+    b: &mut B,
+    sig_in: B::V<W64>,
+    exp_in: B::V<W16>,
+    precision: u32,
+    frac_bits: u32,
+    bias: u32,
+    max_exp: u32,
+) -> (B::V<W64>, B::B) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let e64 = b.zext::<W16, W64>(exp_in);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let mag = b.and::<W64>(e64, mask15);
+    let s15 = b.konst::<W64>(15);
+    let sign = b.shr_l::<W64>(e64, s15);
+    let exp_bits = if frac_bits == 23 { 8u32 } else { 11u32 };
+    let sign_pos = b.konst::<W64>((frac_bits + exp_bits) as u64);
+    let sign_bit = b.shl::<W64>(sign, sign_pos);
+    let exp_max = b.konst::<W64>(max_exp as u64);
+    let frac_mask_t = b.konst::<W64>((1u64 << frac_bits) - 1);
+    let frac_bits64 = b.konst::<W64>(frac_bits as u64);
+    let exp_field_max = b.shl::<W64>(exp_max, frac_bits64);
+    let sig_zero = b.cmp::<W64>(Cmp::Eq, sig_in, zero);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, mag, zero);
+    let is_zero = bit_and(b, exp_zero, sig_zero);
+    let is_special = b.cmp::<W64>(Cmp::Eq, mag, mask15);
+    let frac80_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac80 = b.and::<W64>(sig_in, frac80_mask);
+    let frac80_nz = b.cmp::<W64>(Cmp::Ne, frac80, zero);
+    let is_nan = bit_and(b, is_special, frac80_nz);
+    let payload_shift = b.konst::<W64>((63 - frac_bits) as u64);
+    let payload0 = b.shr_l::<W64>(frac80, payload_shift);
+    let quiet = b.konst::<W64>(1u64 << (frac_bits - 1));
+    let payload = b.or::<W64>(payload0, quiet);
+    let nan_bits0 = b.or::<W64>(exp_field_max, payload);
+    let nan_bits = b.or::<W64>(nan_bits0, sign_bit);
+    let inf_bits0 = exp_field_max;
+    let inf_bits = b.or::<W64>(inf_bits0, sign_bit);
+    let zero_bits = sign_bit;
+
+    // denormal 入力を内部正規形へ直す。ea_eff は符号付き exponent field を
+    // u64 の two's-complement で持つ。
+    let (sig_norm, ea_eff) = x87_normalize_denormal_operand(b, sig_in, mag);
+    let x87_bias = b.konst::<W64>(16383);
+    let bias64 = b.konst::<W64>(bias as u64);
+    let et0 = b.add::<W64>(ea_eff, bias64);
+    let et_pre = b.sub::<W64>(et0, x87_bias);
+    let drop_n = b.konst::<W64>((64 - precision) as u64);
+    let normal_path = b.cmp::<W64>(Cmp::GtS, et_pre, zero);
+
+    // 正規数域では precision bits へ丸め、carry なら exponent を一つ上げる。
+    let (q_norm0, inexact_norm) = x87_round_shift64(b, sig_norm, drop_n, sign);
+    let p_bits = b.konst::<W64>(1u64 << precision);
+    let carry_norm = b.cmp::<W64>(Cmp::Eq, q_norm0, p_bits);
+    let q_norm1 = b.shr_l::<W64>(q_norm0, one);
+    let q_norm = b.select::<W64>(carry_norm, q_norm1, q_norm0);
+    let et_plus = b.add::<W64>(et_pre, one);
+    let et_norm = b.select::<W64>(carry_norm, et_plus, et_pre);
+    let ovf_norm0 = b.cmp::<W64>(Cmp::GeU, et_norm, exp_max);
+    let ovf_norm = bit_and(b, ovf_norm0, normal_path);
+    let q_frac_mask = b.konst::<W64>((1u64 << (precision - 1)) - 1);
+    let q_frac = b.and::<W64>(q_norm, q_frac_mask);
+    let et_store = b.and::<W64>(et_norm, exp_max);
+    let et_shifted = b.shl::<W64>(et_store, frac_bits64);
+    let norm_bits0 = b.or::<W64>(et_shifted, q_frac);
+
+    // subnormal 域では target の最小 subnormal を単位に丸める。
+    // shift = (64-precision) + (1-et)。et<=0 では正になる。
+    let one_minus_et = b.sub::<W64>(one, et_pre);
+    let sh_sub = b.add::<W64>(drop_n, one_minus_et);
+    let (q_sub, inexact_sub) = x87_round_shift64(b, sig_norm, sh_sub, sign);
+    let min_norm_q = b.konst::<W64>(1u64 << (precision - 1));
+    let reaches_normal = b.cmp::<W64>(Cmp::Eq, q_sub, min_norm_q);
+    let min_norm_exp = b.shl::<W64>(one, frac_bits64);
+    let sub_frac = b.and::<W64>(q_sub, frac_mask_t);
+    let sub_bits_norm = b.select::<W64>(reaches_normal, min_norm_exp, sub_frac);
+    let tiny_pre = bit_not(b, normal_path);
+    let inexact = bool_or_select(b, normal_path, inexact_norm, inexact_sub);
+    x87_exception_flag(b, inexact, 1 << 5);
+
+    // overflow masked response は RC 依存で infinity または最大有限値。
+    let fcw = b.get(fcw_ref());
+    let fcw64 = b.zext::<W16, W64>(fcw);
+    let ten = b.konst::<W64>(10);
+    let three = b.konst::<W64>(3);
+    let rc_shifted = b.shr_l::<W64>(fcw64, ten);
+    let rc = b.and::<W64>(rc_shifted, three);
+    let two = b.konst::<W64>(2);
+    let nearest = b.cmp::<W64>(Cmp::Eq, rc, zero);
+    let floor = b.cmp::<W64>(Cmp::Eq, rc, one);
+    let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
+    let negative = b.cmp::<W64>(Cmp::Eq, sign, one);
+    let positive = bit_not(b, negative);
+    let inf_floor = bit_and(b, floor, negative);
+    let inf_ceil = bit_and(b, ceil, positive);
+    let use_inf0 = bit_or(b, nearest, inf_floor);
+    let use_inf = bit_or(b, use_inf0, inf_ceil);
+    let max_finite_exp = b.konst::<W64>((max_exp - 1) as u64);
+    let max_finite_ebits = b.shl::<W64>(max_finite_exp, frac_bits64);
+    let max_finite0 = b.or::<W64>(max_finite_ebits, frac_mask_t);
+    let ovf_mag_bits = b.select::<W64>(use_inf, inf_bits0, max_finite0);
+
+    let non_finite_in = bit_or(b, is_zero, is_special);
+    let finite_in = bit_not(b, non_finite_in);
+    let ovf = bit_and(b, ovf_norm, finite_in);
+    x87_exception_flag(b, ovf, 1 << 3);
+    x87_exception_flag(b, ovf, 1 << 5);
+
+    let z16 = b.konst::<W16>(0);
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let uunmasked = bit_not(b, umasked);
+    let tiny_inexact = bit_and(b, tiny_pre, inexact);
+    let tiny_unmasked = bit_and(b, tiny_pre, uunmasked);
+    let unf0 = bit_or(b, tiny_inexact, tiny_unmasked);
+    let unf = bit_and(b, unf0, finite_in);
+    x87_exception_flag(b, unf, 1 << 4);
+
+    let omask_bit = b.konst::<W16>(1 << 3);
+    let omask = b.and::<W16>(fcw, omask_bit);
+    let omasked = b.cmp::<W16>(Cmp::Ne, omask, z16);
+    let oumasked = bit_not(b, omasked);
+    let block_o = bit_and(b, ovf, oumasked);
+    let block_u = bit_and(b, unf, uunmasked);
+    let block = bit_or(b, block_o, block_u);
+
+    let normal_or_sub = b.select::<W64>(normal_path, norm_bits0, sub_bits_norm);
+    let finite_no_ovf = b.or::<W64>(normal_or_sub, sign_bit);
+    let ovf_signed_bits = b.or::<W64>(ovf_mag_bits, sign_bit);
+    let finite_bits = b.select::<W64>(ovf, ovf_signed_bits, finite_no_ovf);
+    let special_sel = b.select::<W64>(is_nan, nan_bits, inf_bits);
+    let nonzero_bits = b.select::<W64>(is_special, special_sel, finite_bits);
+    let bits = b.select::<W64>(is_zero, zero_bits, nonzero_bits);
+    (bits, block)
+}
+
+fn bool_or_select<B: Backend>(b: &mut B, sel: B::B, a: B::B, c: B::B) -> B::B {
+    // Backend の bool select がないため、ビット幅 1 の整数へ寄せず、
+    // `(sel && a) || (!sel && c)` で選ぶ。
+    let ns = bit_not(b, sel);
+    let aa = bit_and(b, sel, a);
+    let cc = bit_and(b, ns, c);
+    bit_or(b, aa, cc)
+}
+
 /// FCW.PC が単精度または倍精度のとき、有限の 80 ビット結果を
 /// その仮数幅へ丸める。PC=01 は reserved なので拡張精度として扱う。
 /// 既に 64 ビットへ丸めた結果へ適用するため、丸め境界が重なる

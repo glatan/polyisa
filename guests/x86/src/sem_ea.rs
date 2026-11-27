@@ -9717,19 +9717,28 @@ pub fn fst_m<B: Backend>(
 ) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
     let (sig, exp, fault) = sem::read_st_source(b, top);
-    let commit = sem::x87_commit_after_fault(b, fault);
+    let commit0 = sem::x87_commit_after_fault(b, fault);
+    // m32/m64 への store は整数 bit 演算で target precision へ丸める。
+    // unmasked overflow/underflow では memory と TOP を変えない。m80 は
+    // 変換を伴わないので numeric fault 応答を持たない。
+    let zero64 = b.konst::<W64>(0);
+    let no_numeric_block = sem::bool_false(b);
+    let (converted, numeric_block) = if bits == 32 {
+        sem::x87_ext_to_ieee_bits(b, sig, exp, 24, 23, 127, 0xff)
+    } else if bits == 64 {
+        sem::x87_ext_to_ieee_bits(b, sig, exp, 53, 52, 1023, 0x7ff)
+    } else {
+        (zero64, no_numeric_block)
+    };
+    let not_numeric_block = sem::bit_not(b, numeric_block);
+    let commit = sem::bit_and(b, commit0, not_numeric_block);
     if let Rm::Mem { a, wseg } = ea {
         let a = *a;
         let wseg = *wseg;
         b.if_then(commit, |b| {
             match bits {
                 32 => {
-                    let v64 = sem::f80_to_f64(b, sig, exp);
-                    let f = b.trunc::<W64, polyisa_sem::F64>(v64);
-                    let v32 = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
-                    let bits32 = b.trunc::<polyisa_sem::F32, W32>(v32);
-                    let indef32 = b.konst::<W32>(0xffc0_0000);
-                    let store32 = b.select::<W32>(fault, indef32, bits32);
+                    let store32 = b.trunc::<W64, W32>(converted);
                     decode::mem_store::<B, W32>(b, a, wseg, store32)?;
                 }
                 80 => {
@@ -9739,8 +9748,7 @@ pub fn fst_m<B: Backend>(
                     decode::mem_store::<B, W16>(b, a2, wseg, exp)?;
                 }
                 _ => {
-                    let v = sem::f80_to_f64(b, sig, exp);
-                    decode::mem_store::<B, W64>(b, a, wseg, v)?;
+                    decode::mem_store::<B, W64>(b, a, wseg, converted)?;
                 }
             }
             if pop {
