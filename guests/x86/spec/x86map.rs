@@ -2889,6 +2889,31 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VCVT[,T]PS2I[,U]BS（FP32→byte saturating conversion）。
+    // byte は対応 dword 要素の下位へ置き、上位 3 byte は 0 にする。
+    for (op, mn, trunc) in [
+        (0x68u8, "vcvttps2ibs", true),
+        (0x69, "vcvtps2ibs", false),
+        (0x6A, "vcvttps2iubs", true),
+        (0x6B, "vcvtps2iubs", false),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::P66,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 4;
+        it.er = !trunc;
+        it.sae = trunc;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVT[,T]BF162I[,U]BS（BF16→byte saturating conversion）。
     // byte は対応 word 要素の下位へ置き、上位 byte は 0 にする。
     for (op, mn) in [

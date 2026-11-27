@@ -6514,7 +6514,11 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvttph2ibsXvWv
+        Insn::Vcvttps2ibsXvWv
+            | Insn::Vcvtps2ibsXvWv
+            | Insn::Vcvttps2iubsXvWv
+            | Insn::Vcvtps2iubsXvWv
+            | Insn::Vcvttph2ibsXvWv
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
@@ -6594,7 +6598,13 @@ fn avx10_exec(
     let ll = usize::from(md.evex_ll);
     let er512 = md.evex_b
         && md.modrm >> 6 == 3
-        && matches!(md.insn, Insn::Vcvtph2ibsXvWv | Insn::Vcvtph2iubsXvWv);
+        && matches!(
+            md.insn,
+            Insn::Vcvtph2ibsXvWv
+                | Insn::Vcvtph2iubsXvWv
+                | Insn::Vcvtps2ibsXvWv
+                | Insn::Vcvtps2iubsXvWv
+        );
     let vbytes = if er512 { 64 } else { 16usize << ll };
     let acc_r = Access {
         endian: Endian::Le,
@@ -6838,6 +6848,60 @@ fn avx10_exec(
                 out[i * 2 + 1] = 0;
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvttps2ibsXvWv
+        | Insn::Vcvtps2ibsXvWv
+        | Insn::Vcvttps2iubsXvWv
+        | Insn::Vcvtps2iubsXvWv => {
+            let trunc = matches!(insn, Insn::Vcvttps2ibsXvWv | Insn::Vcvttps2iubsXvWv);
+            let unsigned = matches!(insn, Insn::Vcvttps2iubsXvWv | Insn::Vcvtps2iubsXvWv);
+            let rc = if !trunc && md.evex_b && md.modrm >> 6 == 3 {
+                md.evex_ll
+            } else {
+                ((vcvt2_mxcsr >> 13) & 3) as u8
+            };
+            let lanes32 = vbytes / 4;
+            for i in 0..lanes32 {
+                if k >> i & 1 == 0 {
+                    let keep = if md.evex_z { 0 } else { rd32(&old, i) };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&keep.to_le_bytes());
+                    continue;
+                }
+                let mut bits = rd32(&y, i);
+                if vcvt2_mxcsr & 0x40 != 0 && bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0 {
+                    bits &= 0x8000_0000;
+                }
+                let v = f32::from_bits(bits) as f64;
+                let rounded = if trunc {
+                    v.trunc()
+                } else {
+                    match rc {
+                        1 => v.floor(),
+                        2 => v.ceil(),
+                        3 => v.trunc(),
+                        _ => v.round_ties_even(),
+                    }
+                };
+                let byte = if rounded.is_nan() {
+                    0
+                } else if unsigned {
+                    if rounded >= 255.0 {
+                        255
+                    } else if rounded <= 0.0 {
+                        0
+                    } else {
+                        rounded as u8
+                    }
+                } else if rounded >= 127.0 {
+                    127
+                } else if rounded <= -128.0 {
+                    0x80
+                } else {
+                    rounded as i8 as u8
+                };
+                out[i * 4] = byte;
+                out[i * 4 + 1..i * 4 + 4].fill(0);
+            }
         }
         Insn::Vcvttbf162ibsXvWv
         | Insn::Vcvtbf162ibsXvWv
@@ -18707,6 +18771,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
+            | Insn::Vcvttps2ibsXvWv
+            | Insn::Vcvtps2ibsXvWv
+            | Insn::Vcvttps2iubsXvWv
+            | Insn::Vcvtps2iubsXvWv
             | Insn::Vcvttbf162ibsXvWv
             | Insn::Vcvtbf162ibsXvWv
             | Insn::Vcvttbf162iubsXvWv
