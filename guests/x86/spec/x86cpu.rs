@@ -1329,6 +1329,20 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         // TILEMOVROW read/TCVTROW は AMX-AVX512 と ACE で共有され、
         // 項目側が OR ゲートを持つ。空リストは EVEX 既定の avx512f を
         // 足さず、その項目側ゲートを完全なものとして使う印。
+        // AVX10.2 の BF16 FMA は AVX10.2 だけで列挙され、legacy FMA
+        // feature を要求しない。項目側の avx10_2 ゲートを完全なものとして使う。
+        "vfmadd132bf16_xv_hv_wv"
+        | "vfmadd213bf16_xv_hv_wv"
+        | "vfmadd231bf16_xv_hv_wv"
+        | "vfmsub132bf16_xv_hv_wv"
+        | "vfmsub213bf16_xv_hv_wv"
+        | "vfmsub231bf16_xv_hv_wv"
+        | "vfnmadd132bf16_xv_hv_wv"
+        | "vfnmadd213bf16_xv_hv_wv"
+        | "vfnmadd231bf16_xv_hv_wv"
+        | "vfnmsub132bf16_xv_hv_wv"
+        | "vfnmsub213bf16_xv_hv_wv"
+        | "vfnmsub231bf16_xv_hv_wv" => &[],
         "tilemovrow_r_gpr"
         | "tilemovrow_r_imm"
         | "tcvtrowd2ps_gpr"

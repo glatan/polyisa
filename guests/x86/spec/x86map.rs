@@ -2900,6 +2900,38 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v6.push(MapItem::Insn(op, it));
     }
+    // AVX10.2 の BF16 fused multiply-add/subtract（EVEX.NP.MAP6.W0）。
+    // opcode 下位桁は 132/213/231、bit1 は subtract、bit0 は negated 系の
+    // 一部ではなく opcode 表どおり個別に並べる。
+    for (op, mn) in [
+        (0x98u8, "vfmadd132bf16"),
+        (0xA8, "vfmadd213bf16"),
+        (0xB8, "vfmadd231bf16"),
+        (0x9A, "vfmsub132bf16"),
+        (0xAA, "vfmsub213bf16"),
+        (0xBA, "vfmsub231bf16"),
+        (0x9C, "vfnmadd132bf16"),
+        (0xAC, "vfnmadd213bf16"),
+        (0xBC, "vfnmadd231bf16"),
+        (0x9E, "vfnmsub132bf16"),
+        (0xAE, "vfnmsub213bf16"),
+        (0xBE, "vfnmsub231bf16"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v6.push(MapItem::Insn(op, it));
+    }
     // AVX10.2 の FP8 変換（MAP5 系）。1 ソース形は出力が半幅の
     // ベクトル、2 ソース形は出力の下位半分に src2、上位半分に
     // src1 の変換結果を連続配置する。メモリ形は m16bcst を取る。

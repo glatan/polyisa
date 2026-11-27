@@ -6514,7 +6514,19 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcmpbf16KvHvWvIb
+        Insn::Vfmadd132bf16XvHvWv
+            | Insn::Vfmadd213bf16XvHvWv
+            | Insn::Vfmadd231bf16XvHvWv
+            | Insn::Vfmsub132bf16XvHvWv
+            | Insn::Vfmsub213bf16XvHvWv
+            | Insn::Vfmsub231bf16XvHvWv
+            | Insn::Vfnmadd132bf16XvHvWv
+            | Insn::Vfnmadd213bf16XvHvWv
+            | Insn::Vfnmadd231bf16XvHvWv
+            | Insn::Vfnmsub132bf16XvHvWv
+            | Insn::Vfnmsub213bf16XvHvWv
+            | Insn::Vfnmsub231bf16XvHvWv
+            | Insn::Vcmpbf16KvHvWvIb
             | Insn::Vfpclassbf16KvWvIb
             | Insn::Vaddbf16XvHvWv
             | Insn::Vsubbf16XvHvWv
@@ -6667,6 +6679,77 @@ fn avx10_exec(
         }
     };
     match insn {
+        Insn::Vfmadd132bf16XvHvWv
+        | Insn::Vfmadd213bf16XvHvWv
+        | Insn::Vfmadd231bf16XvHvWv
+        | Insn::Vfmsub132bf16XvHvWv
+        | Insn::Vfmsub213bf16XvHvWv
+        | Insn::Vfmsub231bf16XvHvWv
+        | Insn::Vfnmadd132bf16XvHvWv
+        | Insn::Vfnmadd213bf16XvHvWv
+        | Insn::Vfnmadd231bf16XvHvWv
+        | Insn::Vfnmsub132bf16XvHvWv
+        | Insn::Vfnmsub213bf16XvHvWv
+        | Insn::Vfnmsub231bf16XvHvWv => {
+            for i in 0..lanes16 {
+                let dst = bf_r(&old, i);
+                let src1 = bf_r(&x, i);
+                let src2 = bf_r(&y, i);
+                let order132 = matches!(
+                    insn,
+                    Insn::Vfmadd132bf16XvHvWv
+                        | Insn::Vfmsub132bf16XvHvWv
+                        | Insn::Vfnmadd132bf16XvHvWv
+                        | Insn::Vfnmsub132bf16XvHvWv
+                );
+                let order213 = matches!(
+                    insn,
+                    Insn::Vfmadd213bf16XvHvWv
+                        | Insn::Vfmsub213bf16XvHvWv
+                        | Insn::Vfnmadd213bf16XvHvWv
+                        | Insn::Vfnmsub213bf16XvHvWv
+                );
+                let (a, b, c) = if order132 {
+                    (dst, src2, src1)
+                } else if order213 {
+                    (src1, dst, src2)
+                } else {
+                    (src1, src2, dst)
+                };
+                let neg_product = matches!(
+                    insn,
+                    Insn::Vfnmadd132bf16XvHvWv
+                        | Insn::Vfnmadd213bf16XvHvWv
+                        | Insn::Vfnmadd231bf16XvHvWv
+                        | Insn::Vfnmsub132bf16XvHvWv
+                        | Insn::Vfnmsub213bf16XvHvWv
+                        | Insn::Vfnmsub231bf16XvHvWv
+                );
+                let sub = matches!(
+                    insn,
+                    Insn::Vfmsub132bf16XvHvWv
+                        | Insn::Vfmsub213bf16XvHvWv
+                        | Insn::Vfmsub231bf16XvHvWv
+                        | Insn::Vfnmsub132bf16XvHvWv
+                        | Insn::Vfnmsub213bf16XvHvWv
+                        | Insn::Vfnmsub231bf16XvHvWv
+                );
+                let a = if neg_product {
+                    BF16::from_bits(a.bits() ^ 0x8000)
+                } else {
+                    a
+                };
+                let c = if sub {
+                    BF16::from_bits(c.bits() ^ 0x8000)
+                } else {
+                    c
+                };
+                let (g, f) = a.fmadd_rm(b, c, Rm::Rne);
+                flags |= f;
+                out[i * 2..i * 2 + 2].copy_from_slice(&ftz16(g).to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vcmpbf16KvHvWvIb | Insn::Vfpclassbf16KvWvIb => {
             let mut bits = 0u64;
             for i in 0..lanes16 {
@@ -17959,6 +18042,18 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vfmadd132bf16XvHvWv
+            | Insn::Vfmadd213bf16XvHvWv
+            | Insn::Vfmadd231bf16XvHvWv
+            | Insn::Vfmsub132bf16XvHvWv
+            | Insn::Vfmsub213bf16XvHvWv
+            | Insn::Vfmsub231bf16XvHvWv
+            | Insn::Vfnmadd132bf16XvHvWv
+            | Insn::Vfnmadd213bf16XvHvWv
+            | Insn::Vfnmadd231bf16XvHvWv
+            | Insn::Vfnmsub132bf16XvHvWv
+            | Insn::Vfnmsub213bf16XvHvWv
+            | Insn::Vfnmsub231bf16XvHvWv
             | Insn::Vcmpbf16KvHvWvIb
             | Insn::Vfpclassbf16KvWvIb
             | Insn::Vaddbf16XvHvWv
