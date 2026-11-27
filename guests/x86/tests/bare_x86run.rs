@@ -14954,6 +14954,98 @@ fn run_x87_fsqrt_uses_extended_precision_integer_sqrt() {
 }
 
 #[test]
+fn run_x87_fxtract_unsupported_and_zero_preoperation_response() {
+    fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16, u64, u16, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, sig, exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xF4]) // fxtract
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let un = (0x4000_0000_0000_0000u64, 1u16);
+    // unsupported が masked なら、指数側と仮数側の両方が indefinite。
+    let (s0, e0, s7, e7, top, fsw) = once(un.0, un.1, 0x037F);
+    assert_eq!((s0, e0), (0xC000_0000_0000_0000, 0xFFFF));
+    assert_eq!((s7, e7), (0xC000_0000_0000_0000, 0xFFFF));
+    assert_eq!(top, 7);
+    assert_ne!(fsw & 1, 0);
+    // unmasked invalid では push も write もしない。
+    let (s0, e0, s7, e7, top, fsw) = once(un.0, un.1, 0x037E);
+    assert_eq!((s0, e0), un);
+    assert_eq!((s7, e7), (0, 0));
+    assert_eq!(top, 0);
+    assert_eq!(fsw & 0x8081, 0x8081);
+    // zero-divide も pre-operation exception なので、unmasked では非 commit。
+    let (s0, e0, s7, e7, top, fsw) = once(0, 0, 0x037B);
+    assert_eq!((s0, e0), (0, 0));
+    assert_eq!((s7, e7), (0, 0));
+    assert_eq!(top, 0);
+    assert_eq!(fsw & 0x8084, 0x8084);
+}
+
+#[test]
+fn run_x87_fprem_nan_unsupported_and_preoperation_priority() {
+    fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16, fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, sig0, exp0);
+        x87_seed_valid(&mut env, 1, sig1, exp1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xF8]) // fprem
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let one = (0x8000_0000_0000_0000u64, 0x3FFFu16);
+    // QNaN は符号と payload を保って伝播し、#IA にはならない。
+    let (sig, exp, fsw) = once(0xC000_0000_0000_0005, 0xFFFF, one.0, one.1, 0x037F);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0005, 0xFFFF));
+    assert_eq!(fsw & 1, 0);
+    // SNaN invalid は denormal より優先される。DE unmasked でも停止せず、
+    // quiet した payload を書く。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0007, 0x7FFF, 1, 0, 0x037D);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0007, 0x7FFF));
+    assert_ne!(fsw & 1, 0);
+    assert_eq!(fsw & 2, 0);
+    // unsupported format は masked なら indefinite、unmasked なら非 commit。
+    let un = (0x4000_0000_0000_0000u64, 1u16);
+    let (sig, exp, fsw) = once(un.0, un.1, one.0, one.1, 0x037F);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_ne!(fsw & 1, 0);
+    let (sig, exp, fsw) = once(un.0, un.1, one.0, one.1, 0x037E);
+    assert_eq!((sig, exp), un);
+    assert_eq!(fsw & 0x8081, 0x8081);
+}
+
+#[test]
 fn run_x87_fprem_denormal_inputs_use_integer_remainder() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);

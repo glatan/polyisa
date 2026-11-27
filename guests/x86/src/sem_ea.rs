@@ -12350,25 +12350,37 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let den0 = sem::bit_and(b, ez0, snz0);
     let den1 = sem::bit_and(b, ez1, snz1);
     let denormal_in0 = sem::bit_or(b, den0, den1);
-    let denormal_in = sem::bit_and(b, denormal_in0, nofault);
-    sem::x87_exception_flag(b, denormal_in, 1 << 1);
 
     let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
     let frac0 = b.and::<W64>(s0, frac_mask);
     let frac1 = b.and::<W64>(s1, frac_mask);
     let f0nz = b.cmp::<W64>(Cmp::Ne, frac0, zero);
     let f1nz = b.cmp::<W64>(Cmp::Ne, frac1, zero);
-    let nan0 = sem::bit_and(b, sp0, f0nz);
-    let nan1 = sem::bit_and(b, sp1, f1nz);
     let f0zero = sem::bit_not(b, f0nz);
     let f1zero = sem::bit_not(b, f1nz);
     let inf0 = sem::bit_and(b, sp0, f0zero);
     let inf1 = sem::bit_and(b, sp1, f1zero);
     let zero0 = sem::bit_and(b, ez0, sz0);
     let zero1 = sem::bit_and(b, ez1, sz1);
-    let invalid_raw = sem::bit_or(b, inf0, zero1);
+    let nan_sel = sem::x87_nan_select2(b, s0, e0, s1, e1);
+    let nan_input = nan_sel.any;
+    let snan_invalid = nan_sel.snan_invalid;
+    let nan_prop_sig = nan_sel.sig;
+    let nan_prop_sign = nan_sel.sign;
+    let uns0 = sem::x87_unsupported_format(b, s0, e0);
+    let uns1 = sem::x87_unsupported_format(b, s1, e1);
+    let unsupported = sem::bit_or(b, uns0, uns1);
+    let invalid_zi = sem::bit_or(b, inf0, zero1);
+    let invalid_nan = sem::bit_or(b, invalid_zi, snan_invalid);
+    let invalid_raw = sem::bit_or(b, invalid_nan, unsupported);
     let invalid0 = sem::bit_and(b, invalid_raw, nofault);
     sem::x87_exception_flag(b, invalid0, 1);
+    // invalid は denormal より優先される。invalid 側だけを処理するときは
+    // DE を立てず、unmasked DE による停止ともしない。
+    let no_invalid_raw = sem::bit_not(b, invalid_raw);
+    let denormal_report0 = sem::bit_and(b, denormal_in0, no_invalid_raw);
+    let denormal_in = sem::bit_and(b, denormal_report0, nofault);
+    sem::x87_exception_flag(b, denormal_in, 1 << 1);
 
     // 有限入力では、denormal も正規化した実効指数で整数の筆算だけを行う。
     let z0n = sem::bit_not(b, zero0);
@@ -12464,17 +12476,24 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
 
     // 特殊値の優先順位: NaN/invalid、無限 divisor または零 dividend では
     // ST0 不変、通常有限では整数経路、残りは倍精度近似。
-    let any_nan = sem::bit_or(b, nan0, nan1);
+    let any_nan = nan_input;
     let unchanged0 = sem::bit_or(b, inf1, zero0);
-    let use_nan = sem::bit_or(b, any_nan, invalid0);
+    let use_nan0 = sem::bit_or(b, any_nan, invalid0);
+    let use_nan = sem::bit_or(b, use_nan0, unsupported);
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let nan_exp64 = b.konst::<W64>(0x7fff);
-    let nan_exp = b.trunc::<W64, W16>(nan_exp64);
+    let not_unsupported = sem::bit_not(b, unsupported);
+    let propagate_nan = sem::bit_and(b, nan_input, not_unsupported);
+    let nan_out_sig = b.select::<W64>(propagate_nan, nan_prop_sig, nan_sig);
+    let nan_sign = b.shl::<W64>(nan_prop_sign, s15);
+    let nan_prop_exp = b.or::<W64>(nan_exp64, nan_sign);
+    let nan_exp_sel64 = b.select::<W64>(propagate_nan, nan_prop_exp, nan_exp64);
+    let nan_exp = b.trunc::<W64, W16>(nan_exp_sel64);
     let sig_sel0 = b.select::<W64>(normal_inputs, sig_exact_enc, sr_f);
     let er_sel0 = b.select::<W16>(normal_inputs, er_exact16, er_f);
     let sig_sel1 = b.select::<W64>(unchanged0, s0, sig_sel0);
     let er_sel1 = b.select::<W16>(unchanged0, e0, er_sel0);
-    let sig_out0 = b.select::<W64>(use_nan, nan_sig, sig_sel1);
+    let sig_out0 = b.select::<W64>(use_nan, nan_out_sig, sig_sel1);
     let er_out0 = b.select::<W16>(use_nan, nan_exp, er_sel1);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
@@ -12522,7 +12541,12 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     // stack fault の masked response では indefinite を置き、C ビットは
     // 不定なので 0 側へ揃える。unmasked ではこのブロック自体が走らない。
     let nv = b.select::<W16>(fault, cleared, nv_normal);
-    b.if_then(commit, |b| {
+    let invalid_um = sem::x87_unmasked_exception(b, invalid0, 1);
+    let denormal_um = sem::x87_unmasked_exception(b, denormal_in, 1 << 1);
+    let suppress0 = sem::bit_or(b, invalid_um, denormal_um);
+    let result_commit = sem::x87_arith_result_commit(b, suppress0);
+    let commit_result = sem::bit_and(b, commit, result_commit);
+    b.if_then(commit_result, |b| {
         sem::write_st(b, top, sig_out, er_out);
         b.set(sem::fsw_ref(), nv);
         Ok(())
@@ -12676,8 +12700,7 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     let exp_zero = b.cmp::<W64>(Cmp::Eq, eb, zero64);
     let sig_nz = sem::bit_not(b, sig_zero);
     let is_zero = sem::bit_and(b, exp_zero, sig_zero);
-    let denormal = sem::bit_and(b, exp_zero, sig_nz);
-    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let denormal0 = sem::bit_and(b, exp_zero, sig_nz);
     let sp = b.cmp::<W64>(Cmp::Eq, eb, m7fff);
     let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
     let frac = b.and::<W64>(sig, frac_mask);
@@ -12699,18 +12722,34 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     // zero は ZE で exponent=-inf/significand=signed zero、infinity は
     // exponent=+inf/significand=signed infinity。NaN は両方へ同じ値を置く。
     sem::x87_exception_flag(b, is_zero, 1 << 2);
+    let nan_sel = sem::x87_nan_select2(b, sig, exp, sig, exp);
+    let snan_invalid = nan_sel.snan_invalid;
+    let unsupported = sem::x87_unsupported_format(b, sig, exp);
+    let invalid = sem::bit_or(b, snan_invalid, unsupported);
+    sem::x87_exception_flag(b, invalid, 1);
+    // invalid と zero-divide は denormal より優先される。
+    let high0 = sem::bit_or(b, invalid, is_zero);
+    let no_high = sem::bit_not(b, high0);
+    let denormal = sem::bit_and(b, denormal0, no_high);
+    sem::x87_exception_flag(b, denormal, 1 << 1);
     let es_inf = b.select::<W64>(is_inf, int_bit, es_finite);
     let ee_inf = b.select::<W16>(is_inf, pinf_e, ee_finite);
     let es_zero = b.select::<W64>(is_zero, int_bit, es_inf);
     let ee_zero = b.select::<W16>(is_zero, ninf_e, ee_inf);
-    let es = b.select::<W64>(is_nan, sig, es_zero);
-    let ee = b.select::<W16>(is_nan, exp, ee_zero);
+    let es0 = b.select::<W64>(is_nan, sig, es_zero);
+    let ee0 = b.select::<W16>(is_nan, exp, ee_zero);
     let mant_sig_inf = b.select::<W64>(is_inf, int_bit, sig_norm);
     let mant_exp_inf = b.select::<W16>(is_inf, exp, finite_mant_e);
     let mant_sig_zero = b.select::<W64>(is_zero, sig, mant_sig_inf);
     let mant_exp_zero = b.select::<W16>(is_zero, zero_mant_e, mant_exp_inf);
-    let new_e = b.select::<W16>(is_nan, exp, mant_exp_zero);
-    let sig = b.select::<W64>(is_nan, sig, mant_sig_zero);
+    let new_e0 = b.select::<W16>(is_nan, exp, mant_exp_zero);
+    let sig0 = b.select::<W64>(is_nan, sig, mant_sig_zero);
+    let indef_sig0 = b.konst::<W64>(0xC000_0000_0000_0000);
+    let indef_exp0 = b.konst::<W16>(0xffff);
+    let es = b.select::<W64>(invalid, indef_sig0, es0);
+    let ee = b.select::<W16>(invalid, indef_exp0, ee0);
+    let new_e = b.select::<W16>(invalid, indef_exp0, new_e0);
+    let sig = b.select::<W64>(invalid, indef_sig0, sig0);
 
     let one16 = b.konst::<W16>(1);
     let dec = b.sub::<W16>(top, one16);
@@ -12725,7 +12764,14 @@ pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
     sem::x87_stack_fault(b, overflow, true);
 
     let fault = sem::bit_or(b, underflow, overflow);
-    let commit = sem::x87_commit_after_fault(b, fault);
+    let fault_commit = sem::x87_commit_after_fault(b, fault);
+    let invalid_um = sem::x87_unmasked_exception(b, invalid, 1);
+    let zero_um = sem::x87_unmasked_exception(b, is_zero, 1 << 2);
+    let denormal_um = sem::x87_unmasked_exception(b, denormal, 1 << 1);
+    let suppress0 = sem::bit_or(b, invalid_um, zero_um);
+    let suppress = sem::bit_or(b, suppress0, denormal_um);
+    let result_commit = sem::x87_arith_result_commit(b, suppress);
+    let commit = sem::bit_and(b, fault_commit, result_commit);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
     let exp_sig_w = b.select::<W64>(fault, indef_sig, es);
