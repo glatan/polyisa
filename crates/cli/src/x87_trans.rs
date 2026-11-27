@@ -75,7 +75,13 @@ impl Dd {
 /// significand is split at its f64-significand boundary so no low bit is
 /// discarded before the transcendental evaluation.
 pub(crate) fn ext_to_dd(sig: u64, exp_word: u16) -> Dd {
-    let ef = i32::from(exp_word & 0x7fff);
+    let mut ef = i32::from(exp_word & 0x7fff);
+    let mut sig = sig;
+    if ef == 0 && sig != 0 {
+        let lz = sig.leading_zeros() as i32;
+        sig <<= lz;
+        ef = 1 - lz;
+    }
     let hi_part = sig >> 11;
     let lo_part = sig & 0x7ff;
     let scale_hi = (ef - 16383 - 52) as f64;
@@ -228,7 +234,12 @@ pub(crate) fn log2_near_one(x: Dd) -> Dd {
 pub(crate) fn ext_mantissa_exp_dd(sig: u64, exp_word: u16) -> (Dd, i32) {
     let lz = sig.leading_zeros() as i32;
     let nsig = sig << lz;
-    let exp = i32::from(exp_word & 0x7fff) - lz - 16383;
+    let raw_exp = i32::from(exp_word & 0x7fff);
+    let exp = if raw_exp == 0 {
+        1 - lz - 16383
+    } else {
+        raw_exp - lz - 16383
+    };
     let hi_part = nsig >> 11;
     let lo_part = nsig & 0x7ff;
     let hi = (hi_part as f64) * 2f64.powi(-52);

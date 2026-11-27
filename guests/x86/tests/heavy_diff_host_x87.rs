@@ -384,6 +384,70 @@ mod imp {
                 }
             }
         }
+        for (idx, input) in [(1u64, 0u16), (0x4000_0000_0000_0000u64, 0x8000u16)]
+            .iter()
+            .enumerate()
+        {
+            for op in unary_ops {
+                let fcw = 0x037f;
+                let (hv, hsw) = host_unary(*input, op.0, fcw);
+                let (pv, psw) = poly_unary(*input, op.0, fcw);
+                if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                    reports.push(format!(
+                        "trans-denormal {idx} {}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                        op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                    ));
+                }
+            }
+        }
+        let one = (1u64 << 63, 0x3fffu16);
+        let dn = (1u64, 0u16);
+        for op in binary_ops {
+            let (x, y) = if op.1 == "fyl2x" {
+                (dn, one)
+            } else if op.1 == "fpatan" {
+                (one, dn)
+            } else {
+                (dn, one)
+            };
+            let (hv, hsw) = host_op(x, y, op.0, 0x037f);
+            let (pv, psw) = poly_op(x, y, op.0, 0x037f);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-bin-denormal {}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, x.0, x.1, y.0, y.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
+        let exact_cases = [
+            ([0xd9, 0xf1], "fyl2x", (1u64 << 63, 0x3fffu16), one),
+            ([0xd9, 0xf1], "fyl2x", (1u64 << 63, 0x4000u16), one),
+            ([0xd9, 0xf1], "fyl2x", (1u64 << 63, 0x4000u16), (0u64, 0u16)),
+            (
+                [0xd9, 0xf1],
+                "fyl2x",
+                (1u64 << 63, 0x4000u16),
+                (1u64 << 63, 0x7fffu16),
+            ),
+            (
+                [0xd9, 0xf1],
+                "fyl2x",
+                (1u64 << 63, 0x4001u16),
+                (1u64 << 63, 0x3ffeu16),
+            ),
+            ([0xd9, 0xf9], "fyl2xp1", (0u64, 0u16), one),
+            ([0xd9, 0xf9], "fyl2xp1", one, one),
+        ];
+        for (op, name, x, y) in exact_cases {
+            let (hv, hsw) = host_op(x, y, op, 0x037f);
+            let (pv, psw) = poly_op(x, y, op, 0x037f);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-exact {name}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    x.0, x.1, y.0, y.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
         assert!(
             reports.is_empty(),
             "host x87 binary transcendental diff:
