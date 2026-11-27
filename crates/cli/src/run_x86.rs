@@ -9855,7 +9855,7 @@ fn x87_scalar_exception_flag(env: &mut BareEnv, bit: u16) {
     let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
     let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
     let mut nv = fsw | bit;
-    if fcw & bit == 0 {
+    if fcw & bit != bit {
         nv |= 0x8080;
     }
     env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
@@ -9927,6 +9927,20 @@ fn x87_norm_finite(sig: u64, exp: u16) -> (u64, i32) {
     let raw = i32::from(exp & 0x7fff);
     let effective = if raw == 0 { 1 - lz } else { raw - lz };
     (sig << lz, effective)
+}
+
+/// register destination で unmasked underflow になった結果の
+/// significand を normal precision へ揃え、exponent を 24576 だけ持ち上げる。
+/// masked では gradual underflow の値をそのまま返す。
+fn x87_scalar_underflow_response(env: &mut BareEnv, value: (u64, u16)) -> (u64, u16) {
+    let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+    if fcw & (1 << 4) != 0 || value.0 == 0 {
+        return value;
+    }
+    let sign = value.1 & 0x8000;
+    let (sig, effective) = x87_norm_finite(value.0, value.1);
+    let mag = (effective as u16).wrapping_add(24576) & 0x7fff;
+    (sig, mag | sign)
 }
 
 fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
@@ -10267,7 +10281,8 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             let neg = e1 & 0x8000 != 0;
             if let Some(v) = x87_tiny_ratio_ext(s1, e1, s0, e0, rc, neg) {
                 x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
-                x87_write_st(env, 1, v);
+                let adjusted = x87_scalar_underflow_response(env, v);
+                x87_write_st(env, 1, adjusted);
                 x87_pop(env);
                 return;
             }
@@ -10296,10 +10311,18 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         let neg = e0 & 0x8000 != 0;
         if matches!(op, 0xFE | 0xFB) {
             x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
-            x87_write_st(env, 0, (s0, e0));
+            let value = x87_scalar_underflow_response(env, (s0, e0));
+            x87_write_st(env, 0, value);
             if op == 0xFB {
                 x87_push(env, (1u64 << 63, 0x3fff));
             }
+            return;
+        }
+        if op == 0xF2 {
+            x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+            let value = x87_scalar_underflow_response(env, (s0, e0));
+            x87_write_st(env, 0, value);
+            x87_push(env, (1u64 << 63, 0x3fff));
             return;
         }
         if op == 0xFF {
@@ -10313,13 +10336,16 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             let units =
                 crate::x87_trans::mul_denormal_units(s0, 0xb172_17f7_d1cf_79ab, 64, rc, neg);
             x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
-            x87_write_st(env, 0, crate::x87_trans::denormal_units_to_ext(units, neg));
+            let value = crate::x87_trans::denormal_units_to_ext(units, neg);
+            let adjusted = x87_scalar_underflow_response(env, value);
+            x87_write_st(env, 0, adjusted);
             return;
         }
     }
     if op == 0xF3 && x87_denormal(s1, e1) && x87_one(s0, e0) {
         x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
-        x87_write_st(env, 1, (s1, e1));
+        let value = x87_scalar_underflow_response(env, (s1, e1));
+        x87_write_st(env, 1, value);
         x87_pop(env);
         return;
     }
@@ -10331,7 +10357,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         // significand なので 2^63 で割る。
         let units = crate::x87_trans::mul_denormal_units(s0, 0xb8aa_3b29_5c17_f0bc, 63, rc, neg);
         x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
-        x87_write_st(env, 1, crate::x87_trans::denormal_units_to_ext(units, neg));
+        let value = crate::x87_trans::denormal_units_to_ext(units, neg);
+        let adjusted = x87_scalar_underflow_response(env, value);
+        x87_write_st(env, 1, adjusted);
         x87_pop(env);
         return;
     }
