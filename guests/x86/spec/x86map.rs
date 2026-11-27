@@ -4802,6 +4802,29 @@ fn build_map_0f3a(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         items.push(MapItem::Insn(0x52, it));
     }
+    // VMINMAXPH/PS/PD（2 ソース + imm8）。要素幅ごとに pp/W と
+    // broadcast 幅が変わる。
+    for (sel, w, ed, mn) in [
+        (PfxSel::Plain, false, 2u8, "vminmaxph"),
+        (PfxSel::P66, false, 4, "vminmaxps"),
+        (PfxSel::P66, true, 8, "vminmaxpd"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv_ib"),
+            &[RegX, Vv, RmX, ib],
+            sel,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = ed;
+        it.sae = true;
+        it.wsel = Some(w);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0x52, it));
+    }
     // AVX10.2 の BF16 unary immediate 命令。いずれも m16bcst を取り、
     // vvvv=1111b 必須。
     for (op, mn) in [

@@ -28063,6 +28063,55 @@ fn run64_avx10_vcvtbiasph2fp8() {
 }
 
 #[test]
+fn run64_avx10_vminmaxps() {
+    // VMINMAXPS imm=0 は signed minimum。lane0 で min(3.0,1.5)=1.5。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(0x4040_0000u32), // 3.0f
+    );
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x3fc0_0000u32), // 1.5f
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF3, 0x75, 0x28, 0x52, 0xC2, 0x00, // vminmaxps ymm0,ymm1,ymm2,0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let lo: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(lo as u32, 0x3fc0_0000);
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

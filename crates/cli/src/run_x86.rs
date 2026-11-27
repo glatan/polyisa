@@ -6514,7 +6514,10 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvtbiasph2bf8XvHvWv
+        Insn::VminmaxphXvHvWvIb
+            | Insn::VminmaxpsXvHvWvIb
+            | Insn::VminmaxpdXvHvWvIb
+            | Insn::Vcvtbiasph2bf8XvHvWv
             | Insn::Vcvtbiasph2bf8sXvHvWv
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
@@ -6798,6 +6801,118 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::VminmaxphXvHvWvIb | Insn::VminmaxpsXvHvWvIb | Insn::VminmaxpdXvHvWvIb => {
+            let (ebw, eb) = if insn == Insn::VminmaxpdXvHvWvIb {
+                (8usize, 64u32)
+            } else if insn == Insn::VminmaxpsXvHvWvIb {
+                (4, 32)
+            } else {
+                (2, 16)
+            };
+            let lanes = vbytes / ebw;
+            let signbit = 1u64 << (eb - 1);
+            let expbits = if eb == 64 {
+                11
+            } else if eb == 32 {
+                8
+            } else {
+                5
+            };
+            let fracbits = eb - expbits - 1;
+            let expmask = ((1u64 << expbits) - 1) << fracbits;
+            let fracmask = (1u64 << fracbits) - 1;
+            let quiet = 1u64 << (fracbits - 1);
+            let rd = |v: &[u8; 64], i: usize| -> u64 {
+                let mut x = 0u64;
+                for j in 0..ebw {
+                    x |= u64::from(v[i * ebw + j]) << (8 * j);
+                }
+                x
+            };
+            let num = |bits: u64| -> f64 {
+                match eb {
+                    64 => f64::from_bits(bits),
+                    32 => f32::from_bits(bits as u32) as f64,
+                    _ => {
+                        f32::from_bits(F16::from_bits(bits).to_f32(Rm::Rne).0.bits() as u32) as f64
+                    }
+                }
+            };
+            for i in 0..lanes {
+                if k >> i & 1 == 0 {
+                    let keep = if md.evex_z { 0 } else { rd(&old, i) };
+                    for j in 0..ebw {
+                        out[i * ebw + j] = (keep >> (8 * j)) as u8;
+                    }
+                    continue;
+                }
+                let mut aw = rd(&x, i);
+                let mut bw = rd(&y, i);
+                if eb != 16 && vcvt2_mxcsr & 0x40 != 0 {
+                    for w in [&mut aw, &mut bw] {
+                        if *w & expmask == 0 && *w & fracmask != 0 {
+                            *w &= signbit;
+                        }
+                    }
+                }
+                let an = aw & expmask == expmask && aw & fracmask != 0;
+                let bn = bw & expmask == expmask && bw & fracmask != 0;
+                let op = md.imm & 3;
+                let number = md.imm & 0x10 != 0;
+                let mut r = if an || bn {
+                    if number && !(an && bn) {
+                        if an { bw } else { aw }
+                    } else if an {
+                        aw | quiet
+                    } else {
+                        bw | quiet
+                    }
+                } else {
+                    let av = num(aw);
+                    let bv = num(bw);
+                    let mag = op >= 2;
+                    let (xcmp, ycmp) = if mag { (av.abs(), bv.abs()) } else { (av, bv) };
+                    let take_a = if xcmp < ycmp {
+                        op == 0 || op == 2
+                    } else if xcmp > ycmp {
+                        op == 1 || op == 3
+                    } else if av == 0.0 && bv == 0.0 {
+                        let aneg = aw & signbit != 0;
+                        let bneg = bw & signbit != 0;
+                        if op == 0 || op == 2 {
+                            aneg || !bneg
+                        } else {
+                            !aneg || bneg
+                        }
+                    } else if mag {
+                        // magnitude tie は signed minimum/maximum に落ちる。
+                        if av < bv {
+                            op == 2
+                        } else if av > bv {
+                            op == 3
+                        } else {
+                            aw <= bw
+                        }
+                    } else {
+                        aw <= bw
+                    };
+                    if take_a { aw } else { bw }
+                };
+                let rnan = r & expmask == expmask && r & fracmask != 0;
+                if !rnan {
+                    let sign = match (md.imm >> 2) & 3 {
+                        0 => aw & signbit,
+                        1 => r & signbit,
+                        2 => 0,
+                        _ => signbit,
+                    };
+                    r = (r & !signbit) | sign;
+                }
+                for j in 0..ebw {
+                    out[i * ebw + j] = (r >> (8 * j)) as u8;
+                }
+            }
         }
         Insn::Vminmaxbf16XvHvWvIb => {
             for i in 0..lanes16 {
@@ -18469,6 +18584,9 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
+            | Insn::VminmaxphXvHvWvIb
+            | Insn::VminmaxpsXvHvWvIb
+            | Insn::VminmaxpdXvHvWvIb
             | Insn::Vminmaxbf16XvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
