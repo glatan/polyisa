@@ -14597,8 +14597,18 @@ pub(crate) fn cmp_f80<B: Backend>(
     let nan_b = bit_and(b, sp_b, sig_b_not_inf);
     let unordered = bit_or(b, nan_a, nan_b);
 
-    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
-    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let ez_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let ez_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let sz_a = b.cmp::<W64>(Cmp::Eq, sig_a, zero);
+    let sz_b = b.cmp::<W64>(Cmp::Eq, sig_b, zero);
+    let z_a = bit_and(b, ez_a, sz_a);
+    let z_b = bit_and(b, ez_b, sz_b);
+    let sa_nz = bit_not(b, sz_a);
+    let sb_nz = bit_not(b, sz_b);
+    let den_a = bit_and(b, ez_a, sa_nz);
+    let den_b = bit_and(b, ez_b, sb_nz);
+    let denormal_in = bit_or(b, den_a, den_b);
+    x87_exception_flag(b, denormal_in, 1 << 1);
     let both_z = bit_and(b, z_a, z_b);
     let not_both_z = bit_not(b, both_z);
 
