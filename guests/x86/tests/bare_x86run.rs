@@ -14954,6 +14954,44 @@ fn run_x87_fmul_underflow_rounds_once_from_exact_product() {
 }
 
 #[test]
+fn run_x87_precision_control_counts_significant_bits_in_denormal() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    // PC=10 (53 bits)、RNE、例外 masked。
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x027F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // bit62 が最上位で bit10 まで 53 significant bits を使う denormal。
+    // 1.0 を掛けても値は変わらず、PC=53 では bit10 を残さなければ
+    // ならない。64 ビット幅の末尾 11 bit を落とすとこの bit が消える。
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x4000_0000_0000_0400);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3FFF);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xC9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x4000_0000_0000_0400
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & (1 << 5), 0);
+}
+
+#[test]
 fn run_x87_fmul_propagates_infinity_and_nan_rules() {
     fn once(sig0: u64, exp0: u16, sig1: u64, exp1: u16) -> (u64, u16, u16) {
         let mut env = bare_x86_env();

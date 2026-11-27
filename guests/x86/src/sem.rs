@@ -15213,7 +15213,16 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let k40 = b.konst::<W64>(40);
     let k11 = b.konst::<W64>(11);
     let drop_pc = b.select::<W64>(pc24, k40, k11);
-    let drop = b.select::<W64>(active, drop_pc, one);
+    // denormal では先頭の zero bits は精度に寄与しない。正規数と同じ
+    // drop 幅を使うと、leading zero を含む 64 ビット幅で数えてしまい、
+    // 指定された significant bits より余分に削る。exponent 0 の非零値は
+    // clz 分だけ drop を縮め、負になるときは丸めない。
+    let lz = clz64(b, sig_in);
+    let drop_sub = b.sub::<W64>(drop_pc, lz);
+    let drop_pos = b.cmp::<W64>(Cmp::GtS, drop_sub, zero);
+    let drop_den = b.select::<W64>(drop_pos, drop_sub, zero);
+    let drop_pc_eff = b.select::<W64>(exp_zero, drop_den, drop_pc);
+    let drop = b.select::<W64>(active, drop_pc_eff, one);
     let sh_round = b.sub::<W64>(drop, one);
     let one_sh = b.shl::<W64>(one, drop);
     let inc = one_sh;
