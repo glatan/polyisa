@@ -1998,7 +1998,20 @@ fn pipe_read(
             Some(TrapOutcome::Handled)
         }
         polyisa_kernel::PipeRead::Empty => {
+            if sys.fds.pipes().borrow().nonblock(end.0, true) {
+                set64(env, Gpr(0), cx.neg(EAGAIN));
+                return Some(TrapOutcome::Handled);
+            }
+            sys.pipe_wait = None;
             let id = sys.ensure_self();
+            sys.queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock(polyisa_kernel::ThreadId(id.0));
+            if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), true) {
+                return Some(TrapOutcome::Handled);
+            }
             sys.pipe_wait = Some(end.0);
             sys.queue.0.borrow_mut().meta.block(
                 polyisa_kernel::ThreadId(id.0),
@@ -3179,38 +3192,56 @@ enum ParkedSignal {
 
 fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
     let mut queue = sys.queue.0.borrow_mut();
-    let Some(task) = queue.parked.iter_mut().find(|task| task.linux.pid == tid) else {
+    let interrupted = queue.meta.blocked().iter().find_map(|(id, wait)| {
+        if id.0 == tid
+            && matches!(
+                wait,
+                polyisa_kernel::ThreadWait::Signal
+                    | polyisa_kernel::ThreadWait::Child { .. }
+                    | polyisa_kernel::ThreadWait::Pipe { .. }
+            )
+        {
+            Some(*wait)
+        } else {
+            None
+        }
+    });
+    let Some(idx) = queue.parked.iter().position(|task| task.linux.pid == tid) else {
         return ParkedSignal::Missing;
     };
-    if signal_is_pending_target(&task.linux, sig) {
-        let bit = 1u64 << (sig - 1);
-        let caught_unmasked = task
-            .linux
-            .sigacts
-            .get(sig as usize - 1)
-            .is_some_and(|a| a.handler > 1)
-            && task.linux.sig_mask & bit == 0;
-        task.linux.sig_pending |= bit;
-        if caught_unmasked
-            && queue.meta.blocked().iter().any(|(id, wait)| {
-                id.0 == tid
-                    && matches!(
-                        wait,
-                        polyisa_kernel::ThreadWait::Signal
-                            | polyisa_kernel::ThreadWait::Child { .. }
-                    )
-            })
-        {
-            queue.meta.unblock(polyisa_kernel::ThreadId(tid));
+    let mut wake = false;
+    let outcome = {
+        let task = &mut queue.parked[idx];
+        if signal_is_pending_target(&task.linux, sig) {
+            let bit = 1u64 << (sig - 1);
+            let caught_unmasked = task
+                .linux
+                .sigacts
+                .get(sig as usize - 1)
+                .is_some_and(|a| a.handler > 1)
+                && task.linux.sig_mask & bit == 0;
+            task.linux.sig_pending |= bit;
+            if caught_unmasked && interrupted.is_some() {
+                match interrupted {
+                    Some(polyisa_kernel::ThreadWait::Child { .. }) => task.linux.wait = None,
+                    Some(polyisa_kernel::ThreadWait::Pipe { .. }) => task.linux.pipe_wait = None,
+                    _ => {}
+                }
+                wake = true;
+            }
+            ParkedSignal::Queued
+        } else if signal_is_ignored(&task.linux, sig) {
+            ParkedSignal::Noop
+        } else if signal_default_terminates(sig) {
+            ParkedSignal::Terminate
+        } else {
+            ParkedSignal::Noop
         }
-        ParkedSignal::Queued
-    } else if signal_is_ignored(&task.linux, sig) {
-        ParkedSignal::Noop
-    } else if signal_default_terminates(sig) {
-        ParkedSignal::Terminate
-    } else {
-        ParkedSignal::Noop
+    };
+    if wake {
+        queue.meta.unblock(polyisa_kernel::ThreadId(tid));
     }
+    outcome
 }
 
 fn send_signal_to_current(sys: &mut Linux, sig: u64) -> bool {
@@ -8946,6 +8977,102 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn pipe_read_interrupted_without_sa_restart_returns_eintr_after_handler() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds);
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), read_fd as u64);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x302);
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    #[test]
+    fn signal_to_a_pipe_waiting_child_clears_the_pipe_wait() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        {
+            let mut queue = sys.queue.0.borrow_mut();
+            let task = queue
+                .parked
+                .iter_mut()
+                .find(|task| task.linux.pid == child)
+                .expect("parked child");
+            task.linux.pipe_wait = Some(7);
+            queue.meta.block(
+                polyisa_kernel::ThreadId(child),
+                polyisa_kernel::ThreadWait::Pipe { id: 7 },
+            );
+        }
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child");
+        assert_eq!(task.linux.pipe_wait, None);
+        assert!(!queue.meta.blocked().iter().any(|(id, _)| id.0 == child));
+    }
+
+    #[test]
+    fn nonblock_pipe_read_from_an_empty_pipe_returns_eagain() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE2);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o4000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut fds = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds);
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), read_fd as u64);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
     }
 
     #[test]
