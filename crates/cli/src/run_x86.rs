@@ -11698,9 +11698,53 @@ fn amx_tile_exec(
                             }
                             st[dcell..dcell + 4].copy_from_slice(&acc.to_le_bytes());
                         }
+                        Insn::Tdpbf16ps | Insn::Tdpfp16ps => {
+                            // 偶数側と奇数側の partial sum を独立に fused
+                            // multiply-add で求め、最後に e+o と C を一度ずつ
+                            // round-to-nearest で加える。BF16 の denormal 入力は
+                            // zero、FP32 側の denormal 結果も zero へ flush する。
+                            let mut even = 0.0f32;
+                            let mut odd = 0.0f32;
+                            for kk in 0..k {
+                                let aw = u32::from_le_bytes(
+                                    st[tile_cell(st, s1, m) + 4 * kk
+                                        ..tile_cell(st, s1, m) + 4 * kk + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                let bw = u32::from_le_bytes(
+                                    st[tile_cell(st, s2, kk) + 4 * n
+                                        ..tile_cell(st, s2, kk) + 4 * n + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                let cvt = |h: u16| {
+                                    if insn == Insn::Tdpbf16ps {
+                                        if h & 0x7fff != 0 && h & 0x7f80 == 0 {
+                                            f32::from_bits(u32::from(h & 0x8000) << 16)
+                                        } else {
+                                            f32::from_bits(u32::from(h) << 16)
+                                        }
+                                    } else {
+                                        f16_to_f32(h)
+                                    }
+                                };
+                                even = cvt(aw as u16).mul_add(cvt(bw as u16), even);
+                                odd = cvt((aw >> 16) as u16).mul_add(cvt((bw >> 16) as u16), odd);
+                            }
+                            let pair_sum = even + odd;
+                            let acc0 = f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            let out = acc0 + pair_sum;
+                            let bits = out.to_bits();
+                            let bits = if bits & 0x7fff_ffff != 0 && bits & 0x7f80_0000 == 0 {
+                                bits & 0x8000_0000
+                            } else {
+                                bits
+                            };
+                            st[dcell..dcell + 4].copy_from_slice(&bits.to_le_bytes());
+                        }
                         _ => {
-                            // BF16/FP16/複素 FP16: dword 対の実・虚で
-                            // f32 に拡張して積和する。
+                            // 複素 FP16: dword 対の実・虚で f32 に拡張して積和する。
                             let mut acc =
                                 f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
                             for kk in 0..k {
@@ -11716,23 +11760,14 @@ fn amx_tile_exec(
                                         .try_into()
                                         .unwrap(),
                                 );
-                                let cvt: fn(u16) -> f32 = if insn == Insn::Tdpbf16ps {
-                                    |h| f32::from_bits(u32::from(h) << 16)
+                                let (a_re, a_im) =
+                                    (f16_to_f32(aw as u16), f16_to_f32((aw >> 16) as u16));
+                                let (b_re, b_im) =
+                                    (f16_to_f32(bw as u16), f16_to_f32((bw >> 16) as u16));
+                                if insn == Insn::Tcmmrlfp16ps {
+                                    acc += a_re * b_re - a_im * b_im;
                                 } else {
-                                    f16_to_f32
-                                };
-                                let (a_re, a_im) = (cvt(aw as u16), cvt((aw >> 16) as u16));
-                                let (b_re, b_im) = (cvt(bw as u16), cvt((bw >> 16) as u16));
-                                match insn {
-                                    Insn::Tcmmrlfp16ps => {
-                                        acc += a_re * b_re - a_im * b_im;
-                                    }
-                                    Insn::Tcmmimfp16ps => {
-                                        acc += a_re * b_im + a_im * b_re;
-                                    }
-                                    _ => {
-                                        acc += a_re * b_re + a_im * b_im;
-                                    }
+                                    acc += a_re * b_im + a_im * b_re;
                                 }
                             }
                             st[dcell..dcell + 4].copy_from_slice(&acc.to_le_bytes());
