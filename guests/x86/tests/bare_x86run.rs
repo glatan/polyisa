@@ -15032,6 +15032,41 @@ fn run_x87_precision_control_overflow_follows_rounding_mode() {
 }
 
 #[test]
+fn run_x87_fscale_huge_negative_scale_underflows_to_zero() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xFD])
+        .unwrap(); // fscale
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3fff);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0xc03f);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & 0x30, 0x30);
+    assert_eq!(
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        ),
+        (0, 0),
+    );
+}
+
+#[test]
 fn run_x87_fscale_zero_with_infinite_scale_sign() {
     fn once(scale_exp: u16) -> (u16, u64, u16) {
         let mut env = bare_x86_env();

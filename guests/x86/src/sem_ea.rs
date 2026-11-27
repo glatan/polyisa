@@ -12649,8 +12649,11 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let commit = sem::x87_commit_after_fault(b, fault);
     let nofault = sem::bit_not(b, fault);
     let n = f80_to_i64_trunc_occ(b, s1, e1).0;
-    let hi = b.konst::<W64>(0x8000);
-    let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
+    // ±50000 までは正確な scale を保つ。これを超えると、最小/最大の
+    // finite exponent を考えても最終的な overflow/underflow 側だけが
+    // 残るので、飽和させても結果は変わらない。
+    let hi = b.konst::<W64>(0xc350);
+    let lo = b.konst::<W64>(0xffff_ffff_ffff_3cb0);
     let nhi = b.cmp::<W64>(Cmp::GtS, n, hi);
     let nlo = b.cmp::<W64>(Cmp::LtS, n, lo);
     let n1 = b.select::<W64>(nhi, hi, n);
@@ -12717,13 +12720,12 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let numeric_input0 = sem::bit_and(b, not_nan_input, not_invalid);
     let numeric_input = sem::bit_and(b, numeric_input0, nofault);
     // 整数化が i64 indefinite へ潰れる ±2^63 以上の scale は、
-    // 符号だけを保存して ±32768 へ丸める。FSCALE はこの範囲外でも
-    // 飽和した scale factor として扱う。
+    // 符号だけを保存して結果が変わらない ±50000 へ飽和させる。
     let scale_lim = b.konst::<W64>(16383 + 63);
     let scale_large = b.cmp::<W64>(Cmp::GeU, eb1, scale_lim);
     let scale_neg = b.cmp::<W64>(Cmp::Eq, sign1, one);
-    let huge_pos = b.konst::<W64>(0x8000);
-    let huge_neg = b.konst::<W64>(0xffff_ffff_ffff_8000);
+    let huge_pos = b.konst::<W64>(0xc350);
+    let huge_neg = b.konst::<W64>(0xffff_ffff_ffff_3cb0);
     let huge_signed = b.select::<W64>(scale_neg, huge_neg, huge_pos);
     let n3 = b.select::<W64>(scale_large, huge_signed, n2);
 
@@ -12742,39 +12744,13 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     // denormal へ落とす。shift が 64 以上なら結果は零だが、shift=64
     // では元の integer bit が round bit になる。
     let shift0 = b.sub::<W64>(one, sum);
-    let k64 = b.konst::<W64>(64);
-    let sh_gt64 = b.cmp::<W64>(Cmp::GtU, shift0, k64);
-    let sh_ge64 = b.cmp::<W64>(Cmp::GeU, shift0, k64);
-    let sh_cap = b.select::<W64>(sh_ge64, k64, shift0);
-    let round_sh0 = b.sub::<W64>(sh_cap, one);
-    let round_sh = b.select::<W64>(sh_gt64, zero, round_sh0);
-    let round_bit0 = b.shr_l::<W64>(sig_norm, round_sh);
-    let round_bit1 = b.and::<W64>(round_bit0, one);
-    let round_bit2 = b.select::<W64>(sh_gt64, zero, round_bit1);
-    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit2, one);
-    let one_round = b.shl::<W64>(one, round_sh);
-    let sticky_mask = b.sub::<W64>(one_round, one);
-    let sticky_bits0 = b.and::<W64>(sig_norm, sticky_mask);
-    let sticky0 = b.cmp::<W64>(Cmp::Ne, sticky_bits0, zero);
-    let sig_any = b.cmp::<W64>(Cmp::Ne, sig_norm, zero);
-    let sticky1 = sem::bit_or(b, sticky0, sh_gt64);
-    let sticky = sem::bit_and(b, sticky1, sig_any);
-    let kept_for_lsb0 = b.shr_l::<W64>(sig_norm, sh_cap);
-    let kept_for_lsb = b.select::<W64>(sh_ge64, zero, kept_for_lsb0);
-    let kept_lsb = b.and::<W64>(kept_for_lsb, one);
-    let kept_lsb_set = b.cmp::<W64>(Cmp::Eq, kept_lsb, one);
-    let round_up0 = sem::x87_round_up(b, sign, round_set, sticky, kept_lsb_set);
-    let do_up = sem::bit_and(b, round_up0, under);
-    let kept0 = b.shr_l::<W64>(sig_norm, sh_cap);
-    let kept1 = b.select::<W64>(sh_ge64, zero, kept0);
-    let kept_plus = b.add::<W64>(kept1, one);
-    let sig_den = b.select::<W64>(do_up, kept_plus, kept1);
+    let tail_any = sem::bool_false(b);
+    let (sig_den, inexact0) = sem::x87_round_shift64_tail(b, sig_norm, shift0, sign, tail_any);
     let int_bit = b.konst::<W64>(1u64 << 63);
     let den_to_normal = b.cmp::<W64>(Cmp::Eq, sig_den, int_bit);
     let denormal_exp0 = b.select::<W64>(den_to_normal, one, zero);
     let sig_under = b.select::<W64>(under, sig_den, sig_norm);
     let exp_under = b.select::<W64>(under, denormal_exp0, sum);
-    let inexact0 = sem::bit_or(b, round_set, sticky);
     let inexact = sem::bit_and(b, inexact0, under);
     sem::x87_exception_flag(b, inexact, 1 << 5);
 
