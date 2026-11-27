@@ -213,6 +213,7 @@ fn declare_features(m: &mut Model) {
     // dot product/convert 群、V2_AUX は FP32↔FP8 と MX 変換の補助群。
     feat(m, "avx10_v1_aux", &["avx10"]);
     feat(m, "avx10_v2_aux", &["avx10"]);
+    feat(m, "avx10_bmm", &["avx10_3"]);
     // Leaf 1E.1 EAX。AMX-AVX512 は palette 1 のタイル行を ZMM
     // へ読む命令群で、tile 状態の基盤だけを前提にする。
     feat(m, "amx_avx512", &["amx_tile"]);

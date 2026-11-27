@@ -6567,6 +6567,9 @@ fn avx10_step(
             | Insn::VpinterleavehbXvHvWv
             | Insn::VpinterleavelwXvHvWv
             | Insn::VpinterleavehwXvHvWv
+            | Insn::Vbmacor16x16x16XvHvWv
+            | Insn::Vbmacxor16x16x16XvHvWv
+            | Insn::VbitrevXvWv
             | Insn::Vcvtps2bf8XvWv
             | Insn::Vcvtps2bf8sXvWv
             | Insn::Vcvtps2hf8XvWv
@@ -7471,6 +7474,45 @@ fn avx10_exec(
                     } else {
                         y[base + i / 2]
                     };
+                }
+            }
+        }
+        Insn::Vbmacor16x16x16XvHvWv | Insn::Vbmacxor16x16x16XvHvWv => {
+            let xorop = insn == Insn::Vbmacxor16x16x16XvHvWv;
+            out[..vbytes].copy_from_slice(&old[..vbytes]);
+            let row16 = |v: &[u8; 64], q: usize, r: usize| -> u16 {
+                let q64 = u64::from_le_bytes(v[q * 8..q * 8 + 8].try_into().unwrap());
+                ((q64 >> ((r & 3) * 16)) & 0xffff) as u16
+            };
+            for m in 0..vbytes / 32 {
+                let qbase = m * 4;
+                for i in 0..16 {
+                    let arow = row16(&x, qbase + i / 4, i);
+                    for j in 0..16 {
+                        let bitpos = m * 256 + i * 16 + j;
+                        let byte = bitpos / 8;
+                        let bit = bitpos % 8;
+                        let mut acc = (out[byte] >> bit) & 1;
+                        for kk in 0..16 {
+                            let brow = row16(&y, qbase + kk / 4, kk);
+                            let prod = (((arow >> kk) & 1) & ((brow >> j) & 1)) as u8;
+                            if xorop {
+                                acc ^= prod;
+                            } else {
+                                acc |= prod;
+                            }
+                        }
+                        out[byte] = (out[byte] & !(1u8 << bit)) | (acc << bit);
+                    }
+                }
+            }
+        }
+        Insn::VbitrevXvWv => {
+            for i in 0..vbytes {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                } else {
+                    out[i] = y[i].reverse_bits();
                 }
             }
         }

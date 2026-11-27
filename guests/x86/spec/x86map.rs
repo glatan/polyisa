@@ -3374,6 +3374,35 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v6.push(MapItem::Insn(op, it));
     }
+    // AVX10_BMM（EVEX.MAP6 80/81）。BMAC は 256/512 のみで mask なし、
+    // BITREV は全幅で byte mask あり。
+    for wr in [false, true] {
+        let mut it = ex(
+            if wr { "vbmacxor16x16x16_xv_hv_wv" } else { "vbmacor16x16x16_xv_hv_wv" },
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b110,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_bmm".to_string());
+        v6.push(MapItem::Insn(0x80, it));
+    }
+    let mut it = ex(
+        "vbitrev_xv_wv",
+        &[RegX, RmX],
+        PfxSel::Plain,
+        0b111,
+        true,
+        "{op} {x}, {w}",
+        "alu",
+    );
+    it.wsel = Some(false);
+    it.when = Pred::Flag("avx10_bmm".to_string());
+    v6.push(MapItem::Insn(0x81, it));
     // ACE BSR move（EVEX.512.MAP6 95）。modrm.reg=000 は bsr0
     // 固定で、半幅移動は vvvv 未使用、full move は vvvv が A-scale
     // 側の src1。方向は EVEX.W と pp で分かれる。

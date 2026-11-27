@@ -344,9 +344,12 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             [0; 4]
         },
         // leaf 0x24 subleaf 1: AVX10 auxiliary feature leaf。
-        // ECX[2]=AVX10_V1_AUX、ECX[3]=AVX10_V2_AUX。
+        // ECX[1]=AVX10_BMM、ECX[2]=AVX10_V1_AUX、ECX[3]=AVX10_V2_AUX。
         if features.contains("avx10") {
             let mut ecx = 0;
+            if features.contains("avx10_bmm") {
+                ecx |= 1 << 1;
+            }
             if features.contains("avx10_v1_aux") {
                 ecx |= 1 << 2;
             }
