@@ -14028,13 +14028,67 @@ fn run_x87_mul_sets_overflow_and_underflow_flags() {
         )
     }
     // 最大正規数に近い値へ 2.0 を掛けると overflow。最小正規数へ
-    // 0.5 を掛けると、この近似では 0 へ潰れる underflow。
+    // 0.5 を掛けると exponent 0 の exact denormal になる。exact なので
+    // masked underflow/precision は立たない。
     let (osig, oexp, ofsw) = once(0xFFFF_FFFF_FFFF_FFFF, 0x7FFE, 0x8000_0000_0000_0000, 0x4000);
     assert_eq!((osig, oexp), (0x8000_0000_0000_0000, 0x7FFF));
     assert_ne!(ofsw & (1 << 3), 0);
     let (usig, uexp, ufsw) = once(0x8000_0000_0000_0000, 0x0001, 0x8000_0000_0000_0000, 0x3FFE);
-    assert_eq!((usig, uexp), (0, 0));
-    assert_ne!(ufsw & (1 << 4), 0);
+    assert_eq!((usig, uexp), (0x4000_0000_0000_0000, 0));
+    assert_eq!(ufsw & ((1 << 4) | (1 << 5)), 0);
+}
+
+#[test]
+fn run_x87_mul_denormal_operand_and_directed_overflow() {
+    fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16, fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), a_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), a_exp);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), b_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), b_exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // 最小 denormal × 2.0 は significand 2 の denormal。入力の
+    // denormal 例外だけが立ち、UE/PE は立たない。
+    let (sig, exp, fsw) = once(1, 0, 0x8000_0000_0000_0000, 0x4000, 0x037f);
+    assert_eq!((sig, exp), (2, 0));
+    assert_ne!(fsw & (1 << 1), 0);
+    assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+
+    // overflow の masked response は RC に従う。nearest/+inf では inf、
+    // toward-zero と正数の toward -inf では最大有限値。
+    let maxa = (0xFFFF_FFFF_FFFF_FFFF, 0x7FFE);
+    let two = (0x8000_0000_0000_0000, 0x4000);
+    let (_, exp_near, _) = once(maxa.0, maxa.1, two.0, two.1, 0x037f);
+    assert_eq!(exp_near, 0x7fff);
+    let (sig_tz, exp_tz, _) = once(maxa.0, maxa.1, two.0, two.1, 0x0f7f);
+    assert_eq!((sig_tz, exp_tz), (u64::MAX, 0x7ffe));
+    let (sig_down, exp_down, _) = once(maxa.0, maxa.1, two.0, two.1, 0x077f);
+    assert_eq!((sig_down, exp_down), (u64::MAX, 0x7ffe));
+    let (_, exp_up, _) = once(maxa.0, maxa.1, two.0, two.1, 0x0b7f);
+    assert_eq!(exp_up, 0x7fff);
 }
 
 #[test]

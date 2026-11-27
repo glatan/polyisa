@@ -15030,6 +15030,65 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     (sig_pc, b.trunc::<W64, W16>(exp64_out))
 }
 
+/// 有限の 80 ビット入力を乗算・除算の内部で使う正規形へ直す。
+/// 指数 0 の非零 denormal だけを扱い、正規化後の指数は符号付き整数として
+/// u64 の2の補数に乗せる。zero・unsupported/unnormal・special は呼び出し側が
+/// 別経路で処理する。
+pub(crate) fn x87_normalize_denormal_operand<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp15: B::V<W64>,
+) -> (B::V<W64>, B::V<W64>) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, exp15, zero);
+    let denormal = bit_and(b, exp_zero, sig_nz);
+    let lz = clz64(b, sig);
+    let sig_norm = b.shl::<W64>(sig, lz);
+    // denormal: value = sig * 2^-63 * 2^-16382。
+    // sig << lz にすると exponent field は 1-lz になる。
+    let exp_den = b.sub::<W64>(one, lz);
+    let sig_out = b.select::<W64>(denormal, sig_norm, sig);
+    let exp_out = b.select::<W64>(denormal, exp_den, exp15);
+    (sig_out, exp_out)
+}
+
+/// overflow した x87 結果の masked response。RC によって無限大か
+/// 最大有限値を選ぶ。返す指数は符号なしの magnitude 部分だけ。
+pub(crate) fn x87_overflow_masked_response<B: Backend>(
+    b: &mut B,
+    sign: B::V<W64>,
+) -> (B::V<W64>, B::V<W64>) {
+    let fcw = b.get(fcw_ref());
+    let fcw64 = b.zext::<W16, W64>(fcw);
+    let ten = b.konst::<W64>(10);
+    let three = b.konst::<W64>(3);
+    let rc_sh = b.shr_l::<W64>(fcw64, ten);
+    let rc = b.and::<W64>(rc_sh, three);
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let two = b.konst::<W64>(2);
+    let nearest = b.cmp::<W64>(Cmp::Eq, rc, zero);
+    let floor = b.cmp::<W64>(Cmp::Eq, rc, one);
+    let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
+    let negative = b.cmp::<W64>(Cmp::Eq, sign, one);
+    let positive = bit_not(b, negative);
+    let inf_nearest = nearest;
+    let inf_floor = bit_and(b, floor, negative);
+    let inf_ceil = bit_and(b, ceil, positive);
+    let inf01 = bit_or(b, inf_nearest, inf_floor);
+    let use_inf = bit_or(b, inf01, inf_ceil);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let max_sig = b.konst::<W64>(u64::MAX);
+    let inf_exp = b.konst::<W64>(0x7fff);
+    let max_exp = b.konst::<W64>(0x7ffe);
+    (
+        b.select::<W64>(use_inf, int_bit, max_sig),
+        b.select::<W64>(use_inf, inf_exp, max_exp),
+    )
+}
+
 /// 正規化済み 80 ビット同士の乗算。FCW.RC に従って丸め、ゼロと無限大を特別扱いする。
 pub(crate) fn mul_ext<B: Backend>(
     b: &mut B,
@@ -15057,20 +15116,26 @@ pub(crate) fn mul_ext<B: Backend>(
     let sp_b_n = b.select::<W64>(sp_b, one64, zero64);
     let sp_or = b.or::<W64>(sp_a_n, sp_b_n);
     let is_special = b.cmp::<W64>(Cmp::Ne, sp_or, zero64);
-    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero64);
-    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero64);
+    let ez_a = b.cmp::<W64>(Cmp::Eq, ea, zero64);
+    let ez_b = b.cmp::<W64>(Cmp::Eq, eb, zero64);
+    let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero64);
+    let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero64);
+    let sig_a_z = bit_not(b, sig_a_nz);
+    let sig_b_z = bit_not(b, sig_b_nz);
+    let z_a = bit_and(b, ez_a, sig_a_z);
+    let z_b = bit_and(b, ez_b, sig_b_z);
     let z_a_n = b.select::<W64>(z_a, one64, zero64);
     let z_b_n = b.select::<W64>(z_b, one64, zero64);
     let z_or = b.or::<W64>(z_a_n, z_b_n);
     let is_zero = b.cmp::<W64>(Cmp::Ne, z_or, zero64);
-    let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero64);
-    let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero64);
-    let den_a = bit_and(b, z_a, sig_a_nz);
-    let den_b = bit_and(b, z_b, sig_b_nz);
+    let den_a = bit_and(b, ez_a, sig_a_nz);
+    let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
     x87_exception_flag(b, denormal_in, 1 << 1);
-    let lo = b.mul::<W64>(sig_a, sig_b);
-    let hi = b.mulhu::<W64>(sig_a, sig_b);
+    let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
+    let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
+    let lo = b.mul::<W64>(sig_na, sig_nb);
+    let hi = b.mulhu::<W64>(sig_na, sig_nb);
     let s63 = b.konst::<W64>(63);
     let hi_top = b.shr_l::<W64>(hi, s63);
     let ge = b.cmp::<W64>(Cmp::Eq, hi_top, one64);
@@ -15096,8 +15161,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let not_special = bit_not(b, is_special);
     let not_zero_in = bit_not(b, is_zero);
     let inexact_fin = bit_and(b, inexact_raw, not_special);
-    let inexact = bit_and(b, inexact_fin, not_zero_in);
-    x87_exception_flag(b, inexact, 1 << 5);
+    let inexact_base = bit_and(b, inexact_fin, not_zero_in);
     let do_up = x87_round_up(b, sign, round_set, sticky, lsb_set);
     let sig_plus = b.add::<W64>(sig_raw, one64);
     let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
@@ -15111,22 +15175,54 @@ pub(crate) fn mul_ext<B: Backend>(
     let adj0 = b.select::<W64>(ge, one64, zero64);
     let adj1 = b.add::<W64>(adj0, one64);
     let adj = b.select::<W64>(round_ov, adj1, adj0);
-    let exp_sum0 = b.add::<W64>(ea, eb);
+    let exp_sum0 = b.add::<W64>(ea_eff, eb_eff);
     let exp_sum = b.add::<W64>(exp_sum0, adj);
     let bias = b.konst::<W64>(16383);
-    let under = b.cmp::<W64>(Cmp::LeU, exp_sum, bias);
+    let under = b.cmp::<W64>(Cmp::LeS, exp_sum, bias);
     let biased = b.sub::<W64>(exp_sum, bias);
     let ov_lim = b.konst::<W64>(16383 + 0x7fff);
-    let over = b.cmp::<W64>(Cmp::GeU, exp_sum, ov_lim);
+    let over = b.cmp::<W64>(Cmp::GeS, exp_sum, ov_lim);
     let finite_in = bit_and(b, not_special, not_zero_in);
     let ovf_occur = bit_and(b, over, finite_in);
-    let unf_occur = bit_and(b, under, finite_in);
     x87_exception_flag(b, ovf_occur, 1 << 3);
+    // underflow した正規化結果は exponent 0 の denormal として右へ
+    // 揃える。丸めはまだ 64 ビット精度で行った近似で、subnormal 境界の
+    // double rounding は残る。shift が 64 を超える入力は 0 へ潰す。
+    let one_minus_e = b.sub::<W64>(one64, biased);
+    let k63sh = b.konst::<W64>(63);
+    let sh_too_big = b.cmp::<W64>(Cmp::GtU, one_minus_e, k63sh);
+    let sh_den = b.select::<W64>(sh_too_big, k63sh, one_minus_e);
+    let sig_den_raw = b.shr_l::<W64>(sig_norm, sh_den);
+    let sig_den = b.select::<W64>(sh_too_big, zero64, sig_den_raw);
+    // subnormal へ落とすときに捨てる bit も precision exception の
+    // 対象。masked underflow は tiny かつ inexact のときだけ UE を立て、
+    // unmasked では exact tiny でも報告する。
+    let one_sh_den = b.shl::<W64>(one64, sh_den);
+    let den_low_mask = b.sub::<W64>(one_sh_den, one64);
+    let den_dropped_bits = b.and::<W64>(sig_norm, den_low_mask);
+    let den_dropped0 = b.cmp::<W64>(Cmp::Ne, den_dropped_bits, zero64);
+    let sig_norm_nz = b.cmp::<W64>(Cmp::Ne, sig_norm, zero64);
+    let den_all_lost = bit_and(b, sh_too_big, sig_norm_nz);
+    let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
+    let den_inexact0 = bit_and(b, under, den_dropped1);
+    let inexact = bit_or(b, inexact_base, den_inexact0);
+    x87_exception_flag(b, inexact, 1 << 5);
+    let fcw = b.get(fcw_ref());
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let z16 = b.konst::<W16>(0);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let uunmasked = bit_not(b, umasked);
+    let unf_tiny = bit_or(b, inexact, uunmasked);
+    let unf_tiny = bit_and(b, under, unf_tiny);
+    let unf_occur = bit_and(b, unf_tiny, finite_in);
     x87_exception_flag(b, unf_occur, 1 << 4);
     let exp_over = b.select::<W64>(over, special_exp, biased);
     let exp_num = b.select::<W64>(under, zero64, exp_over);
-    let sig_under = b.select::<W64>(under, zero64, sig_norm);
-    let sig_num = b.select::<W64>(over, int_bit, sig_under);
+    let sig_under = b.select::<W64>(under, sig_den, sig_norm);
+    let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign);
+    let sig_num = b.select::<W64>(over, sig_ovm, sig_under);
+    let exp_num = b.select::<W64>(over, exp_ovm, exp_num);
     let exp_fin = b.select::<W64>(is_zero, zero64, exp_num);
     let sig_fin = b.select::<W64>(is_zero, zero64, sig_num);
     // 特殊値。NaN 入力と inf×0 は NaN、inf×非零は符号を
