@@ -375,7 +375,7 @@ mod imp {
             }
         }
         let unary_ops = [([0xd9, 0xfa], "fsqrt"), ([0xd9, 0xfc], "frndint")];
-        for i in 0..512 {
+        for i in 0..1024 {
             let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
             let input = operand(&mut rng);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
@@ -405,7 +405,7 @@ mod imp {
         let mut rng = Rng(0x87D1_77AA);
         let fcws = [0x007f, 0x027f, 0x037f, 0x077f, 0x0b7f, 0x0f7f];
         let mut reports = Vec::new();
-        for i in 0..256 {
+        for i in 0..512 {
             let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
             let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
             let sig = (1u64 << 63) | rng.next();
@@ -429,7 +429,7 @@ mod imp {
             }
         }
         let push_ops = [([0xd9, 0xfb], "fsincos"), ([0xd9, 0xf2], "fptan")];
-        for i in 0..128 {
+        for i in 0..256 {
             let op = push_ops[(rng.next() % push_ops.len() as u64) as usize];
             let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
             let sig = (1u64 << 63) | rng.next();
@@ -460,7 +460,7 @@ mod imp {
             ([0xd9, 0xf3], "fpatan"),
             ([0xd9, 0xf9], "fyl2xp1"),
         ];
-        for i in 0..256 {
+        for i in 0..512 {
             let op = binary_ops[(rng.next() % binary_ops.len() as u64) as usize];
             let small = |rng: &mut Rng, positive: bool| {
                 let sign = if !positive && rng.next() & 1 != 0 {
@@ -629,6 +629,36 @@ mod imp {
                 ));
             }
         }
+        // extended の最小正規数は host f64 では表せないが、trig/tan の
+        // 一次項は入力そのものになる。f64 へ潰れず exponent 分離で
+        // 評価できることを host と照合する。
+        let tiny_normal = (1u64 << 63, 1u16);
+        for op in unary_ops {
+            let (hv, hsw) = host_unary(tiny_normal, op.0, 0x037f);
+            let (pv, psw) = poly_unary(tiny_normal, op.0, 0x037f);
+            if !trans_value_matches(hv, pv) || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-tiny-normal {}: host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
+        for op in push_ops {
+            let (h0, h1, hsw) = host_push_pair(tiny_normal, op.0, 0x037f);
+            let (p0, p1, psw) = poly_push_pair(tiny_normal, op.0, 0x037f);
+            let values_match = if op.1 == "fptan" {
+                h0 == p0 && trans_value_matches(h1, p1)
+            } else {
+                trans_value_matches(h0, p0) && trans_value_matches(h1, p1)
+            };
+            if !values_match || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-push-tiny-normal {}: host={:x}/{:04x},{:x}/{:04x},sw{:04x} poly={:x}/{:04x},{:x}/{:04x},sw{:04x}",
+                    op.1, h0.0, h0.1, h1.0, h1.1, hsw, p0.0, p0.1, p1.0, p1.1, psw
+                ));
+            }
+        }
+
         let exact_cases = [
             ([0xd9, 0xf1], "fyl2x", (1u64 << 63, 0x3fffu16), one),
             ([0xd9, 0xf1], "fyl2x", (1u64 << 63, 0x4000u16), one),
