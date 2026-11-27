@@ -15371,25 +15371,31 @@ pub(crate) fn add_ext<B: Backend>(
 
     let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special);
     let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special);
-    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
-    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let ez_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let ez_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
     let any_sp = bit_or(b, sp_a, sp_b);
     let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero);
     let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero);
-    let den_a = bit_and(b, z_a, sig_a_nz);
-    let den_b = bit_and(b, z_b, sig_b_nz);
+    let sig_a_z = bit_not(b, sig_a_nz);
+    let sig_b_z = bit_not(b, sig_b_nz);
+    let z_a = bit_and(b, ez_a, sig_a_z);
+    let z_b = bit_and(b, ez_b, sig_b_z);
+    let den_a = bit_and(b, ez_a, sig_a_nz);
+    let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
     x87_exception_flag(b, denormal_in, 1 << 1);
+    let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
+    let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
-    let exp_gt = b.cmp::<W64>(Cmp::GtU, ea, eb);
+    let exp_gt = b.cmp::<W64>(Cmp::GtS, ea_eff, eb_eff);
     let exp_eq = b.cmp::<W64>(Cmp::Eq, ea, eb);
-    let sig_ge = b.cmp::<W64>(Cmp::GeU, sig_a, sig_b);
+    let sig_ge = b.cmp::<W64>(Cmp::GeU, sig_na, sig_nb);
     let eq_and_ge = bit_and(b, exp_eq, sig_ge);
     let a_is_big = bit_or(b, exp_gt, eq_and_ge);
-    let sig_big = b.select::<W64>(a_is_big, sig_a, sig_b);
-    let sig_small = b.select::<W64>(a_is_big, sig_b, sig_a);
-    let exp_big = b.select::<W64>(a_is_big, ea, eb);
-    let exp_small = b.select::<W64>(a_is_big, eb, ea);
+    let sig_big = b.select::<W64>(a_is_big, sig_na, sig_nb);
+    let sig_small = b.select::<W64>(a_is_big, sig_nb, sig_na);
+    let exp_big = b.select::<W64>(a_is_big, ea_eff, eb_eff);
+    let exp_small = b.select::<W64>(a_is_big, eb_eff, ea_eff);
     let sign_big = b.select::<W64>(a_is_big, sign_a, sign_b);
     let sign_small = b.select::<W64>(a_is_big, sign_b, sign_a);
     let same_sign = b.cmp::<W64>(Cmp::Eq, sign_big, sign_small);
@@ -15475,10 +15481,10 @@ pub(crate) fn add_ext<B: Backend>(
     let lo_n = b.select::<W64>(both_zero, zero, lo_n_src);
     let shift_lo = b.add::<W64>(s64, clz_lo);
     let shift = b.select::<W64>(hi_zero, shift_lo, clz_hi);
-    let exp_gt_shift = b.cmp::<W64>(Cmp::GtU, exp0, shift);
+    // 正規化で exponent が負へ落ちても、ここでは two's-complement の
+    // 符号付き指数のまま保持する。denormal への桁落としは丸め後に行う。
     let exp_subbed = b.sub::<W64>(exp0, shift);
-    let exp_n_raw = b.select::<W64>(exp_gt_shift, exp_subbed, zero);
-    let exp_n = b.select::<W64>(both_zero, zero, exp_n_raw);
+    let exp_n = b.select::<W64>(both_zero, zero, exp_subbed);
 
     let round_bit = b.shr_l::<W64>(lo_n, s63);
     let rest = b.and::<W64>(lo_n, m63);
@@ -15497,12 +15503,34 @@ pub(crate) fn add_ext<B: Backend>(
     let hi_rounded = b.select::<W64>(ov, int_bit, hi_rounded_raw);
     let exp_up = b.add::<W64>(exp_n, one);
     let exp_rounded = b.select::<W64>(ov, exp_up, exp_n);
-    let exp_is_zero = b.cmp::<W64>(Cmp::Eq, exp_rounded, zero);
-    let exp_ovf = b.cmp::<W64>(Cmp::GeU, exp_rounded, special);
-    let sig_or_inf = b.select::<W64>(exp_ovf, int_bit, hi_rounded);
-    let sig_mag = b.select::<W64>(exp_is_zero, zero, sig_or_inf);
-    let exp_mag = b.select::<W64>(exp_ovf, special, exp_rounded);
-    let sign_num = b.select::<W64>(exp_is_zero, zero, sign_big);
+    let exp_under = b.cmp::<W64>(Cmp::LeS, exp_rounded, zero);
+    let exp_ovf = b.cmp::<W64>(Cmp::GeS, exp_rounded, special);
+    // exponent 0 以下の有限結果は x87 denormal として右へ揃える。
+    // ここでは上位 64 ビット丸めのあとで桁落としするため、inexact
+    // subnormal の丸めには double rounding が残る。
+    let one_minus_exp = b.sub::<W64>(one, exp_rounded);
+    let k63sh = b.konst::<W64>(63);
+    let sh_too_big = b.cmp::<W64>(Cmp::GtU, one_minus_exp, k63sh);
+    let sh_den = b.select::<W64>(sh_too_big, k63sh, one_minus_exp);
+    let sig_den_raw = b.shr_l::<W64>(hi_rounded, sh_den);
+    let sig_den0 = b.select::<W64>(sh_too_big, zero, sig_den_raw);
+    let one_sh_den = b.shl::<W64>(one, sh_den);
+    let den_low_mask = b.sub::<W64>(one_sh_den, one);
+    let den_dropped_bits = b.and::<W64>(hi_rounded, den_low_mask);
+    let den_dropped0 = b.cmp::<W64>(Cmp::Ne, den_dropped_bits, zero);
+    let hi_rounded_nz = b.cmp::<W64>(Cmp::Ne, hi_rounded, zero);
+    let den_all_lost = bit_and(b, sh_too_big, hi_rounded_nz);
+    let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
+    let den_inexact = bit_and(b, exp_under, den_dropped1);
+    let sig_den = b.select::<W64>(both_zero, zero, sig_den0);
+    let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign_big);
+    let sig_or_inf = b.select::<W64>(exp_ovf, sig_ovm, hi_rounded);
+    let sig_under_sel = b.select::<W64>(exp_under, sig_den, sig_or_inf);
+    let sig_mag = b.select::<W64>(both_zero, zero, sig_under_sel);
+    let exp_under0 = b.select::<W64>(exp_under, zero, exp_rounded);
+    let exp_mag0 = b.select::<W64>(exp_ovf, exp_ovm, exp_under0);
+    let exp_mag = b.select::<W64>(both_zero, zero, exp_mag0);
+    let sign_num = b.select::<W64>(both_zero, zero, sign_big);
 
     let not_zb = bit_not(b, z_b);
     let use_b = bit_and(b, z_a, not_zb);
@@ -15523,16 +15551,25 @@ pub(crate) fn add_ext<B: Backend>(
     let nonzero_path = bit_not(b, use_zero);
     let finite_path = bit_and(b, not_sp, nonzero_path);
     let not_cancel_zero = bit_not(b, both_zero);
-    let unf_raw = bit_and(b, exp_is_zero, not_cancel_zero);
+    let unf_raw = bit_and(b, exp_under, not_cancel_zero);
     let ovf_occur = bit_and(b, exp_ovf, finite_path);
-    let unf_occur = bit_and(b, unf_raw, finite_path);
     x87_exception_flag(b, ovf_occur, 1 << 3);
-    x87_exception_flag(b, unf_occur, 1 << 4);
     let inexact_raw = bit_or(b, round_set, sticky_f);
+    let inexact_raw = bit_or(b, inexact_raw, den_inexact);
     let not_zero_path = bit_not(b, use_zero);
     let inexact_fin = bit_and(b, inexact_raw, not_sp);
     let inexact = bit_and(b, inexact_fin, not_zero_path);
     x87_exception_flag(b, inexact, 1 << 5);
+    let fcw = b.get(fcw_ref());
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let z16 = b.konst::<W16>(0);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let uunmasked = bit_not(b, umasked);
+    let unf_tiny = bit_or(b, inexact, uunmasked);
+    let unf_tiny = bit_and(b, unf_raw, unf_tiny);
+    let unf_occur = bit_and(b, unf_tiny, finite_path);
+    x87_exception_flag(b, unf_occur, 1 << 4);
     let sig_after_z = b.select::<W64>(use_zero, sig_zero_case, sig_mag);
     let exp_after_z = b.select::<W64>(use_zero, exp_zero_case, exp_mag);
     let sign_after_z = b.select::<W64>(use_zero, sign_zero_case, sign_num);
