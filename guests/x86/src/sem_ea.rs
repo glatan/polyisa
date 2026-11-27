@@ -10006,11 +10006,11 @@ fn ext_arith<B: Backend>(
         FAr::Add => sem::add_ext(b, s0, e0, s1, e1),
         FAr::Sub => {
             let ne = b.xor::<W16>(e1, sign_mask);
-            sem::add_ext(b, s0, e0, s1, ne)
+            sem::add_ext_nan(b, s0, e0, s1, ne, e0, e1)
         }
         FAr::SubR => {
             let ne = b.xor::<W16>(e0, sign_mask);
-            sem::add_ext(b, s1, e1, s0, ne)
+            sem::add_ext_nan(b, s1, e1, s0, ne, e1, e0)
         }
         FAr::Mul => sem::mul_ext(b, s0, e0, s1, e1),
         FAr::Div => sem::div_ext(b, s0, e0, s1, e1),

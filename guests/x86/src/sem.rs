@@ -15607,12 +15607,6 @@ pub(crate) fn mul_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    // SNaN invalid は denormal operand より優先される。SNaN が
-    // あれば invalid 応答だけを行い、DE は報告しない。
-    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
-    let no_snan_pre = bit_not(b, snan_pre);
-    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
-    x87_exception_flag(b, denormal_report, 1 << 1);
     let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
     let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
     let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
@@ -15693,8 +15687,11 @@ pub(crate) fn mul_ext<B: Backend>(
     // masked gradual underflow は 64 ビットへ丸めた値をさらに切り捨てる
     // のではなく、正規化前の exact product から target quantum へ一度だけ
     // 丸める。exact tail は round/sticky をまとめた inexact_raw で渡す。
-    let (sig_den, den_exact_inexact) =
-        x87_round_shift64_tail(b, sig_raw, one_minus_e, sign, inexact_eff);
+    let pc_extra = b.select::<W64>(pc_active, pc_drop, zero64);
+    let den_shift = b.add::<W64>(one_minus_e, pc_extra);
+    let (sig_den_low, den_exact_inexact) =
+        x87_round_shift64_tail(b, sig_raw, den_shift, sign, inexact_raw);
+    let sig_den = b.shl::<W64>(sig_den_low, pc_extra);
     // subnormal へ落とすときに捨てる bit も precision exception の
     // 対象。masked underflow は tiny かつ inexact のときだけ UE を立て、
     // unmasked では exact tiny でも報告する。
@@ -15761,6 +15758,12 @@ pub(crate) fn mul_ext<B: Backend>(
     let invalid_arith = bit_or(b, invalid_inf_zero, snan_invalid);
     let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
+    // NaN operand は例外ではなくても下位例外より優先され、unsupported
+    // format を含む invalid も denormal より先に処理される。
+    let higher_den0 = bit_or(b, nan_input, invalid_any);
+    let higher_den = bit_not(b, higher_den0);
+    let denormal_report = bit_and(b, denormal_in, higher_den);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let result_nan0 = bit_or(b, nan_input, invalid_inf_zero);
     let result_nan = bit_or(b, result_nan0, unsupported);
     let inf_in = bit_or(b, inf_a, inf_b);
@@ -15775,7 +15778,11 @@ pub(crate) fn mul_ext<B: Backend>(
     let exp_mag = b.select::<W64>(special_out, special_exp, exp_fin);
     let sig_out = b.select::<W64>(special_out, special_sig, sig_fin);
     let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
-    let special_sign = b.select::<W64>(nan_priority, nan_sign_bit, sign_bit);
+    let nan_sign0 = b.select::<W64>(nan_priority, nan_sign_bit, sign_bit);
+    let not_nan_priority = bit_not(b, nan_priority);
+    let nan_generated = bit_and(b, result_nan, not_nan_priority);
+    let neg_nan_sign = b.konst::<W64>(0x8000);
+    let special_sign = b.select::<W64>(nan_generated, neg_nan_sign, nan_sign0);
     let out_sign = b.select::<W64>(special_out, special_sign, sign_bit);
     let exp_word64 = b.or::<W64>(exp_mag, out_sign);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
@@ -15886,6 +15893,21 @@ pub(crate) fn add_ext<B: Backend>(
     sig_b: B::V<W64>,
     exp_b: B::V<W16>,
 ) -> (B::V<W64>, B::V<W16>, B::B) {
+    add_ext_nan(b, sig_a, exp_a, sig_b, exp_b, exp_a, exp_b)
+}
+
+/// `add_ext` と同じ演算をしながら、NaN 伝播の符号だけは
+/// 算術用に反転する前の exponent から取る。subtraction は右項の符号を
+/// 反転して加算へ帰着するが、NaN の符号は反転しないためである。
+pub(crate) fn add_ext_nan<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+    nan_exp_a: B::V<W16>,
+    nan_exp_b: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>, B::B) {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -15919,12 +15941,6 @@ pub(crate) fn add_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    // SNaN invalid は denormal operand より優先される。SNaN が
-    // あれば invalid 応答だけを行い、DE は報告しない。
-    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
-    let no_snan_pre = bit_not(b, snan_pre);
-    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
-    x87_exception_flag(b, denormal_report, 1 << 1);
     let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
     let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
     let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
@@ -15996,10 +16012,20 @@ pub(crate) fn add_ext<B: Backend>(
 
     let lo_nz = b.cmp::<W64>(Cmp::Ne, lo_s, zero);
     let neg_lo = b.sub::<W64>(zero, lo_s);
-    let sub_lo = b.select::<W64>(lo_nz, neg_lo, zero);
+    let sub_lo0 = b.select::<W64>(lo_nz, neg_lo, zero);
     let hi_minus = b.sub::<W64>(sig_big, hi_s);
     let hi_minus_b = b.sub::<W64>(hi_minus, one);
-    let sub_hi = b.select::<W64>(lo_nz, hi_minus_b, hi_minus);
+    let sub_hi0 = b.select::<W64>(lo_nz, hi_minus_b, hi_minus);
+    // 減算では 128 ビットより下へ落ちた被減数の bit は正の量として
+    // 引かれる。truncated 128 bit だけを引くと epsilon だけ大きい
+    // 結果になるので、sticky があるときは 128 bit 幅の差をさらに 1
+    // 下げる。これをしないと directed rounding で 1 ulp 逆へ丸まる。
+    let sub_lo_m1 = b.sub::<W64>(sub_lo0, one);
+    let sub_lo_is_zero = b.cmp::<W64>(Cmp::Eq, sub_lo0, zero);
+    let sub_hi_m1 = b.sub::<W64>(sub_hi0, one);
+    let sub_hi_b = b.select::<W64>(sub_lo_is_zero, sub_hi_m1, sub_hi0);
+    let sub_lo = b.select::<W64>(sticky_s, sub_lo_m1, sub_lo0);
+    let sub_hi = b.select::<W64>(sticky_s, sub_hi_b, sub_hi0);
 
     let hi0 = b.select::<W64>(same_sign, add_hi, sub_hi);
     let lo0 = b.select::<W64>(same_sign, add_lo, sub_lo);
@@ -16075,8 +16101,9 @@ pub(crate) fn add_ext<B: Backend>(
     let one_minus_exp = b.sub::<W64>(one, exp_rounded);
     let pc_extra = b.select::<W64>(pc_active, pc_drop, zero);
     let den_shift = b.add::<W64>(one_minus_exp, pc_extra);
-    let (sig_den_exact, den_round_inexact) =
+    let (sig_den_low, den_round_inexact) =
         x87_round_shift64_tail(b, hi_n, den_shift, sign_big, inexact_raw);
+    let sig_den_exact = b.shl::<W64>(sig_den_low, pc_extra);
     let den_inexact = bit_and(b, exp_under, den_round_inexact);
     let sig_den = b.select::<W64>(both_zero, zero, sig_den_exact);
     // unmasked overflow/underflow の register response では exponent を
@@ -16115,8 +16142,19 @@ pub(crate) fn add_ext<B: Backend>(
     let both_z = bit_and(b, z_a, z_b);
     let sig_zero_b = b.select::<W64>(use_b, sig_b, zero);
     let sig_zero_case = b.select::<W64>(use_a, sig_a, sig_zero_b);
-    let exp_zero_b = b.select::<W64>(use_b, eb, zero);
-    let exp_zero_case = b.select::<W64>(use_a, ea, exp_zero_b);
+    // exponent 0 で integer bit 1 の pseudo-denormal は、数値としては
+    // exponent 1 の denormal である。zero との加減で値をそのまま返す
+    // 経路でも、arithmetically normalized な exponent 1 へ正規化する。
+    let ib_a = b.and::<W64>(sig_a, int_bit);
+    let ib_a_set = b.cmp::<W64>(Cmp::Ne, ib_a, zero);
+    let pseudo_a = bit_and(b, ez_a, ib_a_set);
+    let ib_b = b.and::<W64>(sig_b, int_bit);
+    let ib_b_set = b.cmp::<W64>(Cmp::Ne, ib_b, zero);
+    let pseudo_b = bit_and(b, ez_b, ib_b_set);
+    let ea_canon = b.select::<W64>(pseudo_a, one, ea);
+    let eb_canon = b.select::<W64>(pseudo_b, one, eb);
+    let exp_zero_b = b.select::<W64>(use_b, eb_canon, zero);
+    let exp_zero_case = b.select::<W64>(use_a, ea_canon, exp_zero_b);
     let sign_and = b.and::<W64>(sign_a, sign_b);
     let sign_zero_b = b.select::<W64>(use_b, sign_b, sign_and);
     let sign_zero_case = b.select::<W64>(use_a, sign_a, sign_zero_b);
@@ -16150,9 +16188,16 @@ pub(crate) fn add_ext<B: Backend>(
     let sign_after_z = b.select::<W64>(use_zero, sign_zero_case, sign_num);
 
     let signs_differ = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
-    let both_sp = bit_and(b, sp_a, sp_b);
-    let inf_cancel = bit_and(b, both_sp, signs_differ);
-    let nan_sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac_a = b.and::<W64>(sig_a, frac_mask);
+    let frac_b = b.and::<W64>(sig_b, frac_mask);
+    let frac_a_z = b.cmp::<W64>(Cmp::Eq, frac_a, zero);
+    let frac_b_z = b.cmp::<W64>(Cmp::Eq, frac_b, zero);
+    let inf_a = bit_and(b, sp_a, frac_a_z);
+    let inf_b = bit_and(b, sp_b, frac_b_z);
+    let both_inf = bit_and(b, inf_a, inf_b);
+    let inf_cancel = bit_and(b, both_inf, signs_differ);
+    let nan_sel = x87_nan_select2(b, sig_a, nan_exp_a, sig_b, nan_exp_b);
     let nan_input = nan_sel.any;
     let snan_invalid = nan_sel.snan_invalid;
     let nan_prop_sig = nan_sel.sig;
@@ -16165,15 +16210,19 @@ pub(crate) fn add_ext<B: Backend>(
     let invalid_arith = bit_or(b, inf_cancel, snan_invalid);
     let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
+    let higher_den0 = bit_or(b, nan_input, invalid_any);
+    let higher_den = bit_not(b, higher_den0);
+    let denormal_report = bit_and(b, denormal_in, higher_den);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let nan_case0 = bit_or(b, nan_input, inf_cancel);
     let nan_case = bit_or(b, nan_case0, unsupported);
     let nan_prop_out = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
     let nan_out_sig = b.select::<W64>(unsupported, nan_sig, nan_prop_out);
     let sp_sig = b.select::<W64>(nan_case, nan_out_sig, int_bit);
     let inf_sign = b.select::<W64>(sp_a, sign_a, sign_b);
-    // 入力 NaN は選択した payload の符号を使う。inf同士の cancel が
-    // 作る indefinite は従来どおり第一入力側の符号にしておく。
-    let nan_sign = b.select::<W64>(nan_priority, nan_prop_sign, sign_a);
+    // 入力 NaN は選択した payload の符号を使う。inf同士の cancel や
+    // unsupported format が作る indefinite は負の QNaN indefinite である。
+    let nan_sign = b.select::<W64>(nan_priority, nan_prop_sign, one);
     let sp_sign = b.select::<W64>(nan_case, nan_sign, inf_sign);
     let special_out = bit_or(b, any_sp, unsupported);
     let sig_final = b.select::<W64>(special_out, sp_sig, sig_after_z);
@@ -16268,12 +16317,6 @@ pub(crate) fn div_ext<B: Backend>(
     let den_a = bit_and(b, ez_a, sig_a_nz);
     let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
-    // SNaN invalid は denormal operand より優先される。SNaN が
-    // あれば invalid 応答だけを行い、DE は報告しない。
-    let snan_pre = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b).snan_invalid;
-    let no_snan_pre = bit_not(b, snan_pre);
-    let denormal_report = bit_and(b, denormal_in, no_snan_pre);
-    x87_exception_flag(b, denormal_report, 1 << 1);
     let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
     let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
     let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
@@ -16369,8 +16412,11 @@ pub(crate) fn div_ext<B: Backend>(
     // 除算でも 64 ビット quotient を二度丸めせず、truncate 前の
     // normalized quotient と remainder 由来の exact tail から denormal
     // quantum へ一度だけ丸める。
-    let (sig_den, den_round_inexact) =
-        x87_round_shift64_tail(b, sig_trunc, one_minus_e, sign_r, inexact_eff);
+    let pc_extra = b.select::<W64>(pc_active, pc_drop, zero);
+    let den_shift = b.add::<W64>(one_minus_e, pc_extra);
+    let (sig_den_low, den_round_inexact) =
+        x87_round_shift64_tail(b, sig_trunc, den_shift, sign_r, inexact_raw);
+    let sig_den = b.shl::<W64>(sig_den_low, pc_extra);
     let den_inexact0 = bit_and(b, e_under, den_round_inexact);
     let den_inexact = bit_and(b, den_inexact0, numeric_input);
     let inexact_total = bit_or(b, inexact, den_inexact);
@@ -16428,7 +16474,8 @@ pub(crate) fn div_ext<B: Backend>(
     let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
     // 有限非零の 0 除算は zero-divide。0/0 は invalid、
-    // inf/0 は規則上 inf で zero-divide ではない。
+    // inf/0 は規則上 inf で zero-divide ではない。zero-divide は
+    // denormal より優先されるので、同時には DE を報告しない。
     let not_za = bit_not(b, z_a);
     let not_infa = bit_not(b, inf_a);
     let not_nana = bit_not(b, nan_a);
@@ -16436,6 +16483,11 @@ pub(crate) fn div_ext<B: Backend>(
     let fin_nz_a = bit_and(b, fin_nz_a, not_nana);
     let zero_div = bit_and(b, z_b, fin_nz_a);
     x87_exception_flag(b, zero_div, 1 << 2);
+    let higher_den1 = bit_or(b, nan_input, invalid_any);
+    let higher_den0 = bit_or(b, higher_den1, zero_div);
+    let higher_den = bit_not(b, higher_den0);
+    let denormal_report = bit_and(b, denormal_in, higher_den);
+    x87_exception_flag(b, denormal_report, 1 << 1);
     let bad0 = bit_or(b, any_nan, inf_inf);
     let bad1 = bit_or(b, bad0, z_z);
     let bad = bit_or(b, bad1, unsupported);
@@ -16453,12 +16505,15 @@ pub(crate) fn div_ext<B: Backend>(
     let nan_out_sig = b.select::<W64>(unsupported, nan_sig, nan_prop_out);
     let e_out = b.select::<W64>(bad, nan_exp, e_out);
     let s_out = b.select::<W64>(bad, nan_out_sig, s_out);
-    // 入力 NaN は符号も伝播する。算術 invalid が作る indefinite は
-    // 従来どおり符号なしとする。
+    // 入力 NaN は符号も伝播する。算術 invalid や unsupported format が
+    // 作る indefinite は負の QNaN indefinite である。
     let sign_bit = b.shl::<W64>(sign_r, s15);
     let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
-    let nan_bad_sign = b.select::<W64>(nan_input, nan_sign_bit, zero);
-    let bad_sign = b.select::<W64>(unsupported, zero, nan_bad_sign);
+    let not_unsupported_pri = bit_not(b, unsupported);
+    let nan_priority = bit_and(b, nan_input, not_unsupported_pri);
+    let neg_nan_sign = b.shl::<W64>(one, s15);
+    let nan_bad_sign = b.select::<W64>(nan_priority, nan_sign_bit, neg_nan_sign);
+    let bad_sign = b.select::<W64>(unsupported, neg_nan_sign, nan_bad_sign);
     let sign_sel = b.select::<W64>(bad, bad_sign, sign_bit);
     let e_word = b.or::<W64>(e_out, sign_sel);
     let exp_word = b.trunc::<W64, W16>(e_word);
@@ -16516,7 +16571,7 @@ pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let (sig1, exp1) = read_st(b, dst);
     let sign_mask = b.konst::<W16>(0x8000);
     let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
-    let (sig_d, exp_d, invalid) = add_ext(b, sig1, exp1, sig0, neg_exp0);
+    let (sig_d, exp_d, invalid) = add_ext_nan(b, sig1, exp1, sig0, neg_exp0, exp1, exp0);
     let commit = x87_arith_result_commit(b, invalid);
     b.if_then(commit, |b| {
         write_st(b, dst, sig_d, exp_d);

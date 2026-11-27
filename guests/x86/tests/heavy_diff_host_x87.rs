@@ -88,6 +88,17 @@ mod imp {
         ((sig, exp), sw)
     }
 
+    fn tag_bits(sig: u64, exp: u16) -> u16 {
+        let ef = exp & 0x7fff;
+        if ef == 0 && sig == 0 {
+            1
+        } else if ef != 0 && ef != 0x7fff && sig & (1u64 << 63) != 0 {
+            0
+        } else {
+            2
+        }
+    }
+
     fn poly_op(input0: (u64, u16), input1: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         env.backend
@@ -109,8 +120,8 @@ mod imp {
             .set(polyisa_guest_x86::sem::st_sig_ref(1), input1.0);
         env.backend
             .set(polyisa_guest_x86::sem::st_exp_ref(1), input1.1);
-        env.backend
-            .set(polyisa_guest_x86::sem::ftw_ref(), 0xfff0u16);
+        let tags = 0xfff0u16 | tag_bits(input0.0, input0.1) | (tag_bits(input1.0, input1.1) << 2);
+        env.backend.set(polyisa_guest_x86::sem::ftw_ref(), tags);
         let out = run_x86::run_mode(&mut env, CODE_VA as u32, &mut NoTrap, 1, true);
         assert!(
             matches!(out, Outcome::StepLimit { .. }),
@@ -126,14 +137,40 @@ mod imp {
     }
 
     fn operand(rng: &mut Rng) -> (u64, u16) {
-        let sig = (1u64 << 63) | rng.next();
-        let center = 0x3fffi32;
-        let disp = (rng.next() % 17) as i32 - 8;
-        let mut exp = (center + disp) as u16;
-        if rng.next() & 1 != 0 {
-            exp |= 0x8000;
+        let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
+        match rng.next() % 12 {
+            // 通常の正規数。指数は中心付近に寄せる。
+            0..=5 => {
+                let sig = (1u64 << 63) | rng.next();
+                let disp = (rng.next() % 17) as i32 - 8;
+                (sig, ((0x3fff + disp) as u16) | sign)
+            }
+            // overflow/underflow 境界に寄せた正規数。
+            6..=7 => {
+                let sig = (1u64 << 63) | rng.next();
+                let exp = if rng.next() & 1 != 0 {
+                    1 + (rng.next() % 8) as u16
+                } else {
+                    0x7ffe - (rng.next() % 8) as u16
+                };
+                (sig, exp | sign)
+            }
+            // 正規化済み denormal / pseudo-denormal。
+            8 => {
+                let sig = rng.next() | (if rng.next() & 1 != 0 { 1u64 << 63 } else { 1 });
+                (sig, sign)
+            }
+            // ±0。
+            9 => (0, sign),
+            // ±infinity。
+            10 => (1u64 << 63, 0x7fff | sign),
+            // QNaN/SNaN。payload の下位は乱択する。
+            _ => {
+                let quiet = if rng.next() & 1 != 0 { 1u64 << 62 } else { 0 };
+                let payload = (rng.next() & ((1u64 << 61) - 1)) | 1;
+                ((1u64 << 63) | quiet | payload, 0x7fff | sign)
+            }
         }
-        (sig, exp)
     }
 
     pub fn run() {

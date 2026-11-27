@@ -13586,10 +13586,10 @@ fn run_x87_fdiv_nan_and_invalid_priority() {
     // inf/inf と 0/0 は infinity/zero の通常規則より invalid NaN が優先。
     assert_eq!(
         once(inf.0, inf.1, inf.0, inf.1),
-        (0xC000_0000_0000_0000, 0x7FFF, 1),
+        (0xC000_0000_0000_0000, 0xFFFF, 1),
         "inf/inf"
     );
-    assert_eq!(once(0, 0, 0, 0), (0xC000_0000_0000_0000, 0x7FFF, 1), "0/0");
+    assert_eq!(once(0, 0, 0, 0), (0xC000_0000_0000_0000, 0xFFFF, 1), "0/0");
     // QNaN は payload と符号を保って伝播し、IE は立たない。
     let qnan = (0xC000_0000_0000_0123u64, 0xFFFFu16);
     assert_eq!(
@@ -13734,7 +13734,7 @@ fn run_x87_unsupported_format_invalid_masked_and_unmasked() {
         )
     }
     let (sig, exp, fsw) = mul_once(0x037F);
-    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
     assert_ne!(fsw & 1, 0);
     assert_eq!(fsw & 0x8080, 0);
     assert_eq!(fsw & 0x3F, 1);
@@ -15582,7 +15582,7 @@ fn run_x87_fmul_invalid_masked_writes_indefinite_unmasked_suppresses_write() {
     }
     // masked invalid は indefinite を書く。
     let (sig, exp, fsw) = once(0x037F);
-    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
     assert_ne!(fsw & 1, 0);
     assert_eq!(fsw & 0x8080, 0);
     // unmasked invalid は destination を変えず、IE/ES/B だけを残す。
@@ -15619,7 +15619,7 @@ fn run_x87_fmulp_unmasked_invalid_suppresses_write_and_pop() {
     // masked では ST(1) へ indefinite を書いて pop するので、
     // 新しい ST(0) は物理 slot1 の indefinite になる。
     let (sig1, exp1, top, fsw) = once(0x037F);
-    assert_eq!((sig1, exp1, top), (0xC000_0000_0000_0000, 0x7FFF, 1));
+    assert_eq!((sig1, exp1, top), (0xC000_0000_0000_0000, 0xFFFF, 1));
     assert_ne!(fsw & 1, 0);
     assert_eq!(fsw & 0x8080, 0);
     // unmasked では write も pop もしない。
@@ -15637,9 +15637,8 @@ fn run_x87_precision_control_counts_significant_bits_in_denormal() {
     // PC=10 (53 bits)、RNE、例外 masked。
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x027F);
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
-    // bit62 が最上位で bit10 まで 53 significant bits を使う denormal。
-    // 1.0 を掛けても値は変わらず、PC=53 では bit10 を残さなければ
-    // ならない。64 ビット幅の末尾 11 bit を落とすとこの bit が消える。
+    // bit62 が最上位で bit10 を持つ denormal。PC=53 の extended
+    // significand 基準では末尾 11 bit を落とすので bit10 は消える。
     env.backend
         .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x4000_0000_0000_0400);
     env.backend
@@ -15659,11 +15658,11 @@ fn run_x87_precision_control_counts_significant_bits_in_denormal() {
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
-        0x4000_0000_0000_0400
+        0x4000_0000_0000_0000
     );
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
     let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
-    assert_eq!(fsw & (1 << 5), 0);
+    assert_ne!(fsw & (1 << 5), 0);
 }
 
 #[test]
@@ -15739,7 +15738,7 @@ fn run_x87_fmul_propagates_infinity_and_nan_rules() {
     );
     assert_eq!(
         once(inf.0, inf.1, 0, 0),
-        (0xC000_0000_0000_0000, 0x7FFF, 1),
+        (0xC000_0000_0000_0000, 0xFFFF, 1),
         "inf * 0 is NaN and sets IE"
     );
 
