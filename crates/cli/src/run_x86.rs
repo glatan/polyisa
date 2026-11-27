@@ -11470,6 +11470,7 @@ fn amx_tile_exec(
             // R 拡張ビット（tmm8-15 を指す）は #UD。
             if !tile_valid(st, t)
                 || md.rex & 4 != 0
+                || !md.has_sib
                 || !tile_colsb(st, t).is_multiple_of(4)
                 || usize::from(st[TILECFG_OFF + 1]) >= tile_rows(st, t)
             {

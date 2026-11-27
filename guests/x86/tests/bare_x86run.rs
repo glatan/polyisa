@@ -27930,6 +27930,47 @@ fn run64_amx_tileload_fault_records_start_row() {
 }
 
 #[test]
+fn run64_amx_tileload_requires_sib() {
+    // AMX-E3: TILELOADD/TILESTORED のメモリオペランドは SIB 必須。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_INT8;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    cfg[16..18].copy_from_slice(&4u16.to_le_bytes());
+    cfg[48] = 1;
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+                0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+                0xC4, 0xE2, 0x7B, 0x4B, 0x00, // tileloadd (%rax),tmm0（SIB なし）
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert!(matches!(out, Outcome::Unimplemented { .. }));
+}
+
+#[test]
 fn run64_amx_fp8_dot() {
     // 1x1 の FP8 積和。src1 は BF8 1.0 (0x3c)、src2 は HF8 1.0 (0x38)。
     let feats = polyisa_guest_x86::model_feats("x86_64")
