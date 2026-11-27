@@ -1877,10 +1877,10 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20                   i += 2;\n\
          \x20               } else {\n\
          \x20                   let b3 = *bytes.get(i + 2)?;\n\
-         \x20                   // VEX.mmmmm は 0F/0F38/0F3A（1-3）だけ有効。\n\
+         \x20                   // VEX.mmmmm は 0F/0F38/0F3A（1-3）と AVX10/AMX の map5 が有効。\n\
          \x20                   // 0 と 4 以上は予約で #UD（XOP 表の 8/9/10 は\n\
          \x20                   // 0x8F 接頭辞でのみ選ばれる）。\n\
-         \x20                   if b2 & 0x1F == 0 || b2 & 0x1F > 3 {\n\
+         \x20                   if b2 & 0x1F == 0 || (b2 & 0x1F > 3 && b2 & 0x1F != 5) {\n\
          \x20                       return None;\n\
          \x20                   }\n\
          \x20                   d.vex = true;\n\

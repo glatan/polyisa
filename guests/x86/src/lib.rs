@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2521);
+        assert_eq!(INSNS.len(), 2525);
     }
 
     #[test]
@@ -2834,6 +2834,17 @@ fn amx_decode() {
         assert_eq!(d.insn, want, "{b2:02x} {op:02x}");
         assert_eq!(crate::decode::vvv_t(&d), 3);
     }
+    // AMX-FP8 は VEX.128.MAP5.W0 FD。pp で FP8 型の組合せを選ぶ。
+    for (b2, want) in [
+        (0x60u8, Insn::Tdpbf8ps),
+        (0x63, Insn::Tdpbhf8ps),
+        (0x62, Insn::Tdphbf8ps),
+        (0x61, Insn::Tdphf8ps),
+    ] {
+        let d = decode_map(&[0xC4, 0xE5, b2, 0xFD, 0xCA], modes, tile | FEAT_AMX_FP8).unwrap();
+        assert_eq!(d.insn, want, "fp8 {b2:02x}");
+    }
+    assert!(decode_map(&[0xC4, 0xE5, 0x60, 0xFD, 0xCA], modes, tile).is_none());
     // 機能なしでは #UD。
     assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5E, 0xCA], modes, tile).is_none());
     assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5C, 0xCA], modes, tile).is_none());

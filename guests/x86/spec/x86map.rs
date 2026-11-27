@@ -2821,6 +2821,29 @@ fn build_map_avx10(m: &mut Model) {
     use OpKind::*;
     let mut v = Vec::new();
     let mut v6 = Vec::new();
+    // AMX-FP8（VEX.128.MAP5.W0 FD /r）。pp で FP8 型の組合せを
+    // 選ぶ。dst=modrm.reg、src1=modrm.r/m、src2=vvvv の mod=11 形。
+    for (sel, mn) in [
+        (PfxSel::Plain, "tdpbf8ps"),
+        (PfxSel::PF2, "tdpbhf8ps"),
+        (PfxSel::PF3, "tdphbf8ps"),
+        (PfxSel::P66, "tdphf8ps"),
+    ] {
+        let mut it = mi(
+            mn,
+            &[RegT, RmT, VvT],
+            None,
+            sel,
+            Pred::True,
+            &format!("{mn} {{x}}, {{w}}, {{v}}"),
+            "alu",
+        );
+        it.vex = Some(VexL::L0);
+        it.wsel = Some(false);
+        it.group_mod = Some(true);
+        it.when = w("m64");
+        v.push(MapItem::Insn(0xFD, it));
+    }
     // AVX10.2 の BF16 パック演算（EVEX.66.MAP5）。要素は bf16 で
     // broadcast（m16bcst）は b=1 で選ぶ。既定ゲートは
     // apply_gates で avx10_2 に倒す。

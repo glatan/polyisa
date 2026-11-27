@@ -6044,6 +6044,10 @@ fn amx_tile_step(
             | Insn::Tdpbuud
             | Insn::Tdpbf16ps
             | Insn::Tdpfp16ps
+            | Insn::Tdpbf8ps
+            | Insn::Tdpbhf8ps
+            | Insn::Tdphbf8ps
+            | Insn::Tdphf8ps
             | Insn::Tcmmimfp16ps
             | Insn::Tcmmrlfp16ps
             | Insn::Bsrinit
@@ -10998,6 +11002,54 @@ fn amx_tile_exec(
                 for n in 0..md_cols {
                     let dcell = TMM_OFF + usize::from(dst) * 1024 + m * tile_colsb(st, dst) + 4 * n;
                     match insn {
+                        Insn::Tdpbf8ps | Insn::Tdpbhf8ps | Insn::Tdphbf8ps | Insn::Tdphf8ps => {
+                            use polyisa_softfloat::{E4M3, E5M2, Rm};
+                            let cvt = |x: u8, hf8: bool| -> f32 {
+                                let v = if hf8 {
+                                    E4M3::from_bits(u64::from(x)).to_f32(Rm::Rne).0
+                                } else {
+                                    E5M2::from_bits(u64::from(x)).to_f32(Rm::Rne).0
+                                };
+                                f32::from_bits(v.bits() as u32)
+                            };
+                            let a_hf = matches!(insn, Insn::Tdphbf8ps | Insn::Tdphf8ps);
+                            let b_hf = matches!(insn, Insn::Tdpbhf8ps | Insn::Tdphf8ps);
+                            let mut acc =
+                                f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            let mut nan_in = acc.is_nan();
+                            for kk in 0..k {
+                                let aw = u32::from_le_bytes(
+                                    st[tile_cell(st, s1, m) + 4 * kk
+                                        ..tile_cell(st, s1, m) + 4 * kk + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                let bw = u32::from_le_bytes(
+                                    st[tile_cell(st, s2, kk) + 4 * n
+                                        ..tile_cell(st, s2, kk) + 4 * n + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                for q in 0..4 {
+                                    let av = cvt((aw >> (8 * q)) as u8, a_hf);
+                                    let bv = cvt((bw >> (8 * q)) as u8, b_hf);
+                                    nan_in |= av.is_nan() || bv.is_nan();
+                                    acc += av * bv;
+                                }
+                            }
+                            let r = if nan_in {
+                                0xffc0_0000u32
+                            } else {
+                                let b = acc.to_bits();
+                                // FP8 ドット積は出力側 FTZ=1 として扱う。
+                                if b & 0x7fff_ffff != 0 && b & 0x7f80_0000 == 0 {
+                                    b & 0x8000_0000
+                                } else {
+                                    b
+                                }
+                            };
+                            st[dcell..dcell + 4].copy_from_slice(&r.to_le_bytes());
+                        }
                         Insn::Tdpbssd | Insn::Tdpbsud | Insn::Tdpbusd | Insn::Tdpbuud => {
                             let a_sgn = matches!(insn, Insn::Tdpbssd | Insn::Tdpbsud);
                             let b_sgn = matches!(insn, Insn::Tdpbssd | Insn::Tdpbusd);
@@ -20122,6 +20174,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Tdpbuud
             | Insn::Tdpbf16ps
             | Insn::Tdpfp16ps
+            | Insn::Tdpbf8ps
+            | Insn::Tdpbhf8ps
+            | Insn::Tdphbf8ps
+            | Insn::Tdphf8ps
             | Insn::Tcmmimfp16ps
             | Insn::Tcmmrlfp16ps
             | Insn::Vsha512rnds2XvHvWv

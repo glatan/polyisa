@@ -166,6 +166,7 @@ fn declare_features(m: &mut Model) {
     feat(m, "amx_bf16", &["amx_tile"]);
     feat(m, "amx_int8", &["amx_tile"]);
     feat(m, "amx_fp16", &["amx_tile"]);
+    feat(m, "amx_fp8", &["amx_tile"]);
     feat(m, "amx_complex", &["amx_tile"]);
     feat(m, "amx_movrs", &["amx_tile"]);
     // Leaf 0x8000_0001 ECX。
@@ -1078,6 +1079,7 @@ fn declare_ident_bits(m: &mut Model) {
     b_sub(m, "amx_bf16", 0x1e, 1, "eax", 1);
     b_sub(m, "amx_complex", 0x1e, 1, "eax", 2);
     b_sub(m, "amx_fp16", 0x1e, 1, "eax", 3);
+    b_sub(m, "amx_fp8", 0x1e, 1, "eax", 4);
     b_sub(m, "amx_avx512", 0x1e, 1, "eax", 7);
     b_sub(m, "amx_movrs", 0x1e, 1, "eax", 8);
     b_sub(m, "avxvnniint8", 0x7, 1, "edx", 4);
@@ -1326,6 +1328,7 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         "tdpbssd" | "tdpbsud" | "tdpbusd" | "tdpbuud" => &["amx_int8"],
         "tdpbf16ps" => &["amx_bf16"],
         "tdpfp16ps" => &["amx_fp16"],
+        "tdpbf8ps" | "tdpbhf8ps" | "tdphbf8ps" | "tdphf8ps" => &["amx_fp8"],
         "tcmmimfp16ps" | "tcmmrlfp16ps" => &["amx_complex"],
         // TILEMOVROW read/TCVTROW は AMX-AVX512 と ACE で共有され、
         // 項目側が OR ゲートを持つ。空リストは EVEX 既定の avx512f を
