@@ -13358,6 +13358,41 @@ fn run_x87_fsin_denormal_unmasked_underflow_response() {
 }
 
 #[test]
+fn run_x87_f2xm1_tiny_result_unmasked_underflow_response() {
+    fn once(fcw: u16) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xF0])
+            .unwrap(); // f2xm1
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 1);
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    let (fsw, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x30, 0x30);
+    assert_ne!(sig, 0);
+    assert_eq!(exp & 0x7fff, 0);
+    let (fsw, sig, exp) = once(0x036F);
+    assert_eq!(fsw & 0x8030, 0x8030);
+    assert_ne!(sig & (1u64 << 63), 0);
+    assert_ne!(exp & 0x7fff, 0);
+}
+
+#[test]
 fn run_x87_fptan_denormal_masked_and_unmasked_underflow() {
     fn once(fcw: u16) -> (u16, u16, u64, u16, u64, u16) {
         let mut env = bare_x86_env();

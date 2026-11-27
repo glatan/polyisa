@@ -9943,6 +9943,23 @@ fn x87_scalar_underflow_response(env: &mut BareEnv, value: (u64, u16)) -> (u64, 
     (sig, mag | sign)
 }
 
+/// transcendental の通常経路で得られた tiny 結果に #U を記録する。
+/// unmasked では denormal quantum で丸めた値ではなく、normal precision で
+/// 丸めた significand と exponent+24576 を register response として返す。
+fn x87_scalar_tiny_meta(env: &mut BareEnv, meta: crate::x87_trans::ExtRounded) -> (u64, u16) {
+    if !meta.tiny || meta.sig == 0 {
+        return (meta.sig, meta.exp);
+    }
+    x87_scalar_exception_flag(env, 1 << 4);
+    let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+    if fcw & (1 << 4) != 0 {
+        return (meta.sig, meta.exp);
+    }
+    let sign = meta.exp & 0x8000;
+    let mag = (meta.normal_exp as u16).wrapping_add(24576) & 0x7fff;
+    (meta.normal_sig, mag | sign)
+}
+
 fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
     match op {
         0xFE | 0xFF | 0xF0 => x87_write_st(env, 0, value),
@@ -10377,7 +10394,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            x87_write_st(env, 0, crate::x87_trans::dd_to_ext(y, rc));
+            let meta = crate::x87_trans::dd_to_ext_scaled_meta(y, 0, rc);
+            let adjusted = x87_scalar_tiny_meta(env, meta);
+            x87_write_st(env, 0, adjusted);
         }
         // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
         0xFB => {
@@ -10386,11 +10405,13 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            x87_write_st(
-                env,
+            let sin_meta = crate::x87_trans::dd_to_ext_scaled_meta(
+                crate::x87_trans::sin_reduced_ext(s0, e0),
                 0,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::sin_reduced_ext(s0, e0), rc),
+                rc,
             );
+            let sin_value = x87_scalar_tiny_meta(env, sin_meta);
+            x87_write_st(env, 0, sin_value);
             x87_push(
                 env,
                 crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced_ext(s0, e0), rc),
@@ -10398,14 +10419,26 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
         0xF0 => {
-            let input = crate::x87_trans::ext_to_dd(s0, e0);
-            let y = crate::x87_trans::expm1_small(input);
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            x87_write_st(env, 0, crate::x87_trans::dd_to_ext(y, rc));
+            let (mantissa, input_exp) = crate::x87_trans::ext_mantissa_exp_dd(s0, e0);
+            let meta = if input_exp <= -70 {
+                // |x| が十分小さいときは x^2 項が 64 bit の丸めへ影響せず、
+                // 2^x-1 = x ln2 の一次項だけを exponent 分離のまま丸める。
+                // これにより f64 の exponent 範囲より小さい extended 入力でも
+                // 0 へ潰れない。
+                let linear = mantissa.mul(crate::x87_trans::LN2);
+                crate::x87_trans::dd_to_ext_scaled_meta(linear, input_exp, rc)
+            } else {
+                let input = crate::x87_trans::ext_to_dd(s0, e0);
+                let y = crate::x87_trans::expm1_small(input);
+                crate::x87_trans::dd_to_ext_scaled_meta(y, 0, rc)
+            };
+            let adjusted = x87_scalar_tiny_meta(env, meta);
+            x87_write_st(env, 0, adjusted);
         }
         0xF2 => {
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
@@ -10415,7 +10448,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             }
             let sin = crate::x87_trans::sin_reduced_ext(s0, e0);
             let cos = crate::x87_trans::cos_reduced_ext(s0, e0);
-            x87_write_st(env, 0, crate::x87_trans::dd_to_ext(sin.div(cos), rc));
+            let tan_meta = crate::x87_trans::dd_to_ext_scaled_meta(sin.div(cos), 0, rc);
+            let tan_value = x87_scalar_tiny_meta(env, tan_meta);
+            x87_write_st(env, 0, tan_value);
             x87_push(env, x87_f64_to_ext(1.0));
         }
         // FPATAN: atan(ST1/ST0)、FYL2X系: ST1*log2(ST0[+1])。
@@ -10529,7 +10564,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                 x87_write_st(env, 1, rounded);
             } else if op == 0xF3 {
                 let result = crate::x87_trans::atan2_ext(s1, e1, s0, e0);
-                x87_write_st(env, 1, crate::x87_trans::dd_to_ext(result, rc));
+                let meta = crate::x87_trans::dd_to_ext_scaled_meta(result, 0, rc);
+                let value = x87_scalar_tiny_meta(env, meta);
+                x87_write_st(env, 1, value);
             } else {
                 x87_write_st(env, 1, x87_f64_to_ext(y));
             }
