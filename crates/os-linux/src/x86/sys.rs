@@ -104,6 +104,9 @@ pub struct Linux {
     /// 空のパイプを読もうとして待っているパイプ。
     /// パイプ待ちの対象と方向。真なら空の読み、偽なら満杯の書き。
     pipe_wait: Option<(u64, bool)>,
+    /// nanosleep が眠る絶対期限。シグナルで起きた再実行時に
+    /// 残り時間を計算し、期限満了後の再実行を初回と区別する。
+    sleep_deadline: Option<u64>,
     /// fd 準備待ち（ソケット・待ち合わせ系）の中身。
     fd_wait: Option<crate::sock::Wait>,
     /// 解けたばかりの fd 待ち。解除時に退避し、起きて再実行された
@@ -981,6 +984,7 @@ impl Linux {
             wait: None,
             queue: self.queue.clone(),
             pipe_wait: None,
+            sleep_deadline: None,
             fd_wait: None,
             fd_wait_prev: None,
             host_io: self.host_io.clone(),
@@ -3302,8 +3306,7 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
                         | polyisa_kernel::ThreadWait::HostFd
                         | polyisa_kernel::ThreadWait::Timer,
                     ) => {
-                        task.linux.fd_wait = None;
-                        task.linux.fd_wait_prev = None;
+                        task.linux.fd_wait_prev = task.linux.fd_wait.take();
                     }
                     _ => {}
                 }
@@ -4346,9 +4349,107 @@ fn sys_ioctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_ioctl(env, cx)
 }
 
-fn sys_nanosleep(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_nanosleep(env, cx)
+fn sys_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // nanosleep(req, rem)。タイマ待ちとして block し、期限満了後の
+    // syscall 再実行で 0 を返す。シグナルに割り込まれた場合は
+    // nanosleep の規約どおり SA_RESTART でも再開せず EINTR にし、
+    // rem があれば残り時間を書く。
+    let req = get64(env, cx.r_a);
+    let rem = get64(env, cx.r_b);
+    if req == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let wide = sys.is64 && !sys.x32;
+    let len = if wide { 16 } else { 8 };
+    let mut buf = [0u8; 16];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(req), &mut buf[..len], data_access())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    let (sec, nsec) = if wide {
+        (
+            i64::from_le_bytes(buf[..8].try_into().unwrap()),
+            i64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        )
+    } else {
+        (
+            i64::from(i32::from_le_bytes(buf[..4].try_into().unwrap())),
+            i64::from(i32::from_le_bytes(buf[4..8].try_into().unwrap())),
+        )
+    };
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let duration = (sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    if duration == 0 {
+        sys.sleep_deadline = None;
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    let now = sys.mono_ns();
+    let deadline = sys
+        .sleep_deadline
+        .unwrap_or_else(|| now.saturating_add(duration));
+    if now >= deadline {
+        sys.sleep_deadline = None;
+        sys.fd_wait = None;
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+
+    // 配送可能シグナルがあれば rem を書いて EINTR コンテキストを作る。
+    let interrupting = sys.sig_pending & !sys.sig_mask != 0;
+    if interrupting {
+        let left = deadline.saturating_sub(now);
+        if rem != 0 {
+            let out = if wide {
+                let mut b = [0u8; 16];
+                b[..8].copy_from_slice(&(left / 1_000_000_000).to_le_bytes());
+                b[8..].copy_from_slice(&(left % 1_000_000_000).to_le_bytes());
+                b.to_vec()
+            } else {
+                let mut b = [0u8; 8];
+                b[..4].copy_from_slice(&((left / 1_000_000_000) as u32).to_le_bytes());
+                b[4..].copy_from_slice(&((left % 1_000_000_000) as u32).to_le_bytes());
+                b.to_vec()
+            };
+            if env.backend.mem.write(VirtAddr(rem), &out).is_err() {
+                return Some(TrapOutcome::Unimplemented);
+            }
+        }
+        sys.sleep_deadline = None;
+        sys.fd_wait = None;
+        sys.fd_wait_prev = None;
+        let id = sys.ensure_self();
+        sys.queue
+            .0
+            .borrow_mut()
+            .meta
+            .unblock(polyisa_kernel::ThreadId(id.0));
+        if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false) {
+            return Some(TrapOutcome::Handled);
+        }
+    }
+
+    let id = sys.ensure_self();
+    sys.sleep_deadline = Some(deadline);
+    sys.fd_wait = Some(crate::sock::Wait {
+        fds: Vec::new(),
+        deadline: Some(deadline),
+    });
+    sys.queue.0.borrow_mut().meta.block(
+        polyisa_kernel::ThreadId(id.0),
+        polyisa_kernel::ThreadWait::Timer,
+    );
+    Some(TrapOutcome::Blocked)
 }
 
 /// `/proc/self/status` の `Cpus_allowed` を、CPU 0 が最下位ビットのバイト列にする。
@@ -7650,6 +7751,76 @@ mod tests {
         set64(&mut env, Gpr(6), 128);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ESRCH));
+    }
+
+    #[test]
+    fn nanosleep_blocks_and_returns_zero_after_the_deadline() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x108), &1000i64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.sleep_deadline.is_some());
+        if let Some(wait) = &mut sys.fd_wait {
+            wait.deadline = Some(0);
+        }
+        sys.sleep_deadline = Some(0);
+        sys.sweep_fd_waits();
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.sleep_deadline, None);
+    }
+
+    #[test]
+    fn nanosleep_interrupted_returns_eintr_and_writes_remaining_time() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), &1i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x108), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x302);
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        let mut rem = [0u8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut rem, data_access())
+            .unwrap();
+        let sec = i64::from_le_bytes(rem[..8].try_into().unwrap());
+        let nsec = i64::from_le_bytes(rem[8..].try_into().unwrap());
+        assert!(sec == 0 && nsec > 0 || sec == 1 && nsec == 0);
     }
 
     #[test]
