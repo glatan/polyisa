@@ -4058,6 +4058,27 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VCVT2PS2PHX（2 入力の FP32 ベクタを FP16 へ縮退して連結）。
+    {
+        let mut it = ex(
+            "vcvt2ps2phx_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 4;
+        it.er = true;
+        it.wsel = Some(false);
+        it.when = Pred::Any(vec![
+            Pred::Flag("avx10_2".to_string()),
+            Pred::Flag("avx10_v1_aux".to_string()),
+        ]);
+        v.push(MapItem::Insn(0x67, it));
+    }
     // ACE tile move row/col の GPR 指定形（mod=11 固定）。reg/rm
     // の一方は tmm なので汎用ベクタ意味論ではなく concrete 実行へ渡す。
     for (op, wr, mn) in [

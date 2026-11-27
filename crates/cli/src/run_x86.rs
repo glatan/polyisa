@@ -6514,7 +6514,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vgetexpbf16XvWv
+        Insn::Vcvt2ps2phxXvHvWv
+            | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv
             | Insn::Vrndscalebf16XvWvIb
             | Insn::Vgetmantbf16XvWvIb
@@ -6598,7 +6599,8 @@ fn avx10_exec(
             decode::Rm::Mem { a, .. } => {
                 let mut v = [0u8; 64];
                 if md.evex_b {
-                    let ebw = if matches!(md.insn, Insn::Vdpbf16psXvHvWv) {
+                    let ebw = if matches!(md.insn, Insn::Vdpbf16psXvHvWv | Insn::Vcvt2ps2phxXvHvWv)
+                    {
                         4
                     } else {
                         2
@@ -6632,7 +6634,9 @@ fn avx10_exec(
         env.backend.get(sem::kref(md.evex_aaa))
     };
     let rd16 = |v: &[u8; 64], i: usize| u16::from_le_bytes(v[i * 2..i * 2 + 2].try_into().unwrap());
+    let rd32 = |v: &[u8; 64], i: usize| u32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
     let mut flags = 0u8;
+    let vcvt2_mxcsr: u32 = env.backend.get(sem::mxcsr_ref());
     // AVX10.2 の bf16 演算・VDPBF16PS は DAZ/FTZ が無条件に効く
     // （bf16/f32 の非正規の入出力を ±0 にフラッシュ）。
     let bf_r = |v: &[u8; 64], i: usize| -> BF16 {
@@ -6687,6 +6691,23 @@ fn avx10_exec(
         }
     };
     match insn {
+        Insn::Vcvt2ps2phxXvHvWv => {
+            let half = vbytes / 4;
+            for i in 0..lanes16 {
+                let bits = if i < half {
+                    rd32(&y, i)
+                } else {
+                    rd32(&x, i - half)
+                };
+                let mut f = F32::from_bits(u64::from(bits));
+                if (bits & 0x7f80_0000) == 0 && bits & 0x007f_ffff != 0 && vcvt2_mxcsr & 0x40 != 0 {
+                    f = F32::from_bits(u64::from(bits & 0x8000_0000));
+                }
+                let (h, _) = f.to_f16(Rm::Rne);
+                out[i * 2..i * 2 + 2].copy_from_slice(&(h.bits() as u16).to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vgetexpbf16XvWv
         | Insn::Vrndscalebf16XvWvIb
         | Insn::Vgetmantbf16XvWvIb
