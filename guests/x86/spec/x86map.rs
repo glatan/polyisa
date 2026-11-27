@@ -3065,6 +3065,70 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10_V2_AUX の FP32↔FP8（MAP5 36/38/39/3A/3B）。
+    // AVX10.3 は V2_AUX を包含するため、ゲートは V2_AUX だけでよい。
+    for (op, sel, mn) in [
+        (0x39u8, PfxSel::PF3, "vcvtps2bf8_xv_wv"),
+        (0x3B, PfxSel::PF3, "vcvtps2bf8s_xv_wv"),
+        (0x38, PfxSel::PF3, "vcvtps2hf8_xv_wv"),
+        (0x3A, PfxSel::PF3, "vcvtps2hf8s_xv_wv"),
+        (0x38, PfxSel::P66, "vcvtrops2hf8_xv_wv"),
+        (0x3A, PfxSel::P66, "vcvtrops2hf8s_xv_wv"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX], sel, 0b111, true, "{op} {x}, {w}", "alu");
+        it.bcast = true;
+        it.edisp = 4;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
+    // HF8→FP32 は同じ opcode 36 の W0。byte 入力なので bcst はない。
+    let mut it = ex(
+        "vcvthf82ps_xv_wv",
+        &[RegX, RmX],
+        PfxSel::Plain,
+        0b111,
+        true,
+        "{op} {x}, {w}",
+        "alu",
+    );
+    it.wsel = Some(false);
+    it.when = Pred::Flag("avx10_v2_aux".to_string());
+    v.push(MapItem::Insn(0x36, it));
+    // BF8→FP32 は同じ opcode 36 の W1。
+    let mut it = ex(
+        "vcvtbf82ps_xv_wv",
+        &[RegX, RmX],
+        PfxSel::Plain,
+        0b111,
+        true,
+        "{op} {x}, {w}",
+        "alu",
+    );
+    it.wsel = Some(true);
+    it.when = Pred::Flag("avx10_v2_aux".to_string());
+    v.push(MapItem::Insn(0x36, it));
+    for (op, mn) in [
+        (0x39u8, "vcvtbiasps2bf8_xv_hv_wv"),
+        (0x3B, "vcvtbiasps2bf8s_xv_hv_wv"),
+        (0x38, "vcvtbiasps2hf8_xv_hv_wv"),
+        (0x3A, "vcvtbiasps2hf8s_xv_hv_wv"),
+    ] {
+        let mut it = ex(
+            mn,
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 4;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // AVX10.3 の FP16/BF16→FP4/INT4（MAP5 75/76/77）。
     // W0 は FP16 入力、W1 は BF16 入力。mask は持たない。
     for (op, sel, wr, mn, rv) in [

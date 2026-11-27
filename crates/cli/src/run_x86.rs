@@ -6567,6 +6567,18 @@ fn avx10_step(
             | Insn::VpinterleavehbXvHvWv
             | Insn::VpinterleavelwXvHvWv
             | Insn::VpinterleavehwXvHvWv
+            | Insn::Vcvtps2bf8XvWv
+            | Insn::Vcvtps2bf8sXvWv
+            | Insn::Vcvtps2hf8XvWv
+            | Insn::Vcvtps2hf8sXvWv
+            | Insn::Vcvtrops2hf8XvWv
+            | Insn::Vcvtrops2hf8sXvWv
+            | Insn::Vcvtbiasps2bf8XvHvWv
+            | Insn::Vcvtbiasps2bf8sXvHvWv
+            | Insn::Vcvtbiasps2hf8XvHvWv
+            | Insn::Vcvtbiasps2hf8sXvHvWv
+            | Insn::Vcvtbf82psXvWv
+            | Insn::Vcvthf82psXvWv
             | Insn::Vcvtph2bf4sXvWv
             | Insn::Vcvtph2snsXvWv
             | Insn::Vcvtph2unsXvWv
@@ -6851,6 +6863,16 @@ fn avx10_exec(
                         Insn::Vdpbf16psXvHvWv
                             | Insn::VdpphpsXvHvWv
                             | Insn::Vcvt2ps2phxXvHvWv
+                            | Insn::Vcvtps2bf8XvWv
+                            | Insn::Vcvtps2bf8sXvWv
+                            | Insn::Vcvtps2hf8XvWv
+                            | Insn::Vcvtps2hf8sXvWv
+                            | Insn::Vcvtrops2hf8XvWv
+                            | Insn::Vcvtrops2hf8sXvWv
+                            | Insn::Vcvtbiasps2bf8XvHvWv
+                            | Insn::Vcvtbiasps2bf8sXvHvWv
+                            | Insn::Vcvtbiasps2hf8XvHvWv
+                            | Insn::Vcvtbiasps2hf8sXvHvWv
                             | Insn::Vcvttps2ibsXvWv
                             | Insn::Vcvtps2ibsXvWv
                             | Insn::Vcvttps2iubsXvWv
@@ -6889,7 +6911,11 @@ fn avx10_exec(
                         2
                     } else if matches!(
                         md.insn,
-                        Insn::Vcvthf82phXvWv | Insn::Vcvtbf82bf16XvWv | Insn::Vcvthf82bf16XvWv
+                        Insn::Vcvthf82phXvWv
+                            | Insn::Vcvtbf82bf16XvWv
+                            | Insn::Vcvthf82bf16XvWv
+                            | Insn::Vcvtbf82psXvWv
+                            | Insn::Vcvthf82psXvWv
                     ) || matches!(md.insn, Insn::Vcvttps2qqsXvWv | Insn::Vcvttps2uqqsXvWv)
                     {
                         vbytes / 2
@@ -7446,6 +7472,207 @@ fn avx10_exec(
                         y[base + i / 2]
                     };
                 }
+            }
+        }
+        Insn::Vcvtps2bf8XvWv
+        | Insn::Vcvtps2bf8sXvWv
+        | Insn::Vcvtps2hf8XvWv
+        | Insn::Vcvtps2hf8sXvWv
+        | Insn::Vcvtrops2hf8XvWv
+        | Insn::Vcvtrops2hf8sXvWv
+        | Insn::Vcvtbiasps2bf8XvHvWv
+        | Insn::Vcvtbiasps2bf8sXvHvWv
+        | Insn::Vcvtbiasps2hf8XvHvWv
+        | Insn::Vcvtbiasps2hf8sXvHvWv => {
+            let hf8 = matches!(
+                insn,
+                Insn::Vcvtps2hf8XvWv
+                    | Insn::Vcvtps2hf8sXvWv
+                    | Insn::Vcvtrops2hf8XvWv
+                    | Insn::Vcvtrops2hf8sXvWv
+                    | Insn::Vcvtbiasps2hf8XvHvWv
+                    | Insn::Vcvtbiasps2hf8sXvHvWv
+            );
+            let sat = matches!(
+                insn,
+                Insn::Vcvtps2bf8sXvWv
+                    | Insn::Vcvtps2hf8sXvWv
+                    | Insn::Vcvtrops2hf8sXvWv
+                    | Insn::Vcvtbiasps2bf8sXvHvWv
+                    | Insn::Vcvtbiasps2hf8sXvHvWv
+            );
+            let rto = matches!(insn, Insn::Vcvtrops2hf8XvWv | Insn::Vcvtrops2hf8sXvWv);
+            let biasform = matches!(
+                insn,
+                Insn::Vcvtbiasps2bf8XvHvWv
+                    | Insn::Vcvtbiasps2bf8sXvHvWv
+                    | Insn::Vcvtbiasps2hf8XvHvWv
+                    | Insn::Vcvtbiasps2hf8sXvHvWv
+            );
+            let lowmask = |n: u32| -> u32 { if n >= 32 { u32::MAX } else { (1u32 << n) - 1 } };
+            let f32_to_fp8 = |bits: u32, bias: u32| -> u8 {
+                let s = (bits >> 24) & 0x80;
+                let ei = ((bits >> 23) & 0xff) as i32;
+                let mi = bits & 0x7f_ffff;
+                let (mut eo, mut mo): (i32, u32);
+                if ei == 0xff {
+                    if hf8 {
+                        eo = 0xf;
+                        mo = if sat && mi == 0 { 6 } else { 7 };
+                    } else if sat {
+                        if mi == 0 {
+                            eo = 0x1e;
+                            mo = 3;
+                        } else {
+                            eo = 0x1f;
+                            mo = 2 | ((mi >> 21) & 1);
+                        }
+                    } else {
+                        eo = 0x1f;
+                        mo = if mi != 0 { 2 | ((mi >> 21) & 1) } else { 0 };
+                    }
+                } else if ei == 0 {
+                    eo = 0;
+                    mo = 0;
+                } else if biasform {
+                    let (mut eb, mut mb, rebias, discard) = if hf8 {
+                        (ei, mi.wrapping_add(bias & 0xf_ffff), 7, 20)
+                    } else {
+                        (ei, mi.wrapping_add(bias & 0x1f_ffff), 15, 21)
+                    };
+                    if mb & 0xff80_0000 != 0 {
+                        eb += 1;
+                    }
+                    mb &= 0x7f_ffff;
+                    let newexp = eb - 127 + rebias;
+                    let maxexp = if hf8 { 16 } else { 31 };
+                    if newexp >= maxexp {
+                        if hf8 {
+                            eo = 0xf;
+                            mo = if sat { 6 } else { 7 };
+                        } else if sat {
+                            eo = 0x1e;
+                            mo = 3;
+                        } else {
+                            eo = 0x1f;
+                            mo = 0;
+                        }
+                    } else if newexp <= 0 {
+                        eo = 0;
+                        mo = 0;
+                        let shiftbase = if hf8 { 21 } else { 22 };
+                        if shiftbase - newexp <= 24 {
+                            let mant = mb | 0x80_0000;
+                            let shift = (shiftbase - newexp) as u32;
+                            mo = mant >> shift;
+                        }
+                    } else {
+                        eo = newexp;
+                        mo = mb >> discard;
+                    }
+                } else {
+                    let (rebias, discard, maxexp, mantmask) = if hf8 {
+                        (7, 20, 16, 0x7u32)
+                    } else {
+                        (15, 21, 31, 0x3u32)
+                    };
+                    let newexp = ei - 127 + rebias;
+                    if newexp >= maxexp {
+                        if hf8 {
+                            eo = 0xf;
+                            mo = if sat { 6 } else { 7 };
+                        } else if sat {
+                            eo = 0x1e;
+                            mo = 3;
+                        } else {
+                            eo = 0x1f;
+                            mo = 0;
+                        }
+                    } else if newexp <= 0 {
+                        eo = 0;
+                        mo = 0;
+                        let shiftbase = if hf8 { 21 } else { 22 };
+                        let shn = shiftbase - newexp;
+                        if shn <= 24 {
+                            let mant = mi | 0x80_0000;
+                            let shift = shn as u32;
+                            mo = mant >> shift;
+                            if rto {
+                                if mant & lowmask(shift) != 0 {
+                                    mo |= 1;
+                                }
+                            } else {
+                                let low = mant & lowmask(shift);
+                                let half = 1u32 << (shift - 1);
+                                if low > half || (low == half && mo & 1 != 0) {
+                                    mo += 1;
+                                    if mo & mantmask == 0 {
+                                        eo += 1;
+                                    }
+                                }
+                            }
+                        } else if rto {
+                            mo = 1;
+                        }
+                    } else {
+                        eo = newexp;
+                        mo = mi >> discard;
+                        if rto {
+                            if mi & lowmask(discard) != 0 {
+                                mo |= 1;
+                            }
+                            if sat && eo == 0xf && mo == 7 {
+                                mo = 6;
+                            }
+                        } else {
+                            let half = 1u32 << (discard - 1);
+                            let low = mi & lowmask(discard);
+                            if low > half || (low == half && mo & 1 != 0) {
+                                let clamp = if hf8 {
+                                    (sat && eo == 0xf && mo == 6) || (!sat && eo == 0xf && mo == 7)
+                                } else {
+                                    sat && eo == 0x1e && mo == 3
+                                };
+                                if !clamp {
+                                    mo += 1;
+                                    if mo & mantmask == 0 {
+                                        eo += 1;
+                                    }
+                                }
+                            }
+                            if hf8 && sat && eo == 0xf && mo == 7 {
+                                mo = 6;
+                            }
+                        }
+                    }
+                }
+                (s | (((eo as u32) << if hf8 { 3 } else { 2 }) & 0x7f)
+                    | (mo & if hf8 { 7 } else { 3 })) as u8
+            };
+            let lanes = vbytes / 4;
+            for i in 0..lanes {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                    continue;
+                }
+                let bias = if biasform { rd32(&x, i) } else { 0 };
+                out[i] = f32_to_fp8(rd32(&y, i), bias);
+            }
+        }
+        Insn::Vcvtbf82psXvWv | Insn::Vcvthf82psXvWv => {
+            let lanes = vbytes / 4;
+            for i in 0..lanes {
+                if k >> i & 1 == 0 {
+                    let keep = if md.evex_z { 0 } else { rd32(&old, i) };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&keep.to_le_bytes());
+                    continue;
+                }
+                let f = if insn == Insn::Vcvtbf82psXvWv {
+                    E5M2::from_bits(u64::from(y[i])).to_f32(Rm::Rne).0
+                } else {
+                    E4M3::from_bits(u64::from(y[i])).to_f32(Rm::Rne).0
+                };
+                out[i * 4..i * 4 + 4].copy_from_slice(&(f.bits() as u32).to_le_bytes());
             }
         }
         Insn::Vcvtph2bf4sXvWv
