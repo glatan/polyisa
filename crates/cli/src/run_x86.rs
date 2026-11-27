@@ -10399,12 +10399,14 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
             if matches!(op, 0xF1 | 0xF9) {
+                let y_zero = (e1 & 0x7fff) == 0 && s1 == 0;
                 let log_zero = if op == 0xF1 {
                     (e0 & 0x7fff) == 0x3fff && s0 == 1u64 << 63
                 } else {
                     (e0 & 0x7fff) == 0 && s0 == 0
                 };
                 let y_inf = (e1 & 0x7fff) == 0x7fff && s1 == 1u64 << 63;
+                let exact = y_zero || y_inf || (log_zero && !y_inf);
                 if y_inf {
                     if log_zero {
                         x87_scalar_exception_flag(env, 1);
@@ -10434,10 +10436,11 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                     crate::x87_trans::log2_near_one(xin.add(crate::x87_trans::Dd::from_f64(1.0)))
                 };
                 let result = ymant.mul(logv);
-                let mut rounded = crate::x87_trans::dd_to_ext_scaled(result, yexp, rc);
-                if rounded.1 & 0x7fff >= 0x7fff {
+                let meta = crate::x87_trans::dd_to_ext_scaled_meta(result, yexp, rc);
+                let mut rounded = (meta.sig, meta.exp);
+                let negative = meta.exp & 0x8000 != 0;
+                if meta.normal_exp >= 0x7fff {
                     x87_scalar_exception_flag(env, (1 << 3) | (1 << 5));
-                    let negative = rounded.1 & 0x8000 != 0;
                     if fcw & (1 << 3) != 0 {
                         let use_inf = match rc {
                             0 => true,
@@ -10451,12 +10454,20 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                             (u64::MAX, 0x7ffe | if negative { 0x8000 } else { 0 })
                         };
                     } else {
-                        let mag = rounded.1 & 0x7fff;
-                        rounded.1 = (rounded.1 & 0x8000) | mag.wrapping_sub(24576) & 0x7fff;
+                        // unmasked overflow では 64 bit significand へ通常どおり
+                        // 丸め、exponent から 24576 を引いた値を残す。
+                        let mag = (meta.normal_exp as u16).wrapping_sub(24576) & 0x7fff;
+                        rounded = (meta.normal_sig, mag | if negative { 0x8000 } else { 0 });
                     }
-                }
-                if rounded.1 & 0x7fff == 0 && rounded.0 != 0 && !log_zero {
+                } else if meta.tiny && !exact {
                     x87_scalar_exception_flag(env, 1 << 4);
+                    if fcw & (1 << 4) == 0 {
+                        // unmasked underflow では gradual underflow を使わず、
+                        // normal precision へ丸めた significand と exponent+24576
+                        // を残す。
+                        let mag = (meta.normal_exp as u16).wrapping_add(24576) & 0x7fff;
+                        rounded = (meta.normal_sig, mag | if negative { 0x8000 } else { 0 });
+                    }
                 }
                 x87_write_st(env, 1, rounded);
             } else if op == 0xF3 {

@@ -135,8 +135,22 @@ fn f64_parts(x: f64) -> (u64, i32) {
 /// double-double の positive finite 値を 80 bit extended へ丸める。
 /// nearest のほか、FCW の truncation/floor/ceil に対応する。DD 自身の
 /// 誤差は残るが、53 bit 変換とは違って下位 11 bit も使う。
+pub(crate) struct ExtRounded {
+    pub sig: u64,
+    pub exp: u16,
+    pub normal_sig: u64,
+    pub normal_exp: i32,
+    pub tiny: bool,
+}
+
 pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
-    dd_to_ext_scaled(value, 0, rc)
+    let r = dd_to_ext_scaled_meta(value, 0, rc);
+    (r.sig, r.exp)
+}
+
+pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16) {
+    let r = dd_to_ext_scaled_meta(value, scale_exp, rc);
+    (r.sig, r.exp)
 }
 
 fn round_units(units: i128, frac: f64, shift: u32, rc: u16, neg: bool) -> u128 {
@@ -169,16 +183,20 @@ fn round_units(units: i128, frac: f64, shift: u32, rc: u16, neg: bool) -> u128 {
     q + u128::from(up)
 }
 
-pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16) {
+pub(crate) fn dd_to_ext_scaled_meta(value: Dd, scale_exp: i32, rc: u16) -> ExtRounded {
     if value.hi == 0.0 && value.lo == 0.0 {
-        return (
-            0,
-            if value.hi.is_sign_negative() {
-                0x8000
-            } else {
-                0
-            },
-        );
+        let exp = if value.hi.is_sign_negative() {
+            0x8000
+        } else {
+            0
+        };
+        return ExtRounded {
+            sig: 0,
+            exp,
+            normal_sig: 0,
+            normal_exp: 0,
+            tiny: false,
+        };
     }
     let neg = value.hi.is_sign_negative();
     let v = if neg { value.neg() } else { value };
@@ -193,28 +211,43 @@ pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16)
     let frac = lo_scaled - lo_floor as f64;
     let units = hi_units as i128 + lo_floor;
     let unbiased = eh + scale_exp;
+    let normal_rounded = round_units(units, frac, 0, rc, neg);
+    let mut normal_sig = normal_rounded as u64;
+    let mut normal_exp = unbiased + 16383;
+    if normal_rounded >= 1u128 << 64 {
+        normal_sig = (normal_rounded >> 1) as u64;
+        normal_exp += 1;
+    }
     if unbiased >= -16382 {
-        let rounded = round_units(units, frac, 0, rc, neg);
-        let mut sig = rounded as u64;
-        let mut exp = unbiased + 16383;
-        if rounded >= 1u128 << 64 {
-            sig = (rounded >> 1) as u64;
-            exp += 1;
-        }
-        return (
-            sig,
-            (exp.clamp(0, 0x7fff) as u16) | if neg { 0x8000 } else { 0 },
-        );
+        return ExtRounded {
+            sig: normal_sig,
+            exp: (normal_exp.clamp(0, 0x7fff) as u16) | if neg { 0x8000 } else { 0 },
+            normal_sig,
+            normal_exp,
+            tiny: false,
+        };
     }
     let shift = (-(unbiased + 16382)) as u32;
     let rounded = round_units(units, frac, shift, rc, neg);
     if rounded == 0 {
-        return (0, if neg { 0x8000 } else { 0 });
+        return ExtRounded {
+            sig: 0,
+            exp: if neg { 0x8000 } else { 0 },
+            normal_sig,
+            normal_exp,
+            tiny: true,
+        };
     }
     // denormal quantum と exponent 1 の quantum は連続している。bit63
     // まで丸め上がれば最小正規数側の encoding になる。
     let exp = if rounded >= 1u128 << 63 { 1u16 } else { 0u16 };
-    (rounded as u64, exp | if neg { 0x8000 } else { 0 })
+    ExtRounded {
+        sig: rounded as u64,
+        exp: exp | if neg { 0x8000 } else { 0 },
+        normal_sig,
+        normal_exp,
+        tiny: true,
+    }
 }
 
 pub(crate) fn sin_small(x: Dd) -> Dd {
