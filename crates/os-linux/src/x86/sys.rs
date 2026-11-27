@@ -363,7 +363,7 @@ impl Linux {
         let now = self.mono_ns();
         let pending = self.sig_pending;
         let r = crate::wait::dispatch(&mut self.fds, &abi, env, name, &args, prev, now, pending)?;
-        self.sock_finish(env, r)
+        self.sock_finish_interruptible(env, r, false)
     }
 
     /// AF_UNIX のパス写像器を作る（guest_root・cwd を束縛した
@@ -449,6 +449,18 @@ impl Linux {
         env: &mut BareEnv,
         r: Result<crate::sock::Out, u32>,
     ) -> Option<TrapOutcome> {
+        self.sock_finish_interruptible(env, r, true)
+    }
+
+    /// ソケット・待ち合わせ正準層の戻りをゲスト状態へ写す。
+    /// 新たに待つ前に配送可能シグナルがあれば、SA_RESTART の有無に
+    /// 従って restart/EINTR のどちらかの中断コンテキストを作る。
+    fn sock_finish_interruptible(
+        &mut self,
+        env: &mut BareEnv,
+        r: Result<crate::sock::Out, u32>,
+        restartable: bool,
+    ) -> Option<TrapOutcome> {
         match r {
             Ok(crate::sock::Out::Done(v)) => {
                 self.fd_wait = None;
@@ -458,6 +470,16 @@ impl Linux {
             }
             Ok(crate::sock::Out::Wait(w)) => {
                 let id = self.ensure_self();
+                self.fd_wait = None;
+                self.fd_wait_prev = None;
+                self.queue
+                    .0
+                    .borrow_mut()
+                    .meta
+                    .unblock(polyisa_kernel::ThreadId(id.0));
+                if self.interrupt_blocked_syscall(env, self.errno_value(EINTR), restartable) {
+                    return Some(TrapOutcome::Handled);
+                }
                 let kind = self.wait_kind(&w);
                 self.fd_wait = Some(w);
                 self.queue
@@ -1304,13 +1326,16 @@ impl Linux {
         }
     }
 
-    fn set_errno(&self, env: &mut BareEnv, errno: u32) {
-        let value = if self.is64 {
+    fn errno_value(&self, errno: u32) -> u64 {
+        if self.is64 {
             neg_errno64(errno)
         } else {
             u64::from(neg_errno(errno))
-        };
-        set64(env, Gpr(0), value);
+        }
+    }
+
+    fn set_errno(&self, env: &mut BareEnv, errno: u32) {
+        set64(env, Gpr(0), self.errno_value(errno));
     }
 
     /// SYSCALL と INT 0x80 は 2 バイト。完了した呼び出しの次へ進める。
@@ -3199,6 +3224,9 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
                 polyisa_kernel::ThreadWait::Signal
                     | polyisa_kernel::ThreadWait::Child { .. }
                     | polyisa_kernel::ThreadWait::Pipe { .. }
+                    | polyisa_kernel::ThreadWait::Fd
+                    | polyisa_kernel::ThreadWait::HostFd
+                    | polyisa_kernel::ThreadWait::Timer
             )
         {
             Some(*wait)
@@ -3225,6 +3253,14 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
                 match interrupted {
                     Some(polyisa_kernel::ThreadWait::Child { .. }) => task.linux.wait = None,
                     Some(polyisa_kernel::ThreadWait::Pipe { .. }) => task.linux.pipe_wait = None,
+                    Some(
+                        polyisa_kernel::ThreadWait::Fd
+                        | polyisa_kernel::ThreadWait::HostFd
+                        | polyisa_kernel::ThreadWait::Timer,
+                    ) => {
+                        task.linux.fd_wait = None;
+                        task.linux.fd_wait_prev = None;
+                    }
                     _ => {}
                 }
                 wake = true;
@@ -9073,6 +9109,48 @@ mod tests {
         set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+    }
+
+    #[test]
+    fn poll_interrupted_by_a_signal_returns_eintr_after_handler() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds);
+        env.backend
+            .mem
+            .write(VirtAddr(0x120), &read_fd.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x124), &1i16.to_le_bytes())
+            .unwrap();
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::POLL);
+        set64(&mut env, Gpr(7), 0x120);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), u64::MAX);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x302);
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
     }
 
     #[test]
