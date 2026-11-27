@@ -81,6 +81,10 @@ pub struct Linux {
     sigacts: Vec<crate::x86::SigAct>,
     /// ブロック中のシグナルのビット集合。
     sig_mask: u64,
+    /// `rt_sigsuspend` が一時 mask に入る前の本来の mask。
+    /// シグナルフレームへはこの値を uc_sigmask として入れ、
+    /// sigreturn で本来の mask へ戻す。
+    sigsuspend_mask: Option<u64>,
     /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
     sig_pending: u64,
     /// 代替シグナルスタック（task の sas_ss_*）。
@@ -938,6 +942,7 @@ impl Linux {
             // fork: ハンドラ表とマスクは継承、保留は引き継がない。
             sigacts: self.sigacts.clone(),
             sig_mask: self.sig_mask,
+            sigsuspend_mask: None,
             sig_pending: 0,
             sigaltstack: self.sigaltstack,
             procs: std::rc::Rc::clone(&self.procs),
@@ -1100,8 +1105,10 @@ impl Linux {
             }
             return;
         }
-        let old = self.sig_mask;
-        self.sig_mask = old
+        let runtime_old = self.sig_mask;
+        let suspended = self.sigsuspend_mask.is_some();
+        let frame_old = self.sigsuspend_mask.take().unwrap_or(runtime_old);
+        self.sig_mask = runtime_old
             | act.mask
             | if act.flags & crate::x86::SA_NODEFER == 0 {
                 bit
@@ -1113,11 +1120,19 @@ impl Linux {
         }
         let pid = self.pid;
         let ok = if self.x32 {
-            crate::x86::rt_sigframe_x32_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
+            crate::x86::rt_sigframe_x32_write_ex(
+                env,
+                sig,
+                &act,
+                frame_old,
+                0,
+                pid,
+                self.sigaltstack,
+            )
         } else if self.is64 {
-            crate::x86::rt_sigframe_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
+            crate::x86::rt_sigframe_write_ex(env, sig, &act, frame_old, 0, pid, self.sigaltstack)
         } else {
-            crate::x86::rt_sigframe32_write_ex(env, sig, &act, old, 0, pid, self.sigaltstack)
+            crate::x86::rt_sigframe32_write_ex(env, sig, &act, frame_old, 0, pid, self.sigaltstack)
         };
         if ok {
             crate::x86::signal_init_user_fpstate(env);
@@ -1131,7 +1146,10 @@ impl Linux {
             // フレームが書けない（未写像スタック等）。実機なら
             // SIGSEGV で死ぬが、ここでは配送を諦めて保留と
             // ハンドラを戻し、再試行できる状態にする。
-            self.sig_mask = old;
+            self.sig_mask = runtime_old;
+            if suspended {
+                self.sigsuspend_mask = Some(frame_old);
+            }
             self.sig_pending |= bit;
             self.sigacts[sig as usize - 1] = act;
         }
@@ -4058,25 +4076,39 @@ fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Opti
 }
 
 fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // rt_sigsuspend(set, sigsetsize)。マスクを一時的に置き換えて
-    // シグナルを待つ。配送は `after_step` で起きるので待たずに
-    // EINTR を返す（近似）。マスクは次の sigreturn で元に戻る
-    // ためここでは退避しない（近似: フレームの uc_sigmask が正）。
+    // rt_sigsuspend(set, sigsetsize)。mask を一時的に置き換えて、
+    // 配送可能な caught signal か終了 signal が来るまで眠る。初回は
+    // 本来の mask を `sigsuspend_mask` へ保存し、配送時のフレームへ
+    // uc_sigmask として残す。block から再開したときは同じ syscall が
+    // 再実行されるが、pending があれば EINTR で完了する。
     let set_p = get64(env, cx.r_a);
     let size = get64(env, cx.r_b);
     if size != 8 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    if set_p != 0 {
+    if set_p == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    if sys.sigsuspend_mask.is_none() {
         let Some(v) = mask_read(env, set_p) else {
             set64(env, Gpr(0), cx.neg(EFAULT));
             return Some(TrapOutcome::Handled);
         };
+        sys.sigsuspend_mask = Some(sys.sig_mask);
         sys.sig_mask = v & !(1 << 8 | 1 << 18); // SIGKILL/SIGSTOP は止められない
     }
-    set64(env, Gpr(0), cx.neg(EINTR));
-    Some(TrapOutcome::Handled)
+    if sys.sig_pending & !sys.sig_mask != 0 {
+        set64(env, Gpr(0), cx.neg(EINTR));
+        return Some(TrapOutcome::Handled);
+    }
+    let pid = sys.ensure_self();
+    sys.queue.0.borrow_mut().meta.block(
+        polyisa_kernel::ThreadId(pid.0),
+        polyisa_kernel::ThreadWait::Signal,
+    );
+    Some(TrapOutcome::Blocked)
 }
 
 fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -7674,12 +7706,17 @@ mod tests {
         set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
-        // set=0, size=8 は受理されて EINTR。
+        // set=0 は EFAULT。有効な空 mask では配送可能なシグナルが
+        // 来るまで眠る。
         set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
         set64(&mut env, Gpr(7), 0);
         set64(&mut env, Gpr(6), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EFAULT));
+        set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
     }
 
     #[test]
@@ -7799,6 +7836,55 @@ mod tests {
                 .any(|(id, wait)| id.0 == child
                     && *wait == polyisa_kernel::ThreadWait::Child { which: -1 })
         );
+    }
+
+    #[test]
+    fn sigsuspend_uses_temporary_mask_and_restores_the_original_on_sigreturn() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        let original = 1u64 << 9;
+        sys.sig_mask = original;
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        // 0x200 の一時 mask は 0。SIGUSR1 は元の mask では block だが、
+        // sigsuspend 中は配送可能。
+        set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
+        set64(&mut env, Gpr(7), 0x200);
+        set64(&mut env, Gpr(6), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert_eq!(sys.sig_mask, 0);
+        assert_eq!(sys.sigsuspend_mask, Some(original));
+        sys.sig_pending = 1 << 9;
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        assert_eq!(sys.sigsuspend_mask, Some(original));
+        sys.after_step(&mut env);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        assert_eq!(sys.sigsuspend_mask, None);
+        assert_eq!(sys.sig_mask, 1 << 9);
+        let rsp = get64(&mut env, Gpr(4));
+        let mut frame_mask = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(rsp + 304), &mut frame_mask, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(frame_mask), original);
+        // ハンドラの ret が restorer へ返した状態を模す。
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(sys.sig_mask, original);
     }
 
     #[test]
