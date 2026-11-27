@@ -15147,6 +15147,78 @@ fn run_x87_fmul_underflow_rounds_once_from_exact_product() {
 }
 
 #[test]
+fn run_x87_fmul_invalid_masked_writes_indefinite_unmasked_suppresses_write() {
+    fn once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x7FFF);
+        x87_seed_valid(&mut env, 1, 0, 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // masked invalid は indefinite を書く。
+    let (sig, exp, fsw) = once(0x037F);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_ne!(fsw & 1, 0);
+    assert_eq!(fsw & 0x8080, 0);
+    // unmasked invalid は destination を変えず、IE/ES/B だけを残す。
+    let (sig, exp, fsw) = once(0x037E);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x7FFF));
+    assert_eq!(fsw & 0x8081, 0x8081);
+}
+
+#[test]
+fn run_x87_fmulp_unmasked_invalid_suppresses_write_and_pop() {
+    fn once(fcw: u16) -> (u64, u16, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x7FFF);
+        x87_seed_valid(&mut env, 1, 0, 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDE, 0xC9]) // fmulp st(1),st(0)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // masked では ST(1) へ indefinite を書いて pop するので、
+    // 新しい ST(0) は物理 slot1 の indefinite になる。
+    let (sig1, exp1, top, fsw) = once(0x037F);
+    assert_eq!((sig1, exp1, top), (0xC000_0000_0000_0000, 0x7FFF, 1));
+    assert_ne!(fsw & 1, 0);
+    assert_eq!(fsw & 0x8080, 0);
+    // unmasked では write も pop もしない。
+    let (sig1, exp1, top, fsw) = once(0x037E);
+    assert_eq!((sig1, exp1, top), (0, 0, 0));
+    assert_eq!(fsw & 0x8081, 0x8081);
+}
+
+#[test]
 fn run_x87_precision_control_counts_significant_bits_in_denormal() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);

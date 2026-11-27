@@ -10000,7 +10000,7 @@ fn ext_arith<B: Backend>(
     e0: B::V<W16>,
     s1: B::V<W64>,
     e1: B::V<W16>,
-) -> (B::V<W64>, B::V<W16>) {
+) -> (B::V<W64>, B::V<W16>, B::B) {
     let sign_mask = b.konst::<W16>(0x8000);
     match op {
         FAr::Add => sem::add_ext(b, s0, e0, s1, e1),
@@ -10052,9 +10052,12 @@ pub fn farith_m<B: Backend>(
                         sem::x87_exception_flag(b, denormal, 1 << 1);
                         sem::f64_to_ext(b, v)
                     };
-                    let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
-                    sem::write_st(b, top, sr, er);
-                    Ok(())
+                    let (sr, er, invalid) = ext_arith(b, op, s0, e0, sm, em);
+                    let commit = sem::x87_arith_invalid_commit(b, invalid);
+                    b.if_then(commit, |b| {
+                        sem::write_st(b, top, sr, er);
+                        Ok(())
+                    })
                 },
             )
         })?;
@@ -10093,9 +10096,12 @@ pub fn fiarith_m<B: Backend>(
                         b.sext::<W32, W64>(v)
                     };
                     let (sm, em) = sem::i64_to_ext(b, v64);
-                    let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
-                    sem::write_st(b, top, sr, er);
-                    Ok(())
+                    let (sr, er, invalid) = ext_arith(b, op, s0, e0, sm, em);
+                    let commit = sem::x87_arith_invalid_commit(b, invalid);
+                    b.if_then(commit, |b| {
+                        sem::write_st(b, top, sr, er);
+                        Ok(())
+                    })
                 },
             )
         })?;
@@ -10127,16 +10133,19 @@ pub fn farith_st<B: Backend>(b: &mut B, op: FAr, i: u8, rev: bool, pop: bool) ->
                 Ok(())
             },
             |b| {
-                let (sr, er) = if rev {
+                let (sr, er, invalid) = if rev {
                     ext_arith(b, op, s1, e1, s0, e0)
                 } else {
                     ext_arith(b, op, s0, e0, s1, e1)
                 };
-                sem::write_st(b, dst, sr, er);
-                if pop {
-                    sem::pop_st(b, top)?;
-                }
-                Ok(())
+                let commit = sem::x87_arith_invalid_commit(b, invalid);
+                b.if_then(commit, |b| {
+                    sem::write_st(b, dst, sr, er);
+                    if pop {
+                        sem::pop_st(b, top)?;
+                    }
+                    Ok(())
+                })
             },
         )
     })

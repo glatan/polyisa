@@ -14333,9 +14333,12 @@ pub(crate) fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let (sig_m, exp_m) = f32_to_ext(b, bits);
     let top = b.get(top_ref());
     let (sig0, exp0) = read_st(b, top);
-    let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig_m, exp_m);
-    write_st(b, top, sig_p, exp_p);
-    Ok(())
+    let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig_m, exp_m);
+    let commit = x87_arith_invalid_commit(b, invalid);
+    b.if_then(commit, |b| {
+        write_st(b, top, sig_p, exp_p);
+        Ok(())
+    })
 }
 
 /// FLDL [base] (DD /0 mod=00)。seq 0x4d0723 の fldl (%rax)。
@@ -15428,6 +15431,14 @@ pub(crate) fn x87_cmp_invalid<B: Backend>(
     if ordered { sel.any } else { sel.snan_invalid }
 }
 
+/// 算術 invalid 後に結果 write/pop を行えるか。IE は算術本体が
+/// すでに記録済みなので、ここでは mask だけを見る。
+pub(crate) fn x87_arith_invalid_commit<B: Backend>(b: &mut B, invalid: B::B) -> B::B {
+    let masked = x87_ie_masked(b);
+    let no_invalid = bit_not(b, invalid);
+    bit_or(b, no_invalid, masked)
+}
+
 /// invalid を記録したうえで、masked のときだけ比較結果を commit
 /// するかを返す。unmasked #IA では C/EFLAGS とスタックを変えない。
 pub(crate) fn x87_compare_commit<B: Backend>(b: &mut B, invalid: B::B) -> B::B {
@@ -15490,7 +15501,7 @@ pub(crate) fn mul_ext<B: Backend>(
     exp_a: B::V<W16>,
     sig_b: B::V<W64>,
     exp_b: B::V<W16>,
-) -> (B::V<W64>, B::V<W16>) {
+) -> (B::V<W64>, B::V<W16>, B::B) {
     let exp_a64 = b.zext::<W16, W64>(exp_a);
     let exp_b64 = b.zext::<W16, W64>(exp_b);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -15663,7 +15674,8 @@ pub(crate) fn mul_ext<B: Backend>(
     let out_sign = b.select::<W64>(is_special, special_sign, sign_bit);
     let exp_word64 = b.or::<W64>(exp_mag, out_sign);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
-    x87_apply_precision(b, sig_out, exp_word)
+    let (rs, re) = x87_apply_precision(b, sig_out, exp_word);
+    (rs, re, invalid_any)
 }
 
 pub(crate) fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
@@ -15758,7 +15770,7 @@ pub(crate) fn add_ext<B: Backend>(
     exp_a: B::V<W16>,
     sig_b: B::V<W64>,
     exp_b: B::V<W16>,
-) -> (B::V<W64>, B::V<W16>) {
+) -> (B::V<W64>, B::V<W16>, B::B) {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -16027,7 +16039,8 @@ pub(crate) fn add_ext<B: Backend>(
     let sign_bit = b.shl::<W64>(sign_final, s15);
     let packed = b.or::<W64>(exp_final, sign_bit);
     let exp_word = b.trunc::<W64, W16>(packed);
-    x87_apply_precision(b, sig_final, exp_word)
+    let (rs, re) = x87_apply_precision(b, sig_final, exp_word);
+    (rs, re, invalid_any)
 }
 
 /// ST(slot_sel) のデータビットだけを書く。タグは変えない。
@@ -16065,7 +16078,7 @@ pub(crate) fn div_ext<B: Backend>(
     exp_a: B::V<W16>,
     sig_b: B::V<W64>,
     exp_b: B::V<W16>,
-) -> (B::V<W64>, B::V<W16>) {
+) -> (B::V<W64>, B::V<W16>, B::B) {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -16270,7 +16283,8 @@ pub(crate) fn div_ext<B: Backend>(
     let sign_sel = b.select::<W64>(bad, bad_sign, sign_bit);
     let e_word = b.or::<W64>(e_out, sign_sel);
     let exp_word = b.trunc::<W64, W16>(e_word);
-    x87_apply_precision(b, s_out, exp_word)
+    let (rs, re) = x87_apply_precision(b, s_out, exp_word);
+    (rs, re, invalid_any)
 }
 
 /// FADD ST(0), ST(i) (D8 C0+i)。ST(0) に和を書き、スタックは戻さない。seq 0x4d097d 対応.
@@ -16282,9 +16296,12 @@ pub fn fadd_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
     let (sig1, exp1) = read_st(b, src);
-    let (sig_s, exp_s) = add_ext(b, sig0, exp0, sig1, exp1);
-    write_st(b, top, sig_s, exp_s);
-    Ok(())
+    let (sig_s, exp_s, invalid) = add_ext(b, sig0, exp0, sig1, exp1);
+    let commit = x87_arith_invalid_commit(b, invalid);
+    b.if_then(commit, |b| {
+        write_st(b, top, sig_s, exp_s);
+        Ok(())
+    })
 }
 
 /// FMULP ST(i), ST(0) (DE C8+i)。ST(i) に積を書いてからスタックを一つ捨てる。seq 0x4018c7 対応.
@@ -16296,9 +16313,12 @@ pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let seven = b.konst::<W16>(7);
     let dst = b.and::<W16>(summed, seven);
     let (sig1, exp1) = read_st(b, dst);
-    let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig1, exp1);
-    write_st(b, dst, sig_p, exp_p);
-    pop_st(b, top)
+    let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig1, exp1);
+    let commit = x87_arith_invalid_commit(b, invalid);
+    b.if_then(commit, |b| {
+        write_st(b, dst, sig_p, exp_p);
+        pop_st(b, top)
+    })
 }
 
 /// FSUBP ST(i), ST(0) (DE E8+i)。ST(i) から ST(0) を引いて書き、スタックを一つ捨てる。seq 0x4d0c51 対応.
@@ -16312,9 +16332,12 @@ pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let (sig1, exp1) = read_st(b, dst);
     let sign_mask = b.konst::<W16>(0x8000);
     let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
-    let (sig_d, exp_d) = add_ext(b, sig1, exp1, sig0, neg_exp0);
-    write_st(b, dst, sig_d, exp_d);
-    pop_st(b, top)
+    let (sig_d, exp_d, invalid) = add_ext(b, sig1, exp1, sig0, neg_exp0);
+    let commit = x87_arith_invalid_commit(b, invalid);
+    b.if_then(commit, |b| {
+        write_st(b, dst, sig_d, exp_d);
+        pop_st(b, top)
+    })
 }
 
 /// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
