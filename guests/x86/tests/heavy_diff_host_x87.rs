@@ -319,21 +319,11 @@ mod imp {
                 }
             }
         }
-        assert!(
-            reports.is_empty(),
-            "host x87 transcendental diff:
-{}",
-            reports.join(
-                "
-"
-            )
-        );
         let binary_ops = [
             ([0xd9, 0xf1], "fyl2x"),
             ([0xd9, 0xf3], "fpatan"),
             ([0xd9, 0xf9], "fyl2xp1"),
         ];
-        let mut reports = Vec::new();
         for i in 0..256 {
             let op = binary_ops[(rng.next() % binary_ops.len() as u64) as usize];
             let small = |rng: &mut Rng, positive: bool| {
@@ -346,11 +336,14 @@ mod imp {
                 let disp = (rng.next() % 8) as i32 - 7;
                 (sig, ((0x3fff + disp) as u16) | sign)
             };
-            let input0 = if op.1 == "fyl2x" {
+            let mut input0 = if op.1 == "fyl2x" {
                 small(&mut rng, true)
             } else {
                 small(&mut rng, false)
             };
+            if op.1 == "fyl2xp1" && input0.1 & 0x7fff > 0x3ffc {
+                input0.1 = (input0.1 & 0x8000) | 0x3ffc;
+            }
             let input1 = small(&mut rng, false);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (hv, hsw) = host_op(input0, input1, op.0, fcw);

@@ -10244,7 +10244,21 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                     x87_scalar_exception_flag(env, 1 << 5);
                 }
             }
-            x87_write_st(env, 1, x87_f64_to_ext(y));
+            if matches!(op, 0xF1 | 0xF9) {
+                let xin = crate::x87_trans::ext_to_dd(s0, e0);
+                let yin = crate::x87_trans::ext_to_dd(s1, e1);
+                let logv = if op == 0xF1 {
+                    crate::x87_trans::log2_positive_ext(s0, e0)
+                } else {
+                    crate::x87_trans::log2_near_one(xin.add(crate::x87_trans::Dd::from_f64(1.0)))
+                };
+                let result = yin.mul(logv);
+                let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+                let rc = (fcw >> 10) & 3;
+                x87_write_st(env, 1, crate::x87_trans::dd_to_ext(result, rc));
+            } else {
+                x87_write_st(env, 1, x87_f64_to_ext(y));
+            }
             x87_pop(env);
         }
         _ => unreachable!(),

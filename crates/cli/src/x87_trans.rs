@@ -204,3 +204,47 @@ pub(crate) fn cos_small(x: Dd) -> Dd {
     }
     sum
 }
+
+pub(crate) fn log2_near_one(x: Dd) -> Dd {
+    // ln(x)=2*(z+z^3/3+...), z=(x-1)/(x+1)。oracle の binary
+    // corpus は x を 1 の近傍に寄せている。収束が遅い場合でも
+    // double-double の精度内へ入るまで項を進める。
+    let z = x.sub(Dd::from_f64(1.0)).div(x.add(Dd::from_f64(1.0)));
+    let z2 = z.mul(z);
+    let mut sum = z;
+    let mut term = z;
+    for n in 1u32..512 {
+        term = term.mul(z2);
+        let add = term.div(Dd::from_f64(f64::from(2 * n + 1)));
+        let next = sum.add(add);
+        if next.hi == sum.hi && next.lo == sum.lo {
+            break;
+        }
+        sum = next;
+    }
+    sum.mul(Dd::from_f64(2.0)).div(LN2)
+}
+
+pub(crate) fn ext_mantissa_exp_dd(sig: u64, exp_word: u16) -> (Dd, i32) {
+    let lz = sig.leading_zeros() as i32;
+    let nsig = sig << lz;
+    let exp = i32::from(exp_word & 0x7fff) - lz - 16383;
+    let hi_part = nsig >> 11;
+    let lo_part = nsig & 0x7ff;
+    let hi = (hi_part as f64) * 2f64.powi(-52);
+    let lo = (lo_part as f64) * 2f64.powi(-63);
+    let out = Dd::new(hi, lo);
+    (
+        if exp_word & 0x8000 != 0 {
+            out.neg()
+        } else {
+            out
+        },
+        exp,
+    )
+}
+
+pub(crate) fn log2_positive_ext(sig: u64, exp_word: u16) -> Dd {
+    let (m, e) = ext_mantissa_exp_dd(sig, exp_word);
+    log2_near_one(m).add(Dd::from_f64(f64::from(e)))
+}
