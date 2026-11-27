@@ -328,6 +328,53 @@ mod imp {
 "
             )
         );
+        let binary_ops = [
+            ([0xd9, 0xf1], "fyl2x"),
+            ([0xd9, 0xf3], "fpatan"),
+            ([0xd9, 0xf9], "fyl2xp1"),
+        ];
+        let mut reports = Vec::new();
+        for i in 0..256 {
+            let op = binary_ops[(rng.next() % binary_ops.len() as u64) as usize];
+            let small = |rng: &mut Rng, positive: bool| {
+                let sign = if !positive && rng.next() & 1 != 0 {
+                    0x8000
+                } else {
+                    0
+                };
+                let sig = (1u64 << 63) | rng.next();
+                let disp = (rng.next() % 8) as i32 - 7;
+                (sig, ((0x3fff + disp) as u16) | sign)
+            };
+            let input0 = if op.1 == "fyl2x" {
+                small(&mut rng, true)
+            } else {
+                small(&mut rng, false)
+            };
+            let input1 = small(&mut rng, false);
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
+            let (hv, hsw) = host_op(input0, input1, op.0, fcw);
+            let (pv, psw) = poly_op(input0, input1, op.0, fcw);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-bin {i} {} fcw={fcw:04x}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, input0.0, input0.1, input1.0, input1.1,
+                    hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+                if reports.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            reports.is_empty(),
+            "host x87 binary transcendental diff:
+{}",
+            reports.join(
+                "
+"
+            )
+        );
     }
 }
 
