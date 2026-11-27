@@ -112,6 +112,15 @@ fn vax(
     it
 }
 
+/// TILEMOVROW read/TCVTROW に共通する機能ゲート。
+/// AMX-AVX512 か ACE のどちらかで有効（SPEC-X86-ACE-V1 §10.6/§12.1）。
+fn row_read_gate() -> Pred {
+    Pred::Any(vec![
+        Pred::Flag("amx_avx512".to_string()),
+        Pred::Flag("ace".to_string()),
+    ])
+}
+
 /// グループでも必須接頭辞でもない、無条件の命令項目。
 fn n(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
     mi(name, ops, None, PfxSel::Any, Pred::True, syntax, timing)
@@ -3994,7 +4003,12 @@ fn build_map_0f38(m: &mut Model) {
         it.group_mod = Some(true);
         it.wsel = Some(wr);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        let feature = if mn == "tilemovrow_r_gpr" {
+            row_read_gate()
+        } else {
+            Pred::Flag("ace".to_string())
+        };
+        it.when = Pred::All(vec![w("m64"), feature]);
         v.push(MapItem::Insn(op, it));
     }
     // ACE outer product（mod=11 固定）。modrm.reg は tmm、r/m は
@@ -4025,7 +4039,7 @@ fn build_map_0f38(m: &mut Model) {
         it.group_mod = Some(true);
         it.wsel = Some(false);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        it.when = Pred::All(vec![w("m64"), row_read_gate()]);
         v.push(MapItem::Insn(op, it));
     }
     m.maps.push(MapDecl {
@@ -4562,7 +4576,12 @@ fn build_map_0f3a(m: &mut Model) {
         it.group_mod = Some(true);
         it.wsel = Some(wr);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        let feature = if mn == "tilemovrow_r_imm" {
+            row_read_gate()
+        } else {
+            Pred::Flag("ace".to_string())
+        };
+        it.when = Pred::All(vec![w("m64"), feature]);
         items.push(MapItem::Insn(op, it));
     }
     // ACE MX outer product。modrm.reg は tmm、r/m は src1、vvvv は
@@ -4607,7 +4626,7 @@ fn build_map_0f3a(m: &mut Model) {
         it.group_mod = Some(true);
         it.wsel = Some(false);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        it.when = Pred::All(vec![w("m64"), row_read_gate()]);
         items.push(MapItem::Insn(op, it));
     }
     m.maps.push(MapDecl {

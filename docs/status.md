@@ -26,7 +26,7 @@
 | superh | 12 | 10 | ELF | Linux | — | — | — | bare・abi・program | [superh.md](guests/superh.md) |
 | vax | 11 | 7 | a.out | 4.3BSD | — | 専用モデル（未較正） | — | bare・program | [vax.md](guests/vax.md) |
 | wasm | 3 | 9 | Wasm（`cpus`未掲載） | WASI | — | — | — | bare・conformance・program・diff | [wasm.md](guests/wasm.md) |
-| x86 | 44 | 164 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
+| x86 | 44 | 165 | ELF | Linux | 対応 | 専用モデル（検証あり） | — | bare・conformance・oracle・abi・program・diff・jit・timing | [x86.md](guests/x86.md) |
 
 ## OS パーソナリティ（Linux）
 

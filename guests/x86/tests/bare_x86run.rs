@@ -26337,6 +26337,104 @@ fn run64_amx() {
 }
 
 #[test]
+fn run64_amx_avx512_tilemovrow_palette1() {
+    // AMX-AVX512-only では SCALEDATA(XCR0[20]) なしで palette 1 の
+    // TILEMOVROW read を実行できる。行は colsb stride で読み、
+    // 構成外の列は zero-fill、start_row は成功時に 0 へ戻る。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_AVX512;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    // XTILECFG/XTILEDATA・AVX-512 state・x87/SSE/AVX。bit20 は立てない。
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 1;
+    env.backend.state[tilecfg_off + 1] = 7;
+    // tmm1: rows=2, colsb=8。row1 はパックされたタイル内 offset 8。
+    env.backend.state[tilecfg_off + 16 + 2..tilecfg_off + 16 + 4]
+        .copy_from_slice(&8u16.to_le_bytes());
+    env.backend.state[tilecfg_off + 48 + 1] = 2;
+    for i in 0..8usize {
+        env.backend.state[tmm_off + 1024 + 8 + i] = 0x40 + i as u8;
+    }
+    let prog: &[u8] = &[
+        0x41, 0xB8, 0x01, 0x00, 0x00, 0x00, // mov r8d,1
+        0x62, 0xF3, 0x7D, 0x48, 0x07, 0xC1, 0x01, // tilemovrow zmm0,tmm1,1
+        // vvvv=1000b（r8d）を逆格納した GPR 形。r8-r15 も行番号に使える。
+        0x62, 0xF2, 0x3D, 0x48, 0x4A, 0xC1, // tilemovrow zmm0,tmm1,r8d
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for p in 0..4usize {
+        let got = env
+            .backend
+            .get(polyisa_guest_x86::sem::zreg_ref(0, p))
+            .to_le_bytes();
+        for (i, x) in got.iter().enumerate() {
+            let at = p * 16 + i;
+            let want = if at < 8 { 0x40 + at as u8 } else { 0 };
+            assert_eq!(*x, want, "zmm0 byte {at}");
+        }
+    }
+    assert_eq!(env.backend.state[tilecfg_off + 1], 0, "start_row reset");
+}
+
+#[test]
+fn run64_ace_tilemovrow_requires_scaledata_xcr0() {
+    // ACE 実装では palette 1 の read 形も ACE-E1 に従い、
+    // AMX-AVX512-only と違って XCR0[20]（SCALEDATA）を要求する。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    env.backend.state[tilecfg_off] = 1;
+    env.backend.state[tilecfg_off + 16 + 2..tilecfg_off + 16 + 4]
+        .copy_from_slice(&8u16.to_le_bytes());
+    env.backend.state[tilecfg_off + 48 + 1] = 2;
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x62, 0xF3, 0x7D, 0x48, 0x07, 0xC1, 0x01],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        1,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert!(matches!(out, Outcome::Unimplemented { .. }));
+}
+
+#[test]
 fn run64_ace_palette2_ldtilecfg() {
     // ACE palette2 は固定形状で、LDTILECFG 成功時に TILEDATA=0、
     // SCALEDATA=0x7f へ初期化される。実行には XCR0[20,18:17] が要る。

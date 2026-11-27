@@ -2293,6 +2293,7 @@ mod tests {
             "amx_fp16",
             "amx_complex",
             "amx_movrs",
+            "amx_avx512",
             "via_padlock_rng",
             "via_padlock_rng_en",
             "apx",
@@ -2336,7 +2337,11 @@ mod tests {
         assert_eq!(tbl[14][1], 0x0008_0040, "leaf 1d tile geometry ebx");
         assert_eq!(tbl[14][2], 0x10, "leaf 1d max rows");
         assert_eq!(tbl[15][1], 16 | (64 << 8), "leaf 1e tmul shape");
-        assert_eq!(tbl[16][0] & 0x10f, 0x10f, "leaf 1e amx mirrors+movrs");
+        assert_eq!(
+            tbl[16][0] & 0x18f,
+            0x18f,
+            "leaf 1e amx mirrors+avx512+movrs"
+        );
         // LEAF_IDS 順: index 12 = 0x8000_0001、index 13 = 0x8000_0008。
         assert_eq!(tbl[18][2] & (1 << 29), 1 << 29, "mwaitx");
         assert_eq!(tbl[19][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
@@ -2830,6 +2835,50 @@ fn amx_decode() {
     // 機能なしでは #UD。
     assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5E, 0xCA], modes, tile).is_none());
     assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5C, 0xCA], modes, tile).is_none());
+    // TILEMOVROW read/TCVTROW は AMX-AVX512 と ACE の OR ゲート。
+    // write/column は ACE 専用。
+    let rowread = &[0x62, 0xF3, 0x7D, 0x48, 0x07, 0xC1, 0x03];
+    let rowwrite = &[0x62, 0xF3, 0xFD, 0x48, 0x07, 0xCA, 0x04];
+    let cvtrow = &[0x62, 0xF3, 0x7E, 0x48, 0x07, 0xC1, 0x02];
+    assert_eq!(
+        decode_map(rowread, modes, FEAT_AMX_AVX512 | FEAT_AMX_TILE).map(|d| d.insn),
+        Some(Insn::TilemovrowRImm)
+    );
+    assert_eq!(
+        decode_map(cvtrow, modes, FEAT_AMX_AVX512 | FEAT_AMX_TILE).map(|d| d.insn),
+        Some(Insn::Tcvtrowd2psImm)
+    );
+    // GPR 行番号形も同じ OR ゲート。vvvv=1111b はエンコード上
+    // eax を指す。
+    assert_eq!(
+        decode_map(
+            &[0x62, 0xF2, 0x7D, 0x48, 0x4A, 0xC1],
+            modes,
+            FEAT_AMX_AVX512 | FEAT_AMX_TILE
+        )
+        .map(|d| d.insn),
+        Some(Insn::TilemovrowRGpr)
+    );
+    assert_eq!(
+        decode_map(
+            &[0x62, 0xF2, 0x7E, 0x48, 0x4A, 0xC1],
+            modes,
+            FEAT_AMX_AVX512 | FEAT_AMX_TILE
+        )
+        .map(|d| d.insn),
+        Some(Insn::Tcvtrowd2psGpr)
+    );
+    assert!(decode_map(rowread, modes, 0).is_none());
+    assert!(decode_map(rowwrite, modes, FEAT_AMX_AVX512 | FEAT_AMX_TILE).is_none());
+    let ace = FEAT_ACE | FEAT_AVX512F;
+    assert_eq!(
+        decode_map(rowread, modes, ace).map(|d| d.insn),
+        Some(Insn::TilemovrowRImm)
+    );
+    assert_eq!(
+        decode_map(rowwrite, modes, ace).map(|d| d.insn),
+        Some(Insn::TilemovrowWImm)
+    );
     // 32 ビットモードでは #UD。
     let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
     assert!(

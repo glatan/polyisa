@@ -213,6 +213,9 @@ fn declare_features(m: &mut Model) {
     // dot product/convert 群、V2_AUX は FP32↔FP8 と MX 変換の補助群。
     feat(m, "avx10_v1_aux", &["avx10"]);
     feat(m, "avx10_v2_aux", &["avx10"]);
+    // Leaf 1E.1 EAX。AMX-AVX512 は palette 1 のタイル行を ZMM
+    // へ読む命令群で、tile 状態の基盤だけを前提にする。
+    feat(m, "amx_avx512", &["amx_tile"]);
     // Leaf 7.1 ECX。ACE（Advanced Compute Extensions）。v2 は版
     // （CPUID.0x1D 系の版報告は未モデル）で分かれる。
     // ACE の命令は AMX のタイル状態も使う（ACE 仕様 §3.1 の前提）。
@@ -1074,6 +1077,7 @@ fn declare_ident_bits(m: &mut Model) {
     b_sub(m, "amx_bf16", 0x1e, 1, "eax", 1);
     b_sub(m, "amx_complex", 0x1e, 1, "eax", 2);
     b_sub(m, "amx_fp16", 0x1e, 1, "eax", 3);
+    b_sub(m, "amx_avx512", 0x1e, 1, "eax", 7);
     b_sub(m, "amx_movrs", 0x1e, 1, "eax", 8);
     b_sub(m, "avxvnniint8", 0x7, 1, "edx", 4);
     b_sub(m, "avxneconvert", 0x7, 1, "edx", 5);
@@ -1322,6 +1326,21 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         "tdpbf16ps" => &["amx_bf16"],
         "tdpfp16ps" => &["amx_fp16"],
         "tcmmimfp16ps" | "tcmmrlfp16ps" => &["amx_complex"],
+        // TILEMOVROW read/TCVTROW は AMX-AVX512 と ACE で共有され、
+        // 項目側が OR ゲートを持つ。空リストは EVEX 既定の avx512f を
+        // 足さず、その項目側ゲートを完全なものとして使う印。
+        "tilemovrow_r_gpr"
+        | "tilemovrow_r_imm"
+        | "tcvtrowd2ps_gpr"
+        | "tcvtrowd2ps_imm"
+        | "tcvtrowps2bf16h_gpr"
+        | "tcvtrowps2bf16h_imm"
+        | "tcvtrowps2bf16l_gpr"
+        | "tcvtrowps2bf16l_imm"
+        | "tcvtrowps2phh_gpr"
+        | "tcvtrowps2phh_imm"
+        | "tcvtrowps2phl_gpr"
+        | "tcvtrowps2phl_imm" => &[],
         _ => return None,
     })
 }

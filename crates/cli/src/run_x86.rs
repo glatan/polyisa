@@ -6024,6 +6024,7 @@ fn amx_tile_step(
     next_rip: u64,
     seg: u64,
     eip: u32,
+    feats: u128,
 ) -> Option<Result<(), InterpExit>> {
     use polyisa_guest_x86::Insn;
     if !matches!(
@@ -6088,7 +6089,7 @@ fn amx_tile_step(
     ) {
         return None;
     }
-    Some(amx_tile_exec(env, md, next_rip, seg, eip))
+    Some(amx_tile_exec(env, md, next_rip, seg, eip, feats))
 }
 
 /// `CpuState` 内のタイル構成の先頭オフセット（byte0=palette、
@@ -7764,6 +7765,7 @@ fn amx_tile_exec(
     next_rip: u64,
     seg: u64,
     eip: u32,
+    feats: u128,
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
     // XCR0 の XTILECFG(17)|XTILEDATA(18) が両方立っていなければ #UD。
@@ -8094,7 +8096,15 @@ fn amx_tile_exec(
             | Insn::Tcvtrowps2phlGpr
             | Insn::Tcvtrowps2phlImm
     ) {
+        // AMX-AVX512-only では SCALEDATA(bit20) を使わない。
+        // ACE 実装では read 系も ACE 例外クラスに従い bit20 を要求する。
+        const AMX_AVX512_XCR0: u64 = 0x6_00e6;
         const ACE_XCR0: u64 = 0x16_00e6;
+        let xcr0_need = if feats & polyisa_guest_x86::FEAT_ACE != 0 {
+            ACE_XCR0
+        } else {
+            AMX_AVX512_XCR0
+        };
         let cvt_form = matches!(
             insn,
             Insn::Tcvtrowd2psGpr
@@ -8128,7 +8138,7 @@ fn amx_tile_exec(
         } else {
             palette == 2
         };
-        if xcr0_tile & ACE_XCR0 != ACE_XCR0
+        if xcr0_tile & xcr0_need != xcr0_need
             || !palette_ok
             || md.evex_b
             || md.evex_z
@@ -8153,7 +8163,11 @@ fn amx_tile_exec(
             if decode::rm_reg_x5(md) >= 8 {
                 return Err(amx_ud(eip));
             }
-            if palette == 1 && !tile_valid(&env.backend.state, t) {
+            // AMX-AVX512 の AMX-E7/E8 は colsb の dword 整列を要求する。
+            // ACE 例外クラスにはこの条件がないので、ACE 実装では掛けない。
+            let amx_colsb_bad = feats & polyisa_guest_x86::FEAT_ACE == 0
+                && !tile_colsb(&env.backend.state, t).is_multiple_of(4);
+            if palette == 1 && (!tile_valid(&env.backend.state, t) || amx_colsb_bad) {
                 return Err(amx_ud(eip));
             }
             let mut v = [0u8; 64];
@@ -8268,6 +8282,7 @@ fn amx_tile_exec(
                 }
             }
         }
+        env.backend.state[TILECFG_OFF + 1] = 0;
         return Ok(());
     }
     if matches!(
@@ -8796,7 +8811,7 @@ fn step_x86_map(
             .or_else(|| avx10_step(env, &md, next_rip, seg, eip))
             .or_else(|| avxne_step(env, &md, next_rip, seg, eip))
             .or_else(|| vcrypto_step(env, &md, next_rip, seg, eip))
-            .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip))
+            .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip, feats))
     }) {
         let word = buf[..usize::from(md.len).min(16)]
             .iter()
