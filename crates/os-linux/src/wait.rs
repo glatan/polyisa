@@ -507,6 +507,13 @@ fn sys_select(
         (args[0], args[1], args[2], args[3], args[4])
     };
     let timeout = rd_ts(env, abi, tv, tv_usec)?;
+    if !tv_usec && args[5] != 0 {
+        // pselect6 の第6引数は { sigmask, sigsetsize } の組。
+        let w = u64::from(abi.ptr_size);
+        let mask = rd_u(env, abi.endian, args[5], w as usize).ok_or(errno::EFAULT)?;
+        let size = rd_u(env, abi.endian, args[5] + w, w as usize).ok_or(errno::EFAULT)?;
+        rd_pwait_mask(env, abi, mask, size)?;
+    }
     do_select(
         fds,
         abi,
