@@ -14964,6 +14964,20 @@ pub(crate) fn x87_round_shift64<B: Backend>(
     shift: B::V<W64>,
     sign: B::V<W64>,
 ) -> (B::V<W64>, B::B) {
+    let no_tail = bool_false(b);
+    x87_round_shift64_tail(b, sig, shift, sign, no_tail)
+}
+
+/// `x87_round_shift64` に、kept significand の下位へ続く exact tail の
+/// 有無を追加した版。乗算の 128 ビット積のように、64 ビットへ切り出す
+/// 前から確定している捨て bit を gradual underflow の丸めへ含める。
+pub(crate) fn x87_round_shift64_tail<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    shift: B::V<W64>,
+    sign: B::V<W64>,
+    tail_any: B::B,
+) -> (B::V<W64>, B::B) {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let k64 = b.konst::<W64>(64);
@@ -14984,6 +14998,7 @@ pub(crate) fn x87_round_shift64<B: Backend>(
     let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
     let sticky_far = bit_and(b, sh_gt64, sig_nz);
     let sticky0 = bit_or(b, sticky_nz0, sticky_far);
+    let sticky0 = bit_or(b, sticky0, tail_any);
     let sh_nonzero = bit_not(b, sh_zero);
     let sticky = bit_and(b, sticky0, sh_nonzero);
     let kept = b.shr_l::<W64>(sig, sh_cap);
@@ -15432,25 +15447,17 @@ pub(crate) fn mul_ext<B: Backend>(
     x87_exception_flag(b, ovf_occur, 1 << 3);
     x87_exception_flag(b, ovf_occur, 1 << 5);
     // underflow した正規化結果は exponent 0 の denormal として右へ
-    // 揃える。丸めはまだ 64 ビット精度で行った近似で、subnormal 境界の
-    // double rounding は残る。shift が 64 を超える入力は 0 へ潰す。
+    // 揃える。shift が 64 を超える入力は 0 または丸め上がりの 1 になる。
     let one_minus_e = b.sub::<W64>(one64, biased);
-    let k63sh = b.konst::<W64>(63);
-    let sh_too_big = b.cmp::<W64>(Cmp::GtU, one_minus_e, k63sh);
-    let sh_den = b.select::<W64>(sh_too_big, k63sh, one_minus_e);
-    let sig_den_raw = b.shr_l::<W64>(sig_norm, sh_den);
-    let sig_den = b.select::<W64>(sh_too_big, zero64, sig_den_raw);
+    // masked gradual underflow は 64 ビットへ丸めた値をさらに切り捨てる
+    // のではなく、正規化前の exact product から target quantum へ一度だけ
+    // 丸める。exact tail は round/sticky をまとめた inexact_raw で渡す。
+    let (sig_den, den_exact_inexact) =
+        x87_round_shift64_tail(b, sig_raw, one_minus_e, sign, inexact_raw);
     // subnormal へ落とすときに捨てる bit も precision exception の
     // 対象。masked underflow は tiny かつ inexact のときだけ UE を立て、
     // unmasked では exact tiny でも報告する。
-    let one_sh_den = b.shl::<W64>(one64, sh_den);
-    let den_low_mask = b.sub::<W64>(one_sh_den, one64);
-    let den_dropped_bits = b.and::<W64>(sig_norm, den_low_mask);
-    let den_dropped0 = b.cmp::<W64>(Cmp::Ne, den_dropped_bits, zero64);
-    let sig_norm_nz = b.cmp::<W64>(Cmp::Ne, sig_norm, zero64);
-    let den_all_lost = bit_and(b, sh_too_big, sig_norm_nz);
-    let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
-    let den_inexact0 = bit_and(b, under, den_dropped1);
+    let den_inexact0 = bit_and(b, under, den_exact_inexact);
     let inexact = bit_or(b, inexact_base, den_inexact0);
     x87_exception_flag(b, inexact, 1 << 5);
     let fcw = b.get(fcw_ref());
@@ -15477,7 +15484,9 @@ pub(crate) fn mul_ext<B: Backend>(
     let exp_over = b.select::<W64>(omasked, exp_ovm, exp_ovu);
     let exp_unfu = b.add::<W64>(biased, scale_bias);
     let sig_unf = b.select::<W64>(umasked, sig_den, sig_norm);
-    let exp_unf = b.select::<W64>(umasked, zero64, exp_unfu);
+    let den_to_normal = b.cmp::<W64>(Cmp::Eq, sig_den, int_bit);
+    let exp_den_masked = b.select::<W64>(den_to_normal, one64, zero64);
+    let exp_unf = b.select::<W64>(umasked, exp_den_masked, exp_unfu);
     let sig_ov_sel = b.select::<W64>(over, sig_over, sig_norm);
     let exp_ov_sel = b.select::<W64>(over, exp_over, biased);
     let sig_num = b.select::<W64>(under, sig_unf, sig_ov_sel);
