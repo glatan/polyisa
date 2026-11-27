@@ -135,6 +135,7 @@ struct WaitSlot {
     which: i64,
     status_ptr: u64,
     untraced: bool,
+    continued: bool,
 }
 
 /// 今は走っていないスレッドの実行環境。
@@ -1347,6 +1348,7 @@ impl Linux {
             polyisa_kernel::ProcessId(self.pid),
             wait.which,
             wait.untraced,
+            wait.continued,
         ) {
             polyisa_kernel::Reap::Exited { pid, code, signal } => {
                 if wait.status_ptr != 0 {
@@ -1368,6 +1370,23 @@ impl Linux {
             polyisa_kernel::Reap::Stopped { pid, signal } => {
                 if wait.status_ptr != 0 {
                     let st = stopped_wait_status(signal);
+                    if env
+                        .backend
+                        .mem
+                        .write(VirtAddr(wait.status_ptr), &st.to_le_bytes())
+                        .is_err()
+                    {
+                        self.set_errno(env, EFAULT);
+                        self.advance_past_syscall(env);
+                        return;
+                    }
+                }
+                set64(env, Gpr(0), pid.0);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::Continued { pid } => {
+                if wait.status_ptr != 0 {
+                    let st = continued_wait_status();
                     if env
                         .backend
                         .mem
@@ -1452,6 +1471,10 @@ const IO_CHUNK: usize = 65536;
 
 fn stopped_wait_status(signal: u32) -> u32 {
     (signal << 8) | 0x7f
+}
+
+fn continued_wait_status() -> u32 {
+    0xffff
 }
 
 fn reap_status(code: u32, signal: Option<u32>) -> u32 {
@@ -3355,7 +3378,7 @@ fn finish_parked_signal(
 ) {
     match outcome {
         ParkedSignal::Terminate => terminate_parked_by_signal(sys, target, sig),
-        ParkedSignal::Stop => sys.wake_child_waiters(target),
+        ParkedSignal::Stop | ParkedSignal::Continue => sys.wake_child_waiters(target),
         ParkedSignal::Missing | ParkedSignal::Noop | ParkedSignal::Queued => {}
     }
 }
@@ -3383,6 +3406,7 @@ enum ParkedSignal {
     Queued,
     Terminate,
     Stop,
+    Continue,
 }
 
 fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
@@ -3407,6 +3431,7 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
     let Some(idx) = queue.parked.iter().position(|task| task.linux.pid == tid) else {
         return ParkedSignal::Missing;
     };
+    let was_stopped = queue.meta.is_stopped(polyisa_kernel::ThreadId(tid));
     let mut wake = false;
     let mut cont = false;
     let mut stop = false;
@@ -3473,7 +3498,11 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
     if wake {
         queue.meta.unblock(polyisa_kernel::ThreadId(tid));
     }
-    outcome
+    if cont && was_stopped {
+        ParkedSignal::Continue
+    } else {
+        outcome
+    }
 }
 
 /// write 系で発生した SIGPIPE を現在のスレッドへ送る。
@@ -5186,11 +5215,13 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     // WNOHANG。子がまだ終了していなければ 0 を返す。
     const WNOHANG: u64 = 1;
     const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
     let which = get64(env, cx.r_a) as i64;
     let status_ptr = get64(env, cx.r_b);
     let options = get64(env, cx.r_c);
     let wnohang = options & WNOHANG != 0;
     let untraced = options & WUNTRACED != 0;
+    let continued = options & WCONTINUED != 0;
     if sys.pid == 0 {
         set64(env, Gpr(0), cx.neg(ECHILD));
         return Some(TrapOutcome::Handled);
@@ -5205,7 +5236,11 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Handled);
     }
     let parent = polyisa_kernel::ProcessId(sys.pid);
-    match sys.procs.borrow_mut().try_wait(parent, which, untraced) {
+    match sys
+        .procs
+        .borrow_mut()
+        .try_wait(parent, which, untraced, continued)
+    {
         polyisa_kernel::Reap::Exited { pid, code, signal } => {
             if status_ptr != 0 {
                 let st = reap_status(code, signal);
@@ -5238,6 +5273,22 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
             set64(env, Gpr(0), pid.0);
             Some(TrapOutcome::Handled)
         }
+        polyisa_kernel::Reap::Continued { pid } => {
+            if status_ptr != 0 {
+                let st = continued_wait_status();
+                if env
+                    .backend
+                    .mem
+                    .write(VirtAddr(status_ptr), &st.to_le_bytes())
+                    .is_err()
+                {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            set64(env, Gpr(0), pid.0);
+            Some(TrapOutcome::Handled)
+        }
         polyisa_kernel::Reap::NoChild => {
             set64(env, Gpr(0), cx.neg(ECHILD));
             Some(TrapOutcome::Handled)
@@ -5251,6 +5302,7 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
                     which,
                     status_ptr,
                     untraced,
+                    continued,
                 });
                 sys.queue.0.borrow_mut().meta.block(
                     polyisa_kernel::ThreadId(sys.pid),
@@ -10362,6 +10414,45 @@ mod tests {
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 0);
         set64(&mut env, Gpr(2), 1 | 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn wait4_wcontinued_reports_a_resumed_child_once() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        for sig in [19u64, 18] {
+            set64(&mut env, Gpr(0), abi::KILL);
+            set64(&mut env, Gpr(7), child);
+            set64(&mut env, Gpr(6), sig);
+            assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+            assert_eq!(get64(&mut env, Gpr(0)), 0);
+        }
+
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 1 | 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 0xffff);
+
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 1 | 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
     }

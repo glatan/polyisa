@@ -37,6 +37,8 @@ struct Proc {
     stopped: Option<u32>,
     /// この停止を wait 済みか。継続後の再停止でまた報告できる。
     stop_reported: bool,
+    /// 停止からの継続がまだ wait へ報告されていない。
+    continued: bool,
     pgid: u64,
 }
 
@@ -51,6 +53,8 @@ pub enum Reap {
     },
     /// 一致する子が停止した。表には残し、継続や終了を待てる。
     Stopped { pid: ProcessId, signal: u32 },
+    /// 一致する子が停止から継続した。表には残す。
+    Continued { pid: ProcessId },
     /// 一致する子はいるが、まだ終了していない。
     Pending,
     /// 一致する子がいない。
@@ -69,6 +73,7 @@ impl ProcessTable {
             signal: None,
             stopped: None,
             stop_reported: false,
+            continued: false,
             pgid: id.0,
         });
         id
@@ -136,6 +141,7 @@ impl ProcessTable {
         }
         proc.stopped = Some(signal);
         proc.stop_reported = false;
+        proc.continued = false;
         true
     }
 
@@ -144,8 +150,11 @@ impl ProcessTable {
         let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
             return false;
         };
-        proc.stopped = None;
+        let was_stopped = proc.stopped.take().is_some();
         proc.stop_reported = false;
+        if was_stopped {
+            proc.continued = true;
+        }
         true
     }
 
@@ -156,6 +165,7 @@ impl ProcessTable {
         {
             proc.exit_code = Some(code);
             proc.stopped = None;
+            proc.continued = false;
         }
     }
 
@@ -167,6 +177,7 @@ impl ProcessTable {
         if proc.exit_code.is_none() && proc.signal.is_none() {
             proc.signal = Some(signal);
             proc.stopped = None;
+            proc.continued = false;
         }
         true
     }
@@ -201,12 +212,17 @@ impl ProcessTable {
 
     /// `parent` の子を回収する。停止報告は含めない。
     pub fn try_reap(&mut self, parent: ProcessId, which: i64) -> Reap {
-        self.try_wait(parent, which, false)
+        self.try_wait(parent, which, false, false)
     }
 
-    /// `parent` の子を wait する。`include_stopped` が真なら、
-    /// まだ報告していない停止を表から外さずに返す。
-    pub fn try_wait(&mut self, parent: ProcessId, which: i64, include_stopped: bool) -> Reap {
+    /// `parent` の子を wait する。停止や継続の報告を含めても表から外さない。
+    pub fn try_wait(
+        &mut self,
+        parent: ProcessId,
+        which: i64,
+        include_stopped: bool,
+        include_continued: bool,
+    ) -> Reap {
         let parent_pgid = self.pgid(parent);
         let matches = |proc: &Proc| child_selected(parent, parent_pgid, proc, which);
         if let Some(idx) = self
@@ -232,6 +248,15 @@ impl ProcessTable {
                 pid: proc.id,
                 signal: proc.stopped.unwrap_or(0),
             };
+        }
+        if include_continued
+            && let Some(proc) = self
+                .procs
+                .iter_mut()
+                .find(|proc| matches(proc) && proc.continued)
+        {
+            proc.continued = false;
+            return Reap::Continued { pid: proc.id };
         }
         if self.procs.iter().any(matches) {
             Reap::Pending
@@ -553,17 +578,22 @@ mod tests {
         let child = table.fork(parent);
         assert!(table.stop(child, 19));
         assert_eq!(
-            table.try_wait(parent, -1, true),
+            table.try_wait(parent, -1, true, false),
             Reap::Stopped {
                 pid: child,
                 signal: 19,
             }
         );
-        assert_eq!(table.try_wait(parent, -1, true), Reap::Pending);
+        assert_eq!(table.try_wait(parent, -1, true, false), Reap::Pending);
         assert!(table.cont(child));
+        assert_eq!(
+            table.try_wait(parent, -1, false, true),
+            Reap::Continued { pid: child }
+        );
+        assert_eq!(table.try_wait(parent, -1, false, true), Reap::Pending);
         assert!(table.stop(child, 20));
         assert_eq!(
-            table.try_wait(parent, -1, true),
+            table.try_wait(parent, -1, true, false),
             Reap::Stopped {
                 pid: child,
                 signal: 20,
