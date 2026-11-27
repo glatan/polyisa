@@ -140,20 +140,22 @@ mod imp {
         let ops = [
             ([0xd8, 0xc1], "fadd"),
             ([0xd8, 0xc9], "fmul"),
+            ([0xd8, 0xe1], "fsub"),
             ([0xd8, 0xf1], "fdiv"),
         ];
         let mut rng = Rng(0x87D1_FF01);
         let mut reports = Vec::new();
-        for i in 0..512 {
+        let fcws = [0x007f, 0x027f, 0x037f, 0x077f, 0x0b7f, 0x0f7f];
+        for i in 0..1024 {
             let op = ops[(rng.next() % ops.len() as u64) as usize];
             let input0 = operand(&mut rng);
             let input1 = operand(&mut rng);
-            let fcw = 0x037f;
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (hv, hsw) = host_op(input0, input1, op.0, fcw);
             let (pv, psw) = poly_op(input0, input1, op.0, fcw);
             if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
                 reports.push(format!(
-                    "case {i} {}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    "case {i} {} fcw={fcw:04x}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
                     op.1, input0.0, input0.1, input1.0, input1.1,
                     hv.0, hv.1, hsw, pv.0, pv.1, psw
                 ));
