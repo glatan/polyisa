@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2399);
+        assert_eq!(INSNS.len(), 2401);
     }
 
     #[test]
@@ -2879,6 +2879,28 @@ fn amx_decode() {
         decode_map(rowwrite, modes, ace).map(|d| d.insn),
         Some(Insn::TilemovrowWImm)
     );
+    // ACE v2 optional の IEEE outer product。TOP1PS は NP/W0、
+    // TOP1PD は F2/W1。{er} 形では EVEX.b=1 のレジスタ形で LL を
+    // rounding control として受理する。
+    let ps = &[0x62, 0xF2, 0x7C, 0x48, 0x48, 0xF1];
+    let pd = &[0x62, 0xF2, 0xFF, 0x48, 0x48, 0xEA];
+    assert_eq!(
+        decode_map(ps, modes, FEAT_ACE_OP_FP32 | FEAT_AVX512F).map(|d| d.insn),
+        Some(Insn::Top1ps)
+    );
+    assert_eq!(
+        decode_map(pd, modes, FEAT_ACE_OP_FP64 | FEAT_AVX512F).map(|d| d.insn),
+        Some(Insn::Top1pd)
+    );
+    assert!(decode_map(ps, modes, FEAT_ACE_V2 | FEAT_AVX512F).is_none());
+    assert!(decode_map(pd, modes, FEAT_ACE_V2 | FEAT_AVX512F).is_none());
+    let d = decode_map(
+        &[0x62, 0xF2, 0x7C, 0x58, 0x48, 0xF1],
+        modes,
+        FEAT_ACE_OP_FP32 | FEAT_AVX512F,
+    )
+    .unwrap();
+    assert_eq!((d.insn, d.evex_b, d.evex_ll), (Insn::Top1ps, true, 2));
     // 32 ビットモードでは #UD。
     let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
     assert!(

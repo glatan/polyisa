@@ -4029,6 +4029,20 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::All(vec![w("m64"), Pred::Flag(feature.to_string())]);
         v.push(MapItem::Insn(op, it));
     }
+    // ACE v2 optional の IEEE 754 outer product。TOP1PS/TOP1PD は
+    // EVEX.b=1 のとき L'L を embedded rounding として使う。
+    for (sel, w1, mn, feature) in [
+        (PfxSel::Plain, false, "top1ps", "ace_op_fp32"),
+        (PfxSel::PF2, true, "top1pd", "ace_op_fp64"),
+    ] {
+        let mut it = ex(mn, &[RegT, RmX, Vv], sel, 0b100, false, "{op}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(w1);
+        it.no_mask = true;
+        it.er = true;
+        it.when = Pred::All(vec![w("m64"), Pred::Flag(feature.to_string())]);
+        v.push(MapItem::Insn(0x48, it));
+    }
     // ACE row convert-and-move の GPR 形。すべて read 専用で W0。
     for (op, sel, mn) in [
         (0x4Au8, PfxSel::PF3, "tcvtrowd2ps_gpr"),

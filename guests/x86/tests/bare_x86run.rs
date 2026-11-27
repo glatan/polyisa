@@ -26435,6 +26435,162 @@ fn run64_ace_tilemovrow_requires_scaledata_xcr0() {
 }
 
 #[test]
+fn run64_ace_top1ps_top1pd() {
+    // ACE v2 optional の IEEE outer product。FP32/FP64 とも
+    // rank-1 FMA で 1.0 + 2.0*3.0 = 7.0 を蓄積する。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE
+        | polyisa_guest_x86::FEAT_ACE_V2
+        | polyisa_guest_x86::FEAT_ACE_OP_FP32
+        | polyisa_guest_x86::FEAT_ACE_OP_FP64;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+        .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
+    env.backend.state[tmm_off + 5 * 1024..tmm_off + 5 * 1024 + 8]
+        .copy_from_slice(&0x3ff0_0000_0000_0000u64.to_le_bytes());
+    env.backend.state[tmm_off + 7 * 1024..tmm_off + 7 * 1024 + 4]
+        .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
+    let set32 = |env: &mut BareEnv, r: u8, v: u32| {
+        let mut b = [0u8; 16];
+        b[..4].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(b),
+        );
+    };
+    let set64 = |env: &mut BareEnv, r: u8, v: u64| {
+        let mut b = [0u8; 16];
+        b[..8].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(b),
+        );
+    };
+    set32(&mut env, 1, 0x4000_0000); // 2.0f32
+    set32(&mut env, 0, 0x4040_0000); // 3.0f32
+    set64(&mut env, 2, 0x4000_0000_0000_0000); // 2.0f64
+    set64(&mut env, 4, 0x4008_0000_0000_0000); // 3.0f64
+    set32(&mut env, 5, 0x3f80_0000); // 1.0f32
+    set32(&mut env, 6, 0x3300_0000); // 2^-25 f32
+    let prog: &[u8] = &[
+        0x62, 0xF2, 0x7C, 0x48, 0x48, 0xF1, // top1ps tmm6,zmm1,zmm0
+        0x62, 0xF2, 0xDF, 0x48, 0x48, 0xEA, // top1pd tmm5,zmm2{+1},zmm4
+        // top1ps tmm7,zmm5,zmm6 {ru-sae}。1+2^-25 は RNE では
+        // 1.0、RUP では次の FP32 へ丸まる。
+        0x62, 0xF2, 0x4C, 0x58, 0x48, 0xFD, 0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00,
+        0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x40e0_0000,
+        "TOP1PS result"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            env.backend.state[tmm_off + 5 * 1024..tmm_off + 5 * 1024 + 8]
+                .try_into()
+                .unwrap()
+        ),
+        0x401c_0000_0000_0000,
+        "TOP1PD result"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 7 * 1024..tmm_off + 7 * 1024 + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x3f80_0001,
+        "TOP1PS embedded round-up"
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::mxcsr_ref()), 0x1f80);
+}
+
+#[test]
+fn run64_ace_top1ps_unmasked_invalid_faults_before_tile_write() {
+    // inf*0 は IE を立てる。IM=0 なら ACE-E7 の #XM fault で、
+    // MXCSR は更新されるが tile は fault 前の値を保つ。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE
+        | polyisa_guest_x86::FEAT_ACE_OP_FP32;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f00);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+        .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
+    let mut inf = [0u8; 16];
+    inf[..4].copy_from_slice(&0x7f80_0000u32.to_le_bytes());
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from_le_bytes(inf),
+    );
+    // zmm0 lane0 は初期値 0 なので、row0/col0 は inf*0 になる。
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x62, 0xF2, 0x7C, 0x48, 0x48, 0xF1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        1,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert!(matches!(out, Outcome::Unimplemented { .. }));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::mxcsr_ref()) & 1,
+        1,
+        "IE sticky flag"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x3f80_0000,
+        "tile not written on fault"
+    );
+}
+
+#[test]
 fn run64_ace_palette2_ldtilecfg() {
     // ACE palette2 は固定形状で、LDTILECFG 成功時に TILEDATA=0、
     // SCALEDATA=0x7f へ初期化される。実行には XCR0[20,18:17] が要る。

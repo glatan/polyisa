@@ -6070,6 +6070,8 @@ fn amx_tile_step(
             | Insn::Tcvtrowps2phlImm
             | Insn::Top2bf16ps
             | Insn::Top2phps
+            | Insn::Top1ps
+            | Insn::Top1pd
             | Insn::Top4bssd
             | Insn::Top4bsud
             | Insn::Top4busd
@@ -6834,6 +6836,113 @@ fn ace_add_f32_ftz(a: u32, b: u32) -> u32 {
     } else {
         flush(r.bits() as u32)
     }
+}
+
+/// x86 MXCSR/EVEX の rounding control を softfloat の丸め種別へ写す。
+/// 00=RN、01=RD、10=RU、11=RZ。
+fn ace_x86_rc(rc: u8) -> polyisa_softfloat::Rm {
+    use polyisa_softfloat::Rm;
+    match rc & 3 {
+        1 => Rm::Rdn,
+        2 => Rm::Rup,
+        3 => Rm::Rtz,
+        _ => Rm::Rne,
+    }
+}
+
+/// softfloat の例外ビットを MXCSR status bit へ写す。
+fn ace_mxcsr_status(flags: u8) -> u32 {
+    use polyisa_softfloat::{FP_NV, FP_NX, FP_OF, FP_UF};
+    let mut v = 0;
+    if flags & FP_NX != 0 {
+        v |= 1 << 5;
+    }
+    if flags & FP_UF != 0 {
+        v |= 1 << 4;
+    }
+    if flags & FP_OF != 0 {
+        v |= 1 << 3;
+    }
+    if flags & FP_NV != 0 {
+        v |= 1;
+    }
+    v
+}
+
+fn ace_f32_subnormal(bits: u32) -> bool {
+    bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0
+}
+
+fn ace_f64_subnormal(bits: u64) -> bool {
+    bits & 0x7ff0_0000_0000_0000 == 0 && bits & 0x000f_ffff_ffff_ffff != 0
+}
+
+/// TOP1PS の 1 要素 FMA。戻り値は結果と発生した MXCSR status bit。
+fn ace_f32_mad_mxcsr(
+    acc: u32,
+    a: u32,
+    b: u32,
+    rm: polyisa_softfloat::Rm,
+    daz: bool,
+    ftz: bool,
+) -> (u32, u32) {
+    use polyisa_softfloat::F32;
+    let mut status = 0;
+    if !daz && (ace_f32_subnormal(acc) || ace_f32_subnormal(a) || ace_f32_subnormal(b)) {
+        status |= 1 << 1;
+    }
+    let flush_in = |x: u32| {
+        if daz && ace_f32_subnormal(x) {
+            x & 0x8000_0000
+        } else {
+            x
+        }
+    };
+    let av = F32::from_bits(u64::from(flush_in(a)));
+    let bv = F32::from_bits(u64::from(flush_in(b)));
+    let cv = F32::from_bits(u64::from(flush_in(acc)));
+    let (r, f) = av.fmadd_rm(bv, cv, rm);
+    let mut bits = r.bits() as u32;
+    status |= ace_mxcsr_status(f);
+    if ftz && ace_f32_subnormal(bits) {
+        bits &= 0x8000_0000;
+        status |= (1 << 5) | (1 << 4);
+    }
+    (bits, status)
+}
+
+/// TOP1PD の 1 要素 FMA。戻り値は結果と発生した MXCSR status bit。
+fn ace_f64_mad_mxcsr(
+    acc: u64,
+    a: u64,
+    b: u64,
+    rm: polyisa_softfloat::Rm,
+    daz: bool,
+    ftz: bool,
+) -> (u64, u32) {
+    use polyisa_softfloat::F64;
+    let mut status = 0;
+    if !daz && (ace_f64_subnormal(acc) || ace_f64_subnormal(a) || ace_f64_subnormal(b)) {
+        status |= 1 << 1;
+    }
+    let flush_in = |x: u64| {
+        if daz && ace_f64_subnormal(x) {
+            x & 0x8000_0000_0000_0000
+        } else {
+            x
+        }
+    };
+    let av = F64::from_bits(flush_in(a));
+    let bv = F64::from_bits(flush_in(b));
+    let cv = F64::from_bits(flush_in(acc));
+    let (r, f) = av.fmadd_rm(bv, cv, rm);
+    let mut bits = r.bits();
+    status |= ace_mxcsr_status(f);
+    if ftz && ace_f64_subnormal(bits) {
+        bits &= 0x8000_0000_0000_0000;
+        status |= (1 << 5) | (1 << 4);
+    }
+    (bits, status)
 }
 
 /// MX block scale を integer mantissa と 2 の exponent へ分解する。
@@ -7822,6 +7931,82 @@ fn amx_tile_exec(
     let insn = md.insn;
     let xcr0_tile = env.backend.get(sem::xcr0_ref());
     let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
+    if matches!(insn, Insn::Top1ps | Insn::Top1pd) {
+        const ACE_XCR0: u64 = 0x16_00e6;
+        let src1 = decode::rm_reg_x5(md);
+        if xcr0_tile & ACE_XCR0 != ACE_XCR0
+            || env.backend.state[TILECFG_OFF] != 2
+            || md.evex_z
+            || md.evex_aaa != 0
+            || decode::reg_x5(md) >= 8
+            || (insn == Insn::Top1pd && src1 & 1 != 0)
+        {
+            return Err(amx_ud(eip));
+        }
+        let mxcsr: u32 = env.backend.get(sem::mxcsr_ref());
+        let rc = if md.evex_b {
+            md.evex_ll
+        } else {
+            ((mxcsr >> 13) & 3) as u8
+        };
+        let rm = ace_x86_rc(rc);
+        let daz = mxcsr & 0x40 != 0;
+        let ftz = mxcsr & 0x8000 != 0;
+        let t = usize::from(md.modrm >> 3 & 7);
+        let base = TMM_OFF + t * 1024;
+        let mut tile = [0u8; 1024];
+        tile.copy_from_slice(&env.backend.state[base..base + 1024]);
+        let mut status = 0u32;
+        if insn == Insn::Top1ps {
+            let a = zget64(env, src1);
+            let bvec = zget64(env, md.vex_v);
+            for row in 0..16usize {
+                let av = u32::from_le_bytes(a[row * 4..row * 4 + 4].try_into().unwrap());
+                for col in 0..16usize {
+                    let bv = u32::from_le_bytes(bvec[col * 4..col * 4 + 4].try_into().unwrap());
+                    let at = row * 64 + col * 4;
+                    let acc = u32::from_le_bytes(tile[at..at + 4].try_into().unwrap());
+                    let (out, st) = ace_f32_mad_mxcsr(acc, av, bv, rm, daz, ftz);
+                    status |= st;
+                    tile[at..at + 4].copy_from_slice(&out.to_le_bytes());
+                }
+            }
+        } else {
+            let alo = zget64(env, src1);
+            let ahi = zget64(env, src1 + 1);
+            let bvec = zget64(env, md.vex_v);
+            for row in 0..16usize {
+                let src = if row < 8 { &alo } else { &ahi };
+                let lane = row & 7;
+                let av = u64::from_le_bytes(src[lane * 8..lane * 8 + 8].try_into().unwrap());
+                for col in 0..8usize {
+                    let bv = u64::from_le_bytes(bvec[col * 8..col * 8 + 8].try_into().unwrap());
+                    let at = row * 64 + col * 8;
+                    let acc = u64::from_le_bytes(tile[at..at + 8].try_into().unwrap());
+                    let (out, st) = ace_f64_mad_mxcsr(acc, av, bv, rm, daz, ftz);
+                    status |= st;
+                    tile[at..at + 8].copy_from_slice(&out.to_le_bytes());
+                }
+            }
+        }
+        // EVEX.b=1 は SAE なので status を書かず #XM も発生させない。
+        if !md.evex_b {
+            env.backend.set(sem::mxcsr_ref(), mxcsr | status);
+            let unmasked = [(0u8, 7u8), (1, 8), (3, 10), (4, 11), (5, 12)]
+                .iter()
+                .any(|&(st, mask)| status & (1 << st) != 0 && mxcsr & (1 << mask) == 0);
+            if unmasked {
+                return Err(InterpExit::Exception(polyisa_sem::GuestException {
+                    kind: ExceptionKind::Fp,
+                    code: 19,
+                    addr: Some(u64::from(eip)),
+                    in_delay_slot: false,
+                }));
+            }
+        }
+        env.backend.state[base..base + 1024].copy_from_slice(&tile);
+        return Ok(());
+    }
     if matches!(
         insn,
         Insn::Top2bf16ps
