@@ -9809,7 +9809,7 @@ fn fist_apply_exceptions<B: Backend>(
     v: B::V<W64>,
     inexact: B::B,
     bad64: B::B,
-) -> B::V<W64> {
+) -> (B::V<W64>, B::B) {
     use polyisa_sem::{Cmp, W16, W64};
     let z64 = b.konst::<W64>(0);
     let one64 = b.konst::<W64>(1);
@@ -9844,10 +9844,15 @@ fn fist_apply_exceptions<B: Backend>(
         32 => b.konst::<W64>(0x8000_0000),
         _ => b.konst::<W64>(1u64 << 63),
     };
-    b.select::<W64>(invalid, indef, v)
+    (b.select::<W64>(invalid, indef, v), invalid)
 }
 
-fn fist_convert<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, bits: u32) -> B::V<W64> {
+fn fist_convert<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+    bits: u32,
+) -> (B::V<W64>, B::B) {
     let (v, inexact, bad64) = sem::f80_to_i64_occ(b, sig, exp);
     fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64)
 }
@@ -9902,12 +9907,17 @@ pub fn fist_m<B: Backend>(
                     Ok(())
                 },
                 |b| {
-                    let v = fist_convert(b, sig, exp, bits);
-                    fist_store_at(b, a, wseg, bits, v)?;
-                    if pop {
-                        sem::pop_st(b, top)?;
-                    }
-                    Ok(())
+                    let (v, invalid) = fist_convert(b, sig, exp, bits);
+                    let ie_masked = sem::x87_ie_masked(b);
+                    let no_invalid = sem::bit_not(b, invalid);
+                    let write_ok = sem::bit_or(b, no_invalid, ie_masked);
+                    b.if_then(write_ok, |b| {
+                        fist_store_at(b, a, wseg, bits, v)?;
+                        if pop {
+                            sem::pop_st(b, top)?;
+                        }
+                        Ok(())
+                    })
                 },
             )
         })?;
@@ -9956,9 +9966,14 @@ pub fn fisttp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<
                 },
                 |b| {
                     let (v, inexact, bad64) = f80_to_i64_trunc_occ(b, sig, exp);
-                    let v = fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64);
-                    fist_store_at(b, a, wseg, bits, v)?;
-                    sem::pop_st(b, top)
+                    let (v, invalid) = fist_apply_exceptions(b, sig, exp, bits, v, inexact, bad64);
+                    let ie_masked = sem::x87_ie_masked(b);
+                    let no_invalid = sem::bit_not(b, invalid);
+                    let write_ok = sem::bit_or(b, no_invalid, ie_masked);
+                    b.if_then(write_ok, |b| {
+                        fist_store_at(b, a, wseg, bits, v)?;
+                        sem::pop_st(b, top)
+                    })
                 },
             )
         })?;

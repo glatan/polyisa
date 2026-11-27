@@ -15094,7 +15094,6 @@ pub(crate) fn x87_ext_to_ieee_bits<B: Backend>(
     let sub_bits_norm = b.select::<W64>(reaches_normal, min_norm_exp, sub_frac);
     let tiny_pre = bit_not(b, normal_path);
     let inexact = bool_or_select(b, normal_path, inexact_norm, inexact_sub);
-    x87_exception_flag(b, inexact, 1 << 5);
 
     // overflow masked response は RC 依存で infinity または最大有限値。
     let fcw = b.get(fcw_ref());
@@ -15122,7 +15121,6 @@ pub(crate) fn x87_ext_to_ieee_bits<B: Backend>(
     let finite_in = bit_not(b, non_finite_in);
     let ovf = bit_and(b, ovf_norm, finite_in);
     x87_exception_flag(b, ovf, 1 << 3);
-    x87_exception_flag(b, ovf, 1 << 5);
 
     let z16 = b.konst::<W16>(0);
     let umask_bit = b.konst::<W16>(1 << 4);
@@ -15139,9 +15137,23 @@ pub(crate) fn x87_ext_to_ieee_bits<B: Backend>(
     let omask = b.and::<W16>(fcw, omask_bit);
     let omasked = b.cmp::<W16>(Cmp::Ne, omask, z16);
     let oumasked = bit_not(b, omasked);
+    let ovf_pe = bit_and(b, ovf, omasked);
+    x87_exception_flag(b, ovf_pe, 1 << 5);
     let block_o = bit_and(b, ovf, oumasked);
     let block_u = bit_and(b, unf, uunmasked);
     let block = bit_or(b, block_o, block_u);
+    // memory destination で unmasked overflow/underflow になるときは
+    // store を抑止し、inexact-result condition は報告しない。C1 も
+    // クリアする。
+    let not_block = bit_not(b, block);
+    let pe_report = bit_and(b, inexact, not_block);
+    x87_exception_flag(b, pe_report, 1 << 5);
+    let fsw0 = b.get(fsw_ref());
+    let keep_c1 = b.konst::<W16>(!(1u16 << 9));
+    let keep_all = b.konst::<W16>(u16::MAX);
+    let c1_mask = b.select::<W16>(block, keep_c1, keep_all);
+    let fsw_c1 = b.and::<W16>(fsw0, c1_mask);
+    b.set(fsw_ref(), fsw_c1);
 
     let normal_or_sub = b.select::<W64>(normal_path, norm_bits0, sub_bits_norm);
     let finite_no_ovf = b.or::<W64>(normal_or_sub, sign_bit);
