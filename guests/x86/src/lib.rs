@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2525);
+        assert_eq!(INSNS.len(), 2526);
     }
 
     #[test]
@@ -2932,6 +2932,7 @@ fn avx10_decode() {
     let f = FEAT_AVX10_2
         | FEAT_AVX10_3
         | FEAT_AVX10_V2_AUX
+        | FEAT_AVX10_VPMLDSABFLYDQ
         | FEAT_AVX10
         | FEAT_AVX512F
         | FEAT_AVX512BW
@@ -3036,6 +3037,10 @@ fn avx10_decode() {
     // VMPSADBW: EVEX.F3.0F3A.W0 42 /r /ib。
     let d = decode_map(&[0x62, 0xF3, 0x76, 0x28, 0x42, 0xC2, 0x00], modes, f).unwrap();
     assert_eq!(d.insn, Insn::VmpsadbwXvHvWvIb);
+    // VPMLDSABFLYDQ: EVEX.66.0F3A.W1 DC /r ib。
+    let d = decode_map(&[0x62, 0xF3, 0xF5, 0x08, 0xDC, 0xC2, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VpmldsabflydqXvHvWvIb);
+    assert_eq!(d.imm, 0);
     // AVX10.2 EVEX VNNI: 0F38.50/51/D2/D3。
     for (bytes, insn) in [
         ([0x62, 0xF2, 0x77, 0x28, 0x50, 0xC2], Insn::VpdpbssdXvHvWv),

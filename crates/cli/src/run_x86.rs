@@ -6632,6 +6632,7 @@ fn avx10_step(
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
             | Insn::Vminmaxbf16XvHvWvIb
+            | Insn::VpmldsabflydqXvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv
@@ -7063,6 +7064,65 @@ fn avx10_exec(
     };
     let rd16 = |v: &[u8; 64], i: usize| u16::from_le_bytes(v[i * 2..i * 2 + 2].try_into().unwrap());
     let rd32 = |v: &[u8; 64], i: usize| u32::from_le_bytes(v[i * 4..i * 4 + 4].try_into().unwrap());
+    if md.insn == Insn::VpmldsabflydqXvHvWvIb {
+        // ML-DSA butterfly。25 bit signed の係数を dword から取り出し、
+        // Montgomery reduction 後に 23+3 bit folding で dword へ戻す。
+        let sx25 = |w: u32| -> i32 { (((w & 0x1ff_ffff) << 7) as i32) >> 7 };
+        let mont = |a: i32, b: i32| -> i32 {
+            const Q: u64 = 8_380_417;
+            const QINV: u64 = 58_728_449;
+            let t1 = i64::from(a) * i64::from(b);
+            let t2 = u64::from(t1 as u32) * QINV;
+            let t3 = u64::from(t2 as u32) * Q;
+            ((t1 - t3 as i64) >> 32) as i32
+        };
+        let fold = |v: i32| -> u32 {
+            let low = (v as u32) & 0x7f_ffff;
+            let hi3 = ((v as u32) >> 23) & 7;
+            let hi = ((hi3 << 29) as i32) >> 29;
+            (low as i32).wrapping_add(hi << 13).wrapping_sub(hi) as u32
+        };
+        let dword = |v: &[u8; 64], idx: usize| {
+            u32::from_le_bytes(v[idx * 4..idx * 4 + 4].try_into().unwrap())
+        };
+        let imm = md.imm as u8;
+        let ab_sel = (imm >> 2) & 3;
+        let z_sel = imm & 3;
+        let gs = imm & 0x10 != 0;
+        let mut out = [0u8; 64];
+        for j in 0..vbytes / 8 {
+            let (ai, bi, src) = match ab_sel {
+                0 => (2 * j, 2 * j, true),
+                1 => (2 * j + 1, 2 * j + 1, true),
+                2 => {
+                    let base = (j / 2) * 4 + (j % 2);
+                    (base, base + 2, false)
+                }
+                _ => (2 * j, 2 * j + 1, false),
+            };
+            let inp = if src { &old } else { &x };
+            let inp_b = &x;
+            let a = sx25(dword(inp, ai));
+            let b = sx25(dword(inp_b, bi));
+            let zi = match z_sel {
+                0 | 3 => (j / 2) * 4,
+                1 => (j / 2) * 4 + 1,
+                _ => 2 * j,
+            };
+            let z = sx25(dword(&y, zi));
+            let (ra, rb) = if gs {
+                let m = mont(a - b, z);
+                (a + b, m)
+            } else {
+                let m = mont(b, z);
+                (a + m, a - m)
+            };
+            out[j * 8..j * 8 + 4].copy_from_slice(&fold(ra).to_le_bytes());
+            out[j * 8 + 4..j * 8 + 8].copy_from_slice(&fold(rb).to_le_bytes());
+        }
+        zput(env, dst_r, &out);
+        return Ok(());
+    }
     let mut flags = 0u8;
     let vcvt2_mxcsr: u32 = env.backend.get(sem::mxcsr_ref());
     // AVX10.2 の bf16 演算・VDPBF16PS は DAZ/FTZ が無条件に効く
@@ -20348,6 +20408,7 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::VminmaxpsXvHvWvIb
             | Insn::VminmaxpdXvHvWvIb
             | Insn::Vminmaxbf16XvHvWvIb
+            | Insn::VpmldsabflydqXvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv

@@ -5505,6 +5505,22 @@ fn build_map_0f3a(m: &mut Model) {
         it.when = Pred::Flag("avx10_v2_aux".to_string());
         items.push(MapItem::Insn(0x3D, it));
     }
+    // VPMLDSABFLYDQ（EVEX.66.0F3A.W1 DC /r ib、mask/broadcast なし）。
+    {
+        let mut it = ex(
+            "vpmldsabflydq_xv_hv_wv_ib",
+            &[RegX, Vv, RmX, ib],
+            PfxSel::P66,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.wsel = Some(true);
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_vpmldsabflydq".to_string());
+        items.push(MapItem::Insn(0xDC, it));
+    }
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
         vex_code: Some(3),

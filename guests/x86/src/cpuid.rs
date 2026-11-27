@@ -356,6 +356,9 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             if features.contains("avx10_v2_aux") {
                 ecx |= 1 << 3;
             }
+            if features.contains("avx10_vpmldsabflydq") {
+                ecx |= 1 << 7;
+            }
             [0, 0, ecx, 0]
         } else {
             [0; 4]

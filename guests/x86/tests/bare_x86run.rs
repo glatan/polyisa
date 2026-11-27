@@ -29206,6 +29206,42 @@ fn run64_avx10_vunpackb() {
 }
 
 #[test]
+fn run64_avx10_vpmldsabflydq() {
+    // imm8=0: SRC1/SRC2 の low dword を A/B、Z は 128 bit 車線先頭の
+    // low dword。A'=A+MontMul(B,Z)、B'=A-MontMul(B,Z) を Q 折りたたみで確認する。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    let pack = |d0: u32, d2: u32| -> u128 { u128::from(d0) | (u128::from(d2) << 64) };
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(0, 0), pack(1, 2));
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(1, 0), pack(3, 4));
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(2, 0), pack(5, 0));
+    let mut prog = vec![0x62, 0xF3, 0xF5, 0x08, 0xDC, 0xC2, 0x00];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats() | polyisa_guest_x86::FEAT_AVX10_VPMLDSABFLYDQ,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    let d = |i: u32| ((v0 >> (i * 32)) & 0xffff_ffff) as u32;
+    assert_eq!(
+        [d(0), d(1), d(2), d(3)],
+        [0x0065_a5a2, 0x001a_3a61, 0x005c_e783, 0x0022_f882]
+    );
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ
