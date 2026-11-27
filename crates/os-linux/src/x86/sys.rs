@@ -4349,15 +4349,36 @@ fn sys_ioctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_ioctl(env, cx)
 }
 
+fn sleep_result(cx: &SysCtx, errno: u32, positive: bool) -> u64 {
+    if positive {
+        u64::from(errno)
+    } else {
+        cx.neg(errno)
+    }
+}
+
 fn sys_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // nanosleep(req, rem)。タイマ待ちとして block し、期限満了後の
-    // syscall 再実行で 0 を返す。シグナルに割り込まれた場合は
-    // nanosleep の規約どおり SA_RESTART でも再開せず EINTR にし、
-    // rem があれば残り時間を書く。
     let req = get64(env, cx.r_a);
     let rem = get64(env, cx.r_b);
+    nanosleep_impl(sys, env, cx, req, rem, false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nanosleep_impl(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    req: u64,
+    rem: u64,
+    abstime: bool,
+    positive_errno: bool,
+) -> Option<TrapOutcome> {
+    // nanosleep/clock_nanosleep の共通部。タイマ待ちとして block し、
+    // 期限満了後の syscall 再実行で 0 を返す。シグナルに割り込まれた
+    // 場合は SA_RESTART でも再開せず EINTR にし、relative sleep では
+    // rem があれば残り時間を書く。
     if req == 0 {
-        set64(env, Gpr(0), cx.neg(EFAULT));
+        set64(env, Gpr(0), sleep_result(cx, EFAULT, positive_errno));
         return Some(TrapOutcome::Handled);
     }
     let wide = sys.is64 && !sys.x32;
@@ -4383,21 +4404,29 @@ fn sys_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         )
     };
     if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
+        set64(env, Gpr(0), sleep_result(cx, EINVAL, positive_errno));
         return Some(TrapOutcome::Handled);
     }
     let duration = (sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(nsec as u64);
-    if duration == 0 {
+    if !abstime && duration == 0 {
         sys.sleep_deadline = None;
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
     let now = sys.mono_ns();
-    let deadline = sys
-        .sleep_deadline
-        .unwrap_or_else(|| now.saturating_add(duration));
+    let initial_deadline = if abstime {
+        // clock_gettime(CLOCK_MONOTONIC) は mono_start 起点、fd 待ちは
+        // wait_start 起点。両方とも同じ速さで進むので差分を一度だけ換算する。
+        let report_start = *sys.mono_start.get_or_insert_with(std::time::Instant::now);
+        let report_now = report_start.elapsed().as_nanos() as i128;
+        let offset = now as i128 - report_now;
+        (duration as i128 + offset).max(0) as u64
+    } else {
+        now.saturating_add(duration)
+    };
+    let deadline = sys.sleep_deadline.unwrap_or(initial_deadline);
     if now >= deadline {
         sys.sleep_deadline = None;
         sys.fd_wait = None;
@@ -4409,7 +4438,7 @@ fn sys_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     let interrupting = sys.sig_pending & !sys.sig_mask != 0;
     if interrupting {
         let left = deadline.saturating_sub(now);
-        if rem != 0 {
+        if rem != 0 && !abstime {
             let out = if wide {
                 let mut b = [0u8; 16];
                 b[..8].copy_from_slice(&(left / 1_000_000_000).to_le_bytes());
@@ -4434,7 +4463,7 @@ fn sys_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
             .borrow_mut()
             .meta
             .unblock(polyisa_kernel::ThreadId(id.0));
-        if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false) {
+        if sys.interrupt_blocked_syscall(env, sleep_result(cx, EINTR, positive_errno), false) {
             return Some(TrapOutcome::Handled);
         }
     }
@@ -4459,9 +4488,19 @@ fn sys_sched_getaffinity(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Opt
     crate::x86::sys_sched_getaffinity(me, env, cx)
 }
 
-fn sys_clock_nanosleep(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_clock_nanosleep(env, cx)
+fn sys_clock_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // clock_nanosleep(clockid, flags, req, rem)。CLOCK_REALTIME と
+    // MONOTONIC を受け、TIMER_ABSTIME はゲストの monotonic 時計へ換算する。
+    // clock_nanosleep は errno を負ではなく正の値で返す。
+    let clockid = get64(env, cx.r_a);
+    let flags = get64(env, cx.r_b);
+    if clockid > 1 || flags & !1 != 0 {
+        set64(env, Gpr(0), u64::from(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let req = get64(env, cx.r_c);
+    let rem = get64(env, cx.r_d);
+    nanosleep_impl(sys, env, cx, req, rem, flags & 1 != 0, true)
 }
 
 fn sys_gettimeofday(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -7840,7 +7879,36 @@ mod tests {
         set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
         set64(&mut env, Gpr(7), 99);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        assert_eq!(get64(&mut env, Gpr(0)), u64::from(EINVAL));
+    }
+
+    #[test]
+    fn clock_nanosleep_relative_blocks_until_the_deadline() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x108), &1000i64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        if let Some(wait) = &mut sys.fd_wait {
+            wait.deadline = Some(0);
+        }
+        sys.sleep_deadline = Some(0);
+        sys.sweep_fd_waits();
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]
