@@ -12449,8 +12449,8 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
 }
 
 /// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。整数化は 80 ビットから直接行い、
-/// 仮数は変えず指数に整数を加える。
-/// 結果が上限を超えると無限、下限を割ると仮数右シフトの非正規数（近似）。
+/// 仮数は変えず指数に整数を加える。denormal 入力は正規化し、結果の
+/// gradual underflow では FCW.RC に従って丸める。
 pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (s0, e0, fault0) = sem::read_st_source(b, top);
@@ -12458,6 +12458,7 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let (s1, e1, fault1) = sem::read_st_source(b, slot);
     let fault = sem::bit_or(b, fault0, fault1);
     let commit = sem::x87_commit_after_fault(b, fault);
+    let nofault = sem::bit_not(b, fault);
     let n = f80_to_i64_trunc_occ(b, s1, e1).0;
     let hi = b.konst::<W64>(0x8000);
     let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
@@ -12465,41 +12466,98 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let nlo = b.cmp::<W64>(Cmp::LtS, n, lo);
     let n1 = b.select::<W64>(nhi, hi, n);
     let n2 = b.select::<W64>(nlo, lo, n1);
+
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = mask15;
+    let s15 = b.konst::<W64>(15);
     let e64 = b.zext::<W16, W64>(e0);
-    let m7fff = b.konst::<W64>(0x7fff);
-    let eb = b.and::<W64>(e64, m7fff);
-    let sum = b.add::<W64>(eb, n2);
-    let z64 = b.konst::<W64>(0);
-    let max_e = b.konst::<W64>(0x7ffe);
-    let over = b.cmp::<W64>(Cmp::GtS, sum, max_e);
-    let under = b.cmp::<W64>(Cmp::LeS, sum, z64);
-    let one64 = b.konst::<W64>(1);
-    let shift = b.sub::<W64>(one64, sum);
-    let s63 = b.konst::<W64>(63);
-    let sh_big = b.cmp::<W64>(Cmp::GtU, shift, s63);
-    let shift_c = b.select::<W64>(sh_big, s63, shift);
-    let sig_den = b.shr_l::<W64>(s0, shift_c);
-    let sig_u = b.select::<W64>(under, sig_den, s0);
-    let exp_u = b.select::<W64>(under, z64, sum);
-    let ibit = b.konst::<W64>(1u64 << 63);
-    let sig_f = b.select::<W64>(over, ibit, sig_u);
-    let exp_f = b.select::<W64>(over, m7fff, exp_u);
-    // NaN/inf（指数 0x7fff）と ±0（仮数 0）は入力をそのまま返す。
-    let ef = b.cmp::<W64>(Cmp::Eq, eb, m7fff);
-    let sz = b.cmp::<W64>(Cmp::Eq, s0, z64);
-    let ez0 = b.cmp::<W64>(Cmp::Eq, eb, z64);
-    let is_zero = sem::bit_and(b, ez0, sz);
-    let pass = sem::bit_or(b, ef, is_zero);
-    let sig_p = b.select::<W64>(pass, s0, sig_f);
-    let exp_p = b.select::<W64>(pass, e64, exp_f);
-    let m8000 = b.konst::<W64>(0x8000);
-    let sgn = b.and::<W64>(e64, m8000);
-    let exp_s = b.or::<W64>(exp_p, sgn);
-    let exp16 = b.trunc::<W64, W16>(exp_s);
+    let eb = b.and::<W64>(e64, mask15);
+    let sign = b.shr_l::<W64>(e64, s15);
+    let ez0 = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let sz0 = b.cmp::<W64>(Cmp::Eq, s0, zero);
+    let snz0 = sem::bit_not(b, sz0);
+    let is_zero = sem::bit_and(b, ez0, sz0);
+    let denormal = sem::bit_and(b, ez0, snz0);
+    let denormal = sem::bit_and(b, denormal, nofault);
+    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let sp = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let pass = sem::bit_or(b, sp, is_zero);
+
+    let (sig_norm, ea_eff) = sem::x87_normalize_denormal_operand(b, s0, eb);
+    let sum = b.add::<W64>(ea_eff, n2);
+    let over = b.cmp::<W64>(Cmp::GeS, sum, special);
+    let under = b.cmp::<W64>(Cmp::LeS, sum, zero);
+
+    // exponent 0 以下では、正規化 significand を FCW.RC で丸めながら
+    // denormal へ落とす。shift が 64 以上なら結果は零だが、shift=64
+    // では元の integer bit が round bit になる。
+    let shift0 = b.sub::<W64>(one, sum);
+    let k64 = b.konst::<W64>(64);
+    let sh_gt64 = b.cmp::<W64>(Cmp::GtU, shift0, k64);
+    let sh_ge64 = b.cmp::<W64>(Cmp::GeU, shift0, k64);
+    let sh_cap = b.select::<W64>(sh_ge64, k64, shift0);
+    let round_sh0 = b.sub::<W64>(sh_cap, one);
+    let round_sh = b.select::<W64>(sh_gt64, zero, round_sh0);
+    let round_bit0 = b.shr_l::<W64>(sig_norm, round_sh);
+    let round_bit1 = b.and::<W64>(round_bit0, one);
+    let round_bit2 = b.select::<W64>(sh_gt64, zero, round_bit1);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit2, one);
+    let one_round = b.shl::<W64>(one, round_sh);
+    let sticky_mask = b.sub::<W64>(one_round, one);
+    let sticky_bits0 = b.and::<W64>(sig_norm, sticky_mask);
+    let sticky0 = b.cmp::<W64>(Cmp::Ne, sticky_bits0, zero);
+    let sig_any = b.cmp::<W64>(Cmp::Ne, sig_norm, zero);
+    let sticky1 = sem::bit_or(b, sticky0, sh_gt64);
+    let sticky = sem::bit_and(b, sticky1, sig_any);
+    let kept_for_lsb0 = b.shr_l::<W64>(sig_norm, sh_cap);
+    let kept_for_lsb = b.select::<W64>(sh_ge64, zero, kept_for_lsb0);
+    let kept_lsb = b.and::<W64>(kept_for_lsb, one);
+    let kept_lsb_set = b.cmp::<W64>(Cmp::Eq, kept_lsb, one);
+    let round_up0 = sem::x87_round_up(b, sign, round_set, sticky, kept_lsb_set);
+    let do_up = sem::bit_and(b, round_up0, under);
+    let kept0 = b.shr_l::<W64>(sig_norm, sh_cap);
+    let kept1 = b.select::<W64>(sh_ge64, zero, kept0);
+    let kept_plus = b.add::<W64>(kept1, one);
+    let sig_den = b.select::<W64>(do_up, kept_plus, kept1);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let den_to_normal = b.cmp::<W64>(Cmp::Eq, sig_den, int_bit);
+    let denormal_exp0 = b.select::<W64>(den_to_normal, one, zero);
+    let sig_under = b.select::<W64>(under, sig_den, sig_norm);
+    let exp_under = b.select::<W64>(under, denormal_exp0, sum);
+    let inexact0 = sem::bit_or(b, round_set, sticky);
+    let inexact = sem::bit_and(b, inexact0, under);
+    sem::x87_exception_flag(b, inexact, 1 << 5);
+
+    let (sig_ovm, exp_ovm) = sem::x87_overflow_masked_response(b, sign);
+    let sig_scaled = b.select::<W64>(over, sig_ovm, sig_under);
+    let exp_scaled = b.select::<W64>(over, exp_ovm, exp_under);
+    sem::x87_exception_flag(b, over, 1 << 3);
+    sem::x87_exception_flag(b, over, 1 << 5);
+
+    let fcw = b.get(sem::fcw_ref());
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let z16 = b.konst::<W16>(0);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let uunmasked = sem::bit_not(b, umasked);
+    let unf_tiny = sem::bit_or(b, inexact, uunmasked);
+    let unf = sem::bit_and(b, under, unf_tiny);
+    sem::x87_exception_flag(b, unf, 1 << 4);
+
+    let sig_p = b.select::<W64>(pass, s0, sig_scaled);
+    let exp_p = b.select::<W64>(pass, e64, exp_scaled);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let exp_signed = b.or::<W64>(exp_p, sign_bit);
+    // pass した NaN/Inf/zero は入力の符号・指数をそのまま使う。
+    let exp_sel = b.select::<W64>(pass, e64, exp_signed);
+    let exp16 = b.trunc::<W64, W16>(exp_sel);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
-    let sig_out = b.select::<W64>(fault, indef_sig, sig_p);
-    let exp_out = b.select::<W16>(fault, indef_exp, exp16);
+    let sig_out0 = b.select::<W64>(fault, indef_sig, sig_p);
+    let exp_out0 = b.select::<W16>(fault, indef_exp, exp16);
+    let (sig_out, exp_out) = sem::x87_apply_precision(b, sig_out0, exp_out0);
     b.if_then(commit, |b| {
         sem::write_st(b, top, sig_out, exp_out);
         Ok(())

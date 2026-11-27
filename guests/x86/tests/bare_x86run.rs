@@ -14333,6 +14333,55 @@ fn run_x87_fprem_denormal_inputs_use_integer_remainder() {
 }
 
 #[test]
+fn run_x87_fscale_denormal_and_exact_underflow() {
+    fn once(a_sig: u64, a_exp: u16, scale_exp: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), a_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), a_exp);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), 0x8000_0000_0000_0000);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), scale_exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFD]) // fscale
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // tiny * 2 は significand 2 の exact denormal。DE だけが立つ。
+    let (sig, exp, fsw) = once(1, 0, 0x3fff);
+    assert_eq!((sig, exp), (2, 0));
+    assert_ne!(fsw & (1 << 1), 0);
+    assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+    // minnormal * 2^-1 は exact denormal。UE/PE は立たない。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 1, 0xbfff);
+    assert_eq!((sig, exp), (0x4000_0000_0000_0000, 0));
+    assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+    // minnormal+1ulp * 2^-1 は round bit を落とすので UE/PE が立つ。
+    // 偶数側へ丸めるため significand は exact 半分と同じになる。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0001, 1, 0xbfff);
+    assert_eq!((sig, exp), (0x4000_0000_0000_0000, 0));
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_ne!(fsw & (1 << 5), 0);
+}
+
+#[test]
 fn run_x87_inexact_result_sets_precision_flag() {
     fn once(sig1: u64, exp1: u16) -> u16 {
         let mut env = bare_x86_env();
