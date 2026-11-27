@@ -14738,6 +14738,44 @@ fn run_x87_fdiv_honors_fcw_rounding_mode() {
 }
 
 #[test]
+fn run_x87_fdiv_underflow_rounds_once_from_exact_quotient() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // normalized quotient は 0xa376...2d5d で、bit0 が round bit、
+    // remainder 由来の tail が sticky。biased exponent 0 へ落とす
+    // 1 bit shift と一度に丸めると +1 される。
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0xE569_8AF8_3A6D_540D);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x0001);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 0xB3A4_2F67_8929_C300);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x4000);
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xF1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x51BB_4E1B_FED3_96AF
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_ne!(fsw & (1 << 5), 0);
+}
+
+#[test]
 fn run_x87_fadd_honors_fcw_rounding_mode() {
     fn once(fcw: u16) -> u64 {
         let mut env = bare_x86_env();

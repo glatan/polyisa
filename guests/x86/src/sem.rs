@@ -16031,23 +16031,16 @@ pub(crate) fn div_ext<B: Backend>(
     let eraw = b.select::<W64>(round_ov, eraw_plus, eraw0);
     let e_norm = b.add::<W64>(eraw, bias);
     // overflow は FCW.RC の masked response、underflow は exponent 0 の
-    // denormal へ右へ揃える。subnormal 境界の double rounding は残る。
+    // denormal へ右へ揃える。
     let e_ovf = b.cmp::<W64>(Cmp::GeS, e_norm, special);
     let e_under = b.cmp::<W64>(Cmp::LeS, e_norm, zero);
     let one_minus_e = b.sub::<W64>(one, e_norm);
-    let k63sh = b.konst::<W64>(63);
-    let sh_too_big = b.cmp::<W64>(Cmp::GtU, one_minus_e, k63sh);
-    let sh_den = b.select::<W64>(sh_too_big, k63sh, one_minus_e);
-    let sig_den_raw = b.shr_l::<W64>(sig_norm, sh_den);
-    let sig_den = b.select::<W64>(sh_too_big, zero, sig_den_raw);
-    let one_sh_den = b.shl::<W64>(one, sh_den);
-    let den_low_mask = b.sub::<W64>(one_sh_den, one);
-    let den_dropped_bits = b.and::<W64>(sig_norm, den_low_mask);
-    let den_dropped0 = b.cmp::<W64>(Cmp::Ne, den_dropped_bits, zero);
-    let sig_norm_nz = b.cmp::<W64>(Cmp::Ne, sig_norm, zero);
-    let den_all_lost = bit_and(b, sh_too_big, sig_norm_nz);
-    let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
-    let den_inexact = bit_and(b, e_under, den_dropped1);
+    // 除算でも 64 ビット quotient を二度丸めせず、truncate 前の
+    // normalized quotient と remainder 由来の exact tail から denormal
+    // quantum へ一度だけ丸める。
+    let (sig_den, den_round_inexact) =
+        x87_round_shift64_tail(b, sig_trunc, one_minus_e, sign_r, inexact_raw);
+    let den_inexact = bit_and(b, e_under, den_round_inexact);
     let inexact_total = bit_or(b, inexact, den_inexact);
     x87_exception_flag(b, inexact_total, 1 << 5);
     let fcw = b.get(fcw_ref());
@@ -16065,7 +16058,9 @@ pub(crate) fn div_ext<B: Backend>(
     let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
     let e_unfu = b.add::<W64>(e_norm, scale_bias);
     let sig_unf = b.select::<W64>(umasked, sig_den, sig_norm);
-    let e_unf = b.select::<W64>(umasked, zero, e_unfu);
+    let den_to_normal = b.cmp::<W64>(Cmp::Eq, sig_den, int_bit);
+    let e_den_masked = b.select::<W64>(den_to_normal, one, zero);
+    let e_unf = b.select::<W64>(umasked, e_den_masked, e_unfu);
     let e_inf = b.select::<W64>(e_ovf, e_over, e_norm);
     let sig_fin = b.select::<W64>(e_ovf, sig_over, sig_norm);
     let e_under_z = b.select::<W64>(e_under, e_unf, e_inf);
