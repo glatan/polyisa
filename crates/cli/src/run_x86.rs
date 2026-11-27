@@ -10654,6 +10654,16 @@ fn xstore_step(
     }
 }
 
+/// FTZ 規則で f32 の denormal 結果を符号付き zero へ落とす。
+fn f32_ftz_bits(x: f32) -> u32 {
+    let bits = x.to_bits();
+    if bits & 0x7fff_ffff != 0 && bits & 0x7f80_0000 == 0 {
+        bits & 0x8000_0000
+    } else {
+        bits
+    }
+}
+
 /// FP16 のビットパターンを f32 に変換する。
 fn f16_to_f32(h: u16) -> f32 {
     let s = if h & 0x8000 != 0 { -1.0f32 } else { 1.0 };
@@ -11670,7 +11680,7 @@ fn amx_tile_exec(
                                 0xff80_0000
                             } else {
                                 let tmp = f32::from_bits(int_to_f32(sum, factor));
-                                (acc0 + tmp).to_bits()
+                                f32_ftz_bits(acc0 + tmp)
                             };
                             st[dcell..dcell + 4].copy_from_slice(&r.to_le_bytes());
                         }
@@ -11735,12 +11745,7 @@ fn amx_tile_exec(
                             let pair_sum = even + odd;
                             let acc0 = f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
                             let out = acc0 + pair_sum;
-                            let bits = out.to_bits();
-                            let bits = if bits & 0x7fff_ffff != 0 && bits & 0x7f80_0000 == 0 {
-                                bits & 0x8000_0000
-                            } else {
-                                bits
-                            };
+                            let bits = f32_ftz_bits(out);
                             st[dcell..dcell + 4].copy_from_slice(&bits.to_le_bytes());
                         }
                         _ => {
@@ -11777,12 +11782,7 @@ fn amx_tile_exec(
                             let pair_sum = even + odd;
                             let acc0 = f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
                             let out = acc0 + pair_sum;
-                            let bits = out.to_bits();
-                            let bits = if bits & 0x7fff_ffff != 0 && bits & 0x7f80_0000 == 0 {
-                                bits & 0x8000_0000
-                            } else {
-                                bits
-                            };
+                            let bits = f32_ftz_bits(out);
                             st[dcell..dcell + 4].copy_from_slice(&bits.to_le_bytes());
                         }
                     }
