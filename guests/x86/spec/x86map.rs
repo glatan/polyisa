@@ -4015,6 +4015,7 @@ fn build_map_0f38(m: &mut Model) {
     // src1 の ZMM、vvvv は src2 の ZMM。一部は imm8 で scale groupを選ぶ。
     for (op, sel, mn) in [
         (0x5Cu8, PfxSel::PF3, "top2bf16ps"),
+        (0x5C, PfxSel::PF2, "top2phps"),
         (0x5E, PfxSel::PF2, "top4bssd"),
         (0x5E, PfxSel::PF3, "top4bsud"),
         (0x5E, PfxSel::P66, "top4busd"),
@@ -4024,7 +4025,8 @@ fn build_map_0f38(m: &mut Model) {
         it.group_mod = Some(true);
         it.wsel = Some(false);
         it.no_mask = true;
-        it.when = Pred::All(vec![w("m64"), Pred::Flag("ace".to_string())]);
+        let feature = if mn == "top2phps" { "ace_op_fp16" } else { "ace" };
+        it.when = Pred::All(vec![w("m64"), Pred::Flag(feature.to_string())]);
         v.push(MapItem::Insn(op, it));
     }
     // ACE row convert-and-move の GPR 形。すべて read 専用で W0。

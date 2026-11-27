@@ -6069,6 +6069,7 @@ fn amx_tile_step(
             | Insn::Tcvtrowps2phlGpr
             | Insn::Tcvtrowps2phlImm
             | Insn::Top2bf16ps
+            | Insn::Top2phps
             | Insn::Top4bssd
             | Insn::Top4bsud
             | Insn::Top4busd
@@ -7824,6 +7825,7 @@ fn amx_tile_exec(
     if matches!(
         insn,
         Insn::Top2bf16ps
+            | Insn::Top2phps
             | Insn::Top4bssd
             | Insn::Top4bsud
             | Insn::Top4busd
@@ -7997,6 +7999,46 @@ fn amx_tile_exec(
                         ace_add_f32_ftz(oldbits, sop_fp32)
                     };
                     env.backend.state[at..at + 4].copy_from_slice(&out.to_le_bytes());
+                } else if insn == Insn::Top2phps {
+                    use polyisa_softfloat::{F16, F32, Rm};
+                    let f32new = |bits: u32| F32::from_bits(u64::from(bits));
+                    let half = |bits: u16| F16::from_bits(u64::from(bits)).to_f32(Rm::Rne).0;
+                    let ftz = |f: F32| {
+                        let bits = f.bits() as u32;
+                        if bits & 0x7f80_0000 == 0 && bits & 0x007f_ffff != 0 {
+                            f32new(bits & 0x8000_0000)
+                        } else {
+                            f
+                        }
+                    };
+                    let indef = || F32::from_bits(0xffc0_0000);
+                    let mul = |x: F32, y: F32| {
+                        let (r, _) = x.mul_rm(y, Rm::Rne);
+                        if r.is_nan() { indef() } else { r }
+                    };
+                    let add_ftz = |x: F32, y: F32| {
+                        let (r, _) = x.add_rm(y, Rm::Rne);
+                        if r.is_nan() { indef() } else { ftz(r) }
+                    };
+                    let a0 = half(aq as u16);
+                    let a1 = half((aq >> 16) as u16);
+                    let b0 = half(bq as u16);
+                    let b1 = half((bq >> 16) as u16);
+                    let p0 = mul(a0, b0);
+                    let p1 = mul(a1, b1);
+                    let sop = add_ftz(p0, p1);
+                    let oldbits =
+                        u32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap());
+                    let acc = f32new(
+                        if oldbits & 0x7f80_0000 == 0 && oldbits & 0x007f_ffff != 0 {
+                            oldbits & 0x8000_0000
+                        } else {
+                            oldbits
+                        },
+                    );
+                    let out = add_ftz(acc, sop);
+                    env.backend.state[at..at + 4]
+                        .copy_from_slice(&(out.bits() as u32).to_le_bytes());
                 } else if insn == Insn::Top2bf16ps {
                     use polyisa_softfloat::{F32, Rm};
                     let bf = |w: u16| {

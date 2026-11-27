@@ -26714,7 +26714,8 @@ fn run64_ace_outer_products_basic() {
     let feats = polyisa_guest_x86::model_feats("x86_64_v3")
         | polyisa_guest_x86::FEAT_AVX512F
         | polyisa_guest_x86::FEAT_ACE
-        | polyisa_guest_x86::FEAT_ACE_V2;
+        | polyisa_guest_x86::FEAT_ACE_V2
+        | polyisa_guest_x86::FEAT_ACE_OP_FP16;
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
@@ -26728,6 +26729,10 @@ fn run64_ace_outer_products_basic() {
     // int32 accumulator row0/col0 = 5、fp32 accumulator row1/col0 = 1.0。
     env.backend.state[tile1..tile1 + 4].copy_from_slice(&5i32.to_le_bytes());
     env.backend.state[tmm_off + 2048..tmm_off + 2052]
+        .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
+    // TOP2PHPS 用。tile6 row0/col0=1.0、zmm1=[1.0,2.0]、
+    // zmm0=[3.0,4.0] の FP16 pair。
+    env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
         .copy_from_slice(&0x3f80_0000u32.to_le_bytes());
     let scaledata_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
     env.backend.state[scaledata_off..scaledata_off + 128].fill(0x7f);
@@ -26760,6 +26765,20 @@ fn run64_ace_outer_products_basic() {
             u128::from_le_bytes(b),
         );
     }
+    for (r, first) in [(1u8, 0x4000_3c00u32), (0u8, 0x4400_4200)] {
+        env.backend.set(
+            polyisa_guest_x86::sem::zreg_ref(r, 0),
+            u128::from_le_bytes(
+                first
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain([0u8; 12])
+                    .collect::<Vec<u8>>()
+                    .try_into()
+                    .unwrap(),
+            ),
+        );
+    }
     for r in [6u8, 7] {
         let mut b = [0u8; 16];
         b[0] = 64; // MX INT8 の 1.0（2^-6 scale）
@@ -26788,8 +26807,10 @@ fn run64_ace_outer_products_basic() {
     let prog: &[u8] = &[
         // top4bssd tmm1,zmm4,zmm5。vvvv=5 なので P1 の vvvv フィールドは !5=0xa。
         0x62, 0xF2, 0x57, 0x48, 0x5E, 0xCC,
-        // top2bf16ps tmm1,zmm2,zmm3。vvvv=3 なので !3=0xc。
+        // top2bf16ps tmm2,zmm2,zmm3。vvvv=3 なので !3=0xc。
         0x62, 0xF2, 0x66, 0x48, 0x5C, 0xD2,
+        // top2phps tmm6,zmm1,zmm0。vvvv=0 なのでフィールドは 1111b。
+        0x62, 0xF2, 0x7F, 0x48, 0x5C, 0xF1,
         // top4mxbssps tmm3,zmm6,zmm7,0（src2=zmm7 なので vvvv フィールドは !7=8）
         0x62, 0xF3, 0x47, 0x48, 0x8F, 0xDE, 0x00, // top4mxbf8ps tmm4,zmm8,zmm9,0
         0x62, 0xD3, 0x34, 0x48, 0x8D, 0xE0, 0x00, // top8fmxnssps tmm5,zmm12,zmm13,0
@@ -26823,6 +26844,15 @@ fn run64_ace_outer_products_basic() {
         ),
         0x4140_0000,
         "1.0 + 1*3 + 2*4 = 12.0"
+    );
+    assert_eq!(
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+                .try_into()
+                .unwrap()
+        ),
+        0x4140_0000,
+        "TOP2PHPS 1.0 + 1*3 + 2*4 = 12.0"
     );
     assert_eq!(
         u32::from_le_bytes(
