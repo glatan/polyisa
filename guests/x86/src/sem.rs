@@ -15615,8 +15615,8 @@ pub(crate) fn div_ext<B: Backend>(
     let sign_r = b.xor::<W64>(sign_a, sign_b);
     let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special);
     let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special);
-    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
-    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let ez_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let ez_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
     // 非数判定: 指数が全 1 で仮数の小数部が非零。
     let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
     let fa = b.and::<W64>(sig_a, frac_mask);
@@ -15631,18 +15631,24 @@ pub(crate) fn div_ext<B: Backend>(
     let inf_b = bit_and(b, sp_b, fb_z);
     let sig_a_nz = b.cmp::<W64>(Cmp::Ne, sig_a, zero);
     let sig_b_nz = b.cmp::<W64>(Cmp::Ne, sig_b, zero);
-    let den_a = bit_and(b, z_a, sig_a_nz);
-    let den_b = bit_and(b, z_b, sig_b_nz);
+    let sig_a_z = bit_not(b, sig_a_nz);
+    let sig_b_z = bit_not(b, sig_b_nz);
+    let z_a = bit_and(b, ez_a, sig_a_z);
+    let z_b = bit_and(b, ez_b, sig_b_z);
+    let den_a = bit_and(b, ez_a, sig_a_nz);
+    let den_b = bit_and(b, ez_b, sig_b_nz);
     let denormal_in = bit_or(b, den_a, den_b);
     x87_exception_flag(b, denormal_in, 1 << 1);
+    let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
+    let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
     // 通常経路: q = (sig_a << 64) / sig_b ∈ [2^63, 2^65)。
     let num = {
-        let a128 = b.zext::<W64, W128>(sig_a);
+        let a128 = b.zext::<W64, W128>(sig_na);
         let k64 = b.konst::<W128>(64);
         b.shl::<W128>(a128, k64)
     };
-    let den = b.zext::<W64, W128>(sig_b);
+    let den = b.zext::<W64, W128>(sig_nb);
     let q128 = b.udiv::<W128>(num, den);
     let r128 = b.urem::<W128>(num, den);
     let q = b.trunc::<W128, W64>(q128);
@@ -15654,7 +15660,10 @@ pub(crate) fn div_ext<B: Backend>(
     // 除算の剰余から丸めビットを作る。q>=2^64 では q bit0 が
     // 0.5 ulp 相当、そうでなければ remainder/denominator を
     // 1/2 と比較する。
-    let sig_sh = b.shr_l::<W64>(q, one);
+    let sig_sh0 = b.shr_l::<W64>(q, one);
+    // q の bit 64 は u64 へ truncate すると落ちる。正規化後の
+    // significand ではその bit が integer bit になるので復元する。
+    let sig_sh = b.or::<W64>(sig_sh0, int_bit);
     let sig_trunc = b.select::<W64>(q_ge, sig_sh, q);
     let q_bit0 = b.and::<W64>(q, one);
     let q_half = b.cmp::<W64>(Cmp::Eq, q_bit0, one);
@@ -15682,7 +15691,6 @@ pub(crate) fn div_ext<B: Backend>(
     let finite_in = bit_and(b, inexact_raw, not_sp_in);
     let nonzero_a_in = bit_and(b, finite_in, not_za_in);
     let inexact = bit_and(b, nonzero_a_in, not_zb_in);
-    x87_exception_flag(b, inexact, 1 << 5);
     let lsb = b.and::<W64>(sig_trunc, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let do_up = x87_round_up(b, sign_r, round_set, sticky, lsb_set);
@@ -15692,26 +15700,51 @@ pub(crate) fn div_ext<B: Backend>(
     let round_ov = bit_and(b, do_up, at_max);
     let sig_round = b.select::<W64>(do_up, sig_plus, sig_trunc);
     let sig_norm = b.select::<W64>(round_ov, int_bit, sig_round);
-    let ediff = b.sub::<W64>(ea, eb);
+    let ediff = b.sub::<W64>(ea_eff, eb_eff);
     let em1 = b.sub::<W64>(ediff, one);
     let eraw0 = b.select::<W64>(q_ge, ediff, em1);
     let eraw_plus = b.add::<W64>(eraw0, one);
     let eraw = b.select::<W64>(round_ov, eraw_plus, eraw0);
     let e_norm = b.add::<W64>(eraw, bias);
-    // オーバー/アンダーフローは特別値へ潰す（飽和近似）。
+    // overflow は FCW.RC の masked response、underflow は exponent 0 の
+    // denormal へ右へ揃える。subnormal 境界の double rounding は残る。
     let e_ovf = b.cmp::<W64>(Cmp::GeS, e_norm, special);
     let e_under = b.cmp::<W64>(Cmp::LeS, e_norm, zero);
-    let sig_ovf = int_bit;
-    let e_inf = b.select::<W64>(e_ovf, special, e_norm);
-    let sig_fin = b.select::<W64>(e_ovf, sig_ovf, sig_norm);
+    let one_minus_e = b.sub::<W64>(one, e_norm);
+    let k63sh = b.konst::<W64>(63);
+    let sh_too_big = b.cmp::<W64>(Cmp::GtU, one_minus_e, k63sh);
+    let sh_den = b.select::<W64>(sh_too_big, k63sh, one_minus_e);
+    let sig_den_raw = b.shr_l::<W64>(sig_norm, sh_den);
+    let sig_den = b.select::<W64>(sh_too_big, zero, sig_den_raw);
+    let one_sh_den = b.shl::<W64>(one, sh_den);
+    let den_low_mask = b.sub::<W64>(one_sh_den, one);
+    let den_dropped_bits = b.and::<W64>(sig_norm, den_low_mask);
+    let den_dropped0 = b.cmp::<W64>(Cmp::Ne, den_dropped_bits, zero);
+    let sig_norm_nz = b.cmp::<W64>(Cmp::Ne, sig_norm, zero);
+    let den_all_lost = bit_and(b, sh_too_big, sig_norm_nz);
+    let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
+    let den_inexact = bit_and(b, e_under, den_dropped1);
+    let inexact_total = bit_or(b, inexact, den_inexact);
+    x87_exception_flag(b, inexact_total, 1 << 5);
+    let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign_r);
+    let e_inf = b.select::<W64>(e_ovf, exp_ovm, e_norm);
+    let sig_fin = b.select::<W64>(e_ovf, sig_ovm, sig_norm);
     let e_under_z = b.select::<W64>(e_under, zero, e_inf);
-    let sig_under = b.select::<W64>(e_under, zero, sig_fin);
+    let sig_under = b.select::<W64>(e_under, sig_den, sig_fin);
 
     let finite_div = bit_and(b, not_sp_in, not_za_in);
     let finite_div = bit_and(b, finite_div, not_zb_in);
     let ovf_occur = bit_and(b, e_ovf, finite_div);
-    let unf_occur = bit_and(b, e_under, finite_div);
     x87_exception_flag(b, ovf_occur, 1 << 3);
+    let fcw = b.get(fcw_ref());
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let z16 = b.konst::<W16>(0);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let uunmasked = bit_not(b, umasked);
+    let unf_tiny = bit_or(b, inexact_total, uunmasked);
+    let unf_tiny = bit_and(b, e_under, unf_tiny);
+    let unf_occur = bit_and(b, unf_tiny, finite_div);
     x87_exception_flag(b, unf_occur, 1 << 4);
 
     // 特殊値の規則:
