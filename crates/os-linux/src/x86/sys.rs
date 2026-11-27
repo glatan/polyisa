@@ -134,6 +134,7 @@ pub struct Linux {
 struct WaitSlot {
     which: i64,
     status_ptr: u64,
+    untraced: bool,
 }
 
 /// 今は走っていないスレッドの実行環境。
@@ -1342,14 +1343,31 @@ impl Linux {
             .borrow_mut()
             .meta
             .unblock(polyisa_kernel::ThreadId(self.pid));
-        match self
-            .procs
-            .borrow_mut()
-            .try_reap(polyisa_kernel::ProcessId(self.pid), wait.which)
-        {
+        match self.procs.borrow_mut().try_wait(
+            polyisa_kernel::ProcessId(self.pid),
+            wait.which,
+            wait.untraced,
+        ) {
             polyisa_kernel::Reap::Exited { pid, code, signal } => {
                 if wait.status_ptr != 0 {
                     let st = reap_status(code, signal);
+                    if env
+                        .backend
+                        .mem
+                        .write(VirtAddr(wait.status_ptr), &st.to_le_bytes())
+                        .is_err()
+                    {
+                        self.set_errno(env, EFAULT);
+                        self.advance_past_syscall(env);
+                        return;
+                    }
+                }
+                set64(env, Gpr(0), pid.0);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::Stopped { pid, signal } => {
+                if wait.status_ptr != 0 {
+                    let st = stopped_wait_status(signal);
                     if env
                         .backend
                         .mem
@@ -1431,6 +1449,10 @@ impl Linux {
 /// 1 回の read/write でホストに確保する上限（バイト）。ゲスト指定の
 /// 長さが大きくても、この刻みで分割して転送する。
 const IO_CHUNK: usize = 65536;
+
+fn stopped_wait_status(signal: u32) -> u32 {
+    (signal << 8) | 0x7f
+}
 
 fn reap_status(code: u32, signal: Option<u32>) -> u32 {
     match signal {
@@ -3283,6 +3305,35 @@ fn signal_default_terminates(sig: u64) -> bool {
     )
 }
 
+/// Linux/x86 の標準シグナルで、既定動作が停止のもの。
+fn signal_default_stops(sig: u64) -> bool {
+    matches!(sig, 19..=22)
+}
+
+/// stop 系シグナルのビット集合（SIGSTOP..SIGTTOU）。
+fn stop_signal_bits() -> u64 {
+    (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21)
+}
+
+/// このシグナルが今の動作・maskで即時停止を起こすか。
+/// SIGSTOP は捕捉・block・ignore できない。他の stop 系は
+/// SIG_DFL かつ unmasked のときだけ既定動作で止まる。
+fn signal_stop_applies(linux: &Linux, sig: u64) -> bool {
+    if sig == 19 {
+        return true;
+    }
+    if !signal_default_stops(sig) {
+        return false;
+    }
+    let bit = 1u64 << (sig - 1);
+    let act = linux
+        .sigacts
+        .get(sig as usize - 1)
+        .copied()
+        .unwrap_or_default();
+    act.handler == 0 && linux.sig_mask & bit == 0
+}
+
 /// parked な対象プロセスをシグナル死因として終了させる。
 fn terminate_parked_by_signal(sys: &mut Linux, target: polyisa_kernel::ProcessId, sig: u64) {
     sys.procs.borrow_mut().kill(target, sig as u32);
@@ -3295,12 +3346,43 @@ fn terminate_parked_by_signal(sys: &mut Linux, target: polyisa_kernel::ProcessId
     sys.wake_child_waiters(target);
 }
 
+/// parked な対象へのシグナル生成結果を、プロセス表と親の wait へ反映する。
+fn finish_parked_signal(
+    sys: &mut Linux,
+    target: polyisa_kernel::ProcessId,
+    outcome: ParkedSignal,
+    sig: u64,
+) {
+    match outcome {
+        ParkedSignal::Terminate => terminate_parked_by_signal(sys, target, sig),
+        ParkedSignal::Stop => sys.wake_child_waiters(target),
+        ParkedSignal::Missing | ParkedSignal::Noop | ParkedSignal::Queued => {}
+    }
+}
+
+/// 現在のスレッドを stop 系シグナルの既定動作で止める。
+/// kill/tkill の syscall 自体は成功したものとして、継続後に次へ進む。
+fn stop_current_by_signal(sys: &mut Linux, env: &mut BareEnv, sig: u64) -> TrapOutcome {
+    sys.procs
+        .borrow_mut()
+        .stop(polyisa_kernel::ProcessId(sys.pid), sig as u32);
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .stop(polyisa_kernel::ThreadId(sys.pid));
+    set64(env, Gpr(0), 0);
+    sys.wake_child_waiters(polyisa_kernel::ProcessId(sys.pid));
+    TrapOutcome::Blocked
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParkedSignal {
     Missing,
     Noop,
     Queued,
     Terminate,
+    Stop,
 }
 
 fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
@@ -3326,9 +3408,26 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
         return ParkedSignal::Missing;
     };
     let mut wake = false;
+    let mut cont = false;
+    let mut stop = false;
     let outcome = {
         let task = &mut queue.parked[idx];
-        if signal_is_pending_target(&task.linux, sig) {
+        // stop/continue のプロセス全体効果は配送ではなく生成時に起こる。
+        // SIGCONT は pending stop を捨て、stop 系は pending SIGCONT を捨てる。
+        if sig == 18 {
+            task.linux.sig_pending &= !stop_signal_bits();
+            cont = true;
+        }
+        let stop_now = if signal_default_stops(sig) {
+            task.linux.sig_pending &= !(1 << 17);
+            signal_stop_applies(&task.linux, sig)
+        } else {
+            false
+        };
+        if stop_now {
+            stop = true;
+            ParkedSignal::Stop
+        } else if signal_is_pending_target(&task.linux, sig) {
             let bit = 1u64 << (sig - 1);
             let caught_unmasked = task
                 .linux
@@ -3361,6 +3460,16 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
             ParkedSignal::Noop
         }
     };
+    if cont {
+        sys.procs.borrow_mut().cont(polyisa_kernel::ProcessId(tid));
+        queue.meta.cont(polyisa_kernel::ThreadId(tid));
+    }
+    if stop {
+        sys.procs
+            .borrow_mut()
+            .stop(polyisa_kernel::ProcessId(tid), sig as u32);
+        queue.meta.stop(polyisa_kernel::ThreadId(tid));
+    }
     if wake {
         queue.meta.unblock(polyisa_kernel::ThreadId(tid));
     }
@@ -3382,6 +3491,12 @@ fn raise_sigpipe(sys: &mut Linux) -> Option<TrapOutcome> {
 }
 
 fn send_signal_to_current(sys: &mut Linux, sig: u64) -> bool {
+    if sig == 18 {
+        sys.sig_pending &= !stop_signal_bits();
+    }
+    if signal_default_stops(sig) {
+        sys.sig_pending &= !(1 << 17);
+    }
     if signal_is_pending_target(sys, sig) {
         sys.sig_pending |= 1 << (sig - 1);
         true
@@ -3413,15 +3528,15 @@ fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        if send_signal_to_parked(sys, tid, sig) == ParkedSignal::Terminate {
-            terminate_parked_by_signal(sys, polyisa_kernel::ProcessId(tid), sig);
+        let outcome = send_signal_to_parked(sys, tid, sig);
+        finish_parked_signal(sys, polyisa_kernel::ProcessId(tid), outcome, sig);
+    } else if sig > 0 && !send_signal_to_current(sys, sig) {
+        if signal_stop_applies(sys, sig) {
+            return Some(stop_current_by_signal(sys, env, sig));
         }
-    } else if sig > 0
-        && !send_signal_to_current(sys, sig)
-        && !signal_is_ignored(sys, sig)
-        && signal_default_terminates(sig)
-    {
-        return Some(sys.terminate_by_signal(sig as u32));
+        if !signal_is_ignored(sys, sig) && signal_default_terminates(sig) {
+            return Some(sys.terminate_by_signal(sig as u32));
+        }
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -3635,22 +3750,28 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         }
         if sig > 0 {
             let mut self_terminates = false;
+            let mut self_stops = false;
             for target in targets {
                 if target == me {
-                    if !send_signal_to_current(sys, sig as u64)
-                        && !signal_is_ignored(sys, sig as u64)
-                        && signal_default_terminates(sig as u64)
-                    {
-                        self_terminates = true;
+                    if !send_signal_to_current(sys, sig as u64) {
+                        if signal_stop_applies(sys, sig as u64) {
+                            self_stops = true;
+                        } else if !signal_is_ignored(sys, sig as u64)
+                            && signal_default_terminates(sig as u64)
+                        {
+                            self_terminates = true;
+                        }
                     }
-                } else if send_signal_to_parked(sys, target.0, sig as u64)
-                    == ParkedSignal::Terminate
-                {
-                    terminate_parked_by_signal(sys, target, sig as u64);
+                } else {
+                    let outcome = send_signal_to_parked(sys, target.0, sig as u64);
+                    finish_parked_signal(sys, target, outcome, sig as u64);
                 }
             }
             if self_terminates {
                 return Some(sys.terminate_by_signal(sig as u32));
+            }
+            if self_stops {
+                return Some(stop_current_by_signal(sys, env, sig as u64));
             }
         }
         set64(env, Gpr(0), 0);
@@ -4339,15 +4460,15 @@ fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        if send_signal_to_parked(sys, tid, sig) == ParkedSignal::Terminate {
-            terminate_parked_by_signal(sys, polyisa_kernel::ProcessId(tid), sig);
+        let outcome = send_signal_to_parked(sys, tid, sig);
+        finish_parked_signal(sys, polyisa_kernel::ProcessId(tid), outcome, sig);
+    } else if sig > 0 && !send_signal_to_current(sys, sig) {
+        if signal_stop_applies(sys, sig) {
+            return Some(stop_current_by_signal(sys, env, sig));
         }
-    } else if sig > 0
-        && !send_signal_to_current(sys, sig)
-        && !signal_is_ignored(sys, sig)
-        && signal_default_terminates(sig)
-    {
-        return Some(sys.terminate_by_signal(sig as u32));
+        if !signal_is_ignored(sys, sig) && signal_default_terminates(sig) {
+            return Some(sys.terminate_by_signal(sig as u32));
+        }
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -5064,10 +5185,12 @@ fn sys_execve(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
 fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // WNOHANG。子がまだ終了していなければ 0 を返す。
     const WNOHANG: u64 = 1;
+    const WUNTRACED: u64 = 2;
     let which = get64(env, cx.r_a) as i64;
     let status_ptr = get64(env, cx.r_b);
     let options = get64(env, cx.r_c);
     let wnohang = options & WNOHANG != 0;
+    let untraced = options & WUNTRACED != 0;
     if sys.pid == 0 {
         set64(env, Gpr(0), cx.neg(ECHILD));
         return Some(TrapOutcome::Handled);
@@ -5082,10 +5205,26 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Handled);
     }
     let parent = polyisa_kernel::ProcessId(sys.pid);
-    match sys.procs.borrow_mut().try_reap(parent, which) {
+    match sys.procs.borrow_mut().try_wait(parent, which, untraced) {
         polyisa_kernel::Reap::Exited { pid, code, signal } => {
             if status_ptr != 0 {
                 let st = reap_status(code, signal);
+                if env
+                    .backend
+                    .mem
+                    .write(VirtAddr(status_ptr), &st.to_le_bytes())
+                    .is_err()
+                {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            set64(env, Gpr(0), pid.0);
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::Reap::Stopped { pid, signal } => {
+            if status_ptr != 0 {
+                let st = stopped_wait_status(signal);
                 if env
                     .backend
                     .mem
@@ -5108,7 +5247,11 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
                 set64(env, Gpr(0), 0);
                 Some(TrapOutcome::Handled)
             } else {
-                sys.wait = Some(WaitSlot { which, status_ptr });
+                sys.wait = Some(WaitSlot {
+                    which,
+                    status_ptr,
+                    untraced,
+                });
                 sys.queue.0.borrow_mut().meta.block(
                     polyisa_kernel::ThreadId(sys.pid),
                     polyisa_kernel::ThreadWait::Child { which },
@@ -10122,6 +10265,105 @@ mod tests {
             .find(|task| task.linux.pid == child)
             .expect("parked child");
         assert_ne!(task.linux.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn sigstop_stops_child_and_wait4_wuntraced_reports_it_once() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 19);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_stopped(polyisa_kernel::ThreadId(child))
+        );
+
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 1 | 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), (19 << 8) | 0x7f);
+
+        // 同じ停止は一度だけ報告する。継続して再停止するまでは 0。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 1 | 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn sigcont_resumes_a_stopped_child_even_when_blocked() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        sys.queue
+            .0
+            .borrow_mut()
+            .parked
+            .iter_mut()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child")
+            .linux
+            .sig_mask |= 1 << 17;
+
+        for sig in [19u64, 18] {
+            set64(&mut env, Gpr(0), abi::KILL);
+            set64(&mut env, Gpr(7), child);
+            set64(&mut env, Gpr(6), sig);
+            assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+            assert_eq!(get64(&mut env, Gpr(0)), 0);
+        }
+        assert!(
+            !sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_stopped(polyisa_kernel::ThreadId(child))
+        );
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child");
+        assert_ne!(task.linux.sig_pending & (1 << 17), 0);
+        drop(queue);
+
+        // SIGCONT は配送が block されていても停止状態だけは即時解除する。
+        // 既に報告していない停止は残っていないので WUNTRACED は 0。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1 | 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

@@ -33,6 +33,10 @@ struct Proc {
     parent: Option<ProcessId>,
     exit_code: Option<u32>,
     signal: Option<u32>,
+    /// 停止させたシグナル。継続すると None。
+    stopped: Option<u32>,
+    /// この停止を wait 済みか。継続後の再停止でまた報告できる。
+    stop_reported: bool,
     pgid: u64,
 }
 
@@ -45,6 +49,8 @@ pub enum Reap {
         code: u32,
         signal: Option<u32>,
     },
+    /// 一致する子が停止した。表には残し、継続や終了を待てる。
+    Stopped { pid: ProcessId, signal: u32 },
     /// 一致する子はいるが、まだ終了していない。
     Pending,
     /// 一致する子がいない。
@@ -61,6 +67,8 @@ impl ProcessTable {
             parent,
             exit_code: None,
             signal: None,
+            stopped: None,
+            stop_reported: false,
             pgid: id.0,
         });
         id
@@ -118,12 +126,36 @@ impl ProcessTable {
         child
     }
 
+    /// シグナルの既定動作で停止する。既に終了していれば偽。
+    pub fn stop(&mut self, id: ProcessId, signal: u32) -> bool {
+        let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
+            return false;
+        };
+        if proc.exit_code.is_some() || proc.signal.is_some() {
+            return false;
+        }
+        proc.stopped = Some(signal);
+        proc.stop_reported = false;
+        true
+    }
+
+    /// 停止を継続する。対象がいなければ偽。
+    pub fn cont(&mut self, id: ProcessId) -> bool {
+        let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
+            return false;
+        };
+        proc.stopped = None;
+        proc.stop_reported = false;
+        true
+    }
+
     /// 終了コードを記録する。シグナルで死んでいれば変えない。
     pub fn exit(&mut self, id: ProcessId, code: u32) {
         if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id)
             && proc.signal.is_none()
         {
             proc.exit_code = Some(code);
+            proc.stopped = None;
         }
     }
 
@@ -134,6 +166,7 @@ impl ProcessTable {
         };
         if proc.exit_code.is_none() && proc.signal.is_none() {
             proc.signal = Some(signal);
+            proc.stopped = None;
         }
         true
     }
@@ -166,8 +199,14 @@ impl ProcessTable {
         child_selected(parent, parent_pgid, proc, which)
     }
 
-    /// `parent` の子を回収する。一致する子がいても終了していなければ `Pending`。
+    /// `parent` の子を回収する。停止報告は含めない。
     pub fn try_reap(&mut self, parent: ProcessId, which: i64) -> Reap {
+        self.try_wait(parent, which, false)
+    }
+
+    /// `parent` の子を wait する。`include_stopped` が真なら、
+    /// まだ報告していない停止を表から外さずに返す。
+    pub fn try_wait(&mut self, parent: ProcessId, which: i64, include_stopped: bool) -> Reap {
         let parent_pgid = self.pgid(parent);
         let matches = |proc: &Proc| child_selected(parent, parent_pgid, proc, which);
         if let Some(idx) = self
@@ -180,6 +219,18 @@ impl ProcessTable {
                 pid: proc.id,
                 code: proc.exit_code.unwrap_or(0),
                 signal: proc.signal,
+            };
+        }
+        if include_stopped
+            && let Some(proc) = self
+                .procs
+                .iter_mut()
+                .find(|proc| matches(proc) && proc.stopped.is_some() && !proc.stop_reported)
+        {
+            proc.stop_reported = true;
+            return Reap::Stopped {
+                pid: proc.id,
+                signal: proc.stopped.unwrap_or(0),
             };
         }
         if self.procs.iter().any(matches) {
@@ -232,6 +283,7 @@ struct GThread {
     id: ThreadId,
     steps: u64,
     wait: Option<ThreadWait>,
+    stopped: bool,
     exited: bool,
 }
 
@@ -251,6 +303,7 @@ impl GuestScheduler {
             id,
             steps: 0,
             wait: None,
+            stopped: false,
             exited: false,
         });
     }
@@ -301,10 +354,33 @@ impl GuestScheduler {
         }
     }
 
+    /// シグナルで停止する。既存の wait は保持し、継続後に元の待ちへ戻れるようにする。
+    pub fn stop(&mut self, id: ThreadId) {
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.stopped = true;
+        }
+    }
+
+    /// 停止を継続する。
+    pub fn cont(&mut self, id: ThreadId) {
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.stopped = false;
+        }
+    }
+
+    /// 停止中なら真。
+    #[must_use]
+    pub fn is_stopped(&self, id: ThreadId) -> bool {
+        self.threads
+            .iter()
+            .any(|thread| thread.id == id && thread.stopped)
+    }
+
     pub fn mark_exited(&mut self, id: ThreadId) {
         if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
             thread.exited = true;
             thread.wait = None;
+            thread.stopped = false;
         }
     }
 
@@ -329,7 +405,7 @@ impl GuestScheduler {
     pub fn next(&self, current: ThreadId) -> Option<ThreadId> {
         let me = self.threads.iter().find(|thread| thread.id == current)?;
         let best = self.least_runnable()?;
-        if !me.exited && me.wait.is_none() {
+        if !me.exited && !me.stopped && me.wait.is_none() {
             if best != current && self.steps_of(best) < me.steps {
                 Some(best)
             } else {
@@ -347,7 +423,7 @@ impl GuestScheduler {
     pub fn least_runnable(&self) -> Option<ThreadId> {
         self.threads
             .iter()
-            .filter(|thread| !thread.exited && thread.wait.is_none())
+            .filter(|thread| !thread.exited && !thread.stopped && thread.wait.is_none())
             .min_by_key(|thread| (thread.steps, thread.id.0))
             .map(|thread| thread.id)
     }
@@ -468,6 +544,44 @@ mod tests {
         assert_eq!(pipes.read(id, 4096), PipeRead::Bytes(vec![b'x'; 4096]));
         assert_eq!(pipes.write(id, &[b'y'; 4096]), PipeWrite::Wrote(4096));
         assert_eq!(pipes.write(id, b"z"), PipeWrite::Full);
+    }
+
+    #[test]
+    fn stopped_process_is_reported_once_until_it_continues() {
+        let mut table = ProcessTable::default();
+        let parent = table.spawn(None);
+        let child = table.fork(parent);
+        assert!(table.stop(child, 19));
+        assert_eq!(
+            table.try_wait(parent, -1, true),
+            Reap::Stopped {
+                pid: child,
+                signal: 19,
+            }
+        );
+        assert_eq!(table.try_wait(parent, -1, true), Reap::Pending);
+        assert!(table.cont(child));
+        assert!(table.stop(child, 20));
+        assert_eq!(
+            table.try_wait(parent, -1, true),
+            Reap::Stopped {
+                pid: child,
+                signal: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn stopped_thread_is_not_runnable_until_it_continues() {
+        let mut sched = GuestScheduler::default();
+        sched.insert(ThreadId(1));
+        sched.insert(ThreadId(2));
+        sched.stop(ThreadId(2));
+        assert_eq!(sched.least_runnable(), Some(ThreadId(1)));
+        sched.stop(ThreadId(1));
+        assert_eq!(sched.least_runnable(), None);
+        sched.cont(ThreadId(2));
+        assert_eq!(sched.least_runnable(), Some(ThreadId(2)));
     }
 
     #[test]
