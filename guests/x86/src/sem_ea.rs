@@ -12640,9 +12640,18 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let exp16 = b.trunc::<W64, W16>(exp_sel);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
-    let sig_out0 = b.select::<W64>(fault, indef_sig, sig_p);
-    let exp_out0 = b.select::<W16>(fault, indef_exp, exp16);
+    let uns0 = sem::x87_unsupported_format(b, s0, e0);
+    let uns1 = sem::x87_unsupported_format(b, s1, e1);
+    let unsupported = sem::bit_or(b, uns0, uns1);
+    sem::x87_exception_flag(b, unsupported, 1);
+    let sig_uns = b.select::<W64>(unsupported, indef_sig, sig_p);
+    let exp_uns = b.select::<W16>(unsupported, indef_exp, exp16);
+    let sig_out0 = b.select::<W64>(fault, indef_sig, sig_uns);
+    let exp_out0 = b.select::<W16>(fault, indef_exp, exp_uns);
     let (sig_out, exp_out) = sem::x87_apply_precision(b, sig_out0, exp_out0);
+    let invalid_um = sem::x87_unmasked_exception(b, unsupported, 1);
+    let result_commit = sem::x87_arith_result_commit(b, invalid_um);
+    let commit = sem::bit_and(b, commit, result_commit);
     b.if_then(commit, |b| {
         sem::write_st(b, top, sig_out, exp_out);
         Ok(())
