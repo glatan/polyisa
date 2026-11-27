@@ -9990,6 +9990,14 @@ fn x87_quiet_nan(mut v: (u64, u16)) -> (u64, u16) {
     v
 }
 
+fn x87_zero(sig: u64, exp: u16) -> bool {
+    (exp & 0x7fff) == 0 && sig == 0
+}
+
+fn x87_inf(sig: u64, exp: u16) -> bool {
+    (exp & 0x7fff) == 0x7fff && sig == 1u64 << 63
+}
+
 fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     let empty0 = x87_logical_tag(env, 0) == 3;
     let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
@@ -10160,6 +10168,55 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             return;
         }
         x87_set_c2(env, false);
+    }
+    if op == 0xF3 {
+        let xzero = x87_zero(s0, e0);
+        let yzero = x87_zero(s1, e1);
+        let xinf = x87_inf(s0, e0);
+        let yinf = x87_inf(s1, e1);
+        if xzero || yzero || xinf || yinf {
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            let rc = (fcw >> 10) & 3;
+            let xneg = e0 & 0x8000 != 0;
+            let yneg = e1 & 0x8000 != 0;
+            let half = crate::x87_trans::Dd::from_f64(0.5);
+            let three_quarter = crate::x87_trans::Dd::from_f64(0.75);
+            let (angle, exact) = if yzero {
+                if xneg {
+                    (crate::x87_trans::PI, false)
+                } else {
+                    (crate::x87_trans::Dd::from_f64(0.0), true)
+                }
+            } else if xzero {
+                (crate::x87_trans::PI2, false)
+            } else if yinf {
+                let angle = if xinf {
+                    if xneg {
+                        crate::x87_trans::PI.mul(three_quarter)
+                    } else {
+                        crate::x87_trans::PI2.mul(half)
+                    }
+                } else {
+                    crate::x87_trans::PI2
+                };
+                (angle, false)
+            } else if xinf {
+                if xneg {
+                    (crate::x87_trans::PI, false)
+                } else {
+                    (crate::x87_trans::Dd::from_f64(0.0), true)
+                }
+            } else {
+                unreachable!()
+            };
+            let signed = if yneg { angle.neg() } else { angle };
+            if !exact {
+                x87_scalar_exception_flag(env, 1 << 5);
+            }
+            x87_write_st(env, 1, crate::x87_trans::dd_to_ext(signed, rc));
+            x87_pop(env);
+            return;
+        }
     }
     let x = x87_ext_to_f64(s0, e0);
     match op {

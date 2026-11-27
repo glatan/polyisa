@@ -363,6 +363,27 @@ mod imp {
                 }
             }
         }
+        let fpatan_vals = [
+            (0, 0u16),
+            (0, 0x8000u16),
+            (1u64 << 63, 0x3fff),
+            (1u64 << 63, 0xbfff),
+            (1u64 << 63, 0x7fff),
+            (1u64 << 63, 0xffff),
+        ];
+        for (xi, x) in fpatan_vals.iter().enumerate() {
+            for (yi, y) in fpatan_vals.iter().enumerate() {
+                let fcw = fcws[(xi + yi) % fcws.len()];
+                let (hv, hsw) = host_op(*x, *y, [0xd9, 0xf3], fcw);
+                let (pv, psw) = poly_op(*x, *y, [0xd9, 0xf3], fcw);
+                if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                    reports.push(format!(
+                        "fpatan-special x{xi} y{yi} fcw={fcw:04x}: x={:x}/{:04x} y={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                        x.0, x.1, y.0, y.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                    ));
+                }
+            }
+        }
         assert!(
             reports.is_empty(),
             "host x87 binary transcendental diff:
