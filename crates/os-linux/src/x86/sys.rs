@@ -3049,6 +3049,28 @@ fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_sysfs(env, cx)
 }
 
+fn kill_targets(
+    procs: &polyisa_kernel::ProcessTable,
+    pid: i64,
+    me: polyisa_kernel::ProcessId,
+) -> Vec<polyisa_kernel::ProcessId> {
+    if pid > 0 {
+        let target = polyisa_kernel::ProcessId(pid as u64);
+        if procs.pgid(target).is_some() {
+            vec![target]
+        } else {
+            Vec::new()
+        }
+    } else if pid == 0 {
+        let pgid = procs.pgid(me).unwrap_or(me.0);
+        procs.pids_in_group(pgid)
+    } else if pid == -1 {
+        procs.pids()
+    } else {
+        procs.pids_in_group(pid.unsigned_abs())
+    }
+}
+
 fn signal_is_pending_target(linux: &Linux, sig: u64) -> bool {
     let bit = 1u64 << (sig - 1);
     linux
@@ -3290,66 +3312,61 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     const SIGKILL: i64 = 9;
     let pid = get64(env, cx.r_a) as i64;
     let sig = get64(env, cx.r_b) as i64;
-    // SIGKILL 以外: 自分宛てでハンドラがあれば保留に積む。
-    // SIG_IGN/SIG_DFL 宛ては従来どおり成功だけを返す（SIGKILL
-    // 以外の既定動作での終了はモデル化しない）。
+    // SIGKILL 以外: pid の正・零・負に応じて、単一プロセス・自分の
+    // プロセスグループ・指定プロセスグループへ送る。ハンドラがある
+    // か block 中のシグナルは pending に積む。SIG_IGN/SIG_DFL の
+    // unblocked な既定動作は従来どおりモデル化しない。
     if sig != SIGKILL {
         // sig=0 は存在確認のみ。範囲外は EINVAL（tgkill と同じ）。
         if !(0..=64).contains(&sig) {
             set64(env, Gpr(0), cx.neg(EINVAL));
             return Some(TrapOutcome::Handled);
         }
+        let me = sys.ensure_self();
+        let targets = kill_targets(&sys.procs.borrow(), pid, me);
+        if targets.is_empty() {
+            set64(env, Gpr(0), cx.neg(ESRCH));
+            return Some(TrapOutcome::Handled);
+        }
         if sig > 0 {
-            let me = sys.ensure_self();
-            if pid == me.0 as i64 {
-                if signal_is_pending_target(sys, sig as u64) {
-                    sys.sig_pending |= 1 << (sig - 1);
-                }
-            } else if pid > 0 {
-                let target = polyisa_kernel::ProcessId(pid as u64);
-                if sys.procs.borrow().pgid(target).is_none() {
-                    set64(env, Gpr(0), cx.neg(ESRCH));
-                    return Some(TrapOutcome::Handled);
-                }
-                // 実行を停めている子プロセスは scheduler に Linux 状態ごと
-                // 残っている。プロセス宛てシグナルをその pending 集合へ積み、
-                // 次に実行可能になったときの通常配送へ任せる。
-                let mut queue = sys.queue.0.borrow_mut();
-                if let Some(task) = queue
-                    .parked
-                    .iter_mut()
-                    .find(|task| task.linux.pid == target.0)
-                    && signal_is_pending_target(&task.linux, sig as u64)
-                {
-                    task.linux.sig_pending |= 1 << (sig - 1);
+            for target in targets {
+                if target == me {
+                    if signal_is_pending_target(sys, sig as u64) {
+                        sys.sig_pending |= 1 << (sig - 1);
+                    }
+                } else {
+                    queue_signal_on_parked(sys, target.0, sig as u64);
                 }
             }
         }
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
-    if pid <= 0 {
-        // kill(-1, SIGKILL) も相手なしで成功にする。
-        set64(env, Gpr(0), 0);
-        return Some(TrapOutcome::Handled);
-    }
     let me = sys.ensure_self();
-    let target = polyisa_kernel::ProcessId(pid as u64);
-    if sys.procs.borrow().pgid(target).is_none() {
+    let targets = kill_targets(&sys.procs.borrow(), pid, me);
+    if targets.is_empty() {
         set64(env, Gpr(0), cx.neg(ESRCH));
         return Some(TrapOutcome::Handled);
     }
-    sys.procs.borrow_mut().kill(target, SIGKILL as u32);
-    sys.queue
-        .0
-        .borrow_mut()
-        .meta
-        .mark_exited(polyisa_kernel::ThreadId(target.0));
-    if target != me {
-        sys.release_parked(target.0);
+    let mut self_killed = false;
+    for target in targets {
+        if sys.procs.borrow().pgid(target).is_none() {
+            continue;
+        }
+        sys.procs.borrow_mut().kill(target, SIGKILL as u32);
+        sys.queue
+            .0
+            .borrow_mut()
+            .meta
+            .mark_exited(polyisa_kernel::ThreadId(target.0));
+        if target != me {
+            sys.release_parked(target.0);
+        } else {
+            self_killed = true;
+        }
+        sys.wake_child_waiters(target);
     }
-    sys.wake_child_waiters(target);
-    if target == me {
+    if self_killed {
         return Some(TrapOutcome::Exit(SIGKILL as u32));
     }
     set64(env, Gpr(0), 0);
@@ -8572,6 +8589,33 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn kill_zero_queues_the_caller_process_group() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_ne!(sys.sig_pending & (1 << 9), 0);
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child");
+        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
     }
 
     #[test]

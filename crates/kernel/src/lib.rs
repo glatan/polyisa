@@ -75,6 +75,22 @@ impl ProcessTable {
             .map(|proc| proc.pgid)
     }
 
+    /// 表に残っている全プロセス。
+    #[must_use]
+    pub fn pids(&self) -> Vec<ProcessId> {
+        self.procs.iter().map(|proc| proc.id).collect()
+    }
+
+    /// 指定したプロセスグループに属するプロセス。
+    #[must_use]
+    pub fn pids_in_group(&self, pgid: u64) -> Vec<ProcessId> {
+        self.procs
+            .iter()
+            .filter(|proc| proc.pgid == pgid)
+            .map(|proc| proc.id)
+            .collect()
+    }
+
     /// グループを変える。対象がいなければ偽。
     pub fn set_pgid(&mut self, id: ProcessId, pgid: u64) -> bool {
         let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
