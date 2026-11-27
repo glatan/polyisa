@@ -1175,6 +1175,18 @@ impl Linux {
             if act.handler == 0 && signal_default_terminates(sig as u64) {
                 let _ = self.terminate_by_signal(sig);
                 self.async_exit = Some(sig);
+            } else if act.handler == 0 && signal_default_stops(sig as u64) {
+                // block されていた stop 系シグナルは、unmask された配送時に
+                // 既定動作を起こす。after_step からは Blocked を返せないが、
+                // scheduler を止めれば直後の preempt で他スレッドへ移れる。
+                let me = polyisa_kernel::ProcessId(self.pid);
+                self.procs.borrow_mut().stop(me, sig);
+                self.queue
+                    .0
+                    .borrow_mut()
+                    .meta
+                    .stop(polyisa_kernel::ThreadId(self.pid));
+                self.wake_child_waiters(me);
             }
             return;
         }
@@ -10363,6 +10375,40 @@ mod tests {
         set64(&mut env, Gpr(2), 1 | 2);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn blocked_sigtstp_stops_the_process_when_unmasked() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        let pid = sys.pid;
+        sys.sig_mask = 1 << 19;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), 20);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(
+            !sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_stopped(polyisa_kernel::ThreadId(pid))
+        );
+        assert_ne!(sys.sig_pending & (1 << 19), 0);
+
+        sys.sig_mask = 0;
+        sys.deliver_pending(&mut env);
+        assert_eq!(sys.sig_pending & (1 << 19), 0);
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_stopped(polyisa_kernel::ThreadId(pid))
+        );
     }
 
     #[test]
