@@ -6563,6 +6563,20 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtph2bf4sXvWv
+            | Insn::Vcvtph2snsXvWv
+            | Insn::Vcvtph2unsXvWv
+            | Insn::Vcvt2ph2bf4sXvHvWv
+            | Insn::Vcvt2ph2snsXvHvWv
+            | Insn::Vcvt2ph2unsXvHvWv
+            | Insn::Vcvtbiasph2bf4sXvHvWv
+            | Insn::Vcvtbf162bf4sXvWv
+            | Insn::Vcvtbf162snsXvWv
+            | Insn::Vcvtbf162unsXvWv
+            | Insn::Vcvt2bf162bf4sXvHvWv
+            | Insn::Vcvt2bf162snsXvHvWv
+            | Insn::Vcvt2bf162unsXvHvWv
+            | Insn::Vcvtbiasbf162bf4sXvHvWv
             | Insn::Vcvtbf162uf8XvWv
             | Insn::Vcvtbf162uf8sXvWv
             | Insn::Vcvt2bf162uf8XvHvWv
@@ -7385,6 +7399,162 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvtph2bf4sXvWv
+        | Insn::Vcvtph2snsXvWv
+        | Insn::Vcvtph2unsXvWv
+        | Insn::Vcvt2ph2bf4sXvHvWv
+        | Insn::Vcvt2ph2snsXvHvWv
+        | Insn::Vcvt2ph2unsXvHvWv
+        | Insn::Vcvtbiasph2bf4sXvHvWv
+        | Insn::Vcvtbf162bf4sXvWv
+        | Insn::Vcvtbf162snsXvWv
+        | Insn::Vcvtbf162unsXvWv
+        | Insn::Vcvt2bf162bf4sXvHvWv
+        | Insn::Vcvt2bf162snsXvHvWv
+        | Insn::Vcvt2bf162unsXvHvWv
+        | Insn::Vcvtbiasbf162bf4sXvHvWv => {
+            let bf16in = matches!(
+                insn,
+                Insn::Vcvtbf162bf4sXvWv
+                    | Insn::Vcvtbf162snsXvWv
+                    | Insn::Vcvtbf162unsXvWv
+                    | Insn::Vcvt2bf162bf4sXvHvWv
+                    | Insn::Vcvt2bf162snsXvHvWv
+                    | Insn::Vcvt2bf162unsXvHvWv
+                    | Insn::Vcvtbiasbf162bf4sXvHvWv
+            );
+            let two = matches!(
+                insn,
+                Insn::Vcvt2ph2bf4sXvHvWv
+                    | Insn::Vcvt2ph2snsXvHvWv
+                    | Insn::Vcvt2ph2unsXvHvWv
+                    | Insn::Vcvt2bf162bf4sXvHvWv
+                    | Insn::Vcvt2bf162snsXvHvWv
+                    | Insn::Vcvt2bf162unsXvHvWv
+            );
+            let biasform = matches!(
+                insn,
+                Insn::Vcvtbiasph2bf4sXvHvWv | Insn::Vcvtbiasbf162bf4sXvHvWv
+            );
+            let target_fp4 = matches!(
+                insn,
+                Insn::Vcvtph2bf4sXvWv
+                    | Insn::Vcvt2ph2bf4sXvHvWv
+                    | Insn::Vcvtbiasph2bf4sXvHvWv
+                    | Insn::Vcvtbf162bf4sXvWv
+                    | Insn::Vcvt2bf162bf4sXvHvWv
+                    | Insn::Vcvtbiasbf162bf4sXvHvWv
+            );
+            let target_signed = matches!(
+                insn,
+                Insn::Vcvtph2snsXvWv
+                    | Insn::Vcvt2ph2snsXvHvWv
+                    | Insn::Vcvtbf162snsXvWv
+                    | Insn::Vcvt2bf162snsXvHvWv
+            );
+            let f16_bits = |w: u16| -> u16 {
+                if bf16in {
+                    F32::from_bits(u64::from((w as u32) << 16))
+                        .to_f16(Rm::Rne)
+                        .0
+                        .bits() as u16
+                } else {
+                    w
+                }
+            };
+            let f16_val = |w: u16| -> f32 {
+                f32::from_bits(F16::from_bits(u64::from(w)).to_f32(Rm::Rne).0.bits() as u32)
+            };
+            let fp16_to_fp4 = |w: u16| -> u8 {
+                let v = f16_val(w);
+                if v.is_nan() {
+                    return 8;
+                }
+                let sign = u8::from(v < 0.0) << 3;
+                let mut av = v.abs();
+                const MAGS: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+                if av.is_infinite() || av > 6.0 {
+                    av = 6.0;
+                }
+                let mut best = 0usize;
+                let mut best_dist = (MAGS[0] - av).abs();
+                for (idx, mag) in MAGS.iter().enumerate().skip(1) {
+                    let dist = (mag - av).abs();
+                    if dist < best_dist || (dist == best_dist && idx & 1 == 0) {
+                        best_dist = dist;
+                        best = idx;
+                    }
+                }
+                sign | best as u8
+            };
+            let fp16_to_int4 = |w: u16, signed: bool| -> u8 {
+                let v = f16_val(w);
+                if v.is_nan() {
+                    return 0;
+                }
+                if v.is_infinite() {
+                    return if signed {
+                        if v < 0.0 { 8 } else { 7 }
+                    } else if v < 0.0 {
+                        0
+                    } else {
+                        15
+                    };
+                }
+                let r = v.round_ties_even() as i32;
+                let r = if signed {
+                    r.clamp(-8, 7)
+                } else {
+                    r.clamp(0, 15)
+                };
+                (r as u8) & 0xf
+            };
+            let bias_fp4 = |bias: u8, w: u16| -> u8 {
+                if f16_val(w).is_nan() {
+                    return 8;
+                }
+                let sign = ((w >> 12) as u8) & 8;
+                let exp = i32::from((w >> 10) & 0x1f);
+                let mant = w & 0x3ff;
+                if exp == 0x1f {
+                    return sign | 7;
+                }
+                if exp == 0 && mant == 0 {
+                    return sign;
+                }
+                let biased = (mant >> 7).wrapping_add(u16::from(bias));
+                let bit = i32::from(((biased >> 7) & 1) as u8);
+                let mag = (((exp - 14) << 1) | bit).clamp(0, 7);
+                sign | mag as u8
+            };
+            let convert = |w: u16, bias: u8| -> u8 {
+                let h = f16_bits(w);
+                if biasform {
+                    bias_fp4(bias, h)
+                } else if target_fp4 {
+                    fp16_to_fp4(h)
+                } else {
+                    fp16_to_int4(h, target_signed)
+                }
+            };
+            let put = |outv: &mut [u8; 64], i: usize, nib: u8| {
+                if i & 1 == 0 {
+                    outv[i / 2] |= nib & 0xf;
+                } else {
+                    outv[i / 2] |= (nib & 0xf) << 4;
+                }
+            };
+            if two {
+                for i in 0..lanes16 {
+                    put(&mut out, i, convert(rd16(&y, i), x[2 * i]));
+                    put(&mut out, lanes16 + i, convert(rd16(&x, i), x[2 * i]));
+                }
+            } else {
+                for i in 0..lanes16 {
+                    put(&mut out, i, convert(rd16(&y, i), x[2 * i]));
+                }
+            }
         }
         Insn::Vcvtbf162uf8XvWv
         | Insn::Vcvtbf162uf8sXvWv
@@ -19402,6 +19572,20 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtph2bf4sXvWv
+            | Insn::Vcvtph2snsXvWv
+            | Insn::Vcvtph2unsXvWv
+            | Insn::Vcvt2ph2bf4sXvHvWv
+            | Insn::Vcvt2ph2snsXvHvWv
+            | Insn::Vcvt2ph2unsXvHvWv
+            | Insn::Vcvtbiasph2bf4sXvHvWv
+            | Insn::Vcvtbf162bf4sXvWv
+            | Insn::Vcvtbf162snsXvWv
+            | Insn::Vcvtbf162unsXvWv
+            | Insn::Vcvt2bf162bf4sXvHvWv
+            | Insn::Vcvt2bf162snsXvHvWv
+            | Insn::Vcvt2bf162unsXvHvWv
+            | Insn::Vcvtbiasbf162bf4sXvHvWv
             | Insn::Vcvtbf162uf8XvWv
             | Insn::Vcvtbf162uf8sXvWv
             | Insn::Vcvt2bf162uf8XvHvWv

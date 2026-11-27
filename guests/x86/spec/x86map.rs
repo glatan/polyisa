@@ -3065,6 +3065,34 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10.3 の FP16/BF16→FP4/INT4（MAP5 75/76/77）。
+    // W0 は FP16 入力、W1 は BF16 入力。mask は持たない。
+    for (op, sel, wr, mn, rv) in [
+        (0x76u8, PfxSel::PF3, false, "vcvtph2bf4s_xv_wv", true),
+        (0x77, PfxSel::PF3, false, "vcvtph2sns_xv_wv", true),
+        (0x75, PfxSel::PF3, false, "vcvtph2uns_xv_wv", true),
+        (0x76, PfxSel::PF2, false, "vcvt2ph2bf4s_xv_hv_wv", false),
+        (0x77, PfxSel::PF2, false, "vcvt2ph2sns_xv_hv_wv", false),
+        (0x75, PfxSel::PF2, false, "vcvt2ph2uns_xv_hv_wv", false),
+        (0x76, PfxSel::Plain, false, "vcvtbiasph2bf4s_xv_hv_wv", false),
+        (0x76, PfxSel::PF3, true, "vcvtbf162bf4s_xv_wv", true),
+        (0x77, PfxSel::PF3, true, "vcvtbf162sns_xv_wv", true),
+        (0x75, PfxSel::PF3, true, "vcvtbf162uns_xv_wv", true),
+        (0x76, PfxSel::PF2, true, "vcvt2bf162bf4s_xv_hv_wv", false),
+        (0x77, PfxSel::PF2, true, "vcvt2bf162sns_xv_hv_wv", false),
+        (0x75, PfxSel::PF2, true, "vcvt2bf162uns_xv_hv_wv", false),
+        (0x76, PfxSel::Plain, true, "vcvtbiasbf162bf4s_xv_hv_wv", false),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // AVX10.3 の BF16→UF8（E5M3、MAP5 16/17）。
     for (op, sel, mn, rv) in [
         (0x16u8, PfxSel::PF3, "vcvtbf162uf8_xv_wv", true),
