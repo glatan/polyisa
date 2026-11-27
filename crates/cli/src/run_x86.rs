@@ -10256,6 +10256,21 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             }
         }
     }
+    if op == 0xF0 {
+        if x87_zero(s0, e0) {
+            x87_write_st(env, 0, (s0, e0));
+            return;
+        }
+        if x87_inf(s0, e0) {
+            let value = if e0 & 0x8000 != 0 {
+                (1u64 << 63, 0xbfff)
+            } else {
+                (1u64 << 63, 0x7fff)
+            };
+            x87_write_st(env, 0, value);
+            return;
+        }
+    }
     // extended の denormal 域は f64 では表せないため、線形項が高次項を
     // 完全に支配する tiny input だけを整数 significand で処理する。
     if x87_denormal(s0, e0) {

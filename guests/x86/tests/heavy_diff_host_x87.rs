@@ -495,6 +495,27 @@ mod imp {
                 }
             }
         }
+        let unary_specials = [
+            (0u64, 0u16),
+            (0u64, 0x8000u16),
+            (1u64 << 63, 0x7fffu16),
+            (1u64 << 63, 0xffffu16),
+            ((1u64 << 63) | (1u64 << 62) | 0x12345, 0x7fffu16),
+            ((1u64 << 63) | 0x12345, 0x7fffu16),
+        ];
+        for (idx, input) in unary_specials.iter().enumerate() {
+            for op in unary_ops {
+                let fcw = 0x037f;
+                let (hv, hsw) = host_unary(*input, op.0, fcw);
+                let (pv, psw) = poly_unary(*input, op.0, fcw);
+                if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                    reports.push(format!(
+                        "trans-special {idx} {}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                        op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                    ));
+                }
+            }
+        }
         let fpatan_vals = [
             (0, 0u16),
             (0, 0x8000u16),
