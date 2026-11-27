@@ -45,6 +45,7 @@ pub mod run_vax;
 pub mod run_wasm;
 #[cfg(feature = "guest-x86")]
 pub mod run_x86;
+mod x87_trans;
 
 /// ELF 入口がパーソナリティに要求する初期化面。`TrapHandler` と
 /// 合わせて `run_elf_*_impl` が使う。実装しないパーソナリティは
