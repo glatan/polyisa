@@ -9397,6 +9397,25 @@ mod tests {
     }
 
     #[test]
+    fn ppoll_rejects_a_nonnull_sigmask_with_the_wrong_size() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x140), &0u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::PPOLL);
+        set64(&mut env, Gpr(7), 0x120);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x130);
+        set64(&mut env, Gpr(10), 0x140);
+        set64(&mut env, Gpr(8), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
     fn pipe_read_interrupted_with_sa_restart_reexecutes_the_read() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();

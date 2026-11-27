@@ -659,6 +659,26 @@ fn sys_epoll_wait(
     Ok(Out::Done(ready.len() as u64))
 }
 
+/// pwait 系の sigmask を入力として検証して読む。
+/// Linux の kernel sigset_t は 64 シグナル分の 8 バイト。mask が
+/// null のときはサイズ引数を見ない。実際の一時 mask 適用は ABI 層で行う。
+fn rd_pwait_mask(
+    env: &mut BareEnv,
+    abi: &WaitAbi,
+    addr: u64,
+    size: u64,
+) -> Result<Option<u64>, u32> {
+    if addr == 0 {
+        return Ok(None);
+    }
+    if size != 8 {
+        return Err(errno::EINVAL);
+    }
+    rd_u(env, abi.endian, addr, 8)
+        .map(Some)
+        .ok_or(errno::EFAULT)
+}
+
 /// eventfd(initval, flags)。EFD_SEMAPHORE=1・EFD_NONBLOCK・
 /// EFD_CLOEXEC。eventfd は flags=0 の形。
 fn sys_eventfd(fds: &mut FdTable, abi: &WaitAbi, init: u64, flags: u64) -> Result<u64, u32> {
@@ -884,6 +904,9 @@ pub fn dispatch(
                 Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
+            if let Err(e) = rd_pwait_mask(env, abi, args[3], args[4]) {
+                return Some(Err(e));
+            }
             do_poll(fds, abi, env, args[0], args[1], dl, prev, now, pending)
         }
         "select" | "_newselect" | "pselect6" | "pselect6_time64" => sys_select(
@@ -911,6 +934,11 @@ pub fn dispatch(
             } else {
                 Some(now.saturating_add((ms as u64).saturating_mul(1_000_000)))
             };
+            if name == "epoll_pwait"
+                && let Err(e) = rd_pwait_mask(env, abi, args[4], args[5])
+            {
+                return Some(Err(e));
+            }
             sys_epoll_wait(
                 fds, abi, env, args[0], args[1], args[2], dl, prev, now, pending,
             )
@@ -921,6 +949,9 @@ pub fn dispatch(
                 Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
+            if let Err(e) = rd_pwait_mask(env, abi, args[4], args[5]) {
+                return Some(Err(e));
+            }
             sys_epoll_wait(
                 fds, abi, env, args[0], args[1], args[2], dl, prev, now, pending,
             )
