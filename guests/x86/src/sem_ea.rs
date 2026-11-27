@@ -12055,7 +12055,10 @@ fn fcom_ext_with_fault<B: Backend>(
     let fault_commit = sem::x87_commit_after_fault(b, fault);
     let commit = sem::bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
-        let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
+        let (zf0, unord0, cf0) = sem::cmp_f80(b, s0, e0, sig, exp);
+        let zf = sem::bit_or(b, zf0, invalid);
+        let unord = sem::bit_or(b, unord0, invalid);
+        let cf = sem::bit_or(b, cf0, invalid);
         let old: B::V<W16> = b.get(sem::fsw_ref());
         // FCOM 系は C1 も 0 にする（C1=1 はスタックフォルト時のみ）。
         let keep = b.konst::<W16>(!X87_CC_MASK);
@@ -12167,7 +12170,10 @@ fn fcompp_impl<B: Backend>(b: &mut B, ordered: bool) -> Flow<B> {
     let fault_commit = sem::x87_commit_after_fault(b, fault);
     let commit = sem::bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
-        let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, s1, e1);
+        let (zf0, unord0, cf0) = sem::cmp_f80(b, s0, e0, s1, e1);
+        let zf = sem::bit_or(b, zf0, invalid);
+        let unord = sem::bit_or(b, unord0, invalid);
+        let cf = sem::bit_or(b, cf0, invalid);
         let old: B::V<W16> = b.get(sem::fsw_ref());
         let keep = b.konst::<W16>(!X87_CC_MASK);
         let cleared = b.and::<W16>(old, keep);

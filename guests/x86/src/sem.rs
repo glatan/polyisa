@@ -14678,7 +14678,10 @@ fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool, ordered: bool) -> Flow<B
     let fault_commit = x87_commit_after_fault(b, fault);
     let commit = bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
-        let (zf, pf, cf) = cmp_f80(b, sig0, exp0, sig1, exp1);
+        let (zf0, pf0, cf0) = cmp_f80(b, sig0, exp0, sig1, exp1);
+        let zf = bit_or(b, zf0, invalid);
+        let pf = bit_or(b, pf0, invalid);
+        let cf = bit_or(b, cf0, invalid);
         let old = b.get(eflags_ref());
         let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
         let cleared = b.and::<W32>(old, clear_mask);
@@ -15360,6 +15363,28 @@ pub(crate) fn x87_encode_normalized<B: Backend>(
     (sig_out, b.trunc::<W64, W16>(packed))
 }
 
+/// 80 ビット拡張形式として unsupported な encoding か。
+/// exponent が非零なら integer bit は 1 でなければならない。
+/// これには unnormal に加え、integer bit 0 の pseudo-NaN と
+/// pseudo-infinity も含まれる。exponent 0 で integer bit 1 の
+/// pseudo-denormal は unsupported ではなく denormal として扱う。
+pub(crate) fn x87_unsupported_format<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    exp: B::V<W16>,
+) -> B::B {
+    let zero = b.konst::<W64>(0);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let exp64 = b.zext::<W16, W64>(exp);
+    let ea = b.and::<W64>(exp64, mask15);
+    let ea_nz = b.cmp::<W64>(Cmp::Ne, ea, zero);
+    let ib = b.and::<W64>(sig, int_bit);
+    let ib_set = b.cmp::<W64>(Cmp::Ne, ib, zero);
+    let ib_clear = bit_not(b, ib_set);
+    bit_and(b, ea_nz, ib_clear)
+}
+
 /// 2 入力 x87 算術の NaN 選択。返り値は「NaN 入力があるか」、
 /// 「SNaN による invalid か」、伝播させる quieted significand、その符号。
 /// x87 は SNaN/QNaN が混在すれば QNaN、同種なら significand の大きい方を
@@ -15394,8 +15419,17 @@ pub(crate) fn x87_nan_select2<B: Backend>(
     let fb = b.and::<W64>(sig_b, frac_mask);
     let fa_nz = b.cmp::<W64>(Cmp::Ne, fa, zero);
     let fb_nz = b.cmp::<W64>(Cmp::Ne, fb, zero);
-    let nan_a = bit_and(b, sp_a, fa_nz);
-    let nan_b = bit_and(b, sp_b, fb_nz);
+    // 正式な NaN では integer bit が 1。integer bit 0 の
+    // pseudo-NaN は unsupported format であり NaN 伝播しない。
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let ia = b.and::<W64>(sig_a, int_bit);
+    let ib = b.and::<W64>(sig_b, int_bit);
+    let ia_set = b.cmp::<W64>(Cmp::Ne, ia, zero);
+    let ib_set = b.cmp::<W64>(Cmp::Ne, ib, zero);
+    let nan_a0 = bit_and(b, sp_a, fa_nz);
+    let nan_b0 = bit_and(b, sp_b, fb_nz);
+    let nan_a = bit_and(b, nan_a0, ia_set);
+    let nan_b = bit_and(b, nan_b0, ib_set);
     let qbit = b.konst::<W64>(1u64 << 62);
     let qa = b.and::<W64>(sig_a, qbit);
     let qb = b.and::<W64>(sig_b, qbit);
@@ -15442,7 +15476,11 @@ pub(crate) fn x87_cmp_invalid<B: Backend>(
     ordered: bool,
 ) -> B::B {
     let sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
-    if ordered { sel.any } else { sel.snan_invalid }
+    let nan_invalid = if ordered { sel.any } else { sel.snan_invalid };
+    let unsupported_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported = bit_or(b, unsupported_a, unsupported_b);
+    bit_or(b, nan_invalid, unsupported)
 }
 
 /// 算術の pre-operation fault 後に結果 write/pop を行えるか。
@@ -15674,21 +15712,30 @@ pub(crate) fn mul_ext<B: Backend>(
     let snan_invalid = nan_sel.snan_invalid;
     let nan_prop_sig = nan_sel.sig;
     let nan_prop_sign = nan_sel.sign;
-    let invalid_any = bit_or(b, invalid_inf_zero, snan_invalid);
+    let unsupported_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported = bit_or(b, unsupported_a, unsupported_b);
+    let not_unsupported = bit_not(b, unsupported);
+    let nan_priority = bit_and(b, nan_input, not_unsupported);
+    let invalid_arith = bit_or(b, invalid_inf_zero, snan_invalid);
+    let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
-    let result_nan = bit_or(b, nan_input, invalid_inf_zero);
+    let result_nan0 = bit_or(b, nan_input, invalid_inf_zero);
+    let result_nan = bit_or(b, result_nan0, unsupported);
     let inf_in = bit_or(b, inf_a, inf_b);
     let not_nan = bit_not(b, result_nan);
     let result_inf = bit_and(b, inf_in, not_nan);
     let int_bit64 = b.konst::<W64>(1u64 << 63);
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
-    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_prop_out = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_out_sig = b.select::<W64>(unsupported, nan_sig, nan_prop_out);
     let special_sig = b.select::<W64>(result_inf, int_bit64, nan_out_sig);
-    let exp_mag = b.select::<W64>(is_special, special_exp, exp_fin);
-    let sig_out = b.select::<W64>(is_special, special_sig, sig_fin);
+    let special_out = bit_or(b, is_special, unsupported);
+    let exp_mag = b.select::<W64>(special_out, special_exp, exp_fin);
+    let sig_out = b.select::<W64>(special_out, special_sig, sig_fin);
     let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
-    let special_sign = b.select::<W64>(nan_input, nan_sign_bit, sign_bit);
-    let out_sign = b.select::<W64>(is_special, special_sign, sign_bit);
+    let special_sign = b.select::<W64>(nan_priority, nan_sign_bit, sign_bit);
+    let out_sign = b.select::<W64>(special_out, special_sign, sign_bit);
     let exp_word64 = b.or::<W64>(exp_mag, out_sign);
     let exp_word = b.trunc::<W64, W16>(exp_word64);
     let (rs, re) = x87_apply_precision(b, sig_out, exp_word);
@@ -16047,19 +16094,28 @@ pub(crate) fn add_ext<B: Backend>(
     let snan_invalid = nan_sel.snan_invalid;
     let nan_prop_sig = nan_sel.sig;
     let nan_prop_sign = nan_sel.sign;
-    let invalid_any = bit_or(b, inf_cancel, snan_invalid);
+    let unsupported_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported = bit_or(b, unsupported_a, unsupported_b);
+    let not_unsupported = bit_not(b, unsupported);
+    let nan_priority = bit_and(b, nan_input, not_unsupported);
+    let invalid_arith = bit_or(b, inf_cancel, snan_invalid);
+    let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
-    let nan_case = bit_or(b, nan_input, inf_cancel);
-    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_case0 = bit_or(b, nan_input, inf_cancel);
+    let nan_case = bit_or(b, nan_case0, unsupported);
+    let nan_prop_out = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_out_sig = b.select::<W64>(unsupported, nan_sig, nan_prop_out);
     let sp_sig = b.select::<W64>(nan_case, nan_out_sig, int_bit);
     let inf_sign = b.select::<W64>(sp_a, sign_a, sign_b);
     // 入力 NaN は選択した payload の符号を使う。inf同士の cancel が
     // 作る indefinite は従来どおり第一入力側の符号にしておく。
-    let nan_sign = b.select::<W64>(nan_input, nan_prop_sign, sign_a);
+    let nan_sign = b.select::<W64>(nan_priority, nan_prop_sign, sign_a);
     let sp_sign = b.select::<W64>(nan_case, nan_sign, inf_sign);
-    let sig_final = b.select::<W64>(any_sp, sp_sig, sig_after_z);
-    let exp_final = b.select::<W64>(any_sp, special, exp_after_z);
-    let sign_final = b.select::<W64>(any_sp, sp_sign, sign_after_z);
+    let special_out = bit_or(b, any_sp, unsupported);
+    let sig_final = b.select::<W64>(special_out, sp_sig, sig_after_z);
+    let exp_final = b.select::<W64>(special_out, special, exp_after_z);
+    let sign_final = b.select::<W64>(special_out, sp_sign, sign_after_z);
 
     let sign_bit = b.shl::<W64>(sign_final, s15);
     let packed = b.or::<W64>(exp_final, sign_bit);
@@ -16282,7 +16338,11 @@ pub(crate) fn div_ext<B: Backend>(
     let snan_invalid = nan_sel.snan_invalid;
     let nan_prop_sig = nan_sel.sig;
     let nan_prop_sign = nan_sel.sign;
-    let invalid_any = bit_or(b, invalid_div, snan_invalid);
+    let unsupported_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported = bit_or(b, unsupported_a, unsupported_b);
+    let invalid_arith = bit_or(b, invalid_div, snan_invalid);
+    let invalid_any = bit_or(b, invalid_arith, unsupported);
     x87_exception_flag(b, invalid_any, 1);
     // 有限非零の 0 除算は zero-divide。0/0 は invalid、
     // inf/0 は規則上 inf で zero-divide ではない。
@@ -16293,8 +16353,9 @@ pub(crate) fn div_ext<B: Backend>(
     let fin_nz_a = bit_and(b, fin_nz_a, not_nana);
     let zero_div = bit_and(b, z_b, fin_nz_a);
     x87_exception_flag(b, zero_div, 1 << 2);
-    let bad = bit_or(b, any_nan, inf_inf);
-    let bad = bit_or(b, bad, z_z);
+    let bad0 = bit_or(b, any_nan, inf_inf);
+    let bad1 = bit_or(b, bad0, z_z);
+    let bad = bit_or(b, bad1, unsupported);
     let res_inf = bit_or(b, inf_a, z_b);
     let res_zero = bit_or(b, inf_b, z_a);
 
@@ -16305,14 +16366,16 @@ pub(crate) fn div_ext<B: Backend>(
     let s_out = b.select::<W64>(res_zero, zero, sig_under);
     let e_out = b.select::<W64>(res_inf, special, e_out);
     let s_out = b.select::<W64>(res_inf, int_bit, s_out);
-    let nan_out_sig = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_prop_out = b.select::<W64>(nan_input, nan_prop_sig, nan_sig);
+    let nan_out_sig = b.select::<W64>(unsupported, nan_sig, nan_prop_out);
     let e_out = b.select::<W64>(bad, nan_exp, e_out);
     let s_out = b.select::<W64>(bad, nan_out_sig, s_out);
     // 入力 NaN は符号も伝播する。算術 invalid が作る indefinite は
     // 従来どおり符号なしとする。
     let sign_bit = b.shl::<W64>(sign_r, s15);
     let nan_sign_bit = b.shl::<W64>(nan_prop_sign, s15);
-    let bad_sign = b.select::<W64>(nan_input, nan_sign_bit, zero);
+    let nan_bad_sign = b.select::<W64>(nan_input, nan_sign_bit, zero);
+    let bad_sign = b.select::<W64>(unsupported, zero, nan_bad_sign);
     let sign_sel = b.select::<W64>(bad, bad_sign, sign_bit);
     let e_word = b.or::<W64>(e_out, sign_sel);
     let exp_word = b.trunc::<W64, W16>(e_word);
