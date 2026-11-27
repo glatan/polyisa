@@ -9357,6 +9357,56 @@ mod tests {
     }
 
     #[test]
+    fn pipe_read_interrupted_with_sa_restart_reexecutes_the_read() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), read_fd as u64);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let pipe_id = match sys.fd_target(write_fd) {
+            Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
+            other => panic!("unexpected pipe write target: {other:?}"),
+        };
+        assert_eq!(
+            sys.fds.pipes().borrow_mut().write(pipe_id, b"z"),
+            polyisa_kernel::PipeWrite::Wrote(1)
+        );
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"z");
+    }
+
+    #[test]
     fn signal_to_a_pipe_waiting_child_clears_the_pipe_wait() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
