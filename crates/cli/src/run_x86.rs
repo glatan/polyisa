@@ -10398,6 +10398,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                         rounded.1 = (rounded.1 & 0x8000) | mag.wrapping_sub(24576) & 0x7fff;
                     }
                 }
+                if rounded.1 & 0x7fff == 0 && rounded.0 != 0 && !log_zero {
+                    x87_scalar_exception_flag(env, 1 << 4);
+                }
                 x87_write_st(env, 1, rounded);
             } else if op == 0xF3 {
                 let xin = crate::x87_trans::ext_to_dd(s0, e0);

@@ -437,6 +437,22 @@ mod imp {
                 ));
             }
         }
+        let two = (1u64 << 63, 0x4000u16);
+        let underflow_cases = [
+            (two, (1u64, 0u16), "one-min"),
+            (four, (1u64, 0u16), "two-min"),
+            (two, (0x4000_0000_0000_0000u64, 0u16), "one-mid"),
+        ];
+        for (x, y, name) in underflow_cases {
+            let (hv, hsw) = host_op(x, y, [0xd9, 0xf1], 0x037f);
+            let (pv, psw) = poly_op(x, y, [0xd9, 0xf1], 0x037f);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-underflow {name}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    x.0, x.1, y.0, y.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
         for (idx, input) in [(1u64, 0u16), (0x4000_0000_0000_0000u64, 0x8000u16)]
             .iter()
             .enumerate()

@@ -139,6 +139,36 @@ pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
     dd_to_ext_scaled(value, 0, rc)
 }
 
+fn round_units(units: i128, frac: f64, shift: u32, rc: u16, neg: bool) -> u128 {
+    if units <= 0 {
+        return 0;
+    }
+    let (q, rem, half) = if shift >= 128 {
+        (0u128, 0u128, 0u128)
+    } else {
+        let u = units as u128;
+        (
+            u >> shift,
+            if shift == 0 {
+                0
+            } else {
+                u & ((1u128 << shift) - 1)
+            },
+            if shift == 0 { 0 } else { 1u128 << (shift - 1) },
+        )
+    };
+    let any = rem != 0 || frac != 0.0;
+    let over_half = rem > half || (rem == half && frac > 0.0);
+    let at_half = rem == half && frac == 0.0;
+    let up = match rc {
+        1 => neg && any,
+        2 => !neg && any,
+        3 => false,
+        _ => over_half || (at_half && q & 1 != 0),
+    };
+    q + u128::from(up)
+}
+
 pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16) {
     if value.hi == 0.0 && value.lo == 0.0 {
         return (
@@ -153,37 +183,38 @@ pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16)
     let neg = value.hi.is_sign_negative();
     let v = if neg { value.neg() } else { value };
     let (hf, eh) = f64_parts(v.hi);
-    // hi を 64 bit significand の上位 53 bit へ置き、lo を同じ quantum
-    // へ換算して足す。lo_units の小数部が round/sticky を兼ねる。
-    let hi_units = hf << 11;
+    // hi を 64 bit significand の整数単位へ置き、lo を同じ量子へ換算する。
+    // そのままでは extended 全 exponent を f64 が表せないので、符号・
+    // 指数を分離したまま最終 quantum へ一度だけ丸める。
+    let hi_units = u128::from(hf) << 11;
     let scale = (63 - eh) as f64;
     let lo_scaled = v.lo * scale.exp2();
-    let nearest = lo_scaled.round() as i64;
-    let units = match rc {
-        // extended の magnitude を丸めているので、負数の floor と
-        // 正数の ceil だけ magnitude を大きくする。truncation は
-        // 符号に関係なく magnitude を小さくする。
-        1 if neg => lo_scaled.ceil() as i64,
-        1 => lo_scaled.floor() as i64,
-        2 if neg => lo_scaled.floor() as i64,
-        2 => lo_scaled.ceil() as i64,
-        3 => lo_scaled.floor() as i64,
-        _ => nearest,
-    };
-    let sig64 = hi_units as i128 + i128::from(units);
-    let mut sig = sig64 as u64;
-    let mut exp = eh + 16383 + scale_exp;
-    if sig == 0 {
+    let lo_floor = lo_scaled.floor() as i128;
+    let frac = lo_scaled - lo_floor as f64;
+    let units = hi_units as i128 + lo_floor;
+    let unbiased = eh + scale_exp;
+    if unbiased >= -16382 {
+        let rounded = round_units(units, frac, 0, rc, neg);
+        let mut sig = rounded as u64;
+        let mut exp = unbiased + 16383;
+        if rounded >= 1u128 << 64 {
+            sig = (rounded >> 1) as u64;
+            exp += 1;
+        }
+        return (
+            sig,
+            (exp.clamp(0, 0x7fff) as u16) | if neg { 0x8000 } else { 0 },
+        );
+    }
+    let shift = (-(unbiased + 16382)) as u32;
+    let rounded = round_units(units, frac, shift, rc, neg);
+    if rounded == 0 {
         return (0, if neg { 0x8000 } else { 0 });
     }
-    if sig64 >= 1i128 << 64 {
-        sig >>= 1;
-        exp += 1;
-    }
-    (
-        sig,
-        (exp.clamp(0, 0x7fff) as u16) | if neg { 0x8000 } else { 0 },
-    )
+    // denormal quantum と exponent 1 の quantum は連続している。bit63
+    // まで丸め上がれば最小正規数側の encoding になる。
+    let exp = if rounded >= 1u128 << 63 { 1u16 } else { 0u16 };
+    (rounded as u64, exp | if neg { 0x8000 } else { 0 })
 }
 
 pub(crate) fn sin_small(x: Dd) -> Dd {
