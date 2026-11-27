@@ -13222,6 +13222,79 @@ fn run_x87_fstp_st_empty_source_masked_and_unmasked() {
 }
 
 #[test]
+fn x87_legacy_fadd_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16) {
+        let mut env = bare_x86_env();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.step(|b| polyisa_guest_x86::sem::fadd_st(b, 0)).unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    let (fsw, top, sig, exp) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, sig, exp), (0, 0xC000_0000_0000_0000, 0xffff));
+    let (fsw, top, sig, exp) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, sig, exp), (0, 0, 0));
+}
+
+#[test]
+fn x87_legacy_fmulp_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16, u16) {
+        let mut env = bare_x86_env();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.step(|b| polyisa_guest_x86::sem::fmulp_st(b, 1))
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            x87_tag(&mut env, 1),
+        )
+    }
+    let (fsw, top, sig, exp, tag) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, sig, exp, tag), (1, 0xC000_0000_0000_0000, 0xffff, 2));
+    let (fsw, top, sig, exp, tag) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, sig, exp, tag), (0, 0, 0, 3));
+}
+
+#[test]
+fn x87_legacy_fsubp_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16, u16) {
+        let mut env = bare_x86_env();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.step(|b| polyisa_guest_x86::sem::fsubp_st(b, 1))
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            x87_tag(&mut env, 1),
+        )
+    }
+    let (fsw, top, sig, exp, tag) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, sig, exp, tag), (1, 0xC000_0000_0000_0000, 0xffff, 2));
+    let (fsw, top, sig, exp, tag) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, sig, exp, tag), (0, 0, 0, 3));
+}
+
+#[test]
 fn run_x87_fsin_empty_source_masked_and_unmasked() {
     fn once(fcw: u16) -> (u16, u16, u64, u16) {
         let mut env = bare_x86_env();

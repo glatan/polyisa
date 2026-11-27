@@ -16516,56 +16516,101 @@ pub(crate) fn div_ext<B: Backend>(
 /// FADD ST(0), ST(i) (D8 C0+i)。ST(0) に和を書き、スタックは戻さない。seq 0x4d097d 対応.
 pub fn fadd_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
+    let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let src = b.and::<W16>(summed, seven);
-    let (sig1, exp1) = read_st(b, src);
-    let (sig_s, exp_s, invalid) = add_ext(b, sig0, exp0, sig1, exp1);
-    let commit = x87_arith_result_commit(b, invalid);
-    b.if_then(commit, |b| {
-        write_st(b, top, sig_s, exp_s);
-        Ok(())
+    let (sig1, exp1, fault1) = read_st_source(b, src);
+    let fault = bit_or(b, fault0, fault1);
+    let commit_fault = x87_commit_after_fault(b, fault);
+    b.if_then(commit_fault, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                write_st(b, top, indef_sig, indef_exp);
+                Ok(())
+            },
+            |b| {
+                let (sig_s, exp_s, invalid) = add_ext(b, sig0, exp0, sig1, exp1);
+                let commit = x87_arith_result_commit(b, invalid);
+                b.if_then(commit, |b| {
+                    write_st(b, top, sig_s, exp_s);
+                    Ok(())
+                })
+            },
+        )
     })
 }
 
 /// FMULP ST(i), ST(0) (DE C8+i)。ST(i) に積を書いてからスタックを一つ捨てる。seq 0x4018c7 対応.
 pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
+    let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let dst = b.and::<W16>(summed, seven);
-    let (sig1, exp1) = read_st(b, dst);
-    let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig1, exp1);
-    let commit = x87_arith_result_commit(b, invalid);
-    b.if_then(commit, |b| {
-        write_st(b, dst, sig_p, exp_p);
-        pop_st(b, top)
+    let (sig1, exp1, fault1) = read_st_source(b, dst);
+    let fault = bit_or(b, fault0, fault1);
+    let commit_fault = x87_commit_after_fault(b, fault);
+    b.if_then(commit_fault, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                write_st(b, dst, indef_sig, indef_exp);
+                pop_st(b, top)
+            },
+            |b| {
+                let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig1, exp1);
+                let commit = x87_arith_result_commit(b, invalid);
+                b.if_then(commit, |b| {
+                    write_st(b, dst, sig_p, exp_p);
+                    pop_st(b, top)
+                })
+            },
+        )
     })
 }
 
 /// FSUBP ST(i), ST(0) (DE E8+i)。ST(i) から ST(0) を引いて書き、スタックを一つ捨てる。seq 0x4d0c51 対応.
 pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
+    let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let dst = b.and::<W16>(summed, seven);
-    let (sig1, exp1) = read_st(b, dst);
-    let sign_mask = b.konst::<W16>(0x8000);
-    let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
-    let (sig_d, exp_d, invalid) = add_ext_nan(b, sig1, exp1, sig0, neg_exp0, exp1, exp0);
-    let commit = x87_arith_result_commit(b, invalid);
-    b.if_then(commit, |b| {
-        write_st(b, dst, sig_d, exp_d);
-        pop_st(b, top)
+    let (sig1, exp1, fault1) = read_st_source(b, dst);
+    let fault = bit_or(b, fault0, fault1);
+    let commit_fault = x87_commit_after_fault(b, fault);
+    b.if_then(commit_fault, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                write_st(b, dst, indef_sig, indef_exp);
+                pop_st(b, top)
+            },
+            |b| {
+                let sign_mask = b.konst::<W16>(0x8000);
+                let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
+                let (sig_d, exp_d, invalid) =
+                    add_ext_nan(b, sig1, exp1, sig0, neg_exp0, exp1, exp0);
+                let commit = x87_arith_result_commit(b, invalid);
+                b.if_then(commit, |b| {
+                    write_st(b, dst, sig_d, exp_d);
+                    pop_st(b, top)
+                })
+            },
+        )
     })
 }
-
 /// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
 pub(crate) fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
     let exp64 = b.zext::<W16, W64>(exp);
