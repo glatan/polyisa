@@ -1915,11 +1915,15 @@ mod tests {
         // 0F 38 マップ（mmmmm=2）でこのオペコードには VEX 項目が
         // ないので拒否。
         assert!(decode_map(&[0xC4, 0xE2, 0x7C, 0x18, 0xC0], modes, avx).is_none());
-        // レガシー接頭辞（66/F2/F3/LOCK）+VEX は #UD（XED 実測）。
+        // レガシー接頭辞（66/F2/F3/LOCK）+VEX は #UD。
         assert!(decode_map(&[0xF0, 0xC5, 0xF8, 0x77], modes, avx).is_none());
         assert!(decode_map(&[0x66, 0xC5, 0xF8, 0x77], modes, avx).is_none());
         assert!(decode_map(&[0xF2, 0xC5, 0xF8, 0x77], modes, avx).is_none());
         assert!(decode_map(&[0xF3, 0xC5, 0xF8, 0x77], modes, avx).is_none());
+        // legacy REX+VEX も #UD。REX と VEX の間に別の legacy
+        // prefix が入っても、拡張符号化で REX は使えない。
+        assert!(decode_map(&[0x40, 0xC5, 0xF8, 0x77], modes, avx).is_none());
+        assert!(decode_map(&[0x48, 0x64, 0xC5, 0xF8, 0x77], modes, avx).is_none());
     }
 
     #[test]
@@ -1987,6 +1991,17 @@ mod tests {
         assert!(decode_map(&[0x62, 0xF9, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
         assert!(decode_map(&[0x62, 0xF1, 0x7A, 0x48, 0x6F, 0xC1], modes, f512).is_none());
         assert!(decode_map(&[0x62, 0xF0, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        // legacy REX+EVEX は #UD。REX が即前になく接頭辞列の
+        // 先頭側にあっても、EVEX との組合せ自体を拒否する。
+        assert!(decode_map(&[0x40, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        assert!(
+            decode_map(
+                &[0x48, 0x64, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1],
+                modes,
+                f512
+            )
+            .is_none()
+        );
         // LOCK+EVEX は #UD。
         assert!(decode_map(&[0xF0, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
         // avx512f 無しでは解読しない。
@@ -2013,7 +2028,7 @@ mod tests {
                 "p0={p0:#04x}"
             );
         }
-        // レガシー接頭辞（66/F2/F3/LOCK）+EVEX は #UD（XED 実測）。
+        // レガシー接頭辞（66/F2/F3/LOCK）+EVEX は #UD。
         for p in [0xF2u8, 0x66, 0xF3, 0xF0] {
             let mut b = vec![p, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1];
             assert!(decode_map(&b, modes, fvl).is_none());
@@ -2568,7 +2583,8 @@ fn xop_decode() {
         )
         .is_none()
     );
-    // LOCK+XOP は #UD。POP への後退はしない。
+    // legacy REX+XOP と LOCK+XOP は #UD。POP への後退はしない。
+    assert!(decode_map(&[0x40, 0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_XOP).is_none());
     assert!(decode_map(&[0xF0, 0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_XOP).is_none());
 }
 

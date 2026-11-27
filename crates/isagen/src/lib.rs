@@ -1386,6 +1386,10 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub opcode: u8,\n\
          \x20   /// 最後の REX 接頭辞（なければ 0）。\n\
          \x20   pub rex: u8,\n\
+         \x20   /// レガシー REX 接頭辞を前置き列で読んだか。\n\
+         \x20   /// REX の効力が後続レガシー接頭辞で失われても、\n\
+         \x20   /// VEX/XOP/EVEX との禁止組合せ判定では接頭辞の存在を使う。\n\
+         \x20   pub rex_seen: bool,\n\
          \x20   /// 0x66 オペランドサイズ接頭辞。\n\
          \x20   pub p66: bool,\n\
          \x20   /// 0x67 アドレスサイズ接頭辞。\n\
@@ -1785,6 +1789,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           _ => {\n\
          \x20               if mode_m64(modes) && (0x40..=0x4F).contains(&b) {\n\
          \x20                   d.rex = b;\n\
+         \x20                   d.rex_seen = true;\n\
          \x20                   i += 1;\n\
          \x20                   if i > 15 {\n\
          \x20                       return None;\n\
@@ -1848,7 +1853,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               // LOCK+VEX は #UD。\n\
          \x20               // VEX の前のレガシー接頭辞（66/F2/F3/LOCK）は\n\
          \x20               // #UD（XED 実測）。pp フィールドだけが接頭辞を選ぶ。\n\
-         \x20               if d.lock || d.p66 || d.rep != 0 {\n\
+         \x20               if d.lock || d.rex_seen || d.p66 || d.rep != 0 {\n\
          \x20                   return None;\n\
          \x20               }\n\
          \x20               d.rep = 0;\n\
@@ -1917,7 +1922,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       let b2 = *bytes.get(i + 1)?;\n\
          \x20       if b2 & 0x1F >= 8 {\n\
          \x20           // レガシー接頭辞（66/F2/F3/LOCK）+XOP は #UD。\n\
-         \x20           if d.lock || d.p66 || d.rep != 0 {\n\
+         \x20           if d.lock || d.rex_seen || d.p66 || d.rep != 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
          \x20           let b3 = *bytes.get(i + 2)?;\n\
@@ -1960,7 +1965,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           // map4 では P0.3=B4・P0.4=~R4・P1.2=~X4 が有効フィールド\n\
          \x20           // なので予約ビット検査を緩める。5-7 は予約で、存在しない\n\
          \x20           // マップ番号としてディスパッチ側で #UD に落ちる。\n\
-         \x20           if d.lock || mmm == 0 || d.p66 || d.rep != 0 {\n\
+         \x20           if d.lock || d.rex_seen || mmm == 0 || d.p66 || d.rep != 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
          \x20           if mmm != 4 && (p0 & 0x08 != 0 || p1 & 4 == 0) {\n\
