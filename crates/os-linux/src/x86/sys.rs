@@ -3073,22 +3073,77 @@ fn kill_targets(
 
 fn signal_is_pending_target(linux: &Linux, sig: u64) -> bool {
     let bit = 1u64 << (sig - 1);
+    let act = linux
+        .sigacts
+        .get(sig as usize - 1)
+        .copied()
+        .unwrap_or_default();
+    // SIG_IGN なら block 中でも pending に残さず捨てる。
+    if act.handler == 1 {
+        return false;
+    }
+    act.handler > 1 || linux.sig_mask & bit != 0
+}
+
+fn signal_is_ignored(linux: &Linux, sig: u64) -> bool {
     linux
         .sigacts
         .get(sig as usize - 1)
-        .is_some_and(|a| a.handler > 1)
-        || linux.sig_mask & bit != 0
+        .is_some_and(|a| a.handler == 1)
 }
 
-fn queue_signal_on_parked(sys: &mut Linux, tid: u64, sig: u64) -> bool {
+/// Linux/x86 の標準シグナルで、既定動作がプロセス終了またはコアダンプのもの。
+fn signal_default_terminates(sig: u64) -> bool {
+    matches!(
+        sig,
+        1..=8 | 10..=16 | 24..=27 | 29..=31 | 32..=64
+    )
+}
+
+/// parked な対象プロセスをシグナル死因として終了させる。
+fn terminate_parked_by_signal(sys: &mut Linux, target: polyisa_kernel::ProcessId, sig: u64) {
+    sys.procs.borrow_mut().kill(target, sig as u32);
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .mark_exited(polyisa_kernel::ThreadId(target.0));
+    sys.release_parked(target.0);
+    sys.wake_child_waiters(target);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParkedSignal {
+    Missing,
+    Noop,
+    Queued,
+    Terminate,
+}
+
+fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
     let mut queue = sys.queue.0.borrow_mut();
-    if let Some(task) = queue.parked.iter_mut().find(|task| task.linux.pid == tid) {
-        if signal_is_pending_target(&task.linux, sig) {
-            task.linux.sig_pending |= 1 << (sig - 1);
-        }
-        return true;
+    let Some(task) = queue.parked.iter_mut().find(|task| task.linux.pid == tid) else {
+        return ParkedSignal::Missing;
+    };
+    if signal_is_pending_target(&task.linux, sig) {
+        task.linux.sig_pending |= 1 << (sig - 1);
+        ParkedSignal::Queued
+    } else if signal_is_ignored(&task.linux, sig) {
+        ParkedSignal::Noop
+    } else if signal_default_terminates(sig) {
+        ParkedSignal::Terminate
+    } else {
+        ParkedSignal::Noop
     }
-    false
+}
+
+fn send_signal_to_current(sys: &mut Linux, sig: u64) -> bool {
+    if signal_is_pending_target(sys, sig) {
+        sys.sig_pending |= 1 << (sig - 1);
+        true
+    } else {
+        false
+    }
 }
 
 fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3114,9 +3169,15 @@ fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        queue_signal_on_parked(sys, tid, sig);
-    } else if sig > 0 && signal_is_pending_target(sys, sig) {
-        sys.sig_pending |= 1 << (sig - 1);
+        if send_signal_to_parked(sys, tid, sig) == ParkedSignal::Terminate {
+            terminate_parked_by_signal(sys, polyisa_kernel::ProcessId(tid), sig);
+        }
+    } else if sig > 0
+        && !send_signal_to_current(sys, sig)
+        && !signal_is_ignored(sys, sig)
+        && signal_default_terminates(sig)
+    {
+        return Some(sys.terminate_by_signal(sig as u32));
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -3329,14 +3390,23 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
             return Some(TrapOutcome::Handled);
         }
         if sig > 0 {
+            let mut self_terminates = false;
             for target in targets {
                 if target == me {
-                    if signal_is_pending_target(sys, sig as u64) {
-                        sys.sig_pending |= 1 << (sig - 1);
+                    if !send_signal_to_current(sys, sig as u64)
+                        && !signal_is_ignored(sys, sig as u64)
+                        && signal_default_terminates(sig as u64)
+                    {
+                        self_terminates = true;
                     }
-                } else {
-                    queue_signal_on_parked(sys, target.0, sig as u64);
+                } else if send_signal_to_parked(sys, target.0, sig as u64)
+                    == ParkedSignal::Terminate
+                {
+                    terminate_parked_by_signal(sys, target, sig as u64);
                 }
+            }
+            if self_terminates {
+                return Some(sys.terminate_by_signal(sig as u32));
             }
         }
         set64(env, Gpr(0), 0);
@@ -3361,10 +3431,11 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
             .mark_exited(polyisa_kernel::ThreadId(target.0));
         if target != me {
             sys.release_parked(target.0);
+            sys.wake_child_waiters(target);
         } else {
             self_killed = true;
+            sys.wake_child_waiters(target);
         }
-        sys.wake_child_waiters(target);
     }
     if self_killed {
         return Some(TrapOutcome::Exit(SIGKILL as u32));
@@ -3993,9 +4064,15 @@ fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        queue_signal_on_parked(sys, tid, sig);
-    } else if sig > 0 && signal_is_pending_target(sys, sig) {
-        sys.sig_pending |= 1 << (sig - 1);
+        if send_signal_to_parked(sys, tid, sig) == ParkedSignal::Terminate {
+            terminate_parked_by_signal(sys, polyisa_kernel::ProcessId(tid), sig);
+        }
+    } else if sig > 0
+        && !send_signal_to_current(sys, sig)
+        && !signal_is_ignored(sys, sig)
+        && signal_default_terminates(sig)
+    {
+        return Some(sys.terminate_by_signal(sig as u32));
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -8588,6 +8665,82 @@ mod tests {
         assert!(sys.swap_in(&mut env, child));
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn kill_default_term_signal_marks_the_child_as_signaled() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 15);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(
+            !sys.queue
+                .0
+                .borrow()
+                .parked
+                .iter()
+                .any(|task| task.linux.pid == child)
+        );
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 15);
+    }
+
+    #[test]
+    fn kill_default_term_signal_exits_the_current_process() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), 15);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0),
+            TrapOutcome::Exit(15)
+        ));
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_exited(polyisa_kernel::ThreadId(pid))
+        );
+    }
+
+    #[test]
+    fn sig_ign_discards_even_a_blocked_signal() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 1;
+        sys.sig_mask = 1 << 9;
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
     }
 
