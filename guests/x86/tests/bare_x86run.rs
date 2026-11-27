@@ -13430,6 +13430,99 @@ fn run_x87_fcomp_empty_source_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_fcom_fucom_nan_invalid_and_unmasked_commit() {
+    fn once(opcode1: u8, sig1: u64, exp1: u16, fcw: u16) -> (u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        x87_seed_valid(&mut env, 1, sig1, exp1);
+        // C0 を事前に立て、unmasked invalid で比較結果が上書き
+        // されないことを見る。
+        env.backend.set(polyisa_guest_x86::sem::fsw_ref(), 0x0100);
+        let modrm = if opcode1 == 0xD8 { 0xD1 } else { 0xE1 };
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[opcode1, modrm])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    let qnan = (0xC000_0000_0000_0001u64, 0x7FFFu16);
+    let snan = (0x8000_0000_0000_0001u64, 0x7FFFu16);
+    // D8 E0+i は FCOM。QNaN でも #IA。masked では unordered の
+    // C3/C2/C0 を commit する。
+    let (fsw, _) = once(0xD8, qnan.0, qnan.1, 0x037F);
+    assert_ne!(fsw & 1, 0, "IE");
+    assert_eq!(fsw & 0x8080, 0, "masked ES/B");
+    assert_eq!(fsw & 0x4500, 0x4500, "unordered C bits");
+    // unmasked では IE/ES/B は立つが、事前の C0 以外の C ビットは
+    // 変えない。
+    let (fsw, _) = once(0xD8, qnan.0, qnan.1, 0x037E);
+    assert_eq!(fsw & 0x8081, 0x8081);
+    assert_eq!(fsw & 0x4500, 0x0100);
+    // DD E0+i は FUCOM。QNaN では #IA を立てないが unordered にはなる。
+    let (fsw, _) = once(0xDD, qnan.0, qnan.1, 0x037F);
+    assert_eq!(fsw & 1, 0, "QNaN FUCOM IE");
+    assert_eq!(fsw & 0x4500, 0x4500);
+    // FUCOM でも SNaN は #IA。unmasked では commit しない。
+    let (fsw, _) = once(0xDD, snan.0, snan.1, 0x037E);
+    assert_eq!(fsw & 0x8081, 0x8081);
+    assert_eq!(fsw & 0x4500, 0x0100);
+}
+
+#[test]
+fn run_x87_fcomi_fucomi_nan_invalid_rules() {
+    fn once(modrm: u8, sig1: u64, exp1: u16, fcw: u16) -> (u32, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        x87_seed_valid(&mut env, 1, sig1, exp1);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDB, modrm])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let qnan = (0xC000_0000_0000_0001u64, 0x7FFFu16);
+    let snan = (0x8000_0000_0000_0001u64, 0x7FFFu16);
+    // DB F1=FCOMI。QNaN でも #IA。masked では ZF/PF/CF=111。
+    let (fl, fsw) = once(0xF1, qnan.0, qnan.1, 0x037F);
+    assert_eq!(fl & 0x45, 0x45);
+    assert_ne!(fsw & 1, 0);
+    // unmasked では EFLAGS を更新しない。
+    let (fl, fsw) = once(0xF1, qnan.0, qnan.1, 0x037E);
+    assert_eq!(fl & 0x45, 0);
+    assert_eq!(fsw & 0x8081, 0x8081);
+    // DB E9=FUCOMI。QNaN では #IA なしで unordered、SNaN では #IA。
+    let (fl, fsw) = once(0xE9, qnan.0, qnan.1, 0x037F);
+    assert_eq!(fl & 0x45, 0x45);
+    assert_eq!(fsw & 1, 0);
+    let (fl, fsw) = once(0xE9, snan.0, snan.1, 0x037E);
+    assert_eq!(fl & 0x45, 0);
+    assert_eq!(fsw & 0x8081, 0x8081);
+}
+
+#[test]
 fn run_x87_fdiv_zero_sets_zero_divide_flag() {
     // 1.0 / +0.0 = +inf で ZE(bit2) が立つ。
     let mut env = bare_x86_env();

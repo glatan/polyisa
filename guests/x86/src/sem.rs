@@ -14653,10 +14653,15 @@ pub(crate) fn cmp_f80<B: Backend>(
 
 /// FUCOMI ST(0), ST(i) (DB E8+i)。比較結果を EFLAGS に書き、スタックは戻さない。seq 0x4d0983 対応.
 pub fn fucomi_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
-    fucomi_impl(b, i, false)
+    fucomi_impl(b, i, false, false)
 }
 
-fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
+/// FCOMI ST(0), ST(i)。FUCOMI と違い QNaN でも #IA になる。
+pub fn fcomi_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    fucomi_impl(b, i, false, true)
+}
+
+fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool, ordered: bool) -> Flow<B> {
     let top = b.get(top_ref());
     let (sig0, exp0, fault0) = read_st_source(b, top);
     let ii = b.konst::<W16>(i as u16);
@@ -14665,7 +14670,10 @@ fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     let src = b.and::<W16>(summed, seven);
     let (sig1, exp1, fault1) = read_st_source(b, src);
     let fault = bit_or(b, fault0, fault1);
-    let commit = x87_commit_after_fault(b, fault);
+    let invalid = x87_cmp_invalid(b, sig0, exp0, sig1, exp1, ordered);
+    let invalid_commit = x87_compare_commit(b, invalid);
+    let fault_commit = x87_commit_after_fault(b, fault);
+    let commit = bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
         let (zf, pf, cf) = cmp_f80(b, sig0, exp0, sig1, exp1);
         let old = b.get(eflags_ref());
@@ -14687,7 +14695,7 @@ fn fucomi_impl<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
 
 /// FUCOMIP ST(0), ST(i) (DF E8+i)。比較のあと先頭の段を捨てる。dd 0x4d0ea6 対応.
 pub fn fucomip_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
-    fucomi_impl(b, i, true)
+    fucomi_impl(b, i, true, false)
 }
 
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
@@ -15404,6 +15412,33 @@ pub(crate) fn x87_nan_select2<B: Backend>(
         sig: sig_quiet,
         sign: sign_sel,
     }
+}
+
+/// 比較命令の invalid 条件。ordered 比較では任意の NaN、
+/// unordered 比較では SNaN だけが #IA になる。
+pub(crate) fn x87_cmp_invalid<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+    ordered: bool,
+) -> B::B {
+    let sel = x87_nan_select2(b, sig_a, exp_a, sig_b, exp_b);
+    if ordered { sel.any } else { sel.snan_invalid }
+}
+
+/// invalid を記録したうえで、masked のときだけ比較結果を commit
+/// するかを返す。unmasked #IA では C/EFLAGS とスタックを変えない。
+pub(crate) fn x87_compare_commit<B: Backend>(b: &mut B, invalid: B::B) -> B::B {
+    x87_exception_flag(b, invalid, 1);
+    let fcw = b.get(fcw_ref());
+    let imask = b.konst::<W16>(1);
+    let im = b.and::<W16>(fcw, imask);
+    let z16 = b.konst::<W16>(0);
+    let masked = b.cmp::<W16>(Cmp::Ne, im, z16);
+    let not_invalid = bit_not(b, invalid);
+    bit_or(b, not_invalid, masked)
 }
 
 fn bool_or_select_impl<B: Backend>(b: &mut B, sel: B::B, a: B::B, c: B::B) -> B::B {

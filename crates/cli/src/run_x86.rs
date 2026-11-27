@@ -1109,6 +1109,10 @@ fn fetch_len(
                 // FUCOMI ST(0), ST(i) (DB E8+i)。seq 0x4d0983 の DB E9。
                 return Some(2);
             }
+            if reg == 6 && md == 3 {
+                // FCOMI ST(0), ST(i) (DB F0+i)。
+                return Some(2);
+            }
             if reg == 5 && md == 0 && rm == 5 {
                 // FLD m80 [RIP+disp32] (DB /5)。dd 0x4d0e58 の DB 2D。6B.
                 return Some(6);
@@ -5602,7 +5606,7 @@ fn dispatch_map_inner<B: Backend>(
             if d.modrm >= 0xC0 {
                 // DA E9: FUCOMPP。rm!=1 は未定義。
                 if d.modrm & 7 == 1 {
-                    return sem_ea::fcompp_st(b).map(|()| true);
+                    return sem_ea::fucompp_st(b).map(|()| true);
                 }
                 return Ok(false);
             }
@@ -5668,8 +5672,7 @@ fn dispatch_map_inner<B: Backend>(
         }
         Insn::FcomiSti => {
             if d.modrm >= 0xC0 {
-                // FCOMI も旗の規則は FUCOMI と同じ。
-                polyisa_guest_x86::sem::fucomi_st(b, d.modrm & 7)
+                polyisa_guest_x86::sem::fcomi_st(b, d.modrm & 7)
             } else {
                 return Ok(false);
             }
@@ -5785,7 +5788,7 @@ fn dispatch_map_inner<B: Backend>(
         Insn::X87dd4 => {
             // DD /4: mem=FRSTOR m108、mod=11 は DD E0+i FUCOM st(i)。
             if d.modrm >= 0xC0 {
-                sem_ea::fcom_sti(b, d.modrm & 7, false)
+                sem_ea::fucom_sti(b, d.modrm & 7, false)
             } else {
                 sem_ea::frstor_m(b, &ea, mode, d.osize)
             }
@@ -5793,7 +5796,7 @@ fn dispatch_map_inner<B: Backend>(
         Insn::X87dd5 => {
             // DD /5: mem は未定義、mod=11 は DD E8+i FUCOMP st(i)。
             if d.modrm >= 0xC0 {
-                sem_ea::fcom_sti(b, d.modrm & 7, true)
+                sem_ea::fucom_sti(b, d.modrm & 7, true)
             } else {
                 return Ok(false);
             }

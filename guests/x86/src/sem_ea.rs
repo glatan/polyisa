@@ -12024,7 +12024,7 @@ const X87_CC_MASK: u16 = X87_C_MASK | X87_C1;
 /// `pop` で 1 段捨てる（FCOMP/FICOMP）。
 fn fcom_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, pop: bool) -> Flow<B> {
     let no_fault = sem::bool_false(b);
-    fcom_ext_with_fault(b, sig, exp, pop, no_fault)
+    fcom_ext_with_fault(b, sig, exp, pop, no_fault, true)
 }
 
 /// `src_fault` は ST(i) source operand の empty 検査。ST(0) と合わせ、
@@ -12036,11 +12036,15 @@ fn fcom_ext_with_fault<B: Backend>(
     exp: B::V<W16>,
     pop: bool,
     src_fault: B::B,
+    ordered: bool,
 ) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (s0, e0, fault0) = sem::read_st_source(b, top);
     let fault = sem::bit_or(b, fault0, src_fault);
-    let commit = sem::x87_commit_after_fault(b, fault);
+    let invalid = sem::x87_cmp_invalid(b, s0, e0, sig, exp, ordered);
+    let invalid_commit = sem::x87_compare_commit(b, invalid);
+    let fault_commit = sem::x87_commit_after_fault(b, fault);
+    let commit = sem::bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
         let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
         let old: B::V<W16> = b.get(sem::fsw_ref());
@@ -12081,7 +12085,7 @@ pub fn fcom_m<B: Backend>(
         let seven = b.konst::<W16>(7);
         let slot = b.and::<W16>(summed, seven);
         let (s1, e1, fault) = sem::read_st_source(b, slot);
-        return fcom_ext_with_fault(b, s1, e1, pop, fault);
+        return fcom_ext_with_fault(b, s1, e1, pop, fault, true);
     }
     let (sig, exp) = match ea {
         Rm::Mem { a, wseg } => {
@@ -12119,18 +12123,40 @@ pub fn fcom_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     let seven = b.konst::<W16>(7);
     let slot = b.and::<W16>(summed, seven);
     let (s1, e1, fault) = sem::read_st_source(b, slot);
-    fcom_ext_with_fault(b, s1, e1, pop, fault)
+    fcom_ext_with_fault(b, s1, e1, pop, fault, true)
 }
 
-/// FCOMPP/FUCOMPP。ST(0) と ST(1) を比較して C ビットを更新し、
-/// 2 段ポップする（FUCOMPP との #IA 違いは例外状態未モデルのため同一動作）。
+/// FUCOM/FUCOMP st(i)。QNaN では #IA を立てず、SNaN だけを invalid とする。
+pub fn fucom_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let ii = b.konst::<W16>(u16::from(i & 7));
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let slot = b.and::<W16>(summed, seven);
+    let (s1, e1, fault) = sem::read_st_source(b, slot);
+    fcom_ext_with_fault(b, s1, e1, pop, fault, false)
+}
+
+/// FCOMPP。ST(0) と ST(1) を比較して C ビットを更新し、2 段ポップする。
 pub fn fcompp_st<B: Backend>(b: &mut B) -> Flow<B> {
+    fcompp_impl(b, true)
+}
+
+/// FUCOMPP。QNaN では #IA を立てず、SNaN だけを invalid とする。
+pub fn fucompp_st<B: Backend>(b: &mut B) -> Flow<B> {
+    fcompp_impl(b, false)
+}
+
+fn fcompp_impl<B: Backend>(b: &mut B, ordered: bool) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (s0, e0, fault0) = sem::read_st_source(b, top);
     let slot = st_slot(b, 1);
     let (s1, e1, fault1) = sem::read_st_source(b, slot);
     let fault = sem::bit_or(b, fault0, fault1);
-    let commit = sem::x87_commit_after_fault(b, fault);
+    let invalid = sem::x87_cmp_invalid(b, s0, e0, s1, e1, ordered);
+    let invalid_commit = sem::x87_compare_commit(b, invalid);
+    let fault_commit = sem::x87_commit_after_fault(b, fault);
+    let commit = sem::bit_and(b, fault_commit, invalid_commit);
     b.if_then(commit, |b| {
         let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, s1, e1);
         let old: B::V<W16> = b.get(sem::fsw_ref());
