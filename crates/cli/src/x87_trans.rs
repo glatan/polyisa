@@ -136,6 +136,10 @@ fn f64_parts(x: f64) -> (u64, i32) {
 /// nearest のほか、FCW の truncation/floor/ceil に対応する。DD 自身の
 /// 誤差は残るが、53 bit 変換とは違って下位 11 bit も使う。
 pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
+    dd_to_ext_scaled(value, 0, rc)
+}
+
+pub(crate) fn dd_to_ext_scaled(value: Dd, scale_exp: i32, rc: u16) -> (u64, u16) {
     if value.hi == 0.0 && value.lo == 0.0 {
         return (
             0,
@@ -168,7 +172,7 @@ pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
     };
     let sig64 = hi_units as i128 + i128::from(units);
     let mut sig = sig64 as u64;
-    let mut exp = eh + 16383;
+    let mut exp = eh + 16383 + scale_exp;
     if sig == 0 {
         return (0, if neg { 0x8000 } else { 0 });
     }
@@ -176,7 +180,10 @@ pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
         sig >>= 1;
         exp += 1;
     }
-    (sig, (exp as u16) | if neg { 0x8000 } else { 0 })
+    (
+        sig,
+        (exp.clamp(0, 0x7fff) as u16) | if neg { 0x8000 } else { 0 },
+    )
 }
 
 pub(crate) fn sin_small(x: Dd) -> Dd {
@@ -232,6 +239,9 @@ pub(crate) fn log2_near_one(x: Dd) -> Dd {
 }
 
 pub(crate) fn ext_mantissa_exp_dd(sig: u64, exp_word: u16) -> (Dd, i32) {
+    if sig == 0 {
+        return (Dd::from_f64(0.0), 0);
+    }
     let lz = sig.leading_zeros() as i32;
     let nsig = sig << lz;
     let raw_exp = i32::from(exp_word & 0x7fff);

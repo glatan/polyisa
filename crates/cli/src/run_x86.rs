@@ -10370,14 +10370,35 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                     return;
                 }
                 let xin = crate::x87_trans::ext_to_dd(s0, e0);
-                let yin = crate::x87_trans::ext_to_dd(s1, e1);
+                let (ymant, yexp) = crate::x87_trans::ext_mantissa_exp_dd(s1, e1);
                 let logv = if op == 0xF1 {
                     crate::x87_trans::log2_positive_ext(s0, e0)
                 } else {
                     crate::x87_trans::log2_near_one(xin.add(crate::x87_trans::Dd::from_f64(1.0)))
                 };
-                let result = yin.mul(logv);
-                x87_write_st(env, 1, crate::x87_trans::dd_to_ext(result, rc));
+                let result = ymant.mul(logv);
+                let mut rounded = crate::x87_trans::dd_to_ext_scaled(result, yexp, rc);
+                if rounded.1 & 0x7fff >= 0x7fff {
+                    x87_scalar_exception_flag(env, (1 << 3) | (1 << 5));
+                    let negative = rounded.1 & 0x8000 != 0;
+                    if fcw & (1 << 3) != 0 {
+                        let use_inf = match rc {
+                            0 => true,
+                            1 => negative,
+                            2 => !negative,
+                            _ => false,
+                        };
+                        rounded = if use_inf {
+                            (1u64 << 63, 0x7fff | if negative { 0x8000 } else { 0 })
+                        } else {
+                            (u64::MAX, 0x7ffe | if negative { 0x8000 } else { 0 })
+                        };
+                    } else {
+                        let mag = rounded.1 & 0x7fff;
+                        rounded.1 = (rounded.1 & 0x8000) | mag.wrapping_sub(24576) & 0x7fff;
+                    }
+                }
+                x87_write_st(env, 1, rounded);
             } else if op == 0xF3 {
                 let xin = crate::x87_trans::ext_to_dd(s0, e0);
                 let yin = crate::x87_trans::ext_to_dd(s1, e1);

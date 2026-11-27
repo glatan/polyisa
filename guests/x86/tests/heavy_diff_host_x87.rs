@@ -415,6 +415,28 @@ mod imp {
                 }
             }
         }
+        let maxfin = (u64::MAX, 0x7ffeu16);
+        let four = (1u64 << 63, 0x4001u16);
+        let overflow_cases = [
+            (four, maxfin, 0x037fu16, "nearest"),
+            (
+                four,
+                (maxfin.0, maxfin.1 | 0x8000),
+                0x037fu16,
+                "nearest-neg",
+            ),
+            (four, maxfin, 0x0f7fu16, "truncate"),
+        ];
+        for (x, y, fcw, name) in overflow_cases {
+            let (hv, hsw) = host_op(x, y, [0xd9, 0xf1], fcw);
+            let (pv, psw) = poly_op(x, y, [0xd9, 0xf1], fcw);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-overflow {name}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    x.0, x.1, y.0, y.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
         for (idx, input) in [(1u64, 0u16), (0x4000_0000_0000_0000u64, 0x8000u16)]
             .iter()
             .enumerate()
