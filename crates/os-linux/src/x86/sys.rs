@@ -8611,15 +8611,12 @@ mod tests {
         set64(&mut env, Gpr(6), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         let child = get64(&mut env, Gpr(0));
+        // fork した子は親のプロセスグループを継ぐので、wait4(0) の
+        // 対象になる。まだ生きている間は WNOHANG が 0 を返す。
         set64(&mut env, Gpr(0), abi::WAIT4);
         set64(&mut env, Gpr(7), 0);
         set64(&mut env, Gpr(6), 0);
-        set64(&mut env, Gpr(2), 0);
-        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ECHILD));
-        set64(&mut env, Gpr(0), abi::SETPGID);
-        set64(&mut env, Gpr(7), child);
-        set64(&mut env, Gpr(6), sys.pid);
+        set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
         sys.procs
@@ -8628,7 +8625,7 @@ mod tests {
         set64(&mut env, Gpr(0), abi::WAIT4);
         set64(&mut env, Gpr(7), 0);
         set64(&mut env, Gpr(6), 0x100);
-        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), child);
         let mut status = [0u8; 4];

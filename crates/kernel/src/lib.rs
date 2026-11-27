@@ -92,9 +92,14 @@ impl ProcessTable {
             .any(|proc| proc.id == id && (id == me || proc.parent == Some(me)))
     }
 
-    /// `parent` の子を作る。
+    /// `parent` の子を作る。fork した子は親のプロセスグループを継ぐ。
     pub fn fork(&mut self, parent: ProcessId) -> ProcessId {
-        self.spawn(Some(parent))
+        let pgid = self.pgid(parent).unwrap_or(parent.0);
+        let child = self.spawn(Some(parent));
+        if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == child) {
+            proc.pgid = pgid;
+        }
+        child
     }
 
     /// 終了コードを記録する。シグナルで死んでいれば変えない。
@@ -429,15 +434,15 @@ mod tests {
     }
 
     #[test]
-    fn process_group_starts_as_own_pid() {
+    fn fork_inherits_the_parent_process_group() {
         let mut table = ProcessTable::default();
         let parent = table.spawn(None);
         let child = table.fork(parent);
         assert_eq!(table.pgid(parent), Some(parent.0));
-        assert_eq!(table.pgid(child), Some(child.0));
-        assert!(table.owns(parent, child));
-        assert!(table.set_pgid(child, parent.0));
         assert_eq!(table.pgid(child), Some(parent.0));
+        assert!(table.owns(parent, child));
+        assert!(table.set_pgid(child, child.0));
+        assert_eq!(table.pgid(child), Some(child.0));
         assert!(!table.set_pgid(ProcessId(99), 1));
         assert!(!table.owns(parent, ProcessId(99)));
     }
@@ -448,10 +453,9 @@ mod tests {
         let parent = table.spawn(None);
         let child = table.fork(parent);
         let other = table.fork(parent);
-        assert_eq!(table.try_reap(parent, 0), Reap::NoChild);
-        assert_eq!(table.try_reap(parent, -(other.0 as i64)), Reap::Pending);
-        assert!(table.set_pgid(child, parent.0));
+        assert!(table.set_pgid(other, other.0));
         assert_eq!(table.try_reap(parent, 0), Reap::Pending);
+        assert_eq!(table.try_reap(parent, -(other.0 as i64)), Reap::Pending);
         table.exit(child, 7);
         assert_eq!(
             table.try_reap(parent, 0),
