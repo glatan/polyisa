@@ -12626,18 +12626,69 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let sz0 = b.cmp::<W64>(Cmp::Eq, s0, zero);
     let snz0 = sem::bit_not(b, sz0);
     let is_zero = sem::bit_and(b, ez0, sz0);
-    let denormal = sem::bit_and(b, ez0, snz0);
-    let denormal = sem::bit_and(b, denormal, nofault);
-    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let denormal0 = sem::bit_and(b, ez0, snz0);
     let sp = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let e1_64 = b.zext::<W16, W64>(e1);
+    let eb1 = b.and::<W64>(e1_64, mask15);
+    let ez1 = b.cmp::<W64>(Cmp::Eq, eb1, zero);
+    let sz1 = b.cmp::<W64>(Cmp::Eq, s1, zero);
+    let snz1 = sem::bit_not(b, sz1);
+    let denormal1 = sem::bit_and(b, ez1, snz1);
+    let denormal_in0 = sem::bit_or(b, denormal0, denormal1);
+    let denormal_in = sem::bit_and(b, denormal_in0, nofault);
+    let sp1 = b.cmp::<W64>(Cmp::Eq, eb1, special);
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let frac1 = b.and::<W64>(s1, frac_mask);
+    let frac1_nz = b.cmp::<W64>(Cmp::Ne, frac1, zero);
+    let frac1_z = sem::bit_not(b, frac1_nz);
+    let is_inf1 = sem::bit_and(b, sp1, frac1_z);
+    let sign1 = b.shr_l::<W64>(e1_64, s15);
+    let sign1_set = b.cmp::<W64>(Cmp::Eq, sign1, one);
+    let neg_inf1 = sem::bit_and(b, is_inf1, sign1_set);
     let pass = sem::bit_or(b, sp, is_zero);
 
+    let nan_sel = sem::x87_nan_select2(b, s0, e0, s1, e1);
+    let nan_input = nan_sel.any;
+    let snan_invalid = nan_sel.snan_invalid;
+    let uns0 = sem::x87_unsupported_format(b, s0, e0);
+    let uns1 = sem::x87_unsupported_format(b, s1, e1);
+    let unsupported = sem::bit_or(b, uns0, uns1);
+    let zero_times_infscale = sem::bit_and(b, is_inf1, is_zero);
+    let inf_times_zero_scale0 = sem::bit_and(b, neg_inf1, sp);
+    let not_nan_scale = sem::bit_not(b, nan_input);
+    let inf_times_zero_scale = sem::bit_and(b, inf_times_zero_scale0, not_nan_scale);
+    let invalid_scale0 = sem::bit_or(b, zero_times_infscale, inf_times_zero_scale);
+    let invalid_scale = sem::bit_and(b, invalid_scale0, nofault);
+    let invalid_pre = sem::bit_or(b, snan_invalid, unsupported);
+    let invalid = sem::bit_or(b, invalid_pre, invalid_scale);
+    sem::x87_exception_flag(b, invalid, 1);
+    let higher_den0 = sem::bit_or(b, nan_input, invalid);
+    let higher_den = sem::bit_not(b, higher_den0);
+    let denormal = sem::bit_and(b, denormal_in, higher_den);
+    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let not_nan_input = sem::bit_not(b, nan_input);
+    let not_invalid = sem::bit_not(b, invalid);
+    let numeric_input0 = sem::bit_and(b, not_nan_input, not_invalid);
+    let numeric_input = sem::bit_and(b, numeric_input0, nofault);
+    // 整数化が i64 indefinite へ潰れる ±2^63 以上の scale は、
+    // 符号だけを保存して ±32768 へ丸める。FSCALE はこの範囲外でも
+    // 飽和した scale factor として扱う。
+    let scale_lim = b.konst::<W64>(16383 + 63);
+    let scale_large = b.cmp::<W64>(Cmp::GeU, eb1, scale_lim);
+    let scale_neg = b.cmp::<W64>(Cmp::Eq, sign1, one);
+    let huge_pos = b.konst::<W64>(0x8000);
+    let huge_neg = b.konst::<W64>(0xffff_ffff_ffff_8000);
+    let huge_signed = b.select::<W64>(scale_neg, huge_neg, huge_pos);
+    let n3 = b.select::<W64>(scale_large, huge_signed, n2);
+
     let (sig_norm, ea_eff) = sem::x87_normalize_denormal_operand(b, s0, eb);
-    let sum = b.add::<W64>(ea_eff, n2);
+    let sum = b.add::<W64>(ea_eff, n3);
     let over_raw = b.cmp::<W64>(Cmp::GeS, sum, special);
     let under_raw = b.cmp::<W64>(Cmp::LeS, sum, zero);
     let not_pass = sem::bit_not(b, pass);
-    let scale_active0 = sem::bit_and(b, not_pass, nofault);
+    let not_inf1 = sem::bit_not(b, is_inf1);
+    let scale_active00 = sem::bit_and(b, not_pass, numeric_input);
+    let scale_active0 = sem::bit_and(b, scale_active00, not_inf1);
     let over = sem::bit_and(b, over_raw, scale_active0);
     let under = sem::bit_and(b, under_raw, scale_active0);
 
@@ -12706,16 +12757,38 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let exp16 = b.trunc::<W64, W16>(exp_sel);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let indef_exp = b.konst::<W16>(0xffff);
-    let uns0 = sem::x87_unsupported_format(b, s0, e0);
-    let uns1 = sem::x87_unsupported_format(b, s1, e1);
-    let unsupported = sem::bit_or(b, uns0, uns1);
-    sem::x87_exception_flag(b, unsupported, 1);
-    let sig_uns = b.select::<W64>(unsupported, indef_sig, sig_p);
-    let exp_uns = b.select::<W16>(unsupported, indef_exp, exp16);
+    // ST(1) が ±inf のとき、有限非零の ST(0) は例外なしで
+    // 符号付き ±inf/+0 になる。NaN は payload と符号を伝播し、
+    // unsupported format は負の indefinite になる。
+    let int_bit64 = b.konst::<W64>(1u64 << 63);
+    let not_sp0 = sem::bit_not(b, sp);
+    let nonzero0 = sem::bit_not(b, is_zero);
+    let finite0 = sem::bit_and(b, not_sp0, nonzero0);
+    let inf_scale0 = sem::bit_and(b, is_inf1, finite0);
+    let inf_scale = sem::bit_and(b, inf_scale0, numeric_input);
+    let zero_sig64 = b.konst::<W64>(0);
+    let infscale_sig = b.select::<W64>(neg_inf1, zero_sig64, int_bit64);
+    let infscale_mag = b.select::<W64>(neg_inf1, zero, special);
+    let infscale_exp64 = b.or::<W64>(infscale_mag, sign_bit);
+    let infscale_exp = b.trunc::<W64, W16>(infscale_exp64);
+    let sig_inf = b.select::<W64>(inf_scale, infscale_sig, sig_p);
+    let exp_inf = b.select::<W16>(inf_scale, infscale_exp, exp16);
+    let not_unsupported = sem::bit_not(b, unsupported);
+    let propagate_nan = sem::bit_and(b, nan_input, not_unsupported);
+    let nan_sig64 = b.select::<W64>(propagate_nan, nan_sel.sig, indef_sig);
+    let nan_sign_bit = b.shl::<W64>(nan_sel.sign, s15);
+    let nan_mag = b.or::<W64>(special, nan_sign_bit);
+    let nan_prop_exp = b.trunc::<W64, W16>(nan_mag);
+    let nan_exp = b.select::<W16>(propagate_nan, nan_prop_exp, indef_exp);
+    let sig_nan = b.select::<W64>(nan_input, nan_sig64, sig_inf);
+    let exp_nan = b.select::<W16>(nan_input, nan_exp, exp_inf);
+    let invalid_response = sem::bit_or(b, unsupported, invalid_scale);
+    let sig_uns = b.select::<W64>(invalid_response, indef_sig, sig_nan);
+    let exp_uns = b.select::<W16>(invalid_response, indef_exp, exp_nan);
     let sig_out0 = b.select::<W64>(fault, indef_sig, sig_uns);
     let exp_out0 = b.select::<W16>(fault, indef_exp, exp_uns);
-    let (sig_out, exp_out) = sem::x87_apply_precision(b, sig_out0, exp_out0);
-    let invalid_um = sem::x87_unmasked_exception(b, unsupported, 1);
+    let (sig_out, exp_out) = (sig_out0, exp_out0);
+    let invalid_um = sem::x87_unmasked_exception(b, invalid, 1);
     let result_commit = sem::x87_arith_result_commit(b, invalid_um);
     let commit = sem::bit_and(b, commit, result_commit);
     b.if_then(commit, |b| {

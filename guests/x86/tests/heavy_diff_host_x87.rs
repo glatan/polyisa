@@ -242,6 +242,7 @@ mod imp {
             ([0xd8, 0xc9], "fmul"),
             ([0xd8, 0xe1], "fsub"),
             ([0xd8, 0xf1], "fdiv"),
+            ([0xd9, 0xfd], "fscale"),
         ];
         let mut rng = Rng(0x87D1_FF01);
         let mut reports = Vec::new();
