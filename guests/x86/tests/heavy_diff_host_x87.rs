@@ -118,6 +118,38 @@ mod imp {
         )
     }
 
+    fn host_push_pair(input: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), (u64, u16), u16) {
+        let mut in0 = [0u8; 16];
+        let mut out1 = [0u8; 16];
+        let mut cw = 0u16;
+        let mut sw = 0u16;
+        in0[..8].copy_from_slice(&input.0.to_le_bytes());
+        in0[8..10].copy_from_slice(&input.1.to_le_bytes());
+        let mut code = Vec::new();
+        put_movabs(&mut code, 2, (&mut cw as *mut u16) as u64);
+        code.extend_from_slice(&[0x48, 0xb9]);
+        code.extend_from_slice(&((&mut sw as *mut u16) as u64).to_le_bytes());
+        put_movabs(&mut code, 7, (&mut in0 as *mut [u8; 16]) as u64);
+        put_movabs(&mut code, 6, (&mut out1 as *mut [u8; 16]) as u64);
+        code.extend_from_slice(&[0xdb, 0xe3, 0x66, 0xb8]);
+        code.extend_from_slice(&fcw.to_le_bytes());
+        code.extend_from_slice(&[0x66, 0x89, 0x02, 0xd9, 0x2a, 0xdb, 0x2f]);
+        code.extend_from_slice(&op);
+        code.extend_from_slice(&[0xdb, 0x3f, 0xdb, 0x3e, 0xdf, 0xe0, 0x66, 0x89, 0x01, 0xc3]);
+        let mut mem = ExecMem::new(code.len()).expect("map rw");
+        mem.write(&code).expect("write code");
+        let mem = mem.finalize().expect("make rx");
+        let f: extern "C" fn() = unsafe { core::mem::transmute(mem.ptr()) };
+        f();
+        let rd = |b: &[u8; 16]| {
+            (
+                u64::from_le_bytes(b[..8].try_into().unwrap()),
+                u16::from_le_bytes(b[8..10].try_into().unwrap()),
+            )
+        };
+        (rd(&in0), rd(&out1), sw)
+    }
+
     fn tag_bits(sig: u64, exp: u16) -> u16 {
         let ef = exp & 0x7fff;
         if ef == 0 && sig == 0 {
@@ -129,7 +161,45 @@ mod imp {
         }
     }
 
-    fn within_one_ext_ulp(a: (u64, u16), b: (u64, u16)) -> bool {
+    fn poly_push_pair(input: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), (u64, u16), u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend
+            .mem
+            .map(
+                VirtAddr(CODE_VA),
+                1,
+                Perms(Perms::R.0 | Perms::W.0 | Perms::X.0),
+            )
+            .unwrap();
+        env.backend.mem.write(VirtAddr(CODE_VA), &op).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), input.0);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), input.1);
+        let tags = 0xfff0u16 | tag_bits(input.0, input.1);
+        env.backend.set(polyisa_guest_x86::sem::ftw_ref(), tags);
+        let out = run_x86::run_mode(&mut env, CODE_VA as u32, &mut NoTrap, 1, true);
+        assert!(matches!(out, Outcome::StepLimit { .. }));
+        let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+        let mut rd = |logical: u16| {
+            let physical = usize::from((top + logical) & 7);
+            (
+                env.backend
+                    .get(polyisa_guest_x86::sem::st_sig_ref(physical)),
+                env.backend
+                    .get(polyisa_guest_x86::sem::st_exp_ref(physical)),
+            )
+        };
+        (
+            rd(0),
+            rd(1),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+
+    fn within_ext_ulp(a: (u64, u16), b: (u64, u16), ulp: u64) -> bool {
         if a == b {
             return true;
         }
@@ -142,7 +212,7 @@ mod imp {
             return false;
         }
         if ae == be {
-            return a.0.abs_diff(b.0) <= 1;
+            return a.0.abs_diff(b.0) <= ulp;
         }
         let ((lo_sig, lo_exp), (hi_sig, hi_exp)) = if ae < be {
             ((a.0, ae), (b.0, be))
@@ -157,7 +227,11 @@ mod imp {
         // Intel 仕様も round-to-nearest で 1 ulp 未満の近似を許す。
         // rounding boundary では真値の上下どちらにも丸め得るため、
         // 通常有限値だけ 1 ulp まで許容し、特殊値と例外フラグは厳密に見る。
-        host == poly || within_one_ext_ulp(host, poly)
+        host == poly || within_ext_ulp(host, poly, 1)
+    }
+
+    fn trans_value_matches_wide(host: (u64, u16), poly: (u64, u16)) -> bool {
+        host == poly || within_ext_ulp(host, poly, 2)
     }
 
     fn poly_op(input0: (u64, u16), input1: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), u16) {
@@ -348,6 +422,33 @@ mod imp {
                 reports.push(format!(
                     "trans {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
                     op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+                if reports.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        let push_ops = [([0xd9, 0xfb], "fsincos"), ([0xd9, 0xf2], "fptan")];
+        for i in 0..128 {
+            let op = push_ops[(rng.next() % push_ops.len() as u64) as usize];
+            let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
+            let sig = (1u64 << 63) | rng.next();
+            let disp = (rng.next() % 57) as i32 - 16;
+            let input = (sig, ((0x3fff + disp) as u16) | sign);
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
+            let (h0, h1, hsw) = host_push_pair(input, op.0, fcw);
+            let (p0, p1, psw) = poly_push_pair(input, op.0, fcw);
+            let values_match = if op.1 == "fptan" {
+                h0 == p0 && trans_value_matches_wide(h1, p1)
+            } else {
+                trans_value_matches_wide(h0, p0) && trans_value_matches_wide(h1, p1)
+            };
+            if !values_match || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans-push {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},{:x}/{:04x},sw{:04x} poly={:x}/{:04x},{:x}/{:04x},sw{:04x}",
+                    op.1, input.0, input.1,
+                    h0.0, h0.1, h1.0, h1.1, hsw,
+                    p0.0, p0.1, p1.0, p1.1, psw
                 ));
                 if reports.len() >= 20 {
                     break;
