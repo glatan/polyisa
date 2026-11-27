@@ -88,6 +88,36 @@ mod imp {
         ((sig, exp), sw)
     }
 
+    fn host_unary(input: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), u16) {
+        let mut in0 = [0u8; 16];
+        let mut cw = 0u16;
+        let mut sw = 0u16;
+        in0[..8].copy_from_slice(&input.0.to_le_bytes());
+        in0[8..10].copy_from_slice(&input.1.to_le_bytes());
+        let mut code = Vec::new();
+        put_movabs(&mut code, 2, (&mut cw as *mut u16) as u64);
+        code.extend_from_slice(&[0x48, 0xb9]);
+        code.extend_from_slice(&((&mut sw as *mut u16) as u64).to_le_bytes());
+        put_movabs(&mut code, 7, (&mut in0 as *mut [u8; 16]) as u64);
+        code.extend_from_slice(&[0xdb, 0xe3, 0x66, 0xb8]);
+        code.extend_from_slice(&fcw.to_le_bytes());
+        code.extend_from_slice(&[0x66, 0x89, 0x02, 0xd9, 0x2a, 0xdb, 0x2f]);
+        code.extend_from_slice(&op);
+        code.extend_from_slice(&[0xdb, 0x3f, 0xdf, 0xe0, 0x66, 0x89, 0x01, 0xc3]);
+        let mut mem = ExecMem::new(code.len()).expect("map rw");
+        mem.write(&code).expect("write code");
+        let mem = mem.finalize().expect("make rx");
+        let f: extern "C" fn() = unsafe { core::mem::transmute(mem.ptr()) };
+        f();
+        (
+            (
+                u64::from_le_bytes(in0[..8].try_into().unwrap()),
+                u16::from_le_bytes(in0[8..10].try_into().unwrap()),
+            ),
+            sw,
+        )
+    }
+
     fn tag_bits(sig: u64, exp: u16) -> u16 {
         let ef = exp & 0x7fff;
         if ef == 0 && sig == 0 {
@@ -121,6 +151,39 @@ mod imp {
         env.backend
             .set(polyisa_guest_x86::sem::st_exp_ref(1), input1.1);
         let tags = 0xfff0u16 | tag_bits(input0.0, input0.1) | (tag_bits(input1.0, input1.1) << 2);
+        env.backend.set(polyisa_guest_x86::sem::ftw_ref(), tags);
+        let out = run_x86::run_mode(&mut env, CODE_VA as u32, &mut NoTrap, 1, true);
+        assert!(
+            matches!(out, Outcome::StepLimit { .. }),
+            "poly outcome {out:?}"
+        );
+        (
+            (
+                env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+                env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            ),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+
+    fn poly_unary(input: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend
+            .mem
+            .map(
+                VirtAddr(CODE_VA),
+                1,
+                Perms(Perms::R.0 | Perms::W.0 | Perms::X.0),
+            )
+            .unwrap();
+        env.backend.mem.write(VirtAddr(CODE_VA), &op).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), input.0);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), input.1);
+        let tags = 0xfff0u16 | tag_bits(input.0, input.1);
         env.backend.set(polyisa_guest_x86::sem::ftw_ref(), tags);
         let out = run_x86::run_mode(&mut env, CODE_VA as u32, &mut NoTrap, 1, true);
         assert!(
@@ -195,6 +258,23 @@ mod imp {
                     "case {i} {} fcw={fcw:04x}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
                     op.1, input0.0, input0.1, input1.0, input1.1,
                     hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+                if reports.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        let unary_ops = [([0xd9, 0xfa], "fsqrt"), ([0xd9, 0xfc], "frndint")];
+        for i in 0..512 {
+            let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
+            let input = operand(&mut rng);
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
+            let (hv, hsw) = host_unary(input, op.0, fcw);
+            let (pv, psw) = poly_unary(input, op.0, fcw);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "unary {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
                 ));
                 if reports.len() >= 20 {
                     break;

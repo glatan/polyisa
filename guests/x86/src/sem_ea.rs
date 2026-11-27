@@ -10290,7 +10290,6 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
                 let is_zero = sem::bit_and(b, exp_zero, sig_zero);
                 let denormal = sem::bit_and(b, exp_zero, sig_nz);
-                sem::x87_exception_flag(b, denormal, 1 << 1);
                 let sp = b.cmp::<W64>(Cmp::Eq, ea, special);
                 let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
                 let frac = b.and::<W64>(sig, frac_mask);
@@ -10298,13 +10297,23 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let frac_z = sem::bit_not(b, frac_nz);
                 let is_nan = sem::bit_and(b, sp, frac_nz);
                 let is_inf = sem::bit_and(b, sp, frac_z);
+                let qbit = b.konst::<W64>(1u64 << 62);
+                let qbits = b.and::<W64>(sig, qbit);
+                let qbit_set = b.cmp::<W64>(Cmp::Ne, qbits, zero);
+                let qbit_clear = sem::bit_not(b, qbit_set);
+                let snan = sem::bit_and(b, is_nan, qbit_clear);
                 let nonzero = sem::bit_not(b, is_zero);
                 let not_nan = sem::bit_not(b, is_nan);
                 let neg_nonzero = sem::bit_and(b, neg, nonzero);
                 let invalid_neg = sem::bit_and(b, neg_nonzero, not_nan);
                 let unsupported = sem::x87_unsupported_format(b, sig, exp);
-                let invalid = sem::bit_or(b, invalid_neg, unsupported);
+                let invalid0 = sem::bit_or(b, invalid_neg, unsupported);
+                let invalid = sem::bit_or(b, invalid0, snan);
                 sem::x87_exception_flag(b, invalid, 1);
+                let higher_den0 = sem::bit_or(b, is_nan, invalid);
+                let higher_den = sem::bit_not(b, higher_den0);
+                let denormal_report = sem::bit_and(b, denormal, higher_den);
+                sem::x87_exception_flag(b, denormal_report, 1 << 1);
 
                 // sqrt(sig * 2^u) を整数平方根で求める。u が偶数なら
                 // sqrt(sig << 63)、奇数なら sqrt(sig << 64) が目的の
@@ -10335,7 +10344,7 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
                 let tie_up = sem::bit_and(b, tie, lsb_set);
                 let nearest_up0 = sem::bit_or(b, high_closer, tie_up);
-                let nearest_up = sem::bit_and(b, nearest_up0, inexact128);
+                let nearest_up_pre = sem::bit_and(b, nearest_up0, inexact128);
 
                 let fcw = b.get(sem::fcw_ref());
                 let fcw64 = b.zext::<W16, W64>(fcw);
@@ -10344,10 +10353,16 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let rc0 = b.shr_l::<W64>(fcw64, ten);
                 let rc = b.and::<W64>(rc0, three);
                 let two = b.konst::<W64>(2);
+                let nearest_mode = b.cmp::<W64>(Cmp::Eq, rc, zero);
+                let nearest_up = sem::bit_and(b, nearest_up_pre, nearest_mode);
                 let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
                 let ceil_up = sem::bit_and(b, ceil, inexact128);
                 let do_up = sem::bit_or(b, nearest_up, ceil_up);
-                sem::x87_exception_flag(b, inexact128, 1 << 5);
+                let numeric0 = sem::bit_not(b, sp);
+                let numeric1 = sem::bit_not(b, invalid);
+                let numeric = sem::bit_and(b, numeric0, numeric1);
+                let inexact_numeric = sem::bit_and(b, inexact128, numeric);
+                sem::x87_exception_flag(b, inexact_numeric, 1 << 5);
 
                 let root_inc = b.select::<W64>(do_up, root_plus, root);
                 let root_carry = b.cmp::<W64>(Cmp::Eq, root_inc, zero);
@@ -10363,13 +10378,16 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let zero_exp64 = b.select::<W64>(is_zero, exp64, inf_exp);
                 let bad_nan0 = sem::bit_or(b, is_nan, invalid_neg);
                 let bad_nan = sem::bit_or(b, bad_nan0, unsupported);
-                let final_sig = b.select::<W64>(bad_nan, indef_sig, zero_sig);
+                let nan_prop_sig = b.or::<W64>(sig, qbit);
+                let nan_or_indef = b.select::<W64>(is_nan, nan_prop_sig, indef_sig);
+                let final_sig = b.select::<W64>(bad_nan, nan_or_indef, zero_sig);
                 let indef_exp64 = b.konst::<W64>(0xffff);
-                let exp_word64 = b.select::<W64>(bad_nan, indef_exp64, zero_exp64);
+                let nan_exp64 = b.select::<W64>(is_nan, exp64, indef_exp64);
+                let exp_word64 = b.select::<W64>(bad_nan, nan_exp64, zero_exp64);
                 let exp_word = b.trunc::<W64, W16>(exp_word64);
                 let (sr, er) = sem::x87_apply_precision(b, final_sig, exp_word);
                 let invalid_um = sem::x87_unmasked_exception(b, invalid, 1);
-                let denormal_um = sem::x87_unmasked_exception(b, denormal, 1 << 1);
+                let denormal_um = sem::x87_unmasked_exception(b, denormal_report, 1 << 1);
                 let suppress = sem::bit_or(b, invalid_um, denormal_um);
                 let commit_result = sem::x87_arith_result_commit(b, suppress);
                 b.if_then(commit_result, |b| {
@@ -10421,11 +10439,35 @@ pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let small = b.cmp::<W64>(Cmp::LtU, ea, lim);
                 let sr0 = b.select::<W64>(small, isig, sig);
                 let er0 = b.select::<W16>(small, iexp, exp);
+                let zero64 = b.konst::<W64>(0);
+                let exp_is_zero = b.cmp::<W64>(Cmp::Eq, ea, zero64);
+                let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero64);
+                let denormal = sem::bit_and(b, exp_is_zero, sig_nz);
+                sem::x87_exception_flag(b, denormal, 1 << 1);
+                let special = b.konst::<W64>(0x7fff);
+                let is_special = b.cmp::<W64>(Cmp::Eq, ea, special);
+                let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+                let frac = b.and::<W64>(sig, frac_mask);
+                let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, zero64);
+                let int_bit64 = b.konst::<W64>(1u64 << 63);
+                let ib = b.and::<W64>(sig, int_bit64);
+                let ib_set = b.cmp::<W64>(Cmp::Ne, ib, zero64);
+                let nan0 = sem::bit_and(b, is_special, frac_nz);
+                let is_nan = sem::bit_and(b, nan0, ib_set);
+                let qbit = b.konst::<W64>(1u64 << 62);
+                let qbits = b.and::<W64>(sig, qbit);
+                let qbit_set = b.cmp::<W64>(Cmp::Ne, qbits, zero64);
+                let qbit_clear = sem::bit_not(b, qbit_set);
+                let snan = sem::bit_and(b, is_nan, qbit_clear);
                 let unsupported = sem::x87_unsupported_format(b, sig, exp);
-                sem::x87_exception_flag(b, unsupported, 1);
-                let sr = b.select::<W64>(unsupported, indef_sig, sr0);
-                let er = b.select::<W16>(unsupported, indef_exp, er0);
-                let invalid_um = sem::x87_unmasked_exception(b, unsupported, 1);
+                let invalid = sem::bit_or(b, unsupported, snan);
+                sem::x87_exception_flag(b, invalid, 1);
+                let nan_sig = b.or::<W64>(sig, qbit);
+                let sr_nan = b.select::<W64>(is_nan, nan_sig, sr0);
+                let er_nan = b.select::<W16>(is_nan, exp, er0);
+                let sr = b.select::<W64>(unsupported, indef_sig, sr_nan);
+                let er = b.select::<W16>(unsupported, indef_exp, er_nan);
+                let invalid_um = sem::x87_unmasked_exception(b, invalid, 1);
                 let commit_result = sem::x87_arith_result_commit(b, invalid_um);
                 b.if_then(commit_result, |b| {
                     sem::write_st(b, top, sr, er);
