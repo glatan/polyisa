@@ -7857,7 +7857,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_to_a_child_waiting_in_wait4_does_not_requeue_it() {
+    fn signal_to_a_child_waiting_in_wait4_makes_it_runnable() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
@@ -7877,14 +7877,13 @@ mod tests {
         set64(&mut env, Gpr(6), 10);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert!(
-            sys.queue
+            !sys.queue
                 .0
                 .borrow()
                 .meta
                 .blocked()
                 .iter()
-                .any(|(id, wait)| id.0 == child
-                    && *wait == polyisa_kernel::ThreadWait::Child { which: -1 })
+                .any(|(id, _)| id.0 == child)
         );
     }
 
