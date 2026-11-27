@@ -14323,26 +14323,41 @@ pub fn fmul_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> 
     let base = b.konst::<W64>(next_rip);
     let d = b.konst::<W64>(disp as i64 as u64);
     let addr = b.add::<W64>(base, d);
-    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
-    fmul_m32_bits(b, bits)
+    fmul_m32_at(b, addr)
 }
 
 /// FMUL m32 [disp32] (D8 /1 mod=00 rm=101、32ビット)。
 pub fn fmul_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);
-    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
-    fmul_m32_bits(b, bits)
+    fmul_m32_at(b, addr)
 }
 
-pub(crate) fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
-    let (sig_m, exp_m) = f32_to_ext(b, bits);
+pub(crate) fn fmul_m32_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
     let top = b.get(top_ref());
-    let (sig0, exp0) = read_st(b, top);
-    let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig_m, exp_m);
-    let commit = x87_arith_result_commit(b, invalid);
-    b.if_then(commit, |b| {
-        write_st(b, top, sig_p, exp_p);
-        Ok(())
+    let (sig0, exp0, fault) = read_st_source(b, top);
+    let commit_fault = x87_commit_after_fault(b, fault);
+    b.if_then(commit_fault, |b| {
+        let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+        let indef_exp = b.konst::<W16>(0xffff);
+        b.if_then_else(
+            fault,
+            |b| {
+                write_st(b, top, indef_sig, indef_exp);
+                Ok(())
+            },
+            |b| {
+                let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+                let denormal = f32_denormal(b, bits);
+                x87_exception_flag(b, denormal, 1 << 1);
+                let (sig_m, exp_m) = f32_to_ext(b, bits);
+                let (sig_p, exp_p, invalid) = mul_ext(b, sig0, exp0, sig_m, exp_m);
+                let commit = x87_arith_result_commit(b, invalid);
+                b.if_then(commit, |b| {
+                    write_st(b, top, sig_p, exp_p);
+                    Ok(())
+                })
+            },
+        )
     })
 }
 

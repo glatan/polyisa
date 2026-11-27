@@ -21362,6 +21362,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fmul_m32_empty_source_masked_and_unmasked() {
+        fn once(fcw: u16) -> (u16, u64, u16) {
+            let mut env = bare();
+            let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+            env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+            env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+            env.backend
+                .mem
+                .write(VirtAddr(0x1000), &[0xD8, 0x0D, 0xFA, 0x0F, 0x00, 0x00])
+                .unwrap(); // fmul dword [rip+0xffa] (=0x2000)
+            env.backend
+                .mem
+                .write(VirtAddr(0x2000), &1.0f32.to_le_bytes())
+                .unwrap();
+            sem::write64(&mut env.backend, Gpr(3), 0x2000);
+            env.backend.set(sem::eip_ref(), 0x1000);
+            env.backend.set(sem::fcw_ref(), fcw);
+            env.backend.set(sem::ftw_ref(), 0xffffu16);
+            env.backend.set(sem::top_ref(), 0u16);
+            let mut sys = Linux::x86_64();
+            let mut hist = std::collections::VecDeque::new();
+            step_x86_legacy(&mut env, &mut sys, true, 0, &mut hist).unwrap();
+            (
+                env.backend.get(sem::fsw_ref()),
+                env.backend.get(sem::st_sig_ref(0)),
+                env.backend.get(sem::st_exp_ref(0)),
+            )
+        }
+        let (fsw, sig, exp) = once(0x037F);
+        assert_eq!(fsw & 0x241, 0x41);
+        assert_eq!(fsw & 0x8080, 0);
+        assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xffff));
+        let (fsw, sig, exp) = once(0x037E);
+        assert_eq!(fsw & 0x82C1, 0x80C1);
+        assert_eq!((sig, exp), (0, 0));
+    }
+
+    #[test]
     fn division_exception_enters_linux_signal_handler() {
         // SIGFPE ハンドラを rt_sigaction で設定し、div ecx の #DE で
         // ハンドラへ入ることを実行経路で確かめる。ハンドラは exit(42)。
