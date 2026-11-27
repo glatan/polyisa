@@ -9902,6 +9902,49 @@ fn x87_set_c2(env: &mut BareEnv, on: bool) {
     env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
 }
 
+fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
+    match op {
+        0xFE | 0xFF | 0xF0 => x87_write_st(env, 0, value),
+        0xFB | 0xF2 => {
+            x87_write_st(env, 0, value);
+            x87_push(env, value);
+        }
+        0xF1 | 0xF3 | 0xF9 => {
+            x87_write_st(env, 1, value);
+            x87_pop(env);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn x87_scalar_unsupported(sig: u64, exp: u16) -> bool {
+    let ef = exp & 0x7fff;
+    if ef == 0 || ef == 0x7fff {
+        // exponent 0 は pseudo-denormal だけが unsupported。special では
+        // integer bit なしが pseudo-NaN/Inf。
+        if ef == 0 {
+            sig & (1u64 << 63) != 0
+        } else {
+            sig & (1u64 << 63) == 0
+        }
+    } else {
+        sig & (1u64 << 63) == 0
+    }
+}
+
+fn x87_scalar_nan(sig: u64, exp: u16) -> bool {
+    (exp & 0x7fff) == 0x7fff && sig & (1u64 << 63) != 0 && sig & ((1u64 << 63) - 1) != 0
+}
+
+fn x87_scalar_snan(sig: u64, exp: u16) -> bool {
+    x87_scalar_nan(sig, exp) && sig & (1u64 << 62) == 0
+}
+
+fn x87_quiet_nan(mut v: (u64, u16)) -> (u64, u16) {
+    v.0 |= 1u64 << 62;
+    v
+}
+
 fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     let empty0 = x87_logical_tag(env, 0) == 3;
     let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
@@ -9937,6 +9980,35 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         return;
     }
     let (s0, e0) = x87_read_st(env, 0);
+    let (s1, e1) = if matches!(op, 0xF1 | 0xF3 | 0xF9) {
+        x87_read_st(env, 1)
+    } else {
+        (0, 0)
+    };
+    let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
+    let unsupported = x87_scalar_unsupported(s0, e0) || (binary && x87_scalar_unsupported(s1, e1));
+    let nan0 = x87_scalar_nan(s0, e0);
+    let nan1 = binary && x87_scalar_nan(s1, e1);
+    let snan = x87_scalar_snan(s0, e0) || (binary && x87_scalar_snan(s1, e1));
+    if unsupported || nan0 || nan1 {
+        if unsupported || snan {
+            x87_scalar_exception_flag(env, 1);
+        }
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if fcw & 1 == 0 {
+            return;
+        }
+        let indef = (0xC000_0000_0000_0000u64, 0xffffu16);
+        let value = if unsupported {
+            indef
+        } else if nan0 && (!(nan1) || (s0 & (1u64 << 62) != 0)) {
+            x87_quiet_nan((s0, e0))
+        } else {
+            x87_quiet_nan((s1, e1))
+        };
+        x87_trans_write_result(env, op, value);
+        return;
+    }
     // push 系は range 判定より先に full-stack overflow を検査する。
     if matches!(op, 0xFB | 0xF2) {
         let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
@@ -9993,7 +10065,6 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         // FPATAN: atan(ST1/ST0)、FYL2X系: ST1*log2(ST0[+1])。
         // いずれも結果を ST1 へ書いて pop する。
         0xF1 | 0xF3 | 0xF9 => {
-            let (s1, e1) = x87_read_st(env, 1);
             let x1 = x87_ext_to_f64(s1, e1);
             let y = match op {
                 0xF3 => x1.atan2(x),
