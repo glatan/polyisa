@@ -19895,6 +19895,7 @@ fn run_x87_transcendental() {
     // 超越関数は host f64 による近似。代表値で三角・指数・対数・
     // 逆正接とスタック規則（push/pop）を確認する。
     let mut prog = vec![
+        0xDB, 0xE3, // finit: mask x87 exceptions
         0xDD, 0x05, 0x00, 0x18, 0, 0, 0xD9, 0xFE, 0xDD, 0x1D, 0x00, 0x20, 0, 0, // sin(pi/6)
         0xDD, 0x05, 0x08, 0x18, 0, 0, 0xD9, 0xFF, 0xDD, 0x1D, 0x08, 0x20, 0, 0, // cos(pi/3)
         0xDD, 0x05, 0x00, 0x18, 0, 0, 0xD9, 0xFB, 0xDD, 0x1D, 0x10, 0x20, 0, 0, 0xDD, 0x1D, 0x18,
@@ -19958,6 +19959,7 @@ fn run_x87_transcendental_branch_target() {
     // taken branch の直後に concrete hook の命令が来ても、古い
     // Ctrl::Jump に引きずられず EIP が進むことを確認する。
     let mut prog = vec![
+        0xDB, 0xE3, // finit: mask x87 exceptions
         0xDD, 0x05, 0x00, 0x18, 0, 0, // fld qword [0x1800] = 0.5
         0xEB, 0x00, // jmp +0（次の fsin へ）
         0xD9, 0xFE, // fsin
@@ -19982,6 +19984,7 @@ fn run_x87_transcendental_small_and_range() {
     // fsin(x) は x として残る。2^63 は範囲外なので ST(0) 不変、
     // C2=1。続く範囲内 fsin は C2 を下ろす。
     let mut prog = vec![
+        0xDB, 0xE3, // finit: mask x87 exceptions
         0xDD, 0x05, 0x00, 0x18, 0, 0, // fld qword [0x1800] = 2^-1022
         0xD9, 0xFE, // fsin
         0xDD, 0x1D, 0x00, 0x20, 0, 0, // fstp qword [0x2000]
