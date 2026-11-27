@@ -6514,7 +6514,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vminmaxbf16XvHvWvIb
+        Insn::Vcomisbf16XvWv
+            | Insn::Vminmaxbf16XvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
             | Insn::Vscalefbf16XvHvWv
@@ -6615,9 +6616,14 @@ fn avx10_exec(
                         v[i * ebw..i * ebw + ebw].copy_from_slice(&e[..ebw]);
                     }
                 } else {
+                    let n = if md.insn == Insn::Vcomisbf16XvWv {
+                        2
+                    } else {
+                        vbytes
+                    };
                     env.backend
                         .mem
-                        .read(VirtAddr(a), &mut v[..vbytes], acc_r)
+                        .read(VirtAddr(a), &mut v[..n], acc_r)
                         .map_err(|er| amx_mem_exit(a, er))?;
                 }
                 Ok(v)
@@ -6691,6 +6697,28 @@ fn avx10_exec(
             }
         }
     };
+    if insn == Insn::Vcomisbf16XvWv {
+        let a = bf_r(&x, 0);
+        let c = bf_r(&y, 0);
+        let (zf, pf, cf) = if a.is_nan() || c.is_nan() {
+            (1u32, 1u32, 1u32)
+        } else {
+            let av = bf64(a);
+            let cv = bf64(c);
+            if av == cv {
+                (1, 0, 0)
+            } else if av < cv {
+                (0, 0, 1)
+            } else {
+                (0, 0, 0)
+            }
+        };
+        let cur: u32 = env.backend.get(sem::eflags_ref());
+        let mut f = cur & !(0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x800);
+        f |= cf | (pf << 2) | (zf << 6);
+        env.backend.set(sem::eflags_ref(), f);
+        return Ok(());
+    }
     match insn {
         Insn::Vminmaxbf16XvHvWvIb => {
             for i in 0..lanes16 {
@@ -18247,6 +18275,7 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vcomisbf16XvWv
             | Insn::Vminmaxbf16XvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
