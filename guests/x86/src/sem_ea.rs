@@ -6467,7 +6467,12 @@ pub fn vmovmsk<B: Backend>(
 pub fn vmovd_x_e<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
     movd_x_e(b, d, ea)?;
     let z = b.konst::<W128>(0);
-    b.set(sem::ymm_hi_ref(reg_x(d)), z);
+    let r = reg_x(d);
+    b.set(sem::ymm_hi_ref(r), z);
+    // VEX/EVEX 形は 128 ビット書き込みで最大ベクトル幅まで上位を
+    // ゼロクリアする。zmm 対応状態では part2/3 も残さない。
+    b.set(sem::zreg_ref(r.0, 2), z);
+    b.set(sem::zreg_ref(r.0, 3), z);
     Ok(())
 }
 

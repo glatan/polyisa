@@ -7086,18 +7086,16 @@ fn avx10_exec(
     let bf64 = |v: BF16| f32::from_bits((v.bits() as u32) << 16) as f64;
     let bf64r = |x: f64| -> u16 { F64::from_bits(x.to_bits()).to_bf16(Rm::Rne).0.bits() as u16 };
     let qnan16 = |w: u16| w | 0x40;
-    let f2e5 = |v: F32, sat: bool, sgn: u64, fl: &mut u8| -> u8 {
-        let (r, f) = v.to_e5m2(Rm::Rne);
-        *fl |= f;
+    let f2e5 = |v: F32, sat: bool, sgn: u64, _fl: &mut u8| -> u8 {
+        let (r, _f) = v.to_e5m2(Rm::Rne);
         // 飽和形: オーバーフローは最大有限値 0x7B（57344）に飽和。
         if sat && !v.is_nan() && r.bits() & 0x7f == 0x7c {
             return (0x7b | sgn) as u8;
         }
         r.bits() as u8
     };
-    let f2e4 = |v: F32, sat: bool, sgn: u64, fl: &mut u8| -> u8 {
-        let (r, f) = v.to_e4m3(Rm::Rne);
-        *fl |= f;
+    let f2e4 = |v: F32, sat: bool, sgn: u64, _fl: &mut u8| -> u8 {
+        let (r, _f) = v.to_e4m3(Rm::Rne);
         if sat && !v.is_nan() && r.bits() & 0x7f == 0x7f {
             return (0x7e | sgn) as u8;
         }
