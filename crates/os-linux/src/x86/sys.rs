@@ -7883,6 +7883,12 @@ mod tests {
         set64(&mut env, Gpr(7), 99);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), u64::from(EINVAL));
+        // TIMER_ABSTIME 以外の flags も EINVAL。
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), u64::from(EINVAL));
     }
 
     #[test]
