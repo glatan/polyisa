@@ -304,3 +304,45 @@ pub(crate) fn atan2_dd(y: Dd, x: Dd) -> Dd {
         base.add(PI)
     }
 }
+
+pub(crate) const INV_PI2: Dd = Dd {
+    hi: std::f64::consts::FRAC_2_PI,
+    lo: -3.935735687792394e-17,
+};
+
+fn nearby_int(x: f64) -> i64 {
+    x.round() as i64
+}
+
+/// trig 用の π/2 単位の引数削減。double-double の π/2 では
+/// 中程度の指数までを対象にし、戻り値は残余と象限。
+pub(crate) fn reduce_pi2(x: Dd) -> (Dd, i64) {
+    let qf = x.mul(INV_PI2).hi;
+    let q = nearby_int(qf);
+    if q == 0 {
+        return (x, 0);
+    }
+    let qd = Dd::from_f64(q as f64);
+    let r = x.sub(qd.mul(PI2));
+    (r, q)
+}
+
+pub(crate) fn sin_reduced(x: Dd) -> Dd {
+    let (r, q) = reduce_pi2(x);
+    match q.rem_euclid(4) {
+        0 => sin_small(r),
+        1 => cos_small(r),
+        2 => sin_small(r).neg(),
+        _ => cos_small(r).neg(),
+    }
+}
+
+pub(crate) fn cos_reduced(x: Dd) -> Dd {
+    let (r, q) = reduce_pi2(x);
+    match q.rem_euclid(4) {
+        0 => cos_small(r),
+        1 => sin_small(r).neg(),
+        2 => cos_small(r).neg(),
+        _ => sin_small(r),
+    }
+}

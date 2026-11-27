@@ -10167,9 +10167,9 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         0xFE | 0xFF => {
             let input = crate::x87_trans::ext_to_dd(s0, e0);
             let y = if op == 0xFE {
-                crate::x87_trans::sin_small(input)
+                crate::x87_trans::sin_reduced(input)
             } else {
-                crate::x87_trans::cos_small(input)
+                crate::x87_trans::cos_reduced(input)
             };
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
@@ -10189,11 +10189,11 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             x87_write_st(
                 env,
                 0,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::sin_small(input), rc),
+                crate::x87_trans::dd_to_ext(crate::x87_trans::sin_reduced(input), rc),
             );
             x87_push(
                 env,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_small(input), rc),
+                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced(input), rc),
             );
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
@@ -10214,8 +10214,8 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            let sin = crate::x87_trans::sin_small(input);
-            let cos = crate::x87_trans::cos_small(input);
+            let sin = crate::x87_trans::sin_reduced(input);
+            let cos = crate::x87_trans::cos_reduced(input);
             x87_write_st(env, 0, crate::x87_trans::dd_to_ext(sin.div(cos), rc));
             x87_push(env, x87_f64_to_ext(1.0));
         }
