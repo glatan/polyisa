@@ -129,6 +129,37 @@ mod imp {
         }
     }
 
+    fn within_one_ext_ulp(a: (u64, u16), b: (u64, u16)) -> bool {
+        if a == b {
+            return true;
+        }
+        if (a.1 & 0x8000) != (b.1 & 0x8000) {
+            return false;
+        }
+        let ae = a.1 & 0x7fff;
+        let be = b.1 & 0x7fff;
+        if ae == 0x7fff || be == 0x7fff || ae == 0 || be == 0 {
+            return false;
+        }
+        if ae == be {
+            return a.0.abs_diff(b.0) <= 1;
+        }
+        let ((lo_sig, lo_exp), (hi_sig, hi_exp)) = if ae < be {
+            ((a.0, ae), (b.0, be))
+        } else {
+            ((b.0, be), (a.0, ae))
+        };
+        hi_exp == lo_exp + 1 && lo_sig == u64::MAX && hi_sig == 1u64 << 63
+    }
+
+    fn trans_value_matches(host: (u64, u16), poly: (u64, u16)) -> bool {
+        // x87 transcendental は IEEE 四則と違って正確丸めを要求されず、
+        // Intel 仕様も round-to-nearest で 1 ulp 未満の近似を許す。
+        // rounding boundary では真値の上下どちらにも丸め得るため、
+        // 通常有限値だけ 1 ulp まで許容し、特殊値と例外フラグは厳密に見る。
+        host == poly || within_one_ext_ulp(host, poly)
+    }
+
     fn poly_op(input0: (u64, u16), input1: (u64, u16), op: [u8; 2], fcw: u16) -> ((u64, u16), u16) {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         env.backend
@@ -288,10 +319,10 @@ mod imp {
         }
         assert!(reports.is_empty(), "host x87 diff:\n{}", reports.join("\n"));
     }
-    /// transcendental 用の valid-range oracle。数値評価が高精度化される
-    /// までは ignored test として運用し、入力生成と host/poly 比較の
-    /// 足場だけ先に固定する。角度は小さい正規数に絞る。
-    pub fn run_transcendental_scaffold() {
+    /// transcendental 用の valid-range oracle。x87 transcendental は
+    /// 正確丸めを要求されないため、通常有限値は 1 ulp まで許容し、
+    /// 特殊値と例外フラグは host と厳密に比較する。
+    pub fn run_transcendental_accuracy() {
         let unary_ops = [
             ([0xd9, 0xf0], "f2xm1"),
             ([0xd9, 0xfe], "fsin"),
@@ -313,7 +344,7 @@ mod imp {
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (hv, hsw) = host_unary(input, op.0, fcw);
             let (pv, psw) = poly_unary(input, op.0, fcw);
-            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+            if !trans_value_matches(hv, pv) || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
                 reports.push(format!(
                     "trans {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
                     op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
@@ -352,7 +383,7 @@ mod imp {
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (hv, hsw) = host_op(input0, input1, op.0, fcw);
             let (pv, psw) = poly_op(input0, input1, op.0, fcw);
-            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+            if !trans_value_matches(hv, pv) || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
                 reports.push(format!(
                     "trans-bin {i} {} fcw={fcw:04x}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
                     op.1, input0.0, input0.1, input1.0, input1.1,
@@ -467,8 +498,7 @@ fn diff_host_x87_arithmetic() {
 }
 
 #[test]
-#[ignore = "transcendental bit-exact evaluation is not implemented yet"]
-fn diff_host_x87_transcendental_scaffold() {
+fn diff_host_x87_transcendental_accuracy() {
     #[cfg(all(target_arch = "x86_64", unix))]
-    imp::run_transcendental_scaffold();
+    imp::run_transcendental_accuracy();
 }
