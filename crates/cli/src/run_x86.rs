@@ -9902,6 +9902,31 @@ fn x87_set_c2(env: &mut BareEnv, on: bool) {
     env.backend.set(polyisa_guest_x86::sem::fsw_ref(), nv);
 }
 
+fn x87_norm_finite(sig: u64, exp: u16) -> (u64, i32) {
+    if sig == 0 {
+        return (0, 0);
+    }
+    let lz = sig.leading_zeros() as i32;
+    (sig << lz, i32::from(exp & 0x7fff) - lz)
+}
+
+fn x87_positive_power2_exp(sig: u64, exp: u16) -> Option<i32> {
+    if exp & 0x8000 != 0 || (exp & 0x7fff) == 0x7fff || sig == 0 {
+        return None;
+    }
+    let (n, e) = x87_norm_finite(sig, exp);
+    (n == 1u64 << 63).then_some(e - 16383)
+}
+
+fn x87_scaled_int_product_exact(sig: u64, scale: i32) -> bool {
+    if sig == 0 || scale == 0 {
+        return true;
+    }
+    let product = u128::from(sig) * u128::from(scale.unsigned_abs());
+    let significant = 128 - product.leading_zeros() as i32 - product.trailing_zeros() as i32;
+    significant <= 64
+}
+
 fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
     match op {
         0xFE | 0xFF | 0xF0 => x87_write_st(env, 0, value),
@@ -10165,6 +10190,20 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                 let num_zero = (e1 & 0x7fff) == 0 && s1 == 0;
                 let den_positive = e0 & 0x8000 == 0;
                 if !(num_zero && den_positive) {
+                    x87_scalar_exception_flag(env, 1 << 5);
+                }
+            } else if op == 0xF1 {
+                let y_zero = (e1 & 0x7fff) == 0 && s1 == 0;
+                let y_inf = (e1 & 0x7fff) == 0x7fff && s1 == 1u64 << 63;
+                let exact = if y_zero || y_inf {
+                    true
+                } else if let Some(n) = x87_positive_power2_exp(s0, e0) {
+                    let (ysig, _) = x87_norm_finite(s1, e1);
+                    x87_scaled_int_product_exact(ysig, n)
+                } else {
+                    false
+                };
+                if !exact {
                     x87_scalar_exception_flag(env, 1 << 5);
                 }
             }
