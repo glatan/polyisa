@@ -13358,6 +13358,76 @@ fn run_x87_fsin_denormal_unmasked_underflow_response() {
 }
 
 #[test]
+fn run_x87_trig_tiny_normal_input_preserves_linear_term() {
+    fn once(opcode: u8) -> (u16, u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, opcode])
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 1);
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    let (fsw, sig, exp) = once(0xFE); // fsin
+    assert_eq!(fsw & 0x3f, 0x20);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 1));
+    let (fsw, sig, exp) = once(0xFF); // fcos
+    assert_eq!(fsw & 0x3f, 0x20);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3fff));
+}
+
+#[test]
+fn run_x87_fptan_tiny_normal_input_preserves_linear_term() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xF2])
+        .unwrap(); // fptan
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), 0x8000_0000_0000_0000);
+    env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 1);
+    x87_recalc_tag(&mut env, 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_eq!(fsw & 0x3f, 0x20);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        ),
+        (0x8000_0000_0000_0000, 1),
+    );
+    assert_eq!(
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        ),
+        (0x8000_0000_0000_0000, 0x3fff),
+    );
+}
+
+#[test]
 fn run_x87_f2xm1_tiny_result_unmasked_underflow_response() {
     fn once(fcw: u16) -> (u16, u64, u16) {
         let mut env = bare_x86_env();

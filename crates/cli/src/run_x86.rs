@@ -9960,6 +9960,16 @@ fn x87_scalar_tiny_meta(env: &mut BareEnv, meta: crate::x87_trans::ExtRounded) -
     (meta.normal_sig, mag | sign)
 }
 
+/// trig/tan の一次項近似が 64 bit の結果を完全に決めるほど入力が小さいか。
+/// この域では x^3 項は extended precision の丸めに影響しない。
+fn x87_trans_linear_input(sig: u64, exp: u16) -> bool {
+    if (exp & 0x7fff) == 0x7fff || sig == 0 {
+        return false;
+    }
+    let (_, input_exp) = crate::x87_trans::ext_mantissa_exp_dd(sig, exp);
+    input_exp <= -70
+}
+
 fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
     match op {
         0xFE | 0xFF | 0xF0 => x87_write_st(env, 0, value),
@@ -10384,19 +10394,30 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     match op {
         // FSIN/FCOS は ST(0) を置き換える。
         0xFE | 0xFF => {
-            let y = if op == 0xFE {
-                crate::x87_trans::sin_reduced_ext(s0, e0)
+            let small_linear = x87_trans_linear_input(s0, e0);
+            let y = if small_linear {
+                None
+            } else if op == 0xFE {
+                Some(crate::x87_trans::sin_reduced_ext(s0, e0))
             } else {
-                crate::x87_trans::cos_reduced_ext(s0, e0)
+                Some(crate::x87_trans::cos_reduced_ext(s0, e0))
             };
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            let meta = crate::x87_trans::dd_to_ext_scaled_meta(y, 0, rc);
-            let adjusted = x87_scalar_tiny_meta(env, meta);
-            x87_write_st(env, 0, adjusted);
+            let value = if small_linear {
+                if op == 0xFE {
+                    (s0, e0)
+                } else {
+                    (1u64 << 63, 0x3fff)
+                }
+            } else {
+                let meta = crate::x87_trans::dd_to_ext_scaled_meta(y.unwrap(), 0, rc);
+                x87_scalar_tiny_meta(env, meta)
+            };
+            x87_write_st(env, 0, value);
         }
         // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
         0xFB => {
@@ -10405,17 +10426,24 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            let sin_meta = crate::x87_trans::dd_to_ext_scaled_meta(
-                crate::x87_trans::sin_reduced_ext(s0, e0),
-                0,
-                rc,
-            );
-            let sin_value = x87_scalar_tiny_meta(env, sin_meta);
+            let small_linear = x87_trans_linear_input(s0, e0);
+            let sin_value = if small_linear {
+                (s0, e0)
+            } else {
+                let sin_meta = crate::x87_trans::dd_to_ext_scaled_meta(
+                    crate::x87_trans::sin_reduced_ext(s0, e0),
+                    0,
+                    rc,
+                );
+                x87_scalar_tiny_meta(env, sin_meta)
+            };
             x87_write_st(env, 0, sin_value);
-            x87_push(
-                env,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced_ext(s0, e0), rc),
-            );
+            let cos_value = if small_linear {
+                (1u64 << 63, 0x3fff)
+            } else {
+                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced_ext(s0, e0), rc)
+            };
+            x87_push(env, cos_value);
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
         0xF0 => {
@@ -10446,10 +10474,15 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            let sin = crate::x87_trans::sin_reduced_ext(s0, e0);
-            let cos = crate::x87_trans::cos_reduced_ext(s0, e0);
-            let tan_meta = crate::x87_trans::dd_to_ext_scaled_meta(sin.div(cos), 0, rc);
-            let tan_value = x87_scalar_tiny_meta(env, tan_meta);
+            let small_linear = x87_trans_linear_input(s0, e0);
+            let tan_value = if small_linear {
+                (s0, e0)
+            } else {
+                let sin = crate::x87_trans::sin_reduced_ext(s0, e0);
+                let cos = crate::x87_trans::cos_reduced_ext(s0, e0);
+                let tan_meta = crate::x87_trans::dd_to_ext_scaled_meta(sin.div(cos), 0, rc);
+                x87_scalar_tiny_meta(env, tan_meta)
+            };
             x87_write_st(env, 0, tan_value);
             x87_push(env, x87_f64_to_ext(1.0));
         }
