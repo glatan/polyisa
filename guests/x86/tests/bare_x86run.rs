@@ -14126,16 +14126,30 @@ fn run_x87_mul_denormal_operand_and_directed_overflow() {
     assert_eq!((sig_down, exp_down), (u64::MAX, 0x7ffe));
     let (_, exp_up, _) = once(maxa.0, maxa.1, two.0, two.1, 0x0b7f);
     assert_eq!(exp_up, 0x7fff);
+
+    // unmasked underflow では exact tiny でも UE を立て、register
+    // destination には exponent +24576 の結果を置く。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 1, two.0, 0x3ffe, 0x036f);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x6000));
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_eq!(fsw & (1 << 5), 0);
+    assert_ne!(fsw & 0x8080, 0);
+    // unmasked overflow では exponent -24576 の結果を置く。
+    let (sig, exp, fsw) = once(maxa.0, maxa.1, two.0, two.1, 0x0377);
+    assert_eq!((sig, exp), (u64::MAX, 0x1fff));
+    assert_ne!(fsw & (1 << 3), 0);
+    assert_ne!(fsw & (1 << 5), 0);
+    assert_ne!(fsw & 0x8080, 0);
 }
 
 #[test]
 fn run_x87_div_denormal_operand_and_exact_underflow() {
-    fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16) -> (u64, u16, u16) {
+    fn once(a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16, fcw: u16) -> (u64, u16, u16) {
         let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
-        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         env.backend
             .set(polyisa_guest_x86::sem::st_sig_ref(0), a_sig);
@@ -14161,24 +14175,42 @@ fn run_x87_div_denormal_operand_and_exact_underflow() {
         )
     }
     // 最小 denormal / 0.5 は significand 2 の denormal。DE だけが立つ。
-    let (sig, exp, fsw) = once(1, 0, 0x8000_0000_0000_0000, 0x3ffe);
+    let (sig, exp, fsw) = once(1, 0, 0x8000_0000_0000_0000, 0x3ffe, 0x037f);
     assert_eq!((sig, exp), (2, 0));
     assert_ne!(fsw & (1 << 1), 0);
     assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
     // 最小正規数 / 2 は exact denormal。tiny でも exact なので UE/PE は立たない。
-    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 1, 0x8000_0000_0000_0000, 0x4000);
+    let (sig, exp, fsw) = once(
+        0x8000_0000_0000_0000,
+        1,
+        0x8000_0000_0000_0000,
+        0x4000,
+        0x037f,
+    );
     assert_eq!((sig, exp), (0x4000_0000_0000_0000, 0));
     assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+    // UM=0 では exact tiny でも exponent +24576 の register response。
+    let (sig, exp, fsw) = once(
+        0x8000_0000_0000_0000,
+        1,
+        0x8000_0000_0000_0000,
+        0x4000,
+        0x036f,
+    );
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x6000));
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_eq!(fsw & (1 << 5), 0);
+    assert_ne!(fsw & 0x8080, 0);
 }
 
 #[test]
 fn run_x87_add_denormal_operands_as_values() {
-    fn once(opc1: u8, a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16) -> (u64, u16, u16) {
+    fn once(opc1: u8, a_sig: u64, a_exp: u16, b_sig: u64, b_exp: u16, fcw: u16) -> (u64, u16, u16) {
         let mut env = bare_x86_env();
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(4).state(), 0x1800);
-        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         env.backend
             .set(polyisa_guest_x86::sem::st_sig_ref(0), a_sig);
@@ -14205,16 +14237,23 @@ fn run_x87_add_denormal_operands_as_values() {
     }
     // 最小 denormal 同士の加算は significand 2 の exact denormal。
     // 旧実装は指数 0 をゼロと混同して一方をそのまま返した。
-    let (sig, exp, fsw) = once(0xC1, 1, 0, 1, 0);
+    let (sig, exp, fsw) = once(0xC1, 1, 0, 1, 0, 0x037f);
     assert_eq!((sig, exp), (2, 0));
     assert_ne!(fsw & (1 << 1), 0);
     assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
     // 同じ符号なし零への cancellation は exact zero。denormal operand の
     // DE は立つが UE/PE は立たない。
-    let (sig, exp, fsw) = once(0xE1, 1, 0, 1, 0);
+    let (sig, exp, fsw) = once(0xE1, 1, 0, 1, 0, 0x037f);
     assert_eq!((sig, exp), (0, 0));
     assert_ne!(fsw & (1 << 1), 0);
     assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+    // UM=0 では exact tiny でも UE を立て、register response の exponent は
+    // 正規化結果の exponent +24576 になる。
+    let (sig, exp, fsw) = once(0xC1, 1, 0, 1, 0, 0x036f);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x5fc3));
+    assert_ne!(fsw & (1 << 4), 0);
+    assert_eq!(fsw & (1 << 5), 0);
+    assert_ne!(fsw & 0x8080, 0);
 }
 
 #[test]

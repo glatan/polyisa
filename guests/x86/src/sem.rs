@@ -15262,21 +15262,34 @@ pub(crate) fn mul_ext<B: Backend>(
     let inexact = bit_or(b, inexact_base, den_inexact0);
     x87_exception_flag(b, inexact, 1 << 5);
     let fcw = b.get(fcw_ref());
+    let z16 = b.konst::<W16>(0);
     let umask_bit = b.konst::<W16>(1 << 4);
     let umask = b.and::<W16>(fcw, umask_bit);
-    let z16 = b.konst::<W16>(0);
     let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
     let uunmasked = bit_not(b, umasked);
     let unf_tiny = bit_or(b, inexact, uunmasked);
     let unf_tiny = bit_and(b, under, unf_tiny);
     let unf_occur = bit_and(b, unf_tiny, finite_in);
     x87_exception_flag(b, unf_occur, 1 << 4);
-    let exp_over = b.select::<W64>(over, special_exp, biased);
-    let exp_num = b.select::<W64>(under, zero64, exp_over);
-    let sig_under = b.select::<W64>(under, sig_den, sig_norm);
+    // unmasked overflow/underflow で register destination のときは、
+    // significand を通常どおり丸めて exponent を 24576 だけ bias する。
+    // masked overflow は RC 依存応答、masked underflow は gradual
+    // underflow を使う。
+    let scale_bias = b.konst::<W64>(24576);
+    let omask_bit = b.konst::<W16>(1 << 3);
+    let omask = b.and::<W16>(fcw, omask_bit);
+    let omasked = b.cmp::<W16>(Cmp::Ne, omask, z16);
     let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign);
-    let sig_num = b.select::<W64>(over, sig_ovm, sig_under);
-    let exp_num = b.select::<W64>(over, exp_ovm, exp_num);
+    let exp_ovu = b.sub::<W64>(biased, scale_bias);
+    let sig_over = b.select::<W64>(omasked, sig_ovm, sig_norm);
+    let exp_over = b.select::<W64>(omasked, exp_ovm, exp_ovu);
+    let exp_unfu = b.add::<W64>(biased, scale_bias);
+    let sig_unf = b.select::<W64>(umasked, sig_den, sig_norm);
+    let exp_unf = b.select::<W64>(umasked, zero64, exp_unfu);
+    let sig_ov_sel = b.select::<W64>(over, sig_over, sig_norm);
+    let exp_ov_sel = b.select::<W64>(over, exp_over, biased);
+    let sig_num = b.select::<W64>(under, sig_unf, sig_ov_sel);
+    let exp_num = b.select::<W64>(under, exp_unf, exp_ov_sel);
     let exp_fin = b.select::<W64>(is_zero, zero64, exp_num);
     let sig_fin = b.select::<W64>(is_zero, zero64, sig_num);
     // 特殊値。NaN 入力と inf×0 は NaN、inf×非零は符号を
@@ -15577,13 +15590,31 @@ pub(crate) fn add_ext<B: Backend>(
     let den_dropped1 = bit_or(b, den_dropped0, den_all_lost);
     let den_inexact = bit_and(b, exp_under, den_dropped1);
     let sig_den = b.select::<W64>(both_zero, zero, sig_den0);
+    // unmasked overflow/underflow の register response では exponent を
+    // 24576 だけ bias し、masked response では RC 依存値または gradual
+    // underflow を使う。
+    let fcw = b.get(fcw_ref());
+    let z16 = b.konst::<W16>(0);
+    let scale_bias = b.konst::<W64>(24576);
+    let omask_bit = b.konst::<W16>(1 << 3);
+    let omask = b.and::<W16>(fcw, omask_bit);
+    let omasked = b.cmp::<W16>(Cmp::Ne, omask, z16);
     let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign_big);
-    let sig_or_inf = b.select::<W64>(exp_ovf, sig_ovm, hi_rounded);
-    let sig_under_sel = b.select::<W64>(exp_under, sig_den, sig_or_inf);
-    let sig_mag = b.select::<W64>(both_zero, zero, sig_under_sel);
-    let exp_under0 = b.select::<W64>(exp_under, zero, exp_rounded);
-    let exp_mag0 = b.select::<W64>(exp_ovf, exp_ovm, exp_under0);
-    let exp_mag = b.select::<W64>(both_zero, zero, exp_mag0);
+    let exp_ovu = b.sub::<W64>(exp_rounded, scale_bias);
+    let sig_over = b.select::<W64>(omasked, sig_ovm, hi_rounded);
+    let exp_over = b.select::<W64>(omasked, exp_ovm, exp_ovu);
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let exp_unfu = b.add::<W64>(exp_rounded, scale_bias);
+    let sig_unf = b.select::<W64>(umasked, sig_den, hi_rounded);
+    let exp_unf = b.select::<W64>(umasked, zero, exp_unfu);
+    let sig_or_inf = b.select::<W64>(exp_ovf, sig_over, hi_rounded);
+    let sig_under_sel0 = b.select::<W64>(exp_under, sig_unf, sig_or_inf);
+    let sig_mag = b.select::<W64>(both_zero, zero, sig_under_sel0);
+    let exp_over_sel = b.select::<W64>(exp_ovf, exp_over, exp_rounded);
+    let exp_under0 = b.select::<W64>(exp_under, exp_unf, exp_over_sel);
+    let exp_mag = b.select::<W64>(both_zero, zero, exp_under0);
     let sign_num = b.select::<W64>(both_zero, zero, sign_big);
 
     let not_zb = bit_not(b, z_b);
@@ -15818,22 +15849,32 @@ pub(crate) fn div_ext<B: Backend>(
     let den_inexact = bit_and(b, e_under, den_dropped1);
     let inexact_total = bit_or(b, inexact, den_inexact);
     x87_exception_flag(b, inexact_total, 1 << 5);
+    let fcw = b.get(fcw_ref());
+    let z16 = b.konst::<W16>(0);
+    let scale_bias = b.konst::<W64>(24576);
+    let omask_bit = b.konst::<W16>(1 << 3);
+    let omask = b.and::<W16>(fcw, omask_bit);
+    let omasked = b.cmp::<W16>(Cmp::Ne, omask, z16);
     let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign_r);
-    let e_inf = b.select::<W64>(e_ovf, exp_ovm, e_norm);
-    let sig_fin = b.select::<W64>(e_ovf, sig_ovm, sig_norm);
-    let e_under_z = b.select::<W64>(e_under, zero, e_inf);
-    let sig_under = b.select::<W64>(e_under, sig_den, sig_fin);
+    let e_ovu = b.sub::<W64>(e_norm, scale_bias);
+    let sig_over = b.select::<W64>(omasked, sig_ovm, sig_norm);
+    let e_over = b.select::<W64>(omasked, exp_ovm, e_ovu);
+    let umask_bit = b.konst::<W16>(1 << 4);
+    let umask = b.and::<W16>(fcw, umask_bit);
+    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
+    let e_unfu = b.add::<W64>(e_norm, scale_bias);
+    let sig_unf = b.select::<W64>(umasked, sig_den, sig_norm);
+    let e_unf = b.select::<W64>(umasked, zero, e_unfu);
+    let e_inf = b.select::<W64>(e_ovf, e_over, e_norm);
+    let sig_fin = b.select::<W64>(e_ovf, sig_over, sig_norm);
+    let e_under_z = b.select::<W64>(e_under, e_unf, e_inf);
+    let sig_under = b.select::<W64>(e_under, sig_unf, sig_fin);
 
     let finite_div = bit_and(b, not_sp_in, not_za_in);
     let finite_div = bit_and(b, finite_div, not_zb_in);
     let ovf_occur = bit_and(b, e_ovf, finite_div);
     x87_exception_flag(b, ovf_occur, 1 << 3);
     x87_exception_flag(b, ovf_occur, 1 << 5);
-    let fcw = b.get(fcw_ref());
-    let umask_bit = b.konst::<W16>(1 << 4);
-    let umask = b.and::<W16>(fcw, umask_bit);
-    let z16 = b.konst::<W16>(0);
-    let umasked = b.cmp::<W16>(Cmp::Ne, umask, z16);
     let uunmasked = bit_not(b, umasked);
     let unf_tiny = bit_or(b, inexact_total, uunmasked);
     let unf_tiny = bit_and(b, e_under, unf_tiny);
