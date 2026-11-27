@@ -16158,7 +16158,20 @@ pub(crate) fn add_ext_nan<B: Backend>(
     let exp_zero_b = b.select::<W64>(use_b, eb_canon, zero);
     let exp_zero_case = b.select::<W64>(use_a, ea_canon, exp_zero_b);
     let sign_and = b.and::<W64>(sign_a, sign_b);
-    let sign_zero_b = b.select::<W64>(use_b, sign_b, sign_and);
+    // +0 と -0 の和が exact zero になるときは、round-toward--∞ だけ
+    // -0、それ以外では +0 になる。同符号の zero 同士ではその符号を保つ。
+    let fcw_z: B::V<W16> = b.get(fcw_ref());
+    let fcw_z64 = b.zext::<W16, W64>(fcw_z);
+    let s10z = b.konst::<W64>(10);
+    let rc_z0 = b.shr_l::<W64>(fcw_z64, s10z);
+    let three_z = b.konst::<W64>(3);
+    let rc_z = b.and::<W64>(rc_z0, three_z);
+    let floor_z = b.cmp::<W64>(Cmp::Eq, rc_z, one);
+    let signs_differ_z = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
+    let floor_neg_z = bit_and(b, floor_z, signs_differ_z);
+    let floor_neg_w = b.select::<W64>(floor_neg_z, one, zero);
+    let zero_sign = b.or::<W64>(sign_and, floor_neg_w);
+    let sign_zero_b = b.select::<W64>(use_b, sign_b, zero_sign);
     let sign_zero_case = b.select::<W64>(use_a, sign_a, sign_zero_b);
     let use_ab = bit_or(b, use_a, use_b);
     let use_zero_raw = bit_or(b, use_ab, both_z);

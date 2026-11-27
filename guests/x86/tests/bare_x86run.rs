@@ -15032,6 +15032,34 @@ fn run_x87_precision_control_overflow_follows_rounding_mode() {
 }
 
 #[test]
+fn run_x87_add_opposite_signed_zero_sign_follows_rounding_mode() {
+    fn once(fcw: u16) -> u16 {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1])
+            .unwrap(); // fadd st(0),st(1)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), 0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 0);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), 0);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x8000);
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0))
+    }
+    assert_eq!(once(0x037F) & 0x8000, 0);
+    assert_eq!(once(0x077F) & 0x8000, 0x8000);
+}
+
+#[test]
 fn run_x87_denormal_operand_sets_denormal_flag() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
