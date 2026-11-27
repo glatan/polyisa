@@ -14379,6 +14379,10 @@ fn run_x87_fscale_denormal_and_exact_underflow() {
     assert_eq!((sig, exp), (0x4000_0000_0000_0000, 0));
     assert_ne!(fsw & (1 << 4), 0);
     assert_ne!(fsw & (1 << 5), 0);
+    // ±0 を scale しても zero のままで、指数 0 を underflow と混同しない。
+    let (sig, exp, fsw) = once(0, 0, 0x3fff);
+    assert_eq!((sig, exp), (0, 0));
+    assert_eq!(fsw & ((1 << 1) | (1 << 3) | (1 << 4) | (1 << 5)), 0);
 }
 
 #[test]

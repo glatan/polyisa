@@ -12487,8 +12487,12 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
 
     let (sig_norm, ea_eff) = sem::x87_normalize_denormal_operand(b, s0, eb);
     let sum = b.add::<W64>(ea_eff, n2);
-    let over = b.cmp::<W64>(Cmp::GeS, sum, special);
-    let under = b.cmp::<W64>(Cmp::LeS, sum, zero);
+    let over_raw = b.cmp::<W64>(Cmp::GeS, sum, special);
+    let under_raw = b.cmp::<W64>(Cmp::LeS, sum, zero);
+    let not_pass = sem::bit_not(b, pass);
+    let scale_active0 = sem::bit_and(b, not_pass, nofault);
+    let over = sem::bit_and(b, over_raw, scale_active0);
+    let under = sem::bit_and(b, under_raw, scale_active0);
 
     // exponent 0 以下では、正規化 significand を FCW.RC で丸めながら
     // denormal へ落とす。shift が 64 以上なら結果は零だが、shift=64
