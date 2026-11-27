@@ -4582,6 +4582,40 @@ fn build_map_0f3a(m: &mut Model) {
             ));
         }
     }
+    // AVX10.2 の BF16 比較・分類。宛先は ModRM.reg の k レジスタで、
+    // k2/aaa のマスクオフ要素は常に 0（zero masking only）。
+    {
+        let mut it = ex(
+            "vcmpbf16_kv_hv_wv_ib",
+            &[RegX, Vv, RmX, ib],
+            PfxSel::PF2,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0xC2, it));
+    }
+    {
+        let mut it = ex(
+            "vfpclassbf16_kv_wv_ib",
+            &[RegX, RmX, ib],
+            PfxSel::PF2,
+            0b111,
+            true,
+            "{op} {x}, {w}, {i}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0x66, it));
+    }
     // ACE tile move row/col の immediate 指定形。vvvv は未使用。
     for (op, wr, mn) in [
         (0x07u8, false, "tilemovrow_r_imm"),

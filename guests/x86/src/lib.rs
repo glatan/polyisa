@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2401);
+        assert_eq!(INSNS.len(), 2403);
     }
 
     #[test]
@@ -2936,6 +2936,11 @@ fn avx10_decode() {
     let d = decode_map(&[0x62, 0xF5, 0x7D, 0x38, 0x51, 0x13], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vsqrtbf16XvWv);
     assert!(d.evex_b);
+    // VCMPBF16/VFPCLASSBF16: EVEX.F2.0F3A.W0 C2/66 /r ib。
+    let d = decode_map(&[0x62, 0xF3, 0x77, 0x28, 0xC2, 0xCA, 0x01], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcmpbf16KvHvWvIb);
+    let d = decode_map(&[0x62, 0xF3, 0x7F, 0x28, 0x66, 0xD1, 0x03], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vfpclassbf16KvWvIb);
     // VDPBF16PS: EVEX.F3.0F38.W0 52。
     let d = decode_map(&[0x62, 0xF2, 0x6E, 0x48, 0x52, 0xCB], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vdpbf16psXvHvWv);

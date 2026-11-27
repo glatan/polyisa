@@ -27567,6 +27567,66 @@ fn run64_avx10() {
 }
 
 #[test]
+fn run64_avx10_bf16_compare_class() {
+    // VCMPBF16 の LT と VFPCLASSBF16 の QNaN/+zero 分類を確認する。
+    // BF16 denormal は DAZ され、+zero として分類される。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    let set16 = |env: &mut BareEnv, r: u8, lane: usize, v: u16| {
+        let part = polyisa_guest_x86::sem::zreg_ref(r, lane / 8);
+        let cur: u128 = env.backend.get(part);
+        let mut b = cur.to_le_bytes();
+        b[(lane % 8) * 2..(lane % 8) * 2 + 2].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(part, u128::from_le_bytes(b));
+    };
+    // lane0: 1<3、lane1: 3>1、lane2: QNaN、lane3: BF16 denormal。
+    set16(&mut env, 1, 0, 0x3f80);
+    set16(&mut env, 2, 0, 0x4040);
+    set16(&mut env, 1, 1, 0x4040);
+    set16(&mut env, 2, 1, 0x3f80);
+    set16(&mut env, 1, 2, 0x7fc0);
+    set16(&mut env, 2, 2, 0x3f80);
+    set16(&mut env, 1, 3, 0x0001);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF3, 0x77, 0x28, 0xC2, 0xCA, 0x01, // vcmpbf16 k1,ymm1,ymm2,lt
+                0x62, 0xF3, 0x7F, 0x28, 0x66, 0xD1, 0x03, // vfpclassbf16 k2,ymm1,qnan+poszero
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let k1: u64 = env.backend.get(polyisa_guest_x86::sem::kref(1));
+    let k2: u64 = env.backend.get(polyisa_guest_x86::sem::kref(2));
+    assert_eq!(k1 & 0xffff, 1, "only lane0 is less-than");
+    assert_eq!(k2 & 0xffff, 0xfffc, "qnan lane2 and zero lanes3..15");
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

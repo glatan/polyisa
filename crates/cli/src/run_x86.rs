@@ -6514,7 +6514,9 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vaddbf16XvHvWv
+        Insn::Vcmpbf16KvHvWvIb
+            | Insn::Vfpclassbf16KvWvIb
+            | Insn::Vaddbf16XvHvWv
             | Insn::Vsubbf16XvHvWv
             | Insn::Vmulbf16XvHvWv
             | Insn::Vdivbf16XvHvWv
@@ -6665,6 +6667,68 @@ fn avx10_exec(
         }
     };
     match insn {
+        Insn::Vcmpbf16KvHvWvIb | Insn::Vfpclassbf16KvWvIb => {
+            let mut bits = 0u64;
+            for i in 0..lanes16 {
+                if k >> i & 1 == 0 {
+                    continue;
+                }
+                let hit = if insn == Insn::Vcmpbf16KvHvWvIb {
+                    let a = bf_r(&x, i);
+                    let c = bf_r(&y, i);
+                    let unord = a.is_nan() || c.is_nan();
+                    let eq = !unord && a.eq(c).0;
+                    let lt = !unord && a.lt(c).0;
+                    let le = lt || eq;
+                    match md.imm & 0x1f {
+                        0 | 8 | 16 | 24 => eq,
+                        1 | 17 => lt,
+                        2 | 18 => le,
+                        3 | 19 => unord,
+                        4 | 12 | 20 | 28 => !eq,
+                        5 | 21 => unord || !lt,
+                        6 | 22 => unord || !le,
+                        7 | 23 => !unord,
+                        9 | 25 => lt || unord,
+                        10 | 26 => le || unord,
+                        11 | 27 => false,
+                        13 | 29 => le && !lt,
+                        14 | 30 => !le && !unord,
+                        _ => true,
+                    }
+                } else {
+                    let w = rd16(&y, i);
+                    // DAZ: BF16 非正規入力は符号付き zero として分類する。
+                    let w = if w & 0x7f80 == 0 && w & 0x7f != 0 {
+                        w & 0x8000
+                    } else {
+                        w
+                    };
+                    let sign = w & 0x8000 != 0;
+                    let exp = w & 0x7f80;
+                    let frac = w & 0x7f;
+                    let nan = exp == 0x7f80 && frac != 0;
+                    let inf = exp == 0x7f80 && frac == 0;
+                    let zero = exp == 0 && frac == 0;
+                    let qnan = nan && frac & 0x40 != 0;
+                    let snan = nan && !qnan;
+                    let classes = u64::from(qnan)
+                        | u64::from(!sign && zero) << 1
+                        | u64::from(sign && zero) << 2
+                        | u64::from(!sign && inf) << 3
+                        | u64::from(sign && inf) << 4
+                        // bit5 の denormal class は BF16 では常に 0。
+                        | u64::from(sign && !nan && !inf && !zero) << 6
+                        | u64::from(snan) << 7;
+                    classes & md.imm != 0
+                };
+                bits |= u64::from(hit) << i;
+            }
+            // マスク宛先は ModRM.reg の 3 ビット。KL より上は 0。
+            let kdst = (md.modrm >> 3) & 7;
+            env.backend.set(sem::kref(kdst), bits);
+            return Ok(());
+        }
         Insn::Vaddbf16XvHvWv
         | Insn::Vsubbf16XvHvWv
         | Insn::Vmulbf16XvHvWv
@@ -17895,6 +17959,8 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vcmpbf16KvHvWvIb
+            | Insn::Vfpclassbf16KvWvIb
             | Insn::Vaddbf16XvHvWv
             | Insn::Vsubbf16XvHvWv
             | Insn::Vmulbf16XvHvWv
