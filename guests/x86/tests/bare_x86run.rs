@@ -26337,6 +26337,125 @@ fn run64_amx() {
 }
 
 #[test]
+fn run64_amx_fp8_dot() {
+    // 1x1 の FP8 積和。src1 は BF8 1.0 (0x3c)、src2 は HF8 1.0 (0x38)。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_FP8;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 2, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    for i in 0..3 {
+        cfg[16 + 2 * i..18 + 2 * i].copy_from_slice(&4u16.to_le_bytes());
+        cfg[48 + i] = 1;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &[0x3c, 0, 0, 0])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2110), &[0x38, 0, 0, 0])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+        0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+        0x48, 0xBE, 0x00, 0x21, 0, 0, 0, 0, 0, 0, // movabs rsi,0x2100
+        0x48, 0x31, 0xFF, // xor rdi,rdi (stride 0; rows=1)
+        0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, // tileloaddrs (%rsi,%rdi),tmm1
+        0x48, 0xBE, 0x10, 0x21, 0, 0, 0, 0, 0, 0, // movabs rsi,0x2110
+        0xC4, 0xE2, 0x79, 0x4B, 0x14, 0x3E, // tileloaddrst1 (%rsi,%rdi),tmm2
+        0xC4, 0xE5, 0x6B, 0xFD, 0xC1, // tdpbhf8ps %tmm2,%tmm1,%tmm0
+        0x48, 0xBB, 0x00, 0x22, 0, 0, 0, 0, 0, 0, // movabs rbx,0x2200
+        0xC4, 0xE2, 0x7A, 0x4B, 0x04, 0x3B, // tilestored %tmm0,(%rbx,%rdi)
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2200), &mut b, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(b), 1.0f32.to_bits());
+}
+
+#[test]
+fn run64_amx_fp8_exact_accumulation() {
+    // 2^12 + 3×2^-13 は、固定小数点で集約して一度だけ丸めると
+    // 2^12 の次の FP32 へ進む。逐次 FP32 加算なら 2^-13 は各回で捨てられる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_FP8;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 2, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    let shapes = [(4u16, 1u8), (16, 1), (4, 4)];
+    for (i, (colsb, rows)) in shapes.iter().enumerate() {
+        cfg[16 + 2 * i..18 + 2 * i].copy_from_slice(&colsb.to_le_bytes());
+        cfg[48 + i] = *rows;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    // BF8: 2^6=0x54、2^-7=0x20、2^-6=0x24。
+    let a = [0x54, 0, 0, 0, 0x20, 0, 0, 0, 0x20, 0, 0, 0, 0x20, 0, 0, 0];
+    let b = [0x54, 0, 0, 0, 0x24, 0, 0, 0, 0x24, 0, 0, 0, 0x24, 0, 0, 0];
+    env.backend.mem.write(VirtAddr(0x2100), &a).unwrap();
+    env.backend.mem.write(VirtAddr(0x2110), &b).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x78, 0x49, 0x00, 0x48, 0xBE, 0x00,
+        0x21, 0, 0, 0, 0, 0, 0, 0x48, 0xC7, 0xC7, 4, 0, 0, 0, // mov rdi,4 (stride)
+        0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, // tileloadd (%rsi,%rdi),tmm1
+        0x48, 0xBE, 0x10, 0x21, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x79, 0x4B, 0x14,
+        0x3E, // tileloaddt1 (%rsi,%rdi),tmm2
+        0xC4, 0xE5, 0x68, 0xFD, 0xC1, // tdpbf8ps %tmm2,%tmm1,%tmm0
+        0x48, 0xBB, 0x00, 0x22, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x7A, 0x4B, 0x04,
+        0x3B, // tilestored %tmm0,(%rbx,%rdi)
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2200), &mut b, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(b), 0x4580_0001);
+}
+
+#[test]
 fn run64_amx_avx512_tilemovrow_palette1() {
     // AMX-AVX512-only では SCALEDATA(XCR0[20]) なしで palette 1 の
     // TILEMOVROW read を実行できる。行は colsb stride で読み、

@@ -11003,20 +11003,78 @@ fn amx_tile_exec(
                     let dcell = TMM_OFF + usize::from(dst) * 1024 + m * tile_colsb(st, dst) + 4 * n;
                     match insn {
                         Insn::Tdpbf8ps | Insn::Tdpbhf8ps | Insn::Tdphbf8ps | Insn::Tdphf8ps => {
-                            use polyisa_softfloat::{E4M3, E5M2, Rm};
-                            let cvt = |x: u8, hf8: bool| -> f32 {
-                                let v = if hf8 {
-                                    E4M3::from_bits(u64::from(x)).to_f32(Rm::Rne).0
-                                } else {
-                                    E5M2::from_bits(u64::from(x)).to_f32(Rm::Rne).0
-                                };
-                                f32::from_bits(v.bits() as u32)
-                            };
                             let a_hf = matches!(insn, Insn::Tdphbf8ps | Insn::Tdphf8ps);
                             let b_hf = matches!(insn, Insn::Tdpbhf8ps | Insn::Tdphf8ps);
-                            let mut acc =
-                                f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
-                            let mut nan_in = acc.is_nan();
+                            // FP8 は固定小数点へ正確に変換し、4 要素積と K 方向の
+                            // 和を int128 で求めてから一度だけ FP32 へ丸める。
+                            let fix = |x: u8, hf8: bool| -> i64 {
+                                let sign = x & 0x80 != 0;
+                                let (exp, frac) = if hf8 {
+                                    (i32::from((x >> 3) & 0xf), i64::from(x & 7))
+                                } else {
+                                    (i32::from((x >> 2) & 0x1f), i64::from(x & 3))
+                                };
+                                let mant = if exp == 0 {
+                                    frac
+                                } else {
+                                    frac | if hf8 { 0x8 } else { 0x4 }
+                                };
+                                let e_count = if exp == 0 { 0 } else { exp - 1 };
+                                let mag = mant << e_count;
+                                if sign { -mag } else { mag }
+                            };
+                            let class = |x: u8, hf8: bool| -> (bool, bool, bool) {
+                                let (exp, frac) = if hf8 {
+                                    ((x >> 3) & 0xf, x & 7)
+                                } else {
+                                    ((x >> 2) & 0x1f, x & 3)
+                                };
+                                if hf8 {
+                                    (exp == 0xf && frac == 7, false, exp == 0 && frac == 0)
+                                } else {
+                                    (
+                                        exp == 0x1f && frac != 0,
+                                        exp == 0x1f && frac == 0,
+                                        exp == 0 && frac == 0,
+                                    )
+                                }
+                            };
+                            let int_to_f32 = |x: i128, factor: i32| -> u32 {
+                                if x == 0 {
+                                    return 0;
+                                }
+                                let sign = u32::from(x < 0) << 31;
+                                let mut mag = x.unsigned_abs();
+                                let mut jpos = 126i32;
+                                while mag & (1u128 << 126) == 0 {
+                                    jpos -= 1;
+                                    mag <<= 1;
+                                }
+                                let sticky = u32::from(mag & ((1u128 << 102) - 1) != 0);
+                                let gbit = u32::from(mag & (1u128 << 102) != 0);
+                                let lbit = ((mag >> 103) & 1) as u32;
+                                let mantissa = (mag >> 103) as u32;
+                                let rounded = mantissa + (gbit & (lbit | sticky));
+                                let ovf = rounded >> 24;
+                                let biased = 127 + jpos - factor + ovf as i32;
+                                if biased > 254 {
+                                    return sign | 0x7f80_0000;
+                                }
+                                if biased <= 0 {
+                                    return sign;
+                                }
+                                sign | ((biased as u32) << 23) | (rounded & 0x7f_ffff)
+                            };
+                            let factor = match (a_hf, b_hf) {
+                                (false, false) => 32,
+                                (true, true) => 18,
+                                _ => 25,
+                            };
+                            let acc0 = f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            let mut sum = 0i128;
+                            let mut nan_in = acc0.is_nan();
+                            let mut inf_pos = false;
+                            let mut inf_neg = false;
                             for kk in 0..k {
                                 let aw = u32::from_le_bytes(
                                     st[tile_cell(st, s1, m) + 4 * kk
@@ -11031,22 +11089,29 @@ fn amx_tile_exec(
                                         .unwrap(),
                                 );
                                 for q in 0..4 {
-                                    let av = cvt((aw >> (8 * q)) as u8, a_hf);
-                                    let bv = cvt((bw >> (8 * q)) as u8, b_hf);
-                                    nan_in |= av.is_nan() || bv.is_nan();
-                                    acc += av * bv;
+                                    let av = (aw >> (8 * q)) as u8;
+                                    let bv = (bw >> (8 * q)) as u8;
+                                    let (an, ai, az) = class(av, a_hf);
+                                    let (bn, bi, bz) = class(bv, b_hf);
+                                    nan_in |= an || bn || (ai && bz) || (bi && az);
+                                    if ai || bi {
+                                        let neg = (av ^ bv) & 0x80 != 0;
+                                        if neg { inf_neg = true } else { inf_pos = true }
+                                    } else {
+                                        sum +=
+                                            i128::from(fix(av, a_hf)) * i128::from(fix(bv, b_hf));
+                                    }
                                 }
                             }
-                            let r = if nan_in {
+                            let r = if nan_in || (inf_pos && inf_neg) {
                                 0xffc0_0000u32
+                            } else if inf_pos {
+                                0x7f80_0000
+                            } else if inf_neg {
+                                0xff80_0000
                             } else {
-                                let b = acc.to_bits();
-                                // FP8 ドット積は出力側 FTZ=1 として扱う。
-                                if b & 0x7fff_ffff != 0 && b & 0x7f80_0000 == 0 {
-                                    b & 0x8000_0000
-                                } else {
-                                    b
-                                }
+                                let tmp = f32::from_bits(int_to_f32(sum, factor));
+                                (acc0 + tmp).to_bits()
                             };
                             st[dcell..dcell + 4].copy_from_slice(&r.to_le_bytes());
                         }
