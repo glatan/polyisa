@@ -288,10 +288,58 @@ mod imp {
         }
         assert!(reports.is_empty(), "host x87 diff:\n{}", reports.join("\n"));
     }
+    /// transcendental 用の valid-range oracle。数値評価が高精度化される
+    /// までは ignored test として運用し、入力生成と host/poly 比較の
+    /// 足場だけ先に固定する。角度は小さい正規数に絞る。
+    pub fn run_transcendental_scaffold() {
+        let unary_ops = [
+            ([0xd9, 0xf0], "f2xm1"),
+            ([0xd9, 0xfe], "fsin"),
+            ([0xd9, 0xff], "fcos"),
+        ];
+        let mut rng = Rng(0x87D1_77AA);
+        let fcws = [0x007f, 0x027f, 0x037f, 0x077f, 0x0b7f, 0x0f7f];
+        let mut reports = Vec::new();
+        for i in 0..256 {
+            let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
+            let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
+            let sig = (1u64 << 63) | rng.next();
+            let disp = (rng.next() % 17) as i32 - 16;
+            let input = (sig, ((0x3fff + disp) as u16) | sign);
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
+            let (hv, hsw) = host_unary(input, op.0, fcw);
+            let (pv, psw) = poly_unary(input, op.0, fcw);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "trans {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+                if reports.len() >= 20 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            reports.is_empty(),
+            "host x87 transcendental diff:
+{}",
+            reports.join(
+                "
+"
+            )
+        );
+    }
 }
 
 #[test]
 fn diff_host_x87_arithmetic() {
     #[cfg(all(target_arch = "x86_64", unix))]
     imp::run();
+}
+
+#[test]
+#[ignore = "transcendental bit-exact evaluation is not implemented yet"]
+fn diff_host_x87_transcendental_scaffold() {
+    #[cfg(all(target_arch = "x86_64", unix))]
+    imp::run_transcendental_scaffold();
 }
