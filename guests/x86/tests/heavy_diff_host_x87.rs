@@ -157,10 +157,12 @@ mod imp {
             matches!(out, Outcome::StepLimit { .. }),
             "poly outcome {out:?}"
         );
+        let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
+        let st0 = usize::from(top & 7);
         (
             (
-                env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
-                env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+                env.backend.get(polyisa_guest_x86::sem::st_sig_ref(st0)),
+                env.backend.get(polyisa_guest_x86::sem::st_exp_ref(st0)),
             ),
             env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
         )
