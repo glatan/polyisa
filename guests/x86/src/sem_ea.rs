@@ -12687,6 +12687,8 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let sign1 = b.shr_l::<W64>(e1_64, s15);
     let sign1_set = b.cmp::<W64>(Cmp::Eq, sign1, one);
     let neg_inf1 = sem::bit_and(b, is_inf1, sign1_set);
+    let not_sign1 = sem::bit_not(b, sign1_set);
+    let pos_inf1 = sem::bit_and(b, is_inf1, not_sign1);
     let pass = sem::bit_or(b, sp, is_zero);
 
     let nan_sel = sem::x87_nan_select2(b, s0, e0, s1, e1);
@@ -12695,7 +12697,9 @@ pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
     let uns0 = sem::x87_unsupported_format(b, s0, e0);
     let uns1 = sem::x87_unsupported_format(b, s1, e1);
     let unsupported = sem::bit_or(b, uns0, uns1);
-    let zero_times_infscale = sem::bit_and(b, is_inf1, is_zero);
+    // zero × 2^-inf は zero × 0 なので zero のまま有効だが、
+    // zero × 2^+inf は zero × infinity で invalid である。
+    let zero_times_infscale = sem::bit_and(b, pos_inf1, is_zero);
     let inf_times_zero_scale0 = sem::bit_and(b, neg_inf1, sp);
     let not_nan_scale = sem::bit_not(b, nan_input);
     let inf_times_zero_scale = sem::bit_and(b, inf_times_zero_scale0, not_nan_scale);
