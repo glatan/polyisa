@@ -120,6 +120,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("sde64"), Req::Tool("clang")],
     },
     TestBinary {
+        binary: "heavy_diff_sde_ace",
+        needs: &[Req::Tool("sde64"), Req::Tool("clang")],
+    },
+    TestBinary {
         binary: "heavy_diff_qemu",
         needs: &[Req::Tool("qemu-riscv64")],
     },

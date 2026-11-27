@@ -26534,6 +26534,81 @@ fn run64_ace_top1ps_top1pd() {
 }
 
 #[test]
+fn run64_ace_top2bf16_numeric_corners() {
+    // ACE v1 pseudocode の数値境界。BF16 subnormal は入力で flush、
+    // FP32 subnormal accumulator は accumulate 前に flush する。一方、
+    // subnormal product は個々に FTZ せず、2 項の和が normal なら残る。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[tilecfg_off] = 2;
+    // col4 の accumulator は negative subnormal。DAZ=1 なら -0 へ
+    // flush され、+0 との RNE 加算は +0 になる。
+    env.backend.state[tmm_off + 1024 + 16..tmm_off + 1024 + 20]
+        .copy_from_slice(&0x8000_0001u32.to_le_bytes());
+    let set32 = |env: &mut BareEnv, r: u8, lane: usize, v: u32| {
+        let part = polyisa_guest_x86::sem::zreg_ref(r, lane / 4);
+        let cur: u128 = env.backend.get(part);
+        let mut b = cur.to_le_bytes();
+        b[(lane % 4) * 4..(lane % 4) * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(part, u128::from_le_bytes(b));
+    };
+    // A row0 は low/high とも 0.5。B は列ごとの corner case。
+    set32(&mut env, 0, 0, 0x3f00_3f00);
+    set32(&mut env, 1, 0, 0x0000_0001); // low BF16 min subnormal, high 0
+    set32(&mut env, 1, 1, 0x0000_7fc0); // low BF16 qNaN
+    set32(&mut env, 1, 2, 0x0080_0080); // 両方 BF16 min normal
+    set32(&mut env, 1, 3, 0x0000_0080); // low だけ BF16 min normal
+    // lane4 は +0/+0 のまま。
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF2, 0x76, 0x48, 0x5C, 0xC8, // top2bf16ps tmm1,zmm0,zmm1
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let got = |col: usize| {
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 1024 + col * 4..tmm_off + 1024 + col * 4 + 4]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(got(0), 0, "BF16 subnormal input is DAZ-flushed");
+    assert_eq!(got(1), 0xffc0_0000, "NaN collapses to QNaN indefinite");
+    assert_eq!(
+        got(2),
+        0x0080_0000,
+        "two subnormal products may sum to a normal result"
+    );
+    assert_eq!(got(3), 0, "subnormal sum-of-products is FTZ-flushed");
+    assert_eq!(got(4), 0, "subnormal accumulator is DAZ-flushed");
+}
+
+#[test]
 fn run64_ace_top1ps_unmasked_invalid_faults_before_tile_write() {
     // inf*0 は IE を立てる。IM=0 なら ACE-E7 の #XM fault で、
     // MXCSR は更新されるが tile は fault 前の値を保つ。
