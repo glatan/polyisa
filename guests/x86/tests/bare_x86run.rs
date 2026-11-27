@@ -28568,6 +28568,48 @@ fn run64_amx_ldtilecfg_palette0_ignores_payload() {
 }
 
 #[test]
+fn run64_amx_tilezero_zeroes_full_tile() {
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_AMX_TILE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    cfg[16 + 2..18 + 2].copy_from_slice(&8u16.to_le_bytes());
+    cfg[48 + 1] = 2;
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+                0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+                0xC4, 0xE2, 0x7B, 0x49, 0xC9, // tilezero %tmm1
+            ],
+        )
+        .unwrap();
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let tile1 = tmm_off + 1024;
+    env.backend.state[tile1..tile1 + 32].fill(0xa5);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert!(matches!(out, Outcome::StepLimit { .. }), "{out:?}");
+    assert_eq!(&env.backend.state[tile1..tile1 + 32], &[0u8; 32]);
+}
+
+#[test]
 fn run64_amx_ldtilecfg_rejects_invalid_palette1_configs() {
     let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_AMX_TILE;
     for case in 0..4 {
