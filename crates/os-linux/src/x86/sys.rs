@@ -7912,6 +7912,37 @@ mod tests {
     }
 
     #[test]
+    fn clock_nanosleep_interrupted_returns_positive_eintr() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), &1i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x108), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), u64::from(EINTR));
+    }
+
+    #[test]
     fn ioctl_returns_enotty() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
