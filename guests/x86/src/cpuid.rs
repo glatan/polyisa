@@ -17,9 +17,13 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 26] = [
+pub const LEAF_IDS: [(u32, u32); 34] = [
     (0, 0),
     (1, 0),
+    (4, 0),
+    (4, 1),
+    (4, 2),
+    (4, 3),
     (7, 0),
     (7, 1),
     (0xD, 0),
@@ -44,6 +48,10 @@ pub const LEAF_IDS: [(u32, u32); 26] = [
     (0x24, 1),
     (0x1D, 2),
     (0xD, 20),
+    (0x15, 0),
+    (0x16, 0),
+    (0x1F, 0),
+    (0x1F, 1),
 ];
 
 /// 最大ベーシックリーフの既定（leaf 0 の EAX）。`xsave` 機能が
@@ -98,7 +106,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 26] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 34] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -187,6 +195,12 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         [max_basic, ebx_v, ecx_v, edx_v],
         // leaf 1: 版数と機能ビット。
         [l1_eax, 0, reg_of(1, 0, "ecx"), reg_of(1, 0, "edx")],
+        // leaf 4: deterministic cache parameters。単一コア/単一スレッドの
+        // 代表構成として L1d/L1i 32KiB・L2 2MiB・L3 32MiB を報告する。
+        [0x21, 0x01c0_003f, 63, 0],
+        [0x41, 0x01c0_003f, 63, 0],
+        [0x43, 0x01c0_003f, 4095, 0],
+        [0x63, 0x03c0_003f, 32767, 0],
         // leaf 7 サブリーフ 0: 最大サブリーフと機能ビット。
         [
             max7sub,
@@ -386,6 +400,13 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         } else {
             [0; 4]
         },
+        // leaf 0x15: crystal clock 24MHz、TSC 比 100:1（2.4GHz）。
+        [1, 100, 24_000_000, 0],
+        // leaf 0x16: base/max frequency 2400MHz。bus frequency は不明として 0。
+        [2400, 2400, 0, 0],
+        // leaf 0x1f: 単一論理プロセッサ/単一コアの topology。
+        [0, 1, 0x100, 0],
+        [0, 1, 0x102, 0],
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。

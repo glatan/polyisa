@@ -743,6 +743,49 @@ fn declare_models(m: &mut Model) {
         &[],
         idspr,
     );
+    // Diamond Rapids（ISE-063 Table 1-2）。APX/AVX10.2/MOVRS と
+    // AMX-COMPLEX/MOVRS/AVX512/FP8 を備える将来サーバ世代。
+    // family/model は同表の 13_08H に合わせる。
+    let mut iddnr = intel("13", "8", "1");
+    iddnr.extend([("cpuid.max_basic", "0x24"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "diamond_rapids",
+        "sapphire_rapids",
+        &[
+            "apx",
+            "avx10_2",
+            "movrs",
+            "cmpccxadd",
+            "avxifma",
+            "avxneconvert",
+            "avxvnniint8",
+            "avxvnniint16",
+            "sha512",
+            "sm3",
+            "sm4",
+            "amx_complex",
+            "amx_movrs",
+            "amx_avx512",
+            "amx_fp8",
+        ],
+        &[],
+        &[],
+        iddnr,
+    );
+    // Coral Rapids は Diamond Rapids の構成に VPMLDSABFLYDQ を足す。
+    // family/model は ISE-063 の 13_01H。
+    let mut idcor = intel("13", "1", "1");
+    idcor.extend([("cpuid.max_basic", "0x24"), ("cpuid.max_ext", "0x80000008")]);
+    model(
+        m,
+        "coral_rapids",
+        "diamond_rapids",
+        &["avx10_vpmldsabflydq"],
+        &[],
+        &[],
+        idcor,
+    );
     // AMD。K6 はローカル APIC を持たない。3DNow! 系は K6-2 から、
     // 整数 SSE 相当の MMX 拡張と CMOV・PAT は K7（Athlon）から。
     let mut idk6 = amd("5", "6", "1");
