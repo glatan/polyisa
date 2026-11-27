@@ -2864,6 +2864,29 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
     }
+    // VCVT[,T]BF162I[,U]BS（BF16→byte saturating conversion）。
+    // byte は対応 word 要素の下位へ置き、上位 byte は 0 にする。
+    for (op, mn) in [
+        (0x68u8, "vcvttbf162ibs"),
+        (0x69, "vcvtbf162ibs"),
+        (0x6A, "vcvttbf162iubs"),
+        (0x6B, "vcvtbf162iubs"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::PF2,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVTBIASPH2[B,H]F8[S]（bias 付き FP16→FP8、半幅出力）。
     for (op, mn) in [
         (0x74u8, "vcvtbiasph2bf8s"),

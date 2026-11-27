@@ -6514,7 +6514,11 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::VminmaxsdXvHvWvIb
+        Insn::Vcvttbf162ibsXvWv
+            | Insn::Vcvtbf162ibsXvWv
+            | Insn::Vcvttbf162iubsXvWv
+            | Insn::Vcvtbf162iubsXvWv
+            | Insn::VminmaxsdXvHvWvIb
             | Insn::VminmaxshXvHvWvIb
             | Insn::VminmaxssXvHvWvIb
             | Insn::VminmaxphXvHvWvIb
@@ -6778,6 +6782,49 @@ fn avx10_exec(
         return Ok(());
     }
     match insn {
+        Insn::Vcvttbf162ibsXvWv
+        | Insn::Vcvtbf162ibsXvWv
+        | Insn::Vcvttbf162iubsXvWv
+        | Insn::Vcvtbf162iubsXvWv => {
+            let trunc = matches!(insn, Insn::Vcvttbf162ibsXvWv | Insn::Vcvttbf162iubsXvWv);
+            let unsigned = matches!(insn, Insn::Vcvttbf162iubsXvWv | Insn::Vcvtbf162iubsXvWv);
+            for i in 0..lanes16 {
+                if k >> i & 1 == 0 {
+                    continue;
+                }
+                let a = bf_r(&y, i);
+                let mut bits = a.bits() as u16;
+                if bits & 0x7f80 == 0 && bits & 0x7f != 0 {
+                    bits &= 0x8000;
+                }
+                let v = bf64(BF16::from_bits(u64::from(bits)));
+                let rounded = if trunc {
+                    v.trunc()
+                } else {
+                    v.round_ties_even()
+                };
+                let byte = if rounded.is_nan() {
+                    0
+                } else if unsigned {
+                    if rounded >= 255.0 {
+                        255
+                    } else if rounded <= 0.0 {
+                        0
+                    } else {
+                        rounded as u8
+                    }
+                } else if rounded >= 127.0 {
+                    127
+                } else if rounded <= -128.0 {
+                    0x80
+                } else {
+                    rounded as i8 as u8
+                };
+                out[i * 2] = byte;
+                out[i * 2 + 1] = 0;
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vcvthf82phXvWv => {
             for i in 0..lanes16 {
                 let v = y[i];
@@ -18599,6 +18646,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
+            | Insn::Vcvttbf162ibsXvWv
+            | Insn::Vcvtbf162ibsXvWv
+            | Insn::Vcvttbf162iubsXvWv
+            | Insn::Vcvtbf162iubsXvWv
             | Insn::VminmaxsdXvHvWvIb
             | Insn::VminmaxshXvHvWvIb
             | Insn::VminmaxssXvHvWvIb
