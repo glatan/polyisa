@@ -6514,7 +6514,10 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::VminmaxphXvHvWvIb
+        Insn::VminmaxsdXvHvWvIb
+            | Insn::VminmaxshXvHvWvIb
+            | Insn::VminmaxssXvHvWvIb
+            | Insn::VminmaxphXvHvWvIb
             | Insn::VminmaxpsXvHvWvIb
             | Insn::VminmaxpdXvHvWvIb
             | Insn::Vcvtbiasph2bf8XvHvWv
@@ -6802,15 +6805,24 @@ fn avx10_exec(
             }
             merge16(&mut out, &old, md);
         }
-        Insn::VminmaxphXvHvWvIb | Insn::VminmaxpsXvHvWvIb | Insn::VminmaxpdXvHvWvIb => {
-            let (ebw, eb) = if insn == Insn::VminmaxpdXvHvWvIb {
+        Insn::VminmaxphXvHvWvIb
+        | Insn::VminmaxpsXvHvWvIb
+        | Insn::VminmaxpdXvHvWvIb
+        | Insn::VminmaxsdXvHvWvIb
+        | Insn::VminmaxshXvHvWvIb
+        | Insn::VminmaxssXvHvWvIb => {
+            let scalar = matches!(
+                insn,
+                Insn::VminmaxsdXvHvWvIb | Insn::VminmaxshXvHvWvIb | Insn::VminmaxssXvHvWvIb
+            );
+            let (ebw, eb) = if matches!(insn, Insn::VminmaxpdXvHvWvIb | Insn::VminmaxsdXvHvWvIb) {
                 (8usize, 64u32)
-            } else if insn == Insn::VminmaxpsXvHvWvIb {
+            } else if matches!(insn, Insn::VminmaxpsXvHvWvIb | Insn::VminmaxssXvHvWvIb) {
                 (4, 32)
             } else {
                 (2, 16)
             };
-            let lanes = vbytes / ebw;
+            let lanes = if scalar { 1 } else { vbytes / ebw };
             let signbit = 1u64 << (eb - 1);
             let expbits = if eb == 64 {
                 11
@@ -6912,6 +6924,9 @@ fn avx10_exec(
                 for j in 0..ebw {
                     out[i * ebw + j] = (r >> (8 * j)) as u8;
                 }
+            }
+            if scalar {
+                out[ebw..16].copy_from_slice(&x[ebw..16]);
             }
         }
         Insn::Vminmaxbf16XvHvWvIb => {
@@ -18584,6 +18599,9 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
+            | Insn::VminmaxsdXvHvWvIb
+            | Insn::VminmaxshXvHvWvIb
+            | Insn::VminmaxssXvHvWvIb
             | Insn::VminmaxphXvHvWvIb
             | Insn::VminmaxpsXvHvWvIb
             | Insn::VminmaxpdXvHvWvIb

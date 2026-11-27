@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2434);
+        assert_eq!(INSNS.len(), 2437);
     }
 
     #[test]
@@ -2941,6 +2941,13 @@ fn avx10_decode() {
     assert_eq!(d.insn, Insn::Vfmadd132bf16XvHvWv);
     let d = decode_map(&[0x62, 0xF6, 0x5C, 0x28, 0xBC, 0xDD], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vfnmadd231bf16XvHvWv);
+    // VMINMAXSH/SS/SD: 0F3A.53、scalar/LLIG。
+    let d = decode_map(&[0x62, 0xF3, 0x74, 0x28, 0x53, 0xC2, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VminmaxshXvHvWvIb);
+    let d = decode_map(&[0x62, 0xF3, 0x75, 0x28, 0x53, 0xC2, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VminmaxssXvHvWvIb);
+    let d = decode_map(&[0x62, 0xF3, 0xF5, 0x28, 0x53, 0xC2, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VminmaxsdXvHvWvIb);
     // VMINMAXPH/PS/PD: 0F3A.52、pp/W で要素幅を分ける。
     let d = decode_map(&[0x62, 0xF3, 0x74, 0x28, 0x52, 0xC2, 0x00], modes, f).unwrap();
     assert_eq!(d.insn, Insn::VminmaxphXvHvWvIb);

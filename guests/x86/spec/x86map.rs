@@ -4802,6 +4802,28 @@ fn build_map_0f3a(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         items.push(MapItem::Insn(0x52, it));
     }
+    // VMINMAXSH/SS/SD（scalar、LLIG）。低要素だけを演算し、
+    // XMM の上位は src1 から merge する。
+    for (sel, w, ed, mn) in [
+        (PfxSel::P66, true, 8u8, "vminmaxsd"),
+        (PfxSel::Plain, false, 2, "vminmaxsh"),
+        (PfxSel::P66, false, 4, "vminmaxss"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv_ib"),
+            &[RegX, Vv, RmX, ib],
+            sel,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.edisp = ed;
+        it.sae = true;
+        it.wsel = Some(w);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0x53, it));
+    }
     // VMINMAXPH/PS/PD（2 ソース + imm8）。要素幅ごとに pp/W と
     // broadcast 幅が変わる。
     for (sel, w, ed, mn) in [
