@@ -10090,9 +10090,6 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             return;
         }
     }
-    let finite_input = (e0 & 0x7fff) != 0x7fff;
-    let nonzero_input = (e0 & 0x7fff) != 0 || s0 != 0;
-    let inexact_unary_transcendental = finite_input && nonzero_input;
     // trig 系で infinity は invalid。finite な NaN は上で処理済み。
     if matches!(op, 0xFB | 0xF2 | 0xFE | 0xFF) && (e0 & 0x7fff) == 0x7fff && s0 == 1u64 << 63 {
         x87_scalar_exception_flag(env, 1);
@@ -10121,31 +10118,19 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         // FSIN/FCOS は ST(0) を置き換える。
         0xFE | 0xFF => {
             let y = if op == 0xFE { x.sin() } else { x.cos() };
-            if inexact_unary_transcendental {
-                x87_scalar_exception_flag(env, 1 << 5);
-            }
             x87_write_st(env, 0, x87_f64_to_ext(y));
         }
         // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
         0xFB => {
-            if inexact_unary_transcendental {
-                x87_scalar_exception_flag(env, 1 << 5);
-            }
             x87_write_st(env, 0, x87_f64_to_ext(x.sin()));
             x87_push(env, x87_f64_to_ext(x.cos()));
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
         0xF0 => {
             let y = (x * std::f64::consts::LN_2).exp_m1();
-            if inexact_unary_transcendental {
-                x87_scalar_exception_flag(env, 1 << 5);
-            }
             x87_write_st(env, 0, x87_f64_to_ext(y));
         }
         0xF2 => {
-            if inexact_unary_transcendental {
-                x87_scalar_exception_flag(env, 1 << 5);
-            }
             x87_write_st(env, 0, x87_f64_to_ext(x.tan()));
             x87_push(env, x87_f64_to_ext(1.0));
         }
