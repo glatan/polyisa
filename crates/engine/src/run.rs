@@ -55,6 +55,12 @@ pub trait TrapHandler {
     /// 1 命令を実行したあと。既定では何もしない。
     fn after_step(&mut self, _env: &mut BareEnv) {}
 
+    /// `after_step` で発生した非同期終了を取り出す。シグナルの
+    /// 既定動作のように trap 戻り値を通れない終了に使う。
+    fn take_async_exit(&mut self) -> Option<u32> {
+        None
+    }
+
     /// 待っているスレッドから切り替える。切り替えたら真。
     fn on_block(&mut self, _env: &mut BareEnv) -> bool {
         false

@@ -12226,6 +12226,11 @@ fn x86_post_step(
         }
     }
     sys.after_step(env);
+    if let Some(code) = sys.take_async_exit()
+        && !sys.take_exit(env, code)
+    {
+        return Err(Outcome::Exit(u64::from(code)));
+    }
     Ok(())
 }
 
@@ -21173,6 +21178,11 @@ fn step_x86_jit(
     };
     if r.is_ok() {
         sys.after_step(env);
+        if let Some(code) = sys.take_async_exit()
+            && !sys.take_exit(env, code)
+        {
+            return Err(Outcome::Exit(u64::from(code)));
+        }
     }
     r
 }

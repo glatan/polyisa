@@ -87,6 +87,8 @@ pub struct Linux {
     sigsuspend_mask: Option<u64>,
     /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
     sig_pending: u64,
+    /// 非同期シグナルの既定動作で終わるべきシグナル番号。
+    async_exit: Option<u32>,
     /// 代替シグナルスタック（task の sas_ss_*）。
     sigaltstack: crate::x86::SigAltStack,
     /// ゲストプロセス表。fork した子と共有する。
@@ -966,6 +968,7 @@ impl Linux {
             sig_mask: self.sig_mask,
             sigsuspend_mask: None,
             sig_pending: 0,
+            async_exit: None,
             sigaltstack: self.sigaltstack,
             procs: std::rc::Rc::clone(&self.procs),
             pid: self.pid,
@@ -1124,6 +1127,7 @@ impl Linux {
             // 実行可能な他スレッドへ移れるようにする。
             if act.handler == 0 && signal_default_terminates(sig as u64) {
                 let _ = self.terminate_by_signal(sig);
+                self.async_exit = Some(sig);
             }
             return;
         }
@@ -5012,6 +5016,10 @@ impl TrapHandler for Linux {
     fn after_step(&mut self, env: &mut BareEnv) {
         self.deliver_pending(env);
         self.step_and_maybe_preempt(env);
+    }
+
+    fn take_async_exit(&mut self) -> Option<u32> {
+        self.async_exit.take()
     }
 
     fn on_block(&mut self, env: &mut BareEnv) -> bool {
@@ -9271,6 +9279,8 @@ mod tests {
                 .is_exited(polyisa_kernel::ThreadId(pid))
         );
         assert_eq!(sys.sig_pending & (1 << 14), 0);
+        assert_eq!(sys.take_async_exit(), Some(15));
+        assert_eq!(sys.take_async_exit(), None);
     }
 
     #[test]
