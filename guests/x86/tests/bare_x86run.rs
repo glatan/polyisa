@@ -27690,6 +27690,68 @@ fn run64_avx10_bf16_fma() {
 }
 
 #[test]
+fn run64_avx10_bf16_unary_scale() {
+    // GETEXP(4)=2、SCALEF(3,1.5)=6、RNDSCALE(1.75,M=0)=2、
+    // REDUCE(1.75,M=0)=-0.25、GETMANT(3,interval0)=1.5。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    for (r, v) in [
+        (0u8, 0x4080u16), // 4.0
+        (1, 0x4040),      // 3.0
+        (2, 0x3fc0),      // 1.5
+        (3, 0x3fe0),      // 1.75
+    ] {
+        env.backend
+            .set(polyisa_guest_x86::sem::zreg_ref(r, 0), u128::from(v));
+    }
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF6, 0x7C, 0x28, 0x42, 0xE8, // vgetexpbf16 ymm5,ymm0
+                0x62, 0xF6, 0x74, 0x28, 0x2C, 0xF2, // vscalefbf16 ymm6,ymm1,ymm2
+                0x62, 0xF3, 0x7F, 0x28, 0x08, 0xFB, 0x00, // vrndscalebf16 ymm7,ymm3,0
+                0x62, 0xF3, 0x7F, 0x28, 0x56, 0xE3, 0x00, // vreducebf16 ymm4,ymm3,0
+                0x62, 0xF3, 0x7F, 0x28, 0x26, 0xC1, 0x00, // vgetmantbf16 ymm0,ymm1,0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        12,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let lane0 = |env: &mut BareEnv, r: u8| {
+        let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(r, 0));
+        v as u16
+    };
+    assert_eq!(lane0(&mut env, 5), 0x4000, "getexp(4)=2");
+    assert_eq!(lane0(&mut env, 6), 0x40c0, "scalef(3,1)=6");
+    assert_eq!(lane0(&mut env, 7), 0x4000, "round(1.75)=2");
+    assert_eq!(lane0(&mut env, 4), 0xbe80, "reduce(1.75)=-0.25");
+    assert_eq!(lane0(&mut env, 0), 0x3fc0, "getmant(3)=1.5");
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

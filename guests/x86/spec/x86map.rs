@@ -2900,6 +2900,40 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v6.push(MapItem::Insn(op, it));
     }
+    {
+        // VGETEXPBF16（単項、vvvv=1111b 必須）。
+        let mut it = ex(
+            "vgetexpbf16_xv_wv",
+            &[RegX, RmX],
+            PfxSel::Plain,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v6.push(MapItem::Insn(0x42, it));
+    }
+    {
+        // VSCALEFBF16（2 ソース）。
+        let mut it = ex(
+            "vscalefbf16_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v6.push(MapItem::Insn(0x2C, it));
+    }
     // AVX10.2 の BF16 fused multiply-add/subtract（EVEX.NP.MAP6.W0）。
     // opcode 下位桁は 132/213/231、bit1 は subtract、bit0 は negated 系の
     // 一部ではなく opcode 表どおり個別に並べる。
@@ -4613,6 +4647,28 @@ fn build_map_0f3a(m: &mut Model) {
                 ),
             ));
         }
+    }
+    // AVX10.2 の BF16 unary immediate 命令。いずれも m16bcst を取り、
+    // vvvv=1111b 必須。
+    for (op, mn) in [
+        (0x08u8, "vrndscalebf16"),
+        (0x26, "vgetmantbf16"),
+        (0x56, "vreducebf16"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv_ib"),
+            &[RegX, RmX, ib],
+            PfxSel::PF2,
+            0b111,
+            true,
+            "{op} {x}, {w}, {i}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(op, it));
     }
     // AVX10.2 の BF16 比較・分類。宛先は ModRM.reg の k レジスタで、
     // k2/aaa のマスクオフ要素は常に 0（zero masking only）。

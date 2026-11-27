@@ -6514,7 +6514,12 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vfmadd132bf16XvHvWv
+        Insn::Vgetexpbf16XvWv
+            | Insn::Vscalefbf16XvHvWv
+            | Insn::Vrndscalebf16XvWvIb
+            | Insn::Vgetmantbf16XvWvIb
+            | Insn::Vreducebf16XvWvIb
+            | Insn::Vfmadd132bf16XvHvWv
             | Insn::Vfmadd213bf16XvHvWv
             | Insn::Vfmadd231bf16XvHvWv
             | Insn::Vfmsub132bf16XvHvWv
@@ -6560,7 +6565,7 @@ fn avx10_exec(
     _eip: u32,
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
-    use polyisa_softfloat::{BF16, F16, F32, Rm};
+    use polyisa_softfloat::{BF16, F16, F32, F64, Rm};
     let ll = usize::from(md.evex_ll);
     let vbytes = 16usize << ll;
     let acc_r = Access {
@@ -6650,6 +6655,9 @@ fn avx10_exec(
         }
     };
     let bf2f = |v: BF16| F32::from_bits(u64::from(v.to_f32(Rm::Rne).0.bits() as u32));
+    let bf64 = |v: BF16| f32::from_bits((v.bits() as u32) << 16) as f64;
+    let bf64r = |x: f64| -> u16 { F64::from_bits(x.to_bits()).to_bf16(Rm::Rne).0.bits() as u16 };
+    let qnan16 = |w: u16| w | 0x40;
     let f2e5 = |v: F32, sat: bool, sgn: u64, fl: &mut u8| -> u8 {
         let (r, f) = v.to_e5m2(Rm::Rne);
         *fl |= f;
@@ -6679,6 +6687,119 @@ fn avx10_exec(
         }
     };
     match insn {
+        Insn::Vgetexpbf16XvWv
+        | Insn::Vrndscalebf16XvWvIb
+        | Insn::Vgetmantbf16XvWvIb
+        | Insn::Vreducebf16XvWvIb => {
+            for i in 0..lanes16 {
+                let raw = rd16(&y, i);
+                let a = bf_r(&y, i);
+                let bits = if insn == Insn::Vgetexpbf16XvWv {
+                    if a.is_nan() {
+                        qnan16(raw)
+                    } else if a.is_inf() {
+                        0x7f80
+                    } else if a.is_zero() {
+                        0xff80
+                    } else {
+                        let e = i64::from((raw >> 7) & 0xff) - 127;
+                        let (f, _) = F64::from_i64(e, Rm::Rne);
+                        f.to_bf16(Rm::Rne).0.bits() as u16
+                    }
+                } else if insn == Insn::Vgetmantbf16XvWvIb {
+                    if a.is_nan() {
+                        qnan16(raw)
+                    } else {
+                        let sign = raw & 0x8000 != 0;
+                        let sc0 = md.imm & 4 != 0;
+                        let sc1 = md.imm & 8 != 0;
+                        if (!sign && (a.is_zero() || a.is_inf())) || (sign && sc1 && !a.is_zero()) {
+                            if sign && sc1 && !a.is_zero() {
+                                0x7fc0
+                            } else {
+                                0x3f80
+                            }
+                        } else if sign && (a.is_zero() || a.is_inf()) {
+                            if sc0 { 0x3f80 } else { 0xbf80 }
+                        } else {
+                            // finite nonzero。DAZ 済み入力の exponent/fraction から
+                            // interval に応じて exponent だけを正規化する。
+                            let mut out = raw & 0x807f;
+                            if sc0 {
+                                out &= !0x8000;
+                            }
+                            let exp = i32::from((raw >> 7) & 0xff);
+                            let unbiased = exp - 127;
+                            let interval = md.imm & 3;
+                            let newexp = match interval {
+                                0 => 127,
+                                1 => {
+                                    if unbiased & 1 != 0 {
+                                        126
+                                    } else {
+                                        127
+                                    }
+                                }
+                                2 => 126,
+                                _ => {
+                                    if raw & 0x40 != 0 {
+                                        126
+                                    } else {
+                                        127
+                                    }
+                                }
+                            };
+                            (out & !0x7f80) | ((newexp as u16) << 7)
+                        }
+                    }
+                } else {
+                    if a.is_nan() {
+                        qnan16(raw)
+                    } else if a.is_inf() {
+                        raw & 0x8000 | 0x7f80
+                    } else {
+                        let x = bf64(a);
+                        let m = (md.imm >> 4) as i32;
+                        let scale = 2f64.powi(m);
+                        let rounded = (x * scale).round_ties_even() / scale;
+                        let v = if insn == Insn::Vreducebf16XvWvIb {
+                            x - rounded
+                        } else {
+                            rounded
+                        };
+                        let r = bf64r(v);
+                        if r & 0x7f80 == 0 && r & 0x7f != 0 {
+                            r & 0x8000
+                        } else {
+                            r
+                        }
+                    }
+                };
+                out[i * 2..i * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
+        Insn::Vscalefbf16XvHvWv => {
+            for i in 0..lanes16 {
+                let a = bf_r(&x, i);
+                let c = bf_r(&y, i);
+                let bits = if a.is_nan() || c.is_nan() {
+                    0x7fc0
+                } else {
+                    let x = bf64(a);
+                    let n = bf64(c).floor().clamp(-2048.0, 2048.0) as i32;
+                    let v = x * 2f64.powi(n);
+                    let r = bf64r(v);
+                    if r & 0x7f80 == 0 && r & 0x7f != 0 {
+                        r & 0x8000
+                    } else {
+                        r
+                    }
+                };
+                out[i * 2..i * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vfmadd132bf16XvHvWv
         | Insn::Vfmadd213bf16XvHvWv
         | Insn::Vfmadd231bf16XvHvWv
@@ -18042,6 +18163,11 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vgetexpbf16XvWv
+            | Insn::Vscalefbf16XvHvWv
+            | Insn::Vrndscalebf16XvWvIb
+            | Insn::Vgetmantbf16XvWvIb
+            | Insn::Vreducebf16XvWvIb
             | Insn::Vfmadd132bf16XvHvWv
             | Insn::Vfmadd213bf16XvHvWv
             | Insn::Vfmadd231bf16XvHvWv

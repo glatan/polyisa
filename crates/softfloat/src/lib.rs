@@ -1248,6 +1248,14 @@ impl F16 {
     }
 }
 
+impl F64 {
+    /// BF16（16 ビット）に変換する。
+    #[must_use]
+    pub fn to_bf16(self, rm: Rm) -> (BF16, u8) {
+        convert(self, rm)
+    }
+}
+
 impl F32 {
     /// 64 ビット形式に変換する。
     #[must_use]

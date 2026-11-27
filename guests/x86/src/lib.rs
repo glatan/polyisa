@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2415);
+        assert_eq!(INSNS.len(), 2420);
     }
 
     #[test]
@@ -2941,6 +2941,13 @@ fn avx10_decode() {
     assert_eq!(d.insn, Insn::Vfmadd132bf16XvHvWv);
     let d = decode_map(&[0x62, 0xF6, 0x5C, 0x28, 0xBC, 0xDD], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vfnmadd231bf16XvHvWv);
+    // BF16 unary/scale: GETEXP/SCALEF は MAP6、RNDSCALE は 0F3A。
+    let d = decode_map(&[0x62, 0xF6, 0x7C, 0x28, 0x42, 0xE8], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vgetexpbf16XvWv);
+    let d = decode_map(&[0x62, 0xF6, 0x74, 0x28, 0x2C, 0xC2], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vscalefbf16XvHvWv);
+    let d = decode_map(&[0x62, 0xF3, 0x7F, 0x28, 0x08, 0xFB, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vrndscalebf16XvWvIb);
     // VCMPBF16/VFPCLASSBF16: EVEX.F2.0F3A.W0 C2/66 /r ib。
     let d = decode_map(&[0x62, 0xF3, 0x77, 0x28, 0xC2, 0xCA, 0x01], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vcmpbf16KvHvWvIb);
