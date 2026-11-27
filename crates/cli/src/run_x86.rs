@@ -6510,11 +6510,16 @@ fn avx10_step(
     next_rip: u64,
     seg: u64,
     eip: u32,
+    mode: u8,
 ) -> Option<Result<(), InterpExit>> {
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvttpd2dqsXvWv
+        Insn::Vcvttsd2sisGvWv
+            | Insn::Vcvttsd2usisGvWv
+            | Insn::Vcvttss2sisGvWv
+            | Insn::Vcvttss2usisGvWv
+            | Insn::Vcvttpd2dqsXvWv
             | Insn::Vcvttpd2qqsXvWv
             | Insn::Vcvttpd2udqsXvWv
             | Insn::Vcvttpd2uqqsXvWv
@@ -6591,7 +6596,7 @@ fn avx10_step(
     ) {
         return None;
     }
-    Some(avx10_exec(env, md, next_rip, seg, eip))
+    Some(avx10_exec(env, md, next_rip, seg, eip, mode))
 }
 
 fn avx10_exec(
@@ -6600,6 +6605,7 @@ fn avx10_exec(
     next_rip: u64,
     seg: u64,
     _eip: u32,
+    mode: u8,
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
     use polyisa_softfloat::{BF16, F16, F32, F64, Rm};
@@ -6636,6 +6642,99 @@ fn avx10_exec(
             );
         }
     };
+    if matches!(
+        md.insn,
+        Insn::Vcvttsd2sisGvWv
+            | Insn::Vcvttsd2usisGvWv
+            | Insn::Vcvttss2sisGvWv
+            | Insn::Vcvttss2usisGvWv
+    ) {
+        let sd = matches!(md.insn, Insn::Vcvttsd2sisGvWv | Insn::Vcvttsd2usisGvWv);
+        let unsigned = matches!(md.insn, Insn::Vcvttsd2usisGvWv | Insn::Vcvttss2usisGvWv);
+        let ibw = if sd { 8usize } else { 4 };
+        let bits = match decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+            decode::Rm::Reg(r) => {
+                let v = zget(env, decode::rm_reg_x5(md));
+                let _ = r;
+                v.iter()
+                    .take(ibw)
+                    .enumerate()
+                    .fold(0u64, |x, (j, b)| x | (u64::from(*b) << (8 * j)))
+            }
+            decode::Rm::Mem { a, .. } => {
+                let mut buf = [0u8; 8];
+                env.backend
+                    .mem
+                    .read(VirtAddr(a), &mut buf[..ibw], acc_r)
+                    .map_err(|er| amx_mem_exit(a, er))?;
+                buf.iter()
+                    .take(ibw)
+                    .enumerate()
+                    .fold(0u64, |x, (j, b)| x | (u64::from(*b) << (8 * j)))
+            }
+        };
+        let v = if sd {
+            let mut b = bits;
+            if env.backend.get(sem::mxcsr_ref()) & 0x40 != 0
+                && b & 0x7ff0_0000_0000_0000 == 0
+                && b & 0x000f_ffff_ffff_ffff != 0
+            {
+                b &= 0x8000_0000_0000_0000;
+            }
+            f64::from_bits(b)
+        } else {
+            let mut b = bits as u32;
+            if env.backend.get(sem::mxcsr_ref()) & 0x40 != 0
+                && b & 0x7f80_0000 == 0
+                && b & 0x007f_ffff != 0
+            {
+                b &= 0x8000_0000;
+            }
+            f32::from_bits(b) as f64
+        };
+        let tv = v.trunc();
+        let wide = mode == 64 && md.vex_w;
+        let val = if tv.is_nan() {
+            0
+        } else if wide {
+            if unsigned {
+                if tv >= 18_446_744_073_709_551_616.0 {
+                    u64::MAX
+                } else if tv <= 0.0 {
+                    0
+                } else {
+                    tv as u64
+                }
+            } else if tv >= 9_223_372_036_854_775_808.0 {
+                i64::MAX as u64
+            } else if tv <= -9_223_372_036_854_775_808.0 {
+                i64::MIN as u64
+            } else {
+                (tv as i64) as u64
+            }
+        } else if unsigned {
+            if tv >= 4_294_967_296.0 {
+                u64::from(u32::MAX)
+            } else if tv <= 0.0 {
+                0
+            } else {
+                u64::from(tv as u32)
+            }
+        } else if tv >= 2_147_483_648.0 {
+            u64::from(i32::MAX as u32)
+        } else if tv <= -2_147_483_648.0 {
+            u64::from(i32::MIN as u32)
+        } else {
+            u64::from((tv as i32) as u32)
+        };
+        let g = decode::reg(md);
+        if wide {
+            sem::write64(&mut env.backend, g, val);
+        } else {
+            <polyisa_sem::W32 as decode::Hw>::put(&mut env.backend, g, md, val as u32);
+        }
+        return Ok(());
+    }
     if matches!(md.insn, Insn::VmovwXvWv | Insn::VmovwWvXv) {
         let load = md.insn == Insn::VmovwXvWv;
         let src_reg = if load {
@@ -10032,7 +10131,7 @@ fn step_x86_map(
             .or_else(|| xsavec_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| xrstorc_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| xstore_step(env, &md))
-            .or_else(|| avx10_step(env, &md, next_rip, seg, eip))
+            .or_else(|| avx10_step(env, &md, next_rip, seg, eip, mode))
             .or_else(|| avxne_step(env, &md, next_rip, seg, eip))
             .or_else(|| vcrypto_step(env, &md, next_rip, seg, eip))
             .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip, feats))
@@ -18901,6 +19000,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
+            | Insn::Vcvttsd2sisGvWv
+            | Insn::Vcvttsd2usisGvWv
+            | Insn::Vcvttss2sisGvWv
+            | Insn::Vcvttss2usisGvWv
             | Insn::Vcvttpd2dqsXvWv
             | Insn::Vcvttpd2qqsXvWv
             | Insn::Vcvttpd2udqsXvWv

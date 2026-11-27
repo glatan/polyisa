@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2457);
+        assert_eq!(INSNS.len(), 2461);
     }
 
     #[test]
@@ -2957,6 +2957,16 @@ fn avx10_decode() {
         ([0x62, 0xF5, 0x7D, 0x28, 0x69, 0xC2], Insn::Vcvtps2ibsXvWv),
         ([0x62, 0xF5, 0x7D, 0x28, 0x6A, 0xC2], Insn::Vcvttps2iubsXvWv),
         ([0x62, 0xF5, 0x7D, 0x28, 0x6B, 0xC2], Insn::Vcvtps2iubsXvWv),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap();
+        assert_eq!(d.insn, insn);
+    }
+    // VCVTT{SD,SS}2{S,US}IS: scalar、LLIG、GPR 宛先。
+    for (bytes, insn) in [
+        ([0x62, 0xF5, 0x7F, 0x08, 0x6D, 0xC2], Insn::Vcvttsd2sisGvWv),
+        ([0x62, 0xF5, 0x7F, 0x08, 0x6C, 0xC2], Insn::Vcvttsd2usisGvWv),
+        ([0x62, 0xF5, 0x7E, 0x08, 0x6D, 0xC2], Insn::Vcvttss2sisGvWv),
+        ([0x62, 0xF5, 0x7E, 0x08, 0x6C, 0xC2], Insn::Vcvttss2usisGvWv),
     ] {
         let d = decode_map(&bytes, modes, f).unwrap();
         assert_eq!(d.insn, insn);

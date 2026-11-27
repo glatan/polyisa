@@ -28366,6 +28366,61 @@ fn run64_avx10_vcvtt_int_saturating() {
 }
 
 #[test]
+fn run64_avx10_vcvtt_scalar_saturating() {
+    // scalar saturating conversion。+1.9 は signed/unsigned とも 1、
+    // -1.9 は signed で -1、unsigned で 0。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x3ffe_6666_6666_6666u64), // fp64 1.9
+    );
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(6, 0),
+        u128::from(0xbff3_3333u32), // fp32 -1.9
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF5, 0x7F, 0x08, 0x6D, 0xCA, // vcvttsd2sis ecx,xmm2
+                0x62, 0xF5, 0x7F, 0x08, 0x6C, 0xD2, // vcvttsd2usis edx,xmm2
+                0x62, 0xF5, 0x7E, 0x08, 0x6D, 0xDE, // vcvttss2sis ebx,xmm6
+                0x62, 0xF5, 0x7E, 0x08, 0x6C, 0xFE, // vcvttss2usis edi,xmm6
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for (r, want) in [(1u8, 1u32), (2, 1), (3, 0xffff_ffff), (7, 0)] {
+        let v: u32 = env.backend.get(Gpr(r).state());
+        assert_eq!(v, want, "gpr{r}");
+    }
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

@@ -2889,6 +2889,29 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // VCVTT{SD,SS}2{S,US}IS（scalar truncating saturating conversion to GPR）。
+    // W1 は 64 ビットモードでのみ 64 ビット出力、非 64 ビットでは無視される。
+    for (op, sel, ed, mn) in [
+        (0x6Du8, PfxSel::PF2, 8u8, "vcvttsd2sis"),
+        (0x6C, PfxSel::PF2, 8, "vcvttsd2usis"),
+        (0x6D, PfxSel::PF3, 4, "vcvttss2sis"),
+        (0x6C, PfxSel::PF3, 4, "vcvttss2usis"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_gv_wv"),
+            &[Reg(OpWidth::Q64), RmX],
+            sel,
+            0b111,
+            true,
+            "{op} {g}, {w}",
+            "alu",
+        );
+        it.edisp = ed;
+        it.sae = true;
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVTT{PD,PS}2{D,Q,U DQ,UQ}S（truncating saturating integer conversion）。
     // opcode 6C/6D、pp/W で入出力型を分ける。
     for (op, sel, w, ed, mn) in [
