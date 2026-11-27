@@ -10158,6 +10158,16 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                 0xF1 => x1 * x.log2(),
                 _ => x1 * (x.ln_1p() / std::f64::consts::LN_2),
             };
+            if op == 0xF3 {
+                // atan2 の非零結果は有限 binary rational 入力からは
+                // exact に表せない。分子 zero かつ分母 positive の
+                // signed zero だけが exact。
+                let num_zero = (e1 & 0x7fff) == 0 && s1 == 0;
+                let den_positive = e0 & 0x8000 == 0;
+                if !(num_zero && den_positive) {
+                    x87_scalar_exception_flag(env, 1 << 5);
+                }
+            }
             x87_write_st(env, 1, x87_f64_to_ext(y));
             x87_pop(env);
         }
