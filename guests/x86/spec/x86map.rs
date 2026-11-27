@@ -3046,6 +3046,25 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v.push(MapItem::Insn(0x1F, it));
     }
+    // AVX10.3 の BF16→FP8（MAP5 側）。74/18/1B はそれぞれ
+    // BF8S/HF8/HF8S。単一ソースは F3、2 ソースは F2。
+    for (op, sel, mn, rv) in [
+        (0x74u8, PfxSel::PF3, "vcvtbf162bf8s_xv_wv", true),
+        (0x74, PfxSel::PF2, "vcvt2bf162bf8s_xv_hv_wv", false),
+        (0x18, PfxSel::PF3, "vcvtbf162hf8_xv_wv", true),
+        (0x18, PfxSel::PF2, "vcvt2bf162hf8_xv_hv_wv", false),
+        (0x1B, PfxSel::PF3, "vcvtbf162hf8s_xv_wv", true),
+        (0x1B, PfxSel::PF2, "vcvt2bf162hf8s_xv_hv_wv", false),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(true);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VMOVW（EVEX.128.F3.MAP5.W0 6E/7E、scalar copy、vvvv=1111b）。
     for (op, ops, syn) in [
         (0x6Eu8, [RegX, RmX] as [OpKind; 2], "{op} {x}, {w}"),
@@ -4310,6 +4329,21 @@ fn build_map_0f38(m: &mut Model) {
         it.wsel = Some(false);
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
+    }
+    // AVX10.3 の BF16→FP8（0F38 側）。W1 で AVX10.2 の FP16 形と
+    // 分かれる。単一ソースは半幅出力、2 ソースは全幅出力。
+    for (sel, mn, rv) in [
+        (PfxSel::PF3, "vcvtbf162bf8_xv_wv", true),
+        (PfxSel::PF2, "vcvt2bf162bf8_xv_hv_wv", false),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(true);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(0x74, it));
     }
     // VCVTBIASPH2BF8（bias 付き FP16→E5M2、半幅出力）。
     {

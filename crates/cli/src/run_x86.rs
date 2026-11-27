@@ -6563,6 +6563,14 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf162bf8XvWv
+            | Insn::Vcvtbf162bf8sXvWv
+            | Insn::Vcvtbf162hf8XvWv
+            | Insn::Vcvtbf162hf8sXvWv
+            | Insn::Vcvt2bf162bf8XvHvWv
+            | Insn::Vcvt2bf162bf8sXvHvWv
+            | Insn::Vcvt2bf162hf8XvHvWv
+            | Insn::Vcvt2bf162hf8sXvHvWv
             | Insn::Vcvtbf82bf16XvWv
             | Insn::Vcvthf82bf16XvWv
             | Insn::Vcvthf82phXvWv
@@ -7369,6 +7377,68 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvtbf162bf8XvWv
+        | Insn::Vcvtbf162bf8sXvWv
+        | Insn::Vcvtbf162hf8XvWv
+        | Insn::Vcvtbf162hf8sXvWv
+        | Insn::Vcvt2bf162bf8XvHvWv
+        | Insn::Vcvt2bf162bf8sXvHvWv
+        | Insn::Vcvt2bf162hf8XvHvWv
+        | Insn::Vcvt2bf162hf8sXvHvWv => {
+            let hf8 = matches!(
+                insn,
+                Insn::Vcvtbf162hf8XvWv
+                    | Insn::Vcvtbf162hf8sXvWv
+                    | Insn::Vcvt2bf162hf8XvHvWv
+                    | Insn::Vcvt2bf162hf8sXvHvWv
+            );
+            let sat = matches!(
+                insn,
+                Insn::Vcvtbf162bf8sXvWv
+                    | Insn::Vcvtbf162hf8sXvWv
+                    | Insn::Vcvt2bf162bf8sXvHvWv
+                    | Insn::Vcvt2bf162hf8sXvHvWv
+            );
+            let two = matches!(
+                insn,
+                Insn::Vcvt2bf162bf8XvHvWv
+                    | Insn::Vcvt2bf162bf8sXvHvWv
+                    | Insn::Vcvt2bf162hf8XvHvWv
+                    | Insn::Vcvt2bf162hf8sXvHvWv
+            );
+            let cvt = |w: u16, fl: &mut u8| -> u8 {
+                let v = F32::from_bits(u64::from((w as u32) << 16));
+                let sgn = ((v.bits() >> 31) & 1) << 7;
+                if hf8 {
+                    f2e4(v, sat, sgn, fl)
+                } else {
+                    f2e5(v, sat, sgn, fl)
+                }
+            };
+            if two {
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(rd16(&y, i), &mut flags);
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                    let hi = lanes16 + i;
+                    if k >> hi & 1 != 0 {
+                        out[hi] = cvt(rd16(&x, i), &mut flags);
+                    } else {
+                        out[hi] = if md.evex_z { 0 } else { old[hi] };
+                    }
+                }
+            } else {
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(rd16(&y, i), &mut flags);
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                }
+            }
         }
         Insn::Vcvtbf82bf16XvWv | Insn::Vcvthf82bf16XvWv => {
             for i in 0..lanes16 {
@@ -19172,6 +19242,14 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf162bf8XvWv
+            | Insn::Vcvtbf162bf8sXvWv
+            | Insn::Vcvtbf162hf8XvWv
+            | Insn::Vcvtbf162hf8sXvWv
+            | Insn::Vcvt2bf162bf8XvHvWv
+            | Insn::Vcvt2bf162bf8sXvHvWv
+            | Insn::Vcvt2bf162hf8XvHvWv
+            | Insn::Vcvt2bf162hf8sXvHvWv
             | Insn::Vcvtbf82bf16XvWv
             | Insn::Vcvthf82bf16XvWv
             | Insn::Vcvthf82phXvWv
