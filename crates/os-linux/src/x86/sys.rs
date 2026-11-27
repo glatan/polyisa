@@ -3049,15 +3049,19 @@ fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_sysfs(env, cx)
 }
 
+fn signal_is_pending_target(linux: &Linux, sig: u64) -> bool {
+    let bit = 1u64 << (sig - 1);
+    linux
+        .sigacts
+        .get(sig as usize - 1)
+        .is_some_and(|a| a.handler > 1)
+        || linux.sig_mask & bit != 0
+}
+
 fn queue_signal_on_parked(sys: &mut Linux, tid: u64, sig: u64) -> bool {
     let mut queue = sys.queue.0.borrow_mut();
     if let Some(task) = queue.parked.iter_mut().find(|task| task.linux.pid == tid) {
-        if task
-            .linux
-            .sigacts
-            .get(sig as usize - 1)
-            .is_some_and(|a| a.handler > 1)
-        {
+        if signal_is_pending_target(&task.linux, sig) {
             task.linux.sig_pending |= 1 << (sig - 1);
         }
         return true;
@@ -3089,12 +3093,7 @@ fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     }
     if sig > 0 && tid != me.0 {
         queue_signal_on_parked(sys, tid, sig);
-    } else if sig > 0
-        && sys
-            .sigacts
-            .get(sig as usize - 1)
-            .is_some_and(|a| a.handler > 1)
-    {
+    } else if sig > 0 && signal_is_pending_target(sys, sig) {
         sys.sig_pending |= 1 << (sig - 1);
     }
     set64(env, Gpr(0), 0);
@@ -3303,11 +3302,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         if sig > 0 {
             let me = sys.ensure_self();
             if pid == me.0 as i64 {
-                if sys
-                    .sigacts
-                    .get(sig as usize - 1)
-                    .is_some_and(|a| a.handler > 1)
-                {
+                if signal_is_pending_target(sys, sig as u64) {
                     sys.sig_pending |= 1 << (sig - 1);
                 }
             } else if pid > 0 {
@@ -3324,11 +3319,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
                     .parked
                     .iter_mut()
                     .find(|task| task.linux.pid == target.0)
-                    && task
-                        .linux
-                        .sigacts
-                        .get(sig as usize - 1)
-                        .is_some_and(|a| a.handler > 1)
+                    && signal_is_pending_target(&task.linux, sig as u64)
                 {
                     task.linux.sig_pending |= 1 << (sig - 1);
                 }
@@ -3986,12 +3977,7 @@ fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     }
     if sig > 0 && tid != me.0 {
         queue_signal_on_parked(sys, tid, sig);
-    } else if sig > 0
-        && sys
-            .sigacts
-            .get(sig as usize - 1)
-            .is_some_and(|a| a.handler > 1)
-    {
+    } else if sig > 0 && signal_is_pending_target(sys, sig) {
         sys.sig_pending |= 1 << (sig - 1);
     }
     set64(env, Gpr(0), 0);
@@ -7561,6 +7547,39 @@ mod tests {
         set64(&mut env, Gpr(6), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    #[test]
+    fn kill_queues_a_blocked_signal_until_it_is_unmasked() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_mask = 1 << 9;
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_ne!(sys.sig_pending & (1 << 9), 0);
+        sys.after_step(&mut env);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0);
+        sys.sig_mask = 0;
+        sys.after_step(&mut env);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        assert_eq!(sys.sig_pending & (1 << 9), 0);
     }
 
     #[test]
