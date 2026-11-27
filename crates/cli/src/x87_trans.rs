@@ -314,8 +314,20 @@ fn nearby_int(x: f64) -> i64 {
     x.round() as i64
 }
 
-/// trig 用の π/2 単位の引数削減。double-double の π/2 では
-/// 中程度の指数までを対象にし、戻り値は残余と象限。
+// x87 が内部で使う 66 bit の π/2 近似。Intel が示す
+// π のビット列 C90FDAA2 2168C234 C を有限値として保持する。
+const HW_PI2_P68: u128 = 0xC90FDAA2_2168C234C;
+pub(crate) fn hw_pi2() -> Dd {
+    let hi_int = HW_PI2_P68 >> 15;
+    let lo_int = HW_PI2_P68 & ((1u128 << 15) - 1);
+    Dd::new(
+        (hi_int as f64) * 2f64.powi(-52),
+        (lo_int as f64) * 2f64.powi(-67),
+    )
+}
+
+/// trig 用の π/2 単位の引数削減。x87 と同じ 66 bit の π/2
+/// 近似を使い、戻り値は残余と象限。
 pub(crate) fn reduce_pi2(x: Dd) -> (Dd, i64) {
     let qf = x.mul(INV_PI2).hi;
     let q = nearby_int(qf);
@@ -323,7 +335,7 @@ pub(crate) fn reduce_pi2(x: Dd) -> (Dd, i64) {
         return (x, 0);
     }
     let qd = Dd::from_f64(q as f64);
-    let r = x.sub(qd.mul(PI2));
+    let r = x.sub(qd.mul(hw_pi2()));
     (r, q)
 }
 
