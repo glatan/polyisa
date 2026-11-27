@@ -28472,6 +28472,56 @@ fn run64_avx10_evex_vnni() {
 }
 
 #[test]
+fn run64_avx10_vmpsadbw_evex() {
+    // imm=0 では先頭 4 バイト固定ブロックとの SAD を sliding window で計算する。
+    // src1=1..16、src2=0 なので最初の 2 word は 1+2+3+4=10、2+3+4+5=14。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    let mut src1 = [0u8; 16];
+    for (i, b) in src1.iter_mut().enumerate() {
+        *b = i as u8 + 1;
+    }
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from_le_bytes(src1),
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF3, 0x76, 0x28, 0x42, 0xC2, 0x00, // vmpsadbw ymm0,ymm1,ymm2,0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v as u32, 0x000e_000a);
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

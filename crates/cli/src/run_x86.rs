@@ -6515,7 +6515,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::VpdpbssdXvHvWv
+        Insn::VmpsadbwXvHvWvIb
+            | Insn::VpdpbssdXvHvWv
             | Insn::VpdpbssdsXvHvWv
             | Insn::VpdpbsudXvHvWv
             | Insn::VpdpbsudsXvHvWv
@@ -6621,7 +6622,13 @@ fn avx10_exec(
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
     use polyisa_softfloat::{BF16, F16, F32, F64, Rm};
-    let ll = usize::from(md.evex_ll);
+    // AVX10.2 の VNNI/VMPSADBW は VEX 形と Insn を共有する。
+    // EVEX 幅は evex_ll、VEX 幅は vex_l から決める。
+    let ll = if md.evex {
+        usize::from(md.evex_ll)
+    } else {
+        usize::from(md.vex_l)
+    };
     let er512 = md.evex_b
         && md.modrm >> 6 == 3
         && matches!(
@@ -6999,6 +7006,28 @@ fn avx10_exec(
                 out[i * 2 + 1] = 0;
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::VmpsadbwXvHvWvIb => {
+            for lane in 0..vbytes / 16 {
+                let control = if lane % 2 == 0 { md.imm } else { md.imm >> 3 };
+                let blk2 = (control & 3) as usize * 4;
+                let blk1 = ((control >> 2) & 1) as usize * 4;
+                for i in 0..8 {
+                    let wi = lane * 8 + i;
+                    if k >> wi & 1 == 0 {
+                        let keep = if md.evex_z { 0 } else { rd16(&old, wi) };
+                        out[wi * 2..wi * 2 + 2].copy_from_slice(&keep.to_le_bytes());
+                        continue;
+                    }
+                    let mut sum = 0u16;
+                    for j in 0..4 {
+                        let a = x[lane * 16 + blk1 + i + j];
+                        let b = y[lane * 16 + blk2 + j];
+                        sum += a.abs_diff(b) as u16;
+                    }
+                    out[wi * 2..wi * 2 + 2].copy_from_slice(&sum.to_le_bytes());
+                }
+            }
         }
         Insn::VpdpbssdXvHvWv
         | Insn::VpdpbssdsXvHvWv
@@ -19135,6 +19164,7 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
+            | Insn::VmpsadbwXvHvWvIb
             | Insn::VpdpbssdXvHvWv
             | Insn::VpdpbssdsXvHvWv
             | Insn::VpdpbsudXvHvWv

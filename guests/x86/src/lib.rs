@@ -3018,6 +3018,9 @@ fn avx10_decode() {
     assert_eq!(d.insn, Insn::VminmaxpsXvHvWvIb);
     let d = decode_map(&[0x62, 0xF3, 0xF5, 0x28, 0x52, 0xC2, 0x00], modes, f).unwrap();
     assert_eq!(d.insn, Insn::VminmaxpdXvHvWvIb);
+    // VMPSADBW: EVEX.F3.0F3A.W0 42 /r /ib。
+    let d = decode_map(&[0x62, 0xF3, 0x76, 0x28, 0x42, 0xC2, 0x00], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VmpsadbwXvHvWvIb);
     // AVX10.2 EVEX VNNI: 0F38.50/51/D2/D3。
     for (bytes, insn) in [
         ([0x62, 0xF2, 0x77, 0x28, 0x50, 0xC2], Insn::VpdpbssdXvHvWv),

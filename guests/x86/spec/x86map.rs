@@ -4960,6 +4960,22 @@ fn build_map_0f3a(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         items.push(MapItem::Insn(0x52, it));
     }
+    // VMPSADBW の EVEX 形。128 ビット車線ごとに SAD を計算し、
+    // 512 ビットでは imm8 の車線制御を下位 2 車線から複製する。
+    {
+        let mut it = ex(
+            "vmpsadbw_xv_hv_wv_ib",
+            &[RegX, Vv, RmX, ib],
+            PfxSel::PF3,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        items.push(MapItem::Insn(0x42, it));
+    }
     // VMINMAXSH/SS/SD（scalar、LLIG）。低要素だけを演算し、
     // XMM の上位は src1 から merge する。
     for (sel, w, ed, mn) in [
