@@ -10419,10 +10419,18 @@ pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let ea = b.and::<W64>(exp64, mask15);
                 let lim = b.konst::<W64>(16383 + 63);
                 let small = b.cmp::<W64>(Cmp::LtU, ea, lim);
-                let sr = b.select::<W64>(small, isig, sig);
-                let er = b.select::<W16>(small, iexp, exp);
-                sem::write_st(b, top, sr, er);
-                Ok(())
+                let sr0 = b.select::<W64>(small, isig, sig);
+                let er0 = b.select::<W16>(small, iexp, exp);
+                let unsupported = sem::x87_unsupported_format(b, sig, exp);
+                sem::x87_exception_flag(b, unsupported, 1);
+                let sr = b.select::<W64>(unsupported, indef_sig, sr0);
+                let er = b.select::<W16>(unsupported, indef_exp, er0);
+                let invalid_um = sem::x87_unmasked_exception(b, unsupported, 1);
+                let commit_result = sem::x87_arith_result_commit(b, invalid_um);
+                b.if_then(commit_result, |b| {
+                    sem::write_st(b, top, sr, er);
+                    Ok(())
+                })
             },
         )
     })
