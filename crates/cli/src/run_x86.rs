@@ -6514,7 +6514,11 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::VdpphpsXvHvWv
+        Insn::Vcvtbiasph2bf8XvHvWv
+            | Insn::Vcvtbiasph2bf8sXvHvWv
+            | Insn::Vcvtbiasph2hf8XvHvWv
+            | Insn::Vcvtbiasph2hf8sXvHvWv
+            | Insn::VdpphpsXvHvWv
             | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
@@ -7210,6 +7214,79 @@ fn avx10_exec(
                 let (s2, f4) = s1.add_rm(lo, Rm::Rne);
                 flags |= f1 | f2 | f3 | f4;
                 out[i * 4..i * 4 + 4].copy_from_slice(&ftz32(s2).to_le_bytes());
+            }
+        }
+        Insn::Vcvtbiasph2bf8XvHvWv
+        | Insn::Vcvtbiasph2bf8sXvHvWv
+        | Insn::Vcvtbiasph2hf8XvHvWv
+        | Insn::Vcvtbiasph2hf8sXvHvWv => {
+            let sat = matches!(
+                insn,
+                Insn::Vcvtbiasph2bf8sXvHvWv | Insn::Vcvtbiasph2hf8sXvHvWv
+            );
+            let hf8 = matches!(
+                insn,
+                Insn::Vcvtbiasph2hf8XvHvWv | Insn::Vcvtbiasph2hf8sXvHvWv
+            );
+            let bf8_bias = |x: u16, b: u8| -> u8 {
+                let sign = x & 0x8000;
+                let exp = (x >> 10) & 0x1f;
+                let frac = x & 0x3ff;
+                if exp == 0x1f && frac == 0 {
+                    let mag = if sat { 0x7b } else { 0x7c };
+                    return ((sign >> 8) as u8) | mag;
+                }
+                if exp == 0x1f {
+                    return ((x >> 8) as u8) | 0x02;
+                }
+                let temp = x.wrapping_add(u16::from(b));
+                if sat && (temp >> 8) & 0x7f == 0x7c {
+                    ((temp >> 8) as u8 & 0x80) | 0x7b
+                } else {
+                    (temp >> 8) as u8
+                }
+            };
+            let hf8_bias = |x: u16, b: u8| -> u8 {
+                let sign = ((x & 0x8000) >> 8) as u8;
+                let e_fp16 = u32::from((x >> 10) & 0x1f);
+                let m_fp16 = u32::from(x & 0x3ff);
+                if e_fp16 == 0x1f && m_fp16 == 0 {
+                    return sign | (0xf << 3) | if sat { 6 } else { 7 };
+                }
+                if e_fp16 == 0x1f {
+                    return sign | (0xf << 3) | 7;
+                }
+                let x_bias = x.wrapping_add(u16::from(b >> 1));
+                let eb = u32::from((x_bias >> 10) & 0x1f);
+                let mb = u32::from(x_bias & 0x3ff);
+                let (e, m) = if eb > 8 + 15 || (eb == 8 + 15 && mb >= 0x380) {
+                    (0xf, if sat { 6 } else { 7 })
+                } else if e_fp16 == 0 {
+                    let m = (m_fp16 + (u32::from(b) << 7)) >> 15;
+                    (0, m)
+                } else if eb <= 8 {
+                    let mut m = m_fp16 | 0x400;
+                    m += u32::from(b) << (8 - e_fp16);
+                    m >>= 9 - e_fp16;
+                    let e = m >> 10;
+                    (e, (m >> 7) & 7)
+                } else {
+                    (eb - 8, mb >> 7)
+                };
+                sign | (((e as u8) & 0xf) << 3) | ((m as u8) & 7)
+            };
+            for i in 0..lanes16 {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                    continue;
+                }
+                let x16 = rd16(&y, i);
+                let b = x[2 * i];
+                out[i] = if hf8 {
+                    hf8_bias(x16, b)
+                } else {
+                    bf8_bias(x16, b)
+                };
             }
         }
         _ => {
@@ -18383,6 +18460,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vcvtbiasph2bf8XvHvWv
+            | Insn::Vcvtbiasph2bf8sXvHvWv
+            | Insn::Vcvtbiasph2hf8XvHvWv
+            | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
             | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv

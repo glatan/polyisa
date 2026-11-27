@@ -2864,6 +2864,30 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
     }
+    // VCVTBIASPH2[B,H]F8[S]（bias 付き FP16→FP8、半幅出力）。
+    for (op, mn) in [
+        (0x74u8, "vcvtbiasph2bf8s"),
+        (0x18, "vcvtbiasph2hf8"),
+        (0x1B, "vcvtbiasph2hf8s"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Any(vec![
+            Pred::Flag("avx10_2".to_string()),
+            Pred::Flag("avx10_v1_aux".to_string()),
+        ]);
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVTHF82PH（EVEX.F2.MAP5.W0 1E、半幅の E4M3 入力を FP16 へ）。
     {
         let mut it = ex(
@@ -4112,6 +4136,26 @@ fn build_map_0f38(m: &mut Model) {
         it.wsel = Some(false);
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
+    }
+    // VCVTBIASPH2BF8（bias 付き FP16→E5M2、半幅出力）。
+    {
+        let mut it = ex(
+            "vcvtbiasph2bf8_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Any(vec![
+            Pred::Flag("avx10_2".to_string()),
+            Pred::Flag("avx10_v1_aux".to_string()),
+        ]);
+        v.push(MapItem::Insn(0x74, it));
     }
     // VDPPHPS（FP16 要素対のドット積を FP32 へ蓄積）。
     {

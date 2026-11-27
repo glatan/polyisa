@@ -28012,6 +28012,57 @@ fn run64_avx10_vdpphps() {
 }
 
 #[test]
+fn run64_avx10_vcvtbiasph2fp8() {
+    // bias=0、入力 lane0 は fp16 +Inf。非飽和 BF8 は Inf、
+    // 飽和 BF8 は E5M2_MAX、非飽和 HF8 は NaN、飽和 HF8 は E4M3_MAX。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x7c00u16),
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF2, 0x74, 0x28, 0x74, 0xC2, // vcvtbiasph2bf8 xmm0,ymm1,ymm2
+                0x62, 0xF5, 0x74, 0x28, 0x74, 0xDA, // vcvtbiasph2bf8s xmm3,ymm1,ymm2
+                0x62, 0xF5, 0x74, 0x28, 0x18, 0xE2, // vcvtbiasph2hf8 xmm4,ymm1,ymm2
+                0x62, 0xF5, 0x74, 0x28, 0x1B, 0xEA, // vcvtbiasph2hf8s xmm5,ymm1,ymm2
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for (r, want) in [(0u8, 0x7cu8), (3, 0x7b), (4, 0x7f), (5, 0x7e)] {
+        let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(r, 0));
+        assert_eq!(v as u8, want, "zmm{r}");
+    }
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ
