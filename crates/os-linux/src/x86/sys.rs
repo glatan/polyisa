@@ -8466,7 +8466,17 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare();
         sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x9000; // SIGUSR1
+        sys.sigacts[9].handler = 0x1000; // SIGUSR1
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -8484,6 +8494,11 @@ mod tests {
             .find(|task| task.linux.pid == child)
             .expect("parked child");
         assert_ne!(task.linux.sig_pending & (1 << 9), 0);
+        drop(queue);
+        assert!(sys.swap_in(&mut env, child));
+        sys.after_step(&mut env);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        assert_eq!(sys.sig_pending & (1 << 9), 0);
     }
 
     #[test]
