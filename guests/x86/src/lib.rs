@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2512);
+        assert_eq!(INSNS.len(), 2521);
     }
 
     #[test]
@@ -3109,6 +3109,22 @@ fn avx10_decode() {
         let d = decode_map(&bytes, modes, f).unwrap_or_else(|| panic!("no decode {bytes:02x?}"));
         assert_eq!(d.insn, insn);
     }
+    // AVX10_V2_AUX sub-byte conversion / unpack / symmetric saturation。
+    for (bytes, insn) in [
+        ([0x62, 0xF5, 0xFE, 0x08, 0x3D, 0xC2], Insn::Vcvtbf82bf4sWvXv),
+        ([0x62, 0xF5, 0x7E, 0x08, 0x3D, 0xC2], Insn::Vcvthf82bf4sWvXv),
+        ([0x62, 0xF5, 0x7C, 0x08, 0x37, 0xC2], Insn::Vcvtbf42hf8XvWv),
+        ([0x62, 0xF5, 0xFE, 0x08, 0x3E, 0xC2], Insn::Vcvtbf82bf6sXvWv),
+        ([0x62, 0xF5, 0x7E, 0x08, 0x3C, 0xC2], Insn::Vcvthf82hf6sXvWv),
+        ([0x62, 0xF5, 0xFD, 0x08, 0x37, 0xC2], Insn::Vcvtbf62hf8XvWv),
+        ([0x62, 0xF5, 0x7D, 0x08, 0x37, 0xC2], Insn::Vcvthf62hf8XvWv),
+        ([0x62, 0xF2, 0x7E, 0x08, 0x41, 0xC2], Insn::VpmovssdbWvXv),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap_or_else(|| panic!("no decode {bytes:02x?}"));
+        assert_eq!(d.insn, insn);
+    }
+    let d = decode_map(&[0x62, 0xF3, 0x7C, 0x08, 0x3D, 0xC2, 0x08], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::VunpackbXvWvIb);
     // AVX10_BMM: EVEX.MAP6 80/81。
     for (bytes, insn) in [
         (

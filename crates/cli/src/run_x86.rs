@@ -6570,6 +6570,15 @@ fn avx10_step(
             | Insn::Vbmacor16x16x16XvHvWv
             | Insn::Vbmacxor16x16x16XvHvWv
             | Insn::VbitrevXvWv
+            | Insn::Vcvthf82bf4sWvXv
+            | Insn::Vcvtbf82bf4sWvXv
+            | Insn::Vcvtbf42hf8XvWv
+            | Insn::Vcvtbf82bf6sXvWv
+            | Insn::Vcvthf82hf6sXvWv
+            | Insn::Vcvthf62hf8XvWv
+            | Insn::Vcvtbf62hf8XvWv
+            | Insn::VpmovssdbWvXv
+            | Insn::VunpackbXvWvIb
             | Insn::Vcvtps2bf8XvWv
             | Insn::Vcvtps2bf8sXvWv
             | Insn::Vcvtps2hf8XvWv
@@ -6668,7 +6677,7 @@ fn avx10_exec(
     md: &polyisa_guest_x86::MapDec,
     next_rip: u64,
     seg: u64,
-    _eip: u32,
+    eip: u32,
     mode: u8,
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
@@ -6845,6 +6854,109 @@ fn avx10_exec(
         }
         return Ok(());
     }
+    // AVX10_V2_AUX の downconversion は rm 側が宛先。
+    // レジスタ形では rm レジスタ、メモリ形では狭い出力だけを書く。
+    if matches!(
+        md.insn,
+        Insn::Vcvthf82bf4sWvXv | Insn::Vcvtbf82bf4sWvXv | Insn::VpmovssdbWvXv
+    ) {
+        let kk: u64 = if md.evex_aaa == 0 {
+            u64::MAX
+        } else {
+            env.backend.get(sem::kref(md.evex_aaa))
+        };
+        let src = zget(env, decode::reg_x5(md));
+        let rm = decode::rm_of(&mut env.backend, md, next_rip, seg, false, false);
+        if md.insn == Insn::VpmovssdbWvXv {
+            let lanes = vbytes / 4;
+            let sat = |i: usize| -> u8 {
+                let v = i32::from_le_bytes(src[i * 4..i * 4 + 4].try_into().unwrap());
+                v.clamp(-127, 127) as i8 as u8
+            };
+            match rm {
+                decode::Rm::Reg(_) => {
+                    let dr = decode::rm_reg_x5(md);
+                    let oldv = zget(env, dr);
+                    let mut outv = [0u8; 64];
+                    for i in 0..lanes {
+                        if kk >> i & 1 != 0 {
+                            outv[i] = sat(i);
+                        } else if !md.evex_z {
+                            outv[i] = oldv[i];
+                        }
+                    }
+                    zput(env, dr, &outv);
+                }
+                decode::Rm::Mem { a, .. } => {
+                    if md.evex_z {
+                        return Err(amx_ud(eip));
+                    }
+                    for i in 0..lanes {
+                        if kk >> i & 1 != 0 {
+                            env.backend
+                                .mem
+                                .write(VirtAddr(a + i as u64), &[sat(i)])
+                                .map_err(|er| amx_mem_exit(a, er))?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // FP8→FP4。NaN/Inf と範囲外は最大 magnitude へ飽和し、
+        // 有限値は FP4 E2M1 の 8 段階へ RNE で量子化する。
+        let bf8 = md.insn == Insn::Vcvtbf82bf4sWvXv;
+        let fp8_to_fp4 = |b: u8| -> u8 {
+            let sign = (b >> 4) & 8;
+            let f = if bf8 {
+                E5M2::from_bits(u64::from(b)).to_f32(Rm::Rne).0
+            } else {
+                E4M3::from_bits(u64::from(b)).to_f32(Rm::Rne).0
+            };
+            let v = f32::from_bits(f.bits() as u32);
+            if v.is_nan() || v.is_infinite() || v.abs() > 6.0 {
+                return sign | 7;
+            }
+            const MAGS: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+            let av = v.abs();
+            let mut best = 0usize;
+            let mut best_dist = (MAGS[0] - av).abs();
+            for (idx, mag) in MAGS.iter().enumerate().skip(1) {
+                let dist = (mag - av).abs();
+                if dist < best_dist || (dist == best_dist && idx & 1 == 0) {
+                    best_dist = dist;
+                    best = idx;
+                }
+            }
+            sign | best as u8
+        };
+        let lanes = vbytes;
+        let mut packed = [0u8; 32];
+        for i in 0..lanes {
+            let nib = fp8_to_fp4(src[i]);
+            if i & 1 == 0 {
+                packed[i / 2] |= nib;
+            } else {
+                packed[i / 2] |= nib << 4;
+            }
+        }
+        let nbytes = lanes / 2;
+        match rm {
+            decode::Rm::Reg(_) => {
+                let dr = decode::rm_reg_x5(md);
+                let mut outv = [0u8; 64];
+                outv[..nbytes].copy_from_slice(&packed[..nbytes]);
+                zput(env, dr, &outv);
+            }
+            decode::Rm::Mem { a, .. } => {
+                env.backend
+                    .mem
+                    .write(VirtAddr(a), &packed[..nbytes])
+                    .map_err(|er| amx_mem_exit(a, er))?;
+            }
+        }
+        return Ok(());
+    }
     // 第 2 ソース（rm）。ベクタ幅ぶん読む。b=1 は要素ブロードキャスト
     // （bf16 形のみ宣言上許可）。
     let src2 = |env: &mut BareEnv| -> Result<[u8; 64], InterpExit> {
@@ -6912,13 +7024,14 @@ fn avx10_exec(
                 } else {
                     let n = if md.insn == Insn::Vcomisbf16XvWv {
                         2
+                    } else if matches!(md.insn, Insn::Vcvtbf82psXvWv | Insn::Vcvthf82psXvWv) {
+                        vbytes / 4
                     } else if matches!(
                         md.insn,
                         Insn::Vcvthf82phXvWv
                             | Insn::Vcvtbf82bf16XvWv
                             | Insn::Vcvthf82bf16XvWv
-                            | Insn::Vcvtbf82psXvWv
-                            | Insn::Vcvthf82psXvWv
+                            | Insn::Vcvtbf42hf8XvWv
                     ) || matches!(md.insn, Insn::Vcvttps2qqsXvWv | Insn::Vcvttps2uqqsXvWv)
                     {
                         vbytes / 2
@@ -7475,6 +7588,149 @@ fn avx10_exec(
                         y[base + i / 2]
                     };
                 }
+            }
+        }
+        Insn::Vcvtbf42hf8XvWv => {
+            const LUT: [u8; 8] = [0x00, 0x30, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c];
+            for i in 0..vbytes {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                    continue;
+                }
+                let bit = i * 4;
+                let nib = (y[bit / 8] >> (bit % 8)) & 0xf;
+                out[i] = LUT[usize::from(nib & 7)] | ((nib & 8) << 4);
+            }
+        }
+        Insn::Vcvtbf82bf6sXvWv | Insn::Vcvthf82hf6sXvWv => {
+            let e3m2 = insn == Insn::Vcvtbf82bf6sXvWv;
+            let fp6_val = |code: u8| -> f32 {
+                let (e, m, bias, mb) = if e3m2 {
+                    (u32::from((code >> 2) & 7), u32::from(code & 3), 3, 2)
+                } else {
+                    (u32::from((code >> 3) & 3), u32::from(code & 7), 1, 3)
+                };
+                if e == 0 {
+                    (m as f32) * 2f32.powi(1 - bias - mb)
+                } else {
+                    (1.0 + (m as f32) / (1u32 << mb) as f32) * 2f32.powi(e as i32 - bias)
+                }
+            };
+            let conv = |b: u8| -> u8 {
+                let f = if e3m2 {
+                    E5M2::from_bits(u64::from(b)).to_f32(Rm::Rne).0
+                } else {
+                    E4M3::from_bits(u64::from(b)).to_f32(Rm::Rne).0
+                };
+                let v = f32::from_bits(f.bits() as u32);
+                let sign = (b >> 2) & 0x20;
+                if v.is_nan() || v.is_infinite() {
+                    return sign | 0x1f;
+                }
+                let av = v.abs();
+                let mut best = 0u8;
+                let mut best_dist = (fp6_val(0) - av).abs();
+                for code in 1u8..32 {
+                    let dist = (fp6_val(code) - av).abs();
+                    if dist < best_dist || (dist == best_dist && code & 1 == 0) {
+                        best_dist = dist;
+                        best = code;
+                    }
+                }
+                sign | best
+            };
+            for (i, &yb) in y.iter().enumerate().take(vbytes) {
+                let c = conv(yb);
+                let bit = i * 6;
+                for j in 0..6 {
+                    let dstbit = bit + j;
+                    if c >> j & 1 != 0 {
+                        out[dstbit / 8] |= 1 << (dstbit % 8);
+                    }
+                }
+            }
+        }
+        Insn::Vcvthf62hf8XvWv | Insn::Vcvtbf62hf8XvWv => {
+            let e3m2 = insn == Insn::Vcvtbf62hf8XvWv;
+            let get6 = |idx: usize| -> u8 {
+                let bit = idx * 6;
+                let mut v = 0u8;
+                for j in 0..6 {
+                    let srcbit = bit + j;
+                    v |= ((y[srcbit / 8] >> (srcbit % 8)) & 1) << j;
+                }
+                v
+            };
+            let conv = |v: u8| -> u8 {
+                let s = u32::from((v >> 5) & 1) << 7;
+                if e3m2 {
+                    let e = (v >> 2) & 7;
+                    let m = v & 3;
+                    let (eo, mo) = if e == 0 {
+                        if m == 0 {
+                            (0, 0)
+                        } else if m == 1 {
+                            (3, 0)
+                        } else {
+                            (4, (m & 1) << 2)
+                        }
+                    } else {
+                        (e + 4, m << 1)
+                    };
+                    (s | (u32::from(eo) << 3) | u32::from(mo)) as u8
+                } else {
+                    let e = (v >> 3) & 3;
+                    let m = v & 7;
+                    let (eo, mo) = if e == 0 {
+                        if m == 0 {
+                            (0, 0)
+                        } else if m == 1 {
+                            (4, 0)
+                        } else if m <= 3 {
+                            (5, (m & 1) << 2)
+                        } else {
+                            (6, (m & 3) << 1)
+                        }
+                    } else {
+                        (e + 6, m)
+                    };
+                    (s | (u32::from(eo) << 3) | u32::from(mo)) as u8
+                }
+            };
+            for i in 0..vbytes {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                } else {
+                    out[i] = conv(get6(i));
+                }
+            }
+        }
+        Insn::VunpackbXvWvIb => {
+            let imm = md.imm;
+            let sign_ex = imm & 0x20 != 0;
+            let size = usize::from(((imm >> 2) & 7) as u8).max(2);
+            let start = if size == 2 {
+                usize::from((imm & 3) as u8)
+            } else if size <= 4 {
+                usize::from((imm & 1) as u8)
+            } else {
+                0
+            };
+            for i in 0..vbytes {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                    continue;
+                }
+                let bit = (start * vbytes + i) * size;
+                let mut elem = 0u8;
+                for j in 0..size {
+                    let srcbit = bit + j;
+                    elem |= ((y[srcbit / 8] >> (srcbit % 8)) & 1) << j;
+                }
+                if sign_ex && elem & (1 << (size - 1)) != 0 {
+                    elem |= 0xffu8 << size;
+                }
+                out[i] = elem;
             }
         }
         Insn::Vbmacor16x16x16XvHvWv | Insn::Vbmacxor16x16x16XvHvWv => {

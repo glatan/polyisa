@@ -28920,6 +28920,106 @@ fn run64_avx10_vbitrev() {
     assert_eq!(v0 as u8, 1);
 }
 
+fn avx10_aux_feats() -> u128 {
+    polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_V2_AUX
+        | polyisa_guest_x86::FEAT_AVX10_3
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL
+}
+
+fn avx10_exit_tail() -> [u8; 16] {
+    [
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, 0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x0F,
+        0x05,
+    ]
+}
+
+#[test]
+fn run64_avx10_fp8_to_fp4() {
+    // BF8 1.0 (0x3c) は FP4 E2M1 の code2 (1.0) になる。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(1, 0), u128::from(0x3cu8));
+    let mut prog = vec![0x62, 0xF5, 0xFE, 0x08, 0x3D, 0xC8];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats(),
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v0 as u8, 2);
+}
+
+#[test]
+fn run64_avx10_vpmovssdb() {
+    // -200 は対称飽和で -127 (0x81)。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(-200i32 as u32),
+    );
+    let mut prog = vec![0x62, 0xF2, 0x7E, 0x08, 0x41, 0xC8];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats(),
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v0 as u8, 0x81);
+}
+
+#[test]
+fn run64_avx10_vunpackb() {
+    // size=2,start=0。0xe4 の 2-bit 要素は 0,1,2,3。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(1, 0), u128::from(0xe4u8));
+    let mut prog = vec![0x62, 0xF3, 0x7C, 0x08, 0x3D, 0xC1, 0x08];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats(),
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v0 as u32, 0x0302_0100);
+}
+
 #[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を

@@ -3129,6 +3129,69 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_v2_aux".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10_V2_AUX の FP4/FP6 sub-byte conversion（MAP5 37/3C/3D/3E）。
+    // FP8→FP4 は rm 側が宛先で memory 形を持ち、mask はない。
+    for wr in [false, true] {
+        for (llbit, ed) in [(0b001u8, 8u8), (0b010, 16), (0b100, 32)] {
+            let mut it = ex(
+                if wr { "vcvtbf82bf4s_wv_xv" } else { "vcvthf82bf4s_wv_xv" },
+                &[RmX, RegX],
+                PfxSel::PF3,
+                llbit,
+                true,
+                "{op} {w}, {x}",
+                "alu",
+            );
+            it.edisp = ed;
+            it.wsel = Some(wr);
+            it.no_mask = true;
+            it.when = Pred::Flag("avx10_v2_aux".to_string());
+            v.push(MapItem::Insn(0x3D, it));
+        }
+    }
+    // FP4→FP8 は nibble packed な半幅入力を widening する。
+    for (llbit, ed) in [(0b001u8, 8u8), (0b010, 16), (0b100, 32)] {
+        let mut it = ex(
+            "vcvtbf42hf8_xv_wv",
+            &[RegX, RmX],
+            PfxSel::Plain,
+            llbit,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.edisp = ed;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(0x37, it));
+    }
+    // FP8→FP6 / FP6→FP8 は register form のみ。
+    for (op, wr, mn) in [
+        (0x3Eu8, true, "vcvtbf82bf6s_xv_wv"),
+        (0x3C, false, "vcvthf82hf6s_xv_wv"),
+    ] {
+        let mut it = ex(mn, &[RegX, RmX], PfxSel::PF3, 0b111, true, "{op} {x}, {w}", "alu");
+        it.group_mod = Some(true);
+        it.wsel = Some(wr);
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
+    for wr in [false, true] {
+        let mut it = ex(
+            if wr { "vcvtbf62hf8_xv_wv" } else { "vcvthf62hf8_xv_wv" },
+            &[RegX, RmX],
+            PfxSel::P66,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.group_mod = Some(true);
+        it.wsel = Some(wr);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(0x37, it));
+    }
     // AVX10.3 の FP16/BF16→FP4/INT4（MAP5 75/76/77）。
     // W0 は FP16 入力、W1 は BF16 入力。mask は持たない。
     for (op, sel, wr, mn, rv) in [
@@ -4666,6 +4729,23 @@ fn build_map_0f38(m: &mut Model) {
         it.when = Pred::All(vec![w("m64"), row_read_gate()]);
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10_V2_AUX の対称飽和 INT32→INT8（EVEX.F3.0F38.W0 41）。
+    // memory destination の disp8 倍率は出力幅に従う。
+    for (llbit, ed) in [(0b001u8, 4u8), (0b010, 8), (0b100, 16)] {
+        let mut it = ex(
+            "vpmovssdb_wv_xv",
+            &[RmX, RegX],
+            PfxSel::PF3,
+            llbit,
+            true,
+            "{op} {w}, {x}",
+            "alu",
+        );
+        it.edisp = ed;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        v.push(MapItem::Insn(0x41, it));
+    }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
@@ -5386,6 +5466,21 @@ fn build_map_0f3a(m: &mut Model) {
         it.no_mask = true;
         it.when = Pred::All(vec![w("m64"), row_read_gate()]);
         items.push(MapItem::Insn(op, it));
+    }
+    // AVX10_V2_AUX の sub-byte unpack（EVEX.NP.0F3A.W0 3D imm8）。
+    {
+        let mut it = ex(
+            "vunpackb_xv_wv_ib",
+            &[RegX, RmX, ib],
+            PfxSel::Plain,
+            0b111,
+            true,
+            "{op} {x}, {w}, {i}",
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_v2_aux".to_string());
+        items.push(MapItem::Insn(0x3D, it));
     }
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
