@@ -3049,25 +3049,53 @@ fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_sysfs(env, cx)
 }
 
+fn queue_signal_on_parked(sys: &mut Linux, tid: u64, sig: u64) -> bool {
+    let mut queue = sys.queue.0.borrow_mut();
+    if let Some(task) = queue.parked.iter_mut().find(|task| task.linux.pid == tid) {
+        if task
+            .linux
+            .sigacts
+            .get(sig as usize - 1)
+            .is_some_and(|a| a.handler > 1)
+        {
+            task.linux.sig_pending |= 1 << (sig - 1);
+        }
+        return true;
+    }
+    false
+}
+
 fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // tkill(tid, sig)。tgkill と同様に、自分宛てでハンドラが
-    // あれば保留に積む。
+    // tkill(tid, sig)。自分宛ては即座に pending へ積み、parked な
+    // 他スレッド宛てはその Linux 状態へ積む。sig=0 は存在確認だけ行う。
     let sig = get64(env, cx.r_b);
     if sig > 64 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    if sig > 0 {
-        let me = sys.ensure_self();
-        let tid = get64(env, cx.r_a);
-        if tid == me.0
-            && sys
-                .sigacts
-                .get(sig as usize - 1)
-                .is_some_and(|a| a.handler > 1)
-        {
-            sys.sig_pending |= 1 << (sig - 1);
-        }
+    let tid = get64(env, cx.r_a);
+    let me = sys.ensure_self();
+    let exists = if tid == me.0 {
+        true
+    } else {
+        sys.procs
+            .borrow()
+            .pgid(polyisa_kernel::ProcessId(tid))
+            .is_some()
+    };
+    if !exists {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    if sig > 0 && tid != me.0 {
+        queue_signal_on_parked(sys, tid, sig);
+    } else if sig > 0
+        && sys
+            .sigacts
+            .get(sig as usize - 1)
+            .is_some_and(|a| a.handler > 1)
+    {
+        sys.sig_pending |= 1 << (sig - 1);
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -3934,23 +3962,37 @@ fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // tgkill(tgid, tid, sig)。自分宛てでハンドラがあれば保留に積む。
+    // tgkill(tgid, tid, sig)。現在のプロセス表は thread group を持たず、
+    // 各プロセスが独立した thread group なので tgid=tid の形だけを受理する。
     let sig = get64(env, cx.r_c);
     if sig > 64 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    if sig > 0 {
-        let me = sys.ensure_self();
-        let tid = get64(env, cx.r_b);
-        if tid == me.0
-            && sys
-                .sigacts
-                .get(sig as usize - 1)
-                .is_some_and(|a| a.handler > 1)
-        {
-            sys.sig_pending |= 1 << (sig - 1);
-        }
+    let tgid = get64(env, cx.r_a);
+    let tid = get64(env, cx.r_b);
+    let me = sys.ensure_self();
+    let exists_thread = if tid == me.0 {
+        true
+    } else {
+        sys.procs
+            .borrow()
+            .pgid(polyisa_kernel::ProcessId(tid))
+            .is_some()
+    };
+    if !exists_thread || tgid != tid {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    if sig > 0 && tid != me.0 {
+        queue_signal_on_parked(sys, tid, sig);
+    } else if sig > 0
+        && sys
+            .sigacts
+            .get(sig as usize - 1)
+            .is_some_and(|a| a.handler > 1)
+    {
+        sys.sig_pending |= 1 << (sig - 1);
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -7522,18 +7564,30 @@ mod tests {
     }
 
     #[test]
-    fn tgkill_zero_returns_zero() {
+    fn tgkill_zero_checks_that_the_thread_exists() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
+        let pid = sys.ensure_self().0;
         set64(&mut env, Gpr(0), abi::TGKILL);
-        set64(&mut env, Gpr(7), 100);
-        set64(&mut env, Gpr(6), 100);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), pid);
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 存在しない tid や、tgid/tid の不整合は ESRCH。
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(6), 9999);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ESRCH));
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), 9999);
+        set64(&mut env, Gpr(6), pid);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ESRCH));
         // sig 範囲外は EINVAL。
         set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), pid);
         set64(&mut env, Gpr(2), 100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
@@ -8499,6 +8553,33 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn tgkill_queues_a_signal_on_the_parked_child_thread() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), child);
+        set64(&mut env, Gpr(2), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child");
+        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
     }
 
     #[test]
