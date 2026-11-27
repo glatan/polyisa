@@ -15101,7 +15101,7 @@ fn run_x87_fprem_nan_unsupported_and_preoperation_priority() {
     // unsupported format は masked なら indefinite、unmasked なら非 commit。
     let un = (0x4000_0000_0000_0000u64, 1u16);
     let (sig, exp, fsw) = once(un.0, un.1, one.0, one.1, 0x037F);
-    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
     assert_ne!(fsw & 1, 0);
     let (sig, exp, fsw) = once(un.0, un.1, one.0, one.1, 0x037E);
     assert_eq!((sig, exp), un);
@@ -20116,8 +20116,8 @@ fn run_x87_fprem_exact_complete_and_partial_reduction() {
             env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
             env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0))
         ),
-        (0x8000_0000_0000_0000, 0x4006),
-        "partial remainder must be 128.0"
+        (0x8000_0080_0000_0000, 0x401F),
+        "partial remainder follows the 37-bit first reduction"
     );
     let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
     assert_ne!(fsw & 0x0400, 0, "first reduction is partial");

@@ -12374,7 +12374,6 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let mask15 = b.konst::<W64>(0x7fff);
     let special = b.konst::<W64>(0x7fff);
     let s15 = b.konst::<W64>(15);
-    let s63 = b.konst::<W64>(63);
     let e064 = b.zext::<W16, W64>(e0);
     let e164 = b.zext::<W16, W64>(e1);
     let ea = b.and::<W64>(e064, mask15);
@@ -12412,14 +12411,18 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let uns0 = sem::x87_unsupported_format(b, s0, e0);
     let uns1 = sem::x87_unsupported_format(b, s1, e1);
     let unsupported = sem::bit_or(b, uns0, uns1);
-    let invalid_zi = sem::bit_or(b, inf0, zero1);
+    let invalid_zi0 = sem::bit_or(b, inf0, zero1);
+    let not_nan_zi = sem::bit_not(b, nan_input);
+    let invalid_zi = sem::bit_and(b, invalid_zi0, not_nan_zi);
     let invalid_nan = sem::bit_or(b, invalid_zi, snan_invalid);
     let invalid_raw = sem::bit_or(b, invalid_nan, unsupported);
     let invalid0 = sem::bit_and(b, invalid_raw, nofault);
     sem::x87_exception_flag(b, invalid0, 1);
     // invalid は denormal より優先される。invalid 側だけを処理するときは
     // DE を立てず、unmasked DE による停止ともしない。
-    let no_invalid_raw = sem::bit_not(b, invalid_raw);
+    let no_invalid0 = sem::bit_not(b, invalid_raw);
+    let no_nan_den = sem::bit_not(b, nan_input);
+    let no_invalid_raw = sem::bit_and(b, no_invalid0, no_nan_den);
     let denormal_report0 = sem::bit_and(b, denormal_in0, no_invalid_raw);
     let denormal_in = sem::bit_and(b, denormal_report0, nofault);
     sem::x87_exception_flag(b, denormal_in, 1 << 1);
@@ -12474,10 +12477,15 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
         (quot_floor, rem_floor, false_b)
     };
 
-    // 部分減算: x/y = ((sig0 << 63) / sig1) * 2^(D-63)。
-    // 上位商を引いた残りは除算の剰余 rem_p に 2^(D-63) を掛けたもの。
-    let k63_128 = b.konst::<W128>(63);
-    let num_p = b.shl::<W128>(sig0z, k63_128);
+    // 部分減算。一回で落とせる exponent は n=(D&31)|32 で、
+    // 32..63 の範囲に抑える。これは実機が一度に消費する商桁数の
+    // 上限を真似るためで、固定 63 ビットでは部分剰余の指数がずれる。
+    let k31 = b.konst::<W64>(31);
+    let k32 = b.konst::<W64>(32);
+    let diff_low = b.and::<W64>(diff, k31);
+    let partial_n = b.or::<W64>(diff_low, k32);
+    let partial_n128 = b.zext::<W64, W128>(partial_n);
+    let num_p = b.shl::<W128>(sig0z, partial_n128);
     let quot_p128 = b.udiv::<W128>(num_p, den_safe);
     let rem_p128 = b.urem::<W128>(num_p, den_safe);
     let qmag_p = b.trunc::<W128, W64>(quot_p128);
@@ -12494,11 +12502,11 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let sig_c = b.select::<W64>(dneg, sn0, sig_c_nonzero);
     let er_c_mag = b.select::<W64>(dneg, ea_eff, er_c_nonzero);
 
-    // 部分経路では rem_p が 2^(D-63) の重みを持つ。D=ea-eb
-    // なので、正規化で動く lz を引いた exponent は ea-63-lz。
+    // 部分経路では rem_p が n 桁だけ進んだ商に対応する剰余なので、
+    // 正規化 exponent は ea-n-lz。
     let lz_p = sem::clz64(b, rem_mag_p);
     let sig_p_norm = b.shl::<W64>(rem_mag_p, lz_p);
-    let eraw_p0 = b.sub::<W64>(ea_eff, s63);
+    let eraw_p0 = b.sub::<W64>(ea_eff, partial_n);
     let eraw_p = b.sub::<W64>(eraw_p0, lz_p);
     let rem_p_zero = b.cmp::<W64>(Cmp::Eq, rem_mag_p, zero);
     let sig_p = b.select::<W64>(rem_p_zero, zero, sig_p_norm);
@@ -12523,18 +12531,23 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let use_nan0 = sem::bit_or(b, any_nan, invalid0);
     let use_nan = sem::bit_or(b, use_nan0, unsupported);
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
-    let nan_exp64 = b.konst::<W64>(0x7fff);
+    let nan_mag64 = b.konst::<W64>(0x7fff);
+    let indef_exp64 = b.konst::<W64>(0xffff);
     let not_unsupported = sem::bit_not(b, unsupported);
     let propagate_nan = sem::bit_and(b, nan_input, not_unsupported);
     let nan_out_sig = b.select::<W64>(propagate_nan, nan_prop_sig, nan_sig);
     let nan_sign = b.shl::<W64>(nan_prop_sign, s15);
-    let nan_prop_exp = b.or::<W64>(nan_exp64, nan_sign);
-    let nan_exp_sel64 = b.select::<W64>(propagate_nan, nan_prop_exp, nan_exp64);
+    let nan_prop_exp = b.or::<W64>(nan_mag64, nan_sign);
+    let nan_exp_sel64 = b.select::<W64>(propagate_nan, nan_prop_exp, indef_exp64);
     let nan_exp = b.trunc::<W64, W16>(nan_exp_sel64);
     let sig_sel0 = b.select::<W64>(normal_inputs, sig_exact_enc, sr_f);
     let er_sel0 = b.select::<W16>(normal_inputs, er_exact16, er_f);
-    let sig_sel1 = b.select::<W64>(unchanged0, s0, sig_sel0);
-    let er_sel1 = b.select::<W16>(unchanged0, e0, er_sel0);
+    let (den_norm_sig, den_norm_exp) = sem::x87_encode_normalized(b, sn0, ea_eff, sign0);
+    let inf_denorm0 = sem::bit_and(b, inf1, den0);
+    let unchanged_sig = b.select::<W64>(inf_denorm0, den_norm_sig, s0);
+    let unchanged_exp = b.select::<W16>(inf_denorm0, den_norm_exp, e0);
+    let sig_sel1 = b.select::<W64>(unchanged0, unchanged_sig, sig_sel0);
+    let er_sel1 = b.select::<W16>(unchanged0, unchanged_exp, er_sel0);
     let sig_out0 = b.select::<W64>(use_nan, nan_out_sig, sig_sel1);
     let er_out0 = b.select::<W16>(use_nan, nan_exp, er_sel1);
     let indef_sig = b.konst::<W64>(0xC000_0000_0000_0000);
