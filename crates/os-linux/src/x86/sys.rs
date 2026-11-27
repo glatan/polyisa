@@ -5728,17 +5728,17 @@ mod tests {
         assert_eq!(rd8(&mut env, 0x100), 3);
         assert_eq!(prctl(&mut env, 0x1022, 0x108), 0); // GET_XCOMP_PERM
         assert_eq!(rd8(&mut env, 0x108), 3);
-        // 未対応の XTILEDATA(18)/APX(19) は EOPNOTSUPP、上限超は EINVAL。
+        // 未対応の XTILEDATA(18)/APX(19)/SCALEDATA(20) は EOPNOTSUPP、上限超は EINVAL。
         assert_eq!(prctl(&mut env, 0x1023, 18), neg_errno64(EOPNOTSUPP));
         assert_eq!(prctl(&mut env, 0x1023, 19), neg_errno64(EOPNOTSUPP));
-        assert_eq!(prctl(&mut env, 0x1023, 20), neg_errno64(EINVAL));
+        assert_eq!(prctl(&mut env, 0x1023, 20), neg_errno64(EOPNOTSUPP));
+        assert_eq!(prctl(&mut env, 0x1023, 21), neg_errno64(EINVAL));
         // amx_tile 相当の対応マスクにすると要求が通る。
         env.backend
             .set(polyisa_guest_x86::sem::xcomp_supp_ref(), 0x6_0003);
-        // XTILECFG(17) なしの XTILEDATA は EINVAL。
-        assert_eq!(prctl(&mut env, 0x1023, 18), neg_errno64(EINVAL));
-        assert_eq!(prctl(&mut env, 0x1023, 17), 0);
+        // XTILEDATA の要求は依存する XTILECFG もまとめて許可する。
         assert_eq!(prctl(&mut env, 0x1023, 18), 0);
+        assert_eq!(prctl(&mut env, 0x1023, 17), 0);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref()),
             0x6_0003
