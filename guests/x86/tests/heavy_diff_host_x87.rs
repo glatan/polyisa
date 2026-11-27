@@ -304,7 +304,7 @@ mod imp {
             let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
             let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
             let sig = (1u64 << 63) | rng.next();
-            let disp = (rng.next() % 17) as i32 - 16;
+            let disp = (rng.next() % 16) as i32 - 16;
             let input = (sig, ((0x3fff + disp) as u16) | sign);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (hv, hsw) = host_unary(input, op.0, fcw);

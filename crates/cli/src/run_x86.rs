@@ -10181,11 +10181,14 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
         0xF0 => {
-            let y = (x * std::f64::consts::LN_2).exp_m1();
+            let input = crate::x87_trans::ext_to_dd(s0, e0);
+            let y = crate::x87_trans::expm1_small(input);
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            x87_write_st(env, 0, x87_f64_to_ext(y));
+            x87_write_st(env, 0, crate::x87_trans::dd_to_ext(y, rc));
         }
         0xF2 => {
             if inexact_unary_transcendental {

@@ -95,3 +95,80 @@ pub(crate) const LN2: Dd = Dd {
     hi: std::f64::consts::LN_2,
     lo: 2.3190468138462996e-17,
 };
+
+pub(crate) fn expm1_small(x: Dd) -> Dd {
+    // expm1(x ln2) の Taylor 級数。oracle の valid-range 入力は
+    // |x| < 1 なので、106 bit の double-double では数十項で収束する。
+    let t = x.mul(LN2);
+    let mut sum = t;
+    let mut term = t;
+    for n in 2u32..48 {
+        term = term.mul(t).div(Dd::from_f64(f64::from(n)));
+        let next = sum.add(term);
+        if next.hi == sum.hi && next.lo == sum.lo {
+            break;
+        }
+        sum = next;
+    }
+    sum
+}
+
+fn f64_parts(x: f64) -> (u64, i32) {
+    let bits = x.to_bits();
+    let raw = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    if raw == 0 {
+        // ここで扱う transcendental の有限結果は zero か正規数なので、
+        // subnormal は zero 側へ潰す。入力拡張自体は exact に扱っている。
+        (frac, -1074)
+    } else {
+        ((1u64 << 52) | frac, raw - 1023)
+    }
+}
+
+/// double-double の positive finite 値を 80 bit extended へ丸める。
+/// nearest のほか、FCW の truncation/floor/ceil に対応する。DD 自身の
+/// 誤差は残るが、53 bit 変換とは違って下位 11 bit も使う。
+pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
+    if value.hi == 0.0 && value.lo == 0.0 {
+        return (
+            0,
+            if value.hi.is_sign_negative() {
+                0x8000
+            } else {
+                0
+            },
+        );
+    }
+    let neg = value.hi.is_sign_negative();
+    let v = if neg { value.neg() } else { value };
+    let (hf, eh) = f64_parts(v.hi);
+    // hi を 64 bit significand の上位 53 bit へ置き、lo を同じ quantum
+    // へ換算して足す。lo_units の小数部が round/sticky を兼ねる。
+    let hi_units = hf << 11;
+    let scale = (63 - eh) as f64;
+    let lo_scaled = v.lo * scale.exp2();
+    let nearest = lo_scaled.round() as i64;
+    let units = match rc {
+        // extended の magnitude を丸めているので、負数の floor と
+        // 正数の ceil だけ magnitude を大きくする。truncation は
+        // 符号に関係なく magnitude を小さくする。
+        1 if neg => lo_scaled.ceil() as i64,
+        1 => lo_scaled.floor() as i64,
+        2 if neg => lo_scaled.floor() as i64,
+        2 => lo_scaled.ceil() as i64,
+        3 => lo_scaled.floor() as i64,
+        _ => nearest,
+    };
+    let sig64 = hi_units as i128 + i128::from(units);
+    let mut sig = sig64 as u64;
+    let mut exp = eh + 16383;
+    if sig == 0 {
+        return (0, if neg { 0x8000 } else { 0 });
+    }
+    if sig64 >= 1i128 << 64 {
+        sig >>= 1;
+        exp += 1;
+    }
+    (sig, (exp as u16) | if neg { 0x8000 } else { 0 })
+}
