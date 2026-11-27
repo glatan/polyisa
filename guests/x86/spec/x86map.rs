@@ -3983,6 +3983,40 @@ fn build_map_0f38(m: &mut Model) {
             w0(vf(vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, Any, false, "{op} {x}, {h}, {w}", "alu"), feat)),
         ));
     }
+    // AVX10.2 EVEX VNNI（0F38 50/51/D2/D3）。VEX 形と同じ
+    // 命令名だが、EVEX では 512 ビット・writemask・m32bcst を取る。
+    for (op, sel, mn) in [
+        (0x50u8, PfxSel::PF2, "vpdpbssd"),
+        (0x51, PfxSel::PF2, "vpdpbssds"),
+        (0x50, PfxSel::PF3, "vpdpbsud"),
+        (0x51, PfxSel::PF3, "vpdpbsuds"),
+        (0x50, PfxSel::Plain, "vpdpbuud"),
+        (0x51, PfxSel::Plain, "vpdpbuuds"),
+        (0xD2, PfxSel::PF3, "vpdpwsud"),
+        (0xD3, PfxSel::PF3, "vpdpwsuds"),
+        (0xD2, PfxSel::P66, "vpdpwusd"),
+        (0xD3, PfxSel::P66, "vpdpwusds"),
+        (0xD2, PfxSel::Plain, "vpdpwuud"),
+        (0xD3, PfxSel::Plain, "vpdpwuuds"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            sel,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 4;
+        it.wsel = Some(false);
+        it.when = Pred::Any(vec![
+            Pred::Flag("avx10_2".to_string()),
+            Pred::Flag("avx10_v1_aux".to_string()),
+        ]);
+        v.push(MapItem::Insn(op, it));
+    }
     // AVX-FP16/BF16 の変換・ブロードキャスト（0F 38 B0-B1・
     // メモリ形のみ・W=0 必須・L 両対応。XED 実測）。
     for (op, sel, mn) in [

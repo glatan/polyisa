@@ -6515,7 +6515,19 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcvttsd2sisGvWv
+        Insn::VpdpbssdXvHvWv
+            | Insn::VpdpbssdsXvHvWv
+            | Insn::VpdpbsudXvHvWv
+            | Insn::VpdpbsudsXvHvWv
+            | Insn::VpdpbuudXvHvWv
+            | Insn::VpdpbuudsXvHvWv
+            | Insn::VpdpwsudXvHvWv
+            | Insn::VpdpwsudsXvHvWv
+            | Insn::VpdpwusdXvHvWv
+            | Insn::VpdpwusdsXvHvWv
+            | Insn::VpdpwuudXvHvWv
+            | Insn::VpdpwuudsXvHvWv
+            | Insn::Vcvttsd2sisGvWv
             | Insn::Vcvttsd2usisGvWv
             | Insn::Vcvttss2sisGvWv
             | Insn::Vcvttss2usisGvWv
@@ -6804,6 +6816,18 @@ fn avx10_exec(
                             | Insn::Vcvttps2qqsXvWv
                             | Insn::Vcvttps2udqsXvWv
                             | Insn::Vcvttps2uqqsXvWv
+                            | Insn::VpdpbssdXvHvWv
+                            | Insn::VpdpbssdsXvHvWv
+                            | Insn::VpdpbsudXvHvWv
+                            | Insn::VpdpbsudsXvHvWv
+                            | Insn::VpdpbuudXvHvWv
+                            | Insn::VpdpbuudsXvHvWv
+                            | Insn::VpdpwsudXvHvWv
+                            | Insn::VpdpwsudsXvHvWv
+                            | Insn::VpdpwusdXvHvWv
+                            | Insn::VpdpwusdsXvHvWv
+                            | Insn::VpdpwuudXvHvWv
+                            | Insn::VpdpwuudsXvHvWv
                     ) {
                         4
                     } else {
@@ -6975,6 +6999,117 @@ fn avx10_exec(
                 out[i * 2 + 1] = 0;
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::VpdpbssdXvHvWv
+        | Insn::VpdpbssdsXvHvWv
+        | Insn::VpdpbsudXvHvWv
+        | Insn::VpdpbsudsXvHvWv
+        | Insn::VpdpbuudXvHvWv
+        | Insn::VpdpbuudsXvHvWv
+        | Insn::VpdpwsudXvHvWv
+        | Insn::VpdpwsudsXvHvWv
+        | Insn::VpdpwusdXvHvWv
+        | Insn::VpdpwusdsXvHvWv
+        | Insn::VpdpwuudXvHvWv
+        | Insn::VpdpwuudsXvHvWv => {
+            let byte = matches!(
+                insn,
+                Insn::VpdpbssdXvHvWv
+                    | Insn::VpdpbssdsXvHvWv
+                    | Insn::VpdpbsudXvHvWv
+                    | Insn::VpdpbsudsXvHvWv
+                    | Insn::VpdpbuudXvHvWv
+                    | Insn::VpdpbuudsXvHvWv
+            );
+            let sat = matches!(
+                insn,
+                Insn::VpdpbssdsXvHvWv
+                    | Insn::VpdpbsudsXvHvWv
+                    | Insn::VpdpbuudsXvHvWv
+                    | Insn::VpdpwsudsXvHvWv
+                    | Insn::VpdpwusdsXvHvWv
+                    | Insn::VpdpwuudsXvHvWv
+            );
+            let uu = matches!(
+                insn,
+                Insn::VpdpbuudXvHvWv
+                    | Insn::VpdpbuudsXvHvWv
+                    | Insn::VpdpwuudXvHvWv
+                    | Insn::VpdpwuudsXvHvWv
+            );
+            let s1signed = matches!(
+                insn,
+                Insn::VpdpbssdXvHvWv
+                    | Insn::VpdpbssdsXvHvWv
+                    | Insn::VpdpbsudXvHvWv
+                    | Insn::VpdpbsudsXvHvWv
+                    | Insn::VpdpwsudXvHvWv
+                    | Insn::VpdpwsudsXvHvWv
+            );
+            let s2signed = matches!(
+                insn,
+                Insn::VpdpbssdXvHvWv
+                    | Insn::VpdpbssdsXvHvWv
+                    | Insn::VpdpwusdXvHvWv
+                    | Insn::VpdpwusdsXvHvWv
+            );
+            let lanes32 = vbytes / 4;
+            for i in 0..lanes32 {
+                if k >> i & 1 == 0 {
+                    let keep = if md.evex_z { 0 } else { rd32(&old, i) };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&keep.to_le_bytes());
+                    continue;
+                }
+                let mut sum = if uu {
+                    i64::from(rd32(&old, i))
+                } else {
+                    i64::from(rd32(&old, i) as i32)
+                };
+                if byte {
+                    for j in 0..4 {
+                        let av = x[i * 4 + j];
+                        let bv = y[i * 4 + j];
+                        let a = if s1signed {
+                            i64::from(av as i8)
+                        } else {
+                            i64::from(av)
+                        };
+                        let b = if s2signed {
+                            i64::from(bv as i8)
+                        } else {
+                            i64::from(bv)
+                        };
+                        sum += a * b;
+                    }
+                } else {
+                    for j in 0..2 {
+                        let ai = i * 4 + j * 2;
+                        let aw = u16::from_le_bytes([x[ai], x[ai + 1]]);
+                        let bw = u16::from_le_bytes([y[ai], y[ai + 1]]);
+                        let a = if s1signed {
+                            i64::from(aw as i16)
+                        } else {
+                            i64::from(aw)
+                        };
+                        let b = if s2signed {
+                            i64::from(bw as i16)
+                        } else {
+                            i64::from(bw)
+                        };
+                        sum += a * b;
+                    }
+                }
+                let r = if sat {
+                    if uu {
+                        sum.clamp(0, i64::from(u32::MAX)) as u32
+                    } else {
+                        sum.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32 as u32
+                    }
+                } else {
+                    sum as u32
+                };
+                out[i * 4..i * 4 + 4].copy_from_slice(&r.to_le_bytes());
+            }
         }
         Insn::Vcvttpd2dqsXvWv
         | Insn::Vcvttpd2qqsXvWv
@@ -19000,6 +19135,18 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtph2ibsXvWv
             | Insn::Vcvttph2iubsXvWv
             | Insn::Vcvtph2iubsXvWv
+            | Insn::VpdpbssdXvHvWv
+            | Insn::VpdpbssdsXvHvWv
+            | Insn::VpdpbsudXvHvWv
+            | Insn::VpdpbsudsXvHvWv
+            | Insn::VpdpbuudXvHvWv
+            | Insn::VpdpbuudsXvHvWv
+            | Insn::VpdpwsudXvHvWv
+            | Insn::VpdpwsudsXvHvWv
+            | Insn::VpdpwusdXvHvWv
+            | Insn::VpdpwusdsXvHvWv
+            | Insn::VpdpwuudXvHvWv
+            | Insn::VpdpwuudsXvHvWv
             | Insn::Vcvttsd2sisGvWv
             | Insn::Vcvttsd2usisGvWv
             | Insn::Vcvttss2sisGvWv

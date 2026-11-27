@@ -28421,6 +28421,57 @@ fn run64_avx10_vcvtt_scalar_saturating() {
 }
 
 #[test]
+fn run64_avx10_evex_vnni() {
+    // byte: 10+1*5+2*6+3*7+4*8=80、word: 10+1*3+2*4=21。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(0, 0), u128::from(10u32));
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(0x0002_0001u32),
+    );
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x0004_0003u32),
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF2, 0x74, 0x28, 0xD2, 0xC2, // vpdpwuud ymm0,ymm1,ymm2
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v as u32, 21);
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ
