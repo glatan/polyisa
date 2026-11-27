@@ -172,3 +172,35 @@ pub(crate) fn dd_to_ext(value: Dd, rc: u16) -> (u64, u16) {
     }
     (sig, (exp as u16) | if neg { 0x8000 } else { 0 })
 }
+
+pub(crate) fn sin_small(x: Dd) -> Dd {
+    let x2 = x.mul(x);
+    let mut sum = x;
+    let mut term = x;
+    for n in 1u32..32 {
+        let den = f64::from((2 * n) * (2 * n + 1));
+        term = term.mul(x2).div(Dd::from_f64(den)).neg();
+        let next = sum.add(term);
+        if next.hi == sum.hi && next.lo == sum.lo {
+            break;
+        }
+        sum = next;
+    }
+    sum
+}
+
+pub(crate) fn cos_small(x: Dd) -> Dd {
+    let x2 = x.mul(x);
+    let mut sum = Dd::from_f64(1.0);
+    let mut term = Dd::from_f64(1.0);
+    for n in 1u32..32 {
+        let den = f64::from((2 * n - 1) * (2 * n));
+        term = term.mul(x2).div(Dd::from_f64(den)).neg();
+        let next = sum.add(term);
+        if next.hi == sum.hi && next.lo == sum.lo {
+            break;
+        }
+        sum = next;
+    }
+    sum
+}

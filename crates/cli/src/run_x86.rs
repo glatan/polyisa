@@ -10165,11 +10165,18 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     match op {
         // FSIN/FCOS は ST(0) を置き換える。
         0xFE | 0xFF => {
-            let y = if op == 0xFE { x.sin() } else { x.cos() };
+            let input = crate::x87_trans::ext_to_dd(s0, e0);
+            let y = if op == 0xFE {
+                crate::x87_trans::sin_small(input)
+            } else {
+                crate::x87_trans::cos_small(input)
+            };
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            x87_write_st(env, 0, x87_f64_to_ext(y));
+            x87_write_st(env, 0, crate::x87_trans::dd_to_ext(y, rc));
         }
         // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
         0xFB => {
