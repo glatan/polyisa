@@ -12289,16 +12289,18 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let invalid0 = sem::bit_and(b, invalid_raw, nofault);
     sem::x87_exception_flag(b, invalid0, 1);
 
-    // 正規化有限入力では、指数差に応じて整数の筆算だけで求める。
-    let ez0n = sem::bit_not(b, ez0);
-    let ez1n = sem::bit_not(b, ez1);
+    // 有限入力では、denormal も正規化した実効指数で整数の筆算だけを行う。
+    let z0n = sem::bit_not(b, zero0);
+    let z1n = sem::bit_not(b, zero1);
     let sp0n = sem::bit_not(b, sp0);
     let sp1n = sem::bit_not(b, sp1);
-    let n0a = sem::bit_and(b, ez0n, sp0n);
-    let n1a = sem::bit_and(b, ez1n, sp1n);
+    let n0a = sem::bit_and(b, z0n, sp0n);
+    let n1a = sem::bit_and(b, z1n, sp1n);
     let normal_inputs = sem::bit_and(b, n0a, n1a);
+    let (sn0, ea_eff) = sem::x87_normalize_denormal_operand(b, s0, ea);
+    let (sn1, eb_eff) = sem::x87_normalize_denormal_operand(b, s1, eb);
 
-    let diff = b.sub::<W64>(ea, eb);
+    let diff = b.sub::<W64>(ea_eff, eb_eff);
     let dneg = b.cmp::<W64>(Cmp::LtS, diff, zero);
     let k64lim = b.konst::<W64>(64);
     let partial = b.cmp::<W64>(Cmp::GeS, diff, k64lim);
@@ -12309,8 +12311,8 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
 
     // 完全減算: floor((sig0 << D) / sig1)。FPREM1 は剰余と
     // 半分の比較から商を最近接偶数へ丸める。
-    let sig0z = b.zext::<W64, W128>(s0);
-    let sig1z = b.zext::<W64, W128>(s1);
+    let sig0z = b.zext::<W64, W128>(sn0);
+    let sig1z = b.zext::<W64, W128>(sn1);
     let one128 = b.konst::<W128>(1);
     let den_safe = b.select::<W128>(sz1, one128, sig1z);
     let shift_c128 = b.zext::<W64, W128>(shift_c);
@@ -12330,7 +12332,7 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
         let roundup = sem::bit_or(b, gt_half, tie_up);
         let upv = b.select::<W64>(roundup, one, zero);
         let qround = b.add::<W64>(quot_floor, upv);
-        let deficit = b.sub::<W64>(s1, rem_floor);
+        let deficit = b.sub::<W64>(sn1, rem_floor);
         let remmag = b.select::<W64>(roundup, deficit, rem_floor);
         (qround, remmag, roundup)
     } else {
@@ -12349,27 +12351,23 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     // 完全経路の正規化。remainder = rem * 2^(eb-bias-63)。
     let lz_c = sem::clz64(b, rem_mag_c);
     let sig_c_norm = b.shl::<W64>(rem_mag_c, lz_c);
-    let eraw_c = b.sub::<W64>(eb, lz_c);
-    let erneg_c = b.cmp::<W64>(Cmp::LtS, eraw_c, zero);
-    let er_c_clamped = b.select::<W64>(erneg_c, zero, eraw_c);
+    let eraw_c = b.sub::<W64>(eb_eff, lz_c);
     let rem_c_zero = b.cmp::<W64>(Cmp::Eq, rem_mag_c, zero);
     let sig_c_nonzero = b.select::<W64>(rem_c_zero, zero, sig_c_norm);
-    let er_c_nonzero = b.select::<W64>(rem_c_zero, zero, er_c_clamped);
+    let er_c_nonzero = b.select::<W64>(rem_c_zero, zero, eraw_c);
     // D<0 では商 0 なので被除数がそのまま残る。
-    let sig_c = b.select::<W64>(dneg, s0, sig_c_nonzero);
-    let er_c_mag = b.select::<W64>(dneg, ea, er_c_nonzero);
+    let sig_c = b.select::<W64>(dneg, sn0, sig_c_nonzero);
+    let er_c_mag = b.select::<W64>(dneg, ea_eff, er_c_nonzero);
 
     // 部分経路では rem_p が 2^(D-63) の重みを持つ。D=ea-eb
     // なので、正規化で動く lz を引いた exponent は ea-63-lz。
     let lz_p = sem::clz64(b, rem_mag_p);
     let sig_p_norm = b.shl::<W64>(rem_mag_p, lz_p);
-    let eraw_p0 = b.sub::<W64>(ea, s63);
+    let eraw_p0 = b.sub::<W64>(ea_eff, s63);
     let eraw_p = b.sub::<W64>(eraw_p0, lz_p);
-    let erneg_p = b.cmp::<W64>(Cmp::LtS, eraw_p, zero);
-    let er_p_clamped = b.select::<W64>(erneg_p, zero, eraw_p);
     let rem_p_zero = b.cmp::<W64>(Cmp::Eq, rem_mag_p, zero);
     let sig_p = b.select::<W64>(rem_p_zero, zero, sig_p_norm);
-    let er_p_mag = b.select::<W64>(rem_p_zero, zero, er_p_clamped);
+    let er_p_mag = b.select::<W64>(rem_p_zero, zero, eraw_p);
 
     let sig_exact_mag = b.select::<W64>(partial, sig_p, sig_c);
     let er_exact = b.select::<W64>(partial, er_p_mag, er_c_mag);
@@ -12380,9 +12378,8 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let sign_exact = b.select::<W64>(rem_c_zero, sign0, sign_flip);
     let sign_exact = b.select::<W64>(partial, sign0, sign_exact);
     let sign_exact = b.select::<W64>(dneg, sign0, sign_exact);
-    let sign_bit = b.shl::<W64>(sign_exact, s15);
-    let er_packed = b.or::<W64>(er_exact, sign_bit);
-    let er_exact16 = b.trunc::<W64, W16>(er_packed);
+    let (sig_exact_enc, er_exact16) =
+        sem::x87_encode_normalized(b, sig_exact_mag, er_exact, sign_exact);
 
     // 特殊値の優先順位: NaN/invalid、無限 divisor または零 dividend では
     // ST0 不変、通常有限では整数経路、残りは倍精度近似。
@@ -12392,7 +12389,7 @@ pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
     let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
     let nan_exp64 = b.konst::<W64>(0x7fff);
     let nan_exp = b.trunc::<W64, W16>(nan_exp64);
-    let sig_sel0 = b.select::<W64>(normal_inputs, sig_exact_mag, sr_f);
+    let sig_sel0 = b.select::<W64>(normal_inputs, sig_exact_enc, sr_f);
     let er_sel0 = b.select::<W16>(normal_inputs, er_exact16, er_f);
     let sig_sel1 = b.select::<W64>(unchanged0, s0, sig_sel0);
     let er_sel1 = b.select::<W16>(unchanged0, e0, er_sel0);

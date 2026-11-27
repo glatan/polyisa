@@ -14303,6 +14303,36 @@ fn run_x87_fsqrt_uses_extended_precision_integer_sqrt() {
 }
 
 #[test]
+fn run_x87_fprem_denormal_inputs_use_integer_remainder() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // ST0=3*tiny, ST1=2*tiny。剰余は exact に tiny。
+    env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), 3);
+    env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 0);
+    env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), 2);
+    env.backend.set(polyisa_guest_x86::sem::st_exp_ref(1), 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0xF8]) // fprem
+        .unwrap();
+    x87_recalc_tag(&mut env, 0);
+    x87_recalc_tag(&mut env, 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
+    let fsw = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 1), 0, "DE");
+    assert_ne!(fsw & (1 << 9), 0, "C1/Q0");
+    assert_eq!(fsw & ((1 << 8) | (1 << 10) | (1 << 14)), 0, "C0/C2/C3");
+}
+
+#[test]
 fn run_x87_inexact_result_sets_precision_flag() {
     fn once(sig1: u64, exp1: u16) -> u16 {
         let mut env = bare_x86_env();

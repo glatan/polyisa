@@ -15070,6 +15070,32 @@ pub(crate) fn x87_normalize_denormal_operand<B: Backend>(
     (sig_out, exp_out)
 }
 
+/// 内部の正規形 (significand, 符号付き exponent field) を x87 の
+/// 80 ビット形式へ戻す。exponent field が 1 未満なら exponent 0 の
+/// denormal へ右へ揃える。捨てられる bit の丸めは呼び出し側の責務。
+pub(crate) fn x87_encode_normalized<B: Backend>(
+    b: &mut B,
+    sig: B::V<W64>,
+    eraw: B::V<W64>,
+    sign: B::V<W64>,
+) -> (B::V<W64>, B::V<W16>) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let s15 = b.konst::<W64>(15);
+    let k63 = b.konst::<W64>(63);
+    let under = b.cmp::<W64>(Cmp::LeS, eraw, zero);
+    let shift0 = b.sub::<W64>(one, eraw);
+    let too_big = b.cmp::<W64>(Cmp::GtU, shift0, k63);
+    let shift = b.select::<W64>(too_big, k63, shift0);
+    let den_raw = b.shr_l::<W64>(sig, shift);
+    let den = b.select::<W64>(too_big, zero, den_raw);
+    let sig_out = b.select::<W64>(under, den, sig);
+    let exp_out = b.select::<W64>(under, zero, eraw);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let packed = b.or::<W64>(exp_out, sign_bit);
+    (sig_out, b.trunc::<W64, W16>(packed))
+}
+
 /// overflow した x87 結果の masked response。RC によって無限大か
 /// 最大有限値を選ぶ。返す指数は符号なしの magnitude 部分だけ。
 pub(crate) fn x87_overflow_masked_response<B: Backend>(
