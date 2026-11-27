@@ -28321,6 +28321,47 @@ fn run64_amx_complex_fp16_real_imag() {
 }
 
 #[test]
+fn run64_amx_tdp_clears_start_row() {
+    // TDP/TCMM の成功時も TILECFG.startRow は 0 へ戻る。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_BF16;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let cfg = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    env.backend.state[cfg] = 1;
+    env.backend.state[cfg + 1] = 1;
+    for i in 0..3 {
+        env.backend.state[cfg + 16 + 2 * i..cfg + 18 + 2 * i].copy_from_slice(&4u16.to_le_bytes());
+        env.backend.state[cfg + 48 + i] = 1;
+    }
+    // 1.0 * 1.0 を入れておき、演算自体は成功させる。
+    env.backend.state[tmm + 1024..tmm + 1028].copy_from_slice(&0x3f80u32.to_le_bytes());
+    env.backend.state[tmm + 2048..tmm + 2052].copy_from_slice(&0x3f80u32.to_le_bytes());
+    let prog: &[u8] = &[
+        0xC4, 0xE2, 0x6A, 0x5C, 0xC1, // tdpbf16ps %tmm2,%tmm1,%tmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.state[cfg + 1], 0);
+}
+
+#[test]
 fn run64_amx_avx512_tilemovrow_palette1() {
     // AMX-AVX512-only では SCALEDATA(XCR0[20]) なしで palette 1 の
     // TILEMOVROW read を実行できる。行は colsb stride で読み、

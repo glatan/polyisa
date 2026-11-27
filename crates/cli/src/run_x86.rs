@@ -11788,6 +11788,8 @@ fn amx_tile_exec(
                     }
                 }
             }
+            // TDP/TCMM も成功時には restart 状態を消費済みとして startRow を戻す。
+            st[TILECFG_OFF + 1] = 0;
             Ok(())
         }
     }
