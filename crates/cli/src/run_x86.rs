@@ -10090,6 +10090,15 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             return;
         }
     }
+    // trig 系で infinity は invalid。finite な NaN は上で処理済み。
+    if matches!(op, 0xFB | 0xF2 | 0xFE | 0xFF) && (e0 & 0x7fff) == 0x7fff && s0 == 1u64 << 63 {
+        x87_scalar_exception_flag(env, 1);
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        if fcw & 1 != 0 {
+            x87_trans_write_result(env, op, (0xC000_0000_0000_0000, 0xffff));
+        }
+        return;
+    }
     // FSIN/FCOS/FSINCOS/FPTAN の有限入力は |x| < 2^63。範囲外では
     // C2=1、ST(0) 不変で、push 系も push しない。`exp` は bias 付き
     // なので 2^63 は 16383+63=16446。Infinity/NaN の invalid-operation
