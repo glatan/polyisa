@@ -3289,6 +3289,27 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10.3 の linear interleave（EVEX.66.MAP6.W0 60/61/68/69）。
+    // 128 ビット車線ではなく全ベクトルを線形配列として扱う。
+    for (op, mn) in [
+        (0x60u8, "vpinterleavelb"),
+        (0x68, "vpinterleavehb"),
+        (0x61, "vpinterleavelw"),
+        (0x69, "vpinterleavehw"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v6.push(MapItem::Insn(op, it));
+    }
     // ACE BSR move（EVEX.512.MAP6 95）。modrm.reg=000 は bsr0
     // 固定で、半幅移動は vvvv 未使用、full move は vvvv が A-scale
     // 側の src1。方向は EVEX.W と pp で分かれる。

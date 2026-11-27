@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2493);
+        assert_eq!(INSNS.len(), 2497);
     }
 
     #[test]
@@ -3085,6 +3085,28 @@ fn avx10_decode() {
         ),
     ] {
         let d = decode_map(&bytes, modes, f).unwrap_or_else(|| panic!("no decode {bytes:02x?}"));
+        assert_eq!(d.insn, insn);
+    }
+    // AVX10.3 VPINTERLEAVE: EVEX.66.MAP6.W0 60/61/68/69。
+    for (bytes, insn) in [
+        (
+            [0x62, 0xF6, 0x75, 0x28, 0x60, 0xC2],
+            Insn::VpinterleavelbXvHvWv,
+        ),
+        (
+            [0x62, 0xF6, 0x75, 0x28, 0x68, 0xC2],
+            Insn::VpinterleavehbXvHvWv,
+        ),
+        (
+            [0x62, 0xF6, 0x75, 0x28, 0x61, 0xC2],
+            Insn::VpinterleavelwXvHvWv,
+        ),
+        (
+            [0x62, 0xF6, 0x75, 0x28, 0x69, 0xC2],
+            Insn::VpinterleavehwXvHvWv,
+        ),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap();
         assert_eq!(d.insn, insn);
     }
     // AVX10.3 FP16/BF16→FP4/INT4: MAP5 75/76/77。mask なし。

@@ -6563,6 +6563,10 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::VpinterleavelbXvHvWv
+            | Insn::VpinterleavehbXvHvWv
+            | Insn::VpinterleavelwXvHvWv
+            | Insn::VpinterleavehwXvHvWv
             | Insn::Vcvtph2bf4sXvWv
             | Insn::Vcvtph2snsXvWv
             | Insn::Vcvtph2unsXvWv
@@ -7399,6 +7403,50 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::VpinterleavelbXvHvWv
+        | Insn::VpinterleavehbXvHvWv
+        | Insn::VpinterleavelwXvHvWv
+        | Insn::VpinterleavehwXvHvWv => {
+            let word = matches!(
+                insn,
+                Insn::VpinterleavelwXvHvWv | Insn::VpinterleavehwXvHvWv
+            );
+            let hi = matches!(
+                insn,
+                Insn::VpinterleavehbXvHvWv | Insn::VpinterleavehwXvHvWv
+            );
+            if word {
+                let lanes = lanes16;
+                let base = if hi { lanes / 2 } else { 0 };
+                for i in 0..lanes {
+                    if k >> i & 1 == 0 {
+                        let keep = if md.evex_z { 0 } else { rd16(&old, i) };
+                        out[i * 2..i * 2 + 2].copy_from_slice(&keep.to_le_bytes());
+                        continue;
+                    }
+                    let v = if i & 1 == 0 {
+                        rd16(&x, base + i / 2)
+                    } else {
+                        rd16(&y, base + i / 2)
+                    };
+                    out[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+                }
+            } else {
+                let lanes = vbytes;
+                let base = if hi { lanes / 2 } else { 0 };
+                for i in 0..lanes {
+                    if k >> i & 1 == 0 {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                        continue;
+                    }
+                    out[i] = if i & 1 == 0 {
+                        x[base + i / 2]
+                    } else {
+                        y[base + i / 2]
+                    };
+                }
+            }
         }
         Insn::Vcvtph2bf4sXvWv
         | Insn::Vcvtph2snsXvWv
@@ -19572,6 +19620,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::VpinterleavelbXvHvWv
+            | Insn::VpinterleavehbXvHvWv
+            | Insn::VpinterleavelwXvHvWv
+            | Insn::VpinterleavehwXvHvWv
             | Insn::Vcvtph2bf4sXvWv
             | Insn::Vcvtph2snsXvWv
             | Insn::Vcvtph2unsXvWv
