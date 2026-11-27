@@ -28205,6 +28205,59 @@ fn run64_amx_fp16_split_partial_sums() {
 }
 
 #[test]
+fn run64_amx_bf16_denormal_input_is_zero() {
+    // BF16 0x0001 は denormal。TDPBF16PS は入力 denormalを zero として扱うので、
+    // 2^127 を掛けても 2^-6 にはならず結果は +0 になる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_BF16;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 2, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    for i in 0..3 {
+        cfg[16 + 2 * i..18 + 2 * i].copy_from_slice(&4u16.to_le_bytes());
+        cfg[48 + i] = 1;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    let a = 0x0001u32; // low=BF16 denormal、high=+0
+    let b = 0x7f00u32; // low=BF16 2^127、high=+0
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &a.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2110), &b.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x78, 0x49, 0x00, 0x48, 0xBE, 0x00,
+        0x21, 0, 0, 0, 0, 0, 0, 0x48, 0x31, 0xFF, 0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, 0x48, 0xBE,
+        0x10, 0x21, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x79, 0x4B, 0x14, 0x3E, 0xC4, 0xE2, 0x6A, 0x5C,
+        0xC1, // tdpbf16ps %tmm2,%tmm1,%tmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let tmm = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    assert_eq!(&env.backend.state[tmm..tmm + 4], &[0, 0, 0, 0]);
+}
+
+#[test]
 fn run64_amx_complex_fp16_real_imag() {
     // (1+2i)*(3+4i): real=-5、imag=10。complex FP16 は B を
     // row-major complex number として読み、結果は real/imag の2命令に分かれる。
