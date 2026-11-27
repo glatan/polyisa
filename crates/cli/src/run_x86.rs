@@ -10009,6 +10009,37 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         x87_trans_write_result(env, op, value);
         return;
     }
+    // FYL2X の対数入力に対する invalid/zero-divide。NaN は上で
+    // 処理済みなので、ここでは有限/inf の符号と zero だけを見る。
+    if op == 0xF1 {
+        let sign0 = e0 & 0x8000 != 0;
+        let sign1 = e1 & 0x8000 != 0;
+        let ef0 = e0 & 0x7fff;
+        let zero0 = ef0 == 0 && s0 == 0;
+        let inf0 = ef0 == 0x7fff && s0 == 1u64 << 63;
+        let zero1 = (e1 & 0x7fff) == 0 && s1 == 0;
+        let negative0 = sign0 && !zero0;
+        let invalid = negative0 || ((zero0 || inf0) && zero1) || (inf0 && sign0);
+        if invalid {
+            x87_scalar_exception_flag(env, 1);
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            if fcw & 1 != 0 {
+                x87_trans_write_result(env, op, (0xC000_0000_0000_0000, 0xffff));
+            }
+            return;
+        }
+        if zero0 || inf0 {
+            if zero0 {
+                x87_scalar_exception_flag(env, 4);
+            }
+            // log2(+0)=-inf、log2(+inf)=+inf。乗数 ST1 の符号と
+            // 掛け合わせた infinity を返す。
+            let negative = if zero0 { !sign1 } else { sign1 };
+            let exp = if negative { 0xffff } else { 0x7fff };
+            x87_trans_write_result(env, op, (1u64 << 63, exp));
+            return;
+        }
+    }
     // push 系は range 判定より先に full-stack overflow を検査する。
     if matches!(op, 0xFB | 0xF2) {
         let top: u16 = env.backend.get(polyisa_guest_x86::sem::top_ref());
