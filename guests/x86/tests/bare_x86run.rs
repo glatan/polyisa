@@ -13608,6 +13608,73 @@ fn run_x87_fdiv_nan_and_invalid_priority() {
 }
 
 #[test]
+fn run_x87_preoperation_unmasked_exceptions_suppress_arithmetic_write() {
+    fn div_once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0x3FFF);
+        x87_seed_valid(&mut env, 1, 0, 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xF1]) // fdiv st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // masked zero-divide は infinity を書く。
+    let (sig, exp, fsw) = div_once(0x037F);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x7FFF));
+    assert_ne!(fsw & 4, 0);
+    assert_eq!(fsw & 0x8080, 0);
+    // ZE mask を落とすと destination は 1.0 のまま。
+    let (sig, exp, fsw) = div_once(0x037B);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3FFF));
+    assert_eq!(fsw & 0x8084, 0x8084);
+
+    fn mul_den_once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 1, 0);
+        x87_seed_valid(&mut env, 1, 0x8000_0000_0000_0000, 0x4000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // masked denormal operand では tiny*2 を実行する。
+    let (sig, exp, fsw) = mul_den_once(0x037F);
+    assert_eq!((sig, exp), (2, 0));
+    assert_ne!(fsw & 2, 0);
+    assert_eq!(fsw & 0x8080, 0);
+    // DE mask を落とすと pre-operation exception なので書き込まない。
+    let (sig, exp, fsw) = mul_den_once(0x037D);
+    assert_eq!((sig, exp), (1, 0));
+    assert_eq!(fsw & 0x8082, 0x8082);
+}
+
+#[test]
 fn run_x87_push_overflow_sets_sf_c1_and_loads_indefinite() {
     fn once(fcw: u16) -> (u16, u16, u64, u16) {
         let mut env = bare_x86_env();
