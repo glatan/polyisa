@@ -4390,7 +4390,8 @@ fn nanosleep_impl(
         .read(VirtAddr(req), &mut buf[..len], data_access())
         .is_err()
     {
-        return Some(TrapOutcome::Unimplemented);
+        set64(env, Gpr(0), sleep_result(cx, EFAULT, positive_errno));
+        return Some(TrapOutcome::Handled);
     }
     let (sec, nsec) = if wide {
         (
@@ -4451,7 +4452,9 @@ fn nanosleep_impl(
                 b.to_vec()
             };
             if env.backend.mem.write(VirtAddr(rem), &out).is_err() {
-                return Some(TrapOutcome::Unimplemented);
+                set64(env, Gpr(0), sleep_result(cx, EFAULT, positive_errno));
+                sys.advance_past_syscall(env);
+                return Some(TrapOutcome::Handled);
             }
         }
         sys.sleep_deadline = None;
