@@ -10301,7 +10301,9 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let nonzero = sem::bit_not(b, is_zero);
                 let not_nan = sem::bit_not(b, is_nan);
                 let neg_nonzero = sem::bit_and(b, neg, nonzero);
-                let invalid = sem::bit_and(b, neg_nonzero, not_nan);
+                let invalid_neg = sem::bit_and(b, neg_nonzero, not_nan);
+                let unsupported = sem::x87_unsupported_format(b, sig, exp);
+                let invalid = sem::bit_or(b, invalid_neg, unsupported);
                 sem::x87_exception_flag(b, invalid, 1);
 
                 // sqrt(sig * 2^u) を整数平方根で求める。u が偶数なら
@@ -10359,14 +10361,21 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let inf_exp = b.select::<W64>(is_inf, special, out_e);
                 let zero_sig = b.select::<W64>(is_zero, sig, inf_sig);
                 let zero_exp64 = b.select::<W64>(is_zero, exp64, inf_exp);
-                let bad_nan = sem::bit_or(b, is_nan, invalid);
+                let bad_nan0 = sem::bit_or(b, is_nan, invalid_neg);
+                let bad_nan = sem::bit_or(b, bad_nan0, unsupported);
                 let final_sig = b.select::<W64>(bad_nan, indef_sig, zero_sig);
                 let indef_exp64 = b.konst::<W64>(0xffff);
                 let exp_word64 = b.select::<W64>(bad_nan, indef_exp64, zero_exp64);
                 let exp_word = b.trunc::<W64, W16>(exp_word64);
                 let (sr, er) = sem::x87_apply_precision(b, final_sig, exp_word);
-                sem::write_st(b, top, sr, er);
-                Ok(())
+                let invalid_um = sem::x87_unmasked_exception(b, invalid, 1);
+                let denormal_um = sem::x87_unmasked_exception(b, denormal, 1 << 1);
+                let suppress = sem::bit_or(b, invalid_um, denormal_um);
+                let commit_result = sem::x87_arith_result_commit(b, suppress);
+                b.if_then(commit_result, |b| {
+                    sem::write_st(b, top, sr, er);
+                    Ok(())
+                })
             },
         )
     })

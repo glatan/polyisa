@@ -13744,6 +13744,38 @@ fn run_x87_unsupported_format_invalid_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_fsqrt_unsupported_format_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        x87_seed_valid(&mut env, 0, 0x4000_0000_0000_0000, 1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFA]) // fsqrt
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    let (sig, exp, fsw) = once(0x037F);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xFFFF));
+    assert_ne!(fsw & 1, 0);
+    assert_eq!(fsw & 0x8080, 0);
+    let (sig, exp, fsw) = once(0x037E);
+    assert_eq!((sig, exp), (0x4000_0000_0000_0000, 1));
+    assert_eq!(fsw & 0x8081, 0x8081);
+}
+
+#[test]
 fn run_x87_pseudo_denormal_uses_exponent_one() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
