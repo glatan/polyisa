@@ -11418,7 +11418,13 @@ fn amx_tile_exec(
                 if cfg[0] == 2 && cfg[1..].iter().any(|&b| b != 0) {
                     return Err(amx_gp(eip));
                 }
-                st[TILECFG_OFF..TILECFG_OFF + 64].copy_from_slice(&cfg);
+                if cfg[0] == 0 {
+                    // palette 0 は release。メモリ上の他バイトは無視し、
+                    // architectural な tilecfg は init state の全零になる。
+                    st[TILECFG_OFF..TILECFG_OFF + 64].fill(0);
+                } else {
+                    st[TILECFG_OFF..TILECFG_OFF + 64].copy_from_slice(&cfg);
+                }
                 st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
                 st[SCALEDATA_OFF..SCALEDATA_OFF + 128].fill(0x7f);
             } else {

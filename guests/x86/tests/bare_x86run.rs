@@ -27971,6 +27971,50 @@ fn run64_amx_tileload_requires_sib() {
 }
 
 #[test]
+fn run64_amx_ldtilecfg_palette0_ignores_payload() {
+    // palette 0 は release。payload の他バイトは無視し、STTILECFG には
+    // init state の全零が戻る。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_AMX_TILE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let cfg = [0xa5u8; 64];
+    let mut cfg0 = cfg;
+    cfg0[0] = 0;
+    env.backend.mem.write(VirtAddr(0x2000), &cfg0).unwrap();
+    env.backend.mem.write(VirtAddr(0x2100), &cfg).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+        0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+        0x48, 0xB8, 0x00, 0x21, 0, 0, 0, 0, 0, 0, // movabs rax,0x2100
+        0xC4, 0xE2, 0x79, 0x49, 0x00, // sttilecfg (%rax)
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, // mov rax,60
+        0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0xffu8; 64];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut back, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(back, [0u8; 64]);
+}
+
+#[test]
 fn run64_amx_fp8_dot() {
     // 1x1 の FP8 積和。src1 は BF8 1.0 (0x3c)、src2 は HF8 1.0 (0x38)。
     let feats = polyisa_guest_x86::model_feats("x86_64")
