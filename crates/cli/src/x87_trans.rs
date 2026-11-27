@@ -369,3 +369,35 @@ pub(crate) fn cos_reduced(x: Dd) -> Dd {
         _ => sin_small(r),
     }
 }
+
+/// denormal quantum を単位とした significand に、64 bit significand の
+/// 正係数を掛けて一度だけ丸める。`coeff_scale` は係数の binary scaling。
+/// 返り値は同じ quantum を単位とする整数で、bit63 が立てば exponent 1
+/// の最小正規数側へ連続的に移る。
+pub(crate) fn mul_denormal_units(
+    sig: u64,
+    coeff_sig: u64,
+    coeff_scale: u32,
+    rc: u16,
+    neg: bool,
+) -> u128 {
+    let n = u128::from(sig) * u128::from(coeff_sig);
+    let q = n >> coeff_scale;
+    let rem = n & ((1u128 << coeff_scale) - 1);
+    let half = 1u128 << (coeff_scale - 1);
+    let up = match rc {
+        1 => neg && rem != 0,
+        2 => !neg && rem != 0,
+        3 => false,
+        _ => rem > half || (rem == half && q & 1 != 0),
+    };
+    q + u128::from(up)
+}
+
+pub(crate) fn denormal_units_to_ext(units: u128, neg: bool) -> (u64, u16) {
+    if units == 0 {
+        return (0, if neg { 0x8000 } else { 0 });
+    }
+    let exp = if units >= 1u128 << 63 { 1u16 } else { 0u16 };
+    (units as u64, exp | if neg { 0x8000 } else { 0 })
+}

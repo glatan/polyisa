@@ -9965,6 +9965,10 @@ fn x87_denormal(sig: u64, exp: u16) -> bool {
     (exp & 0x7fff) == 0 && sig != 0 && sig & (1u64 << 63) == 0
 }
 
+fn x87_one(sig: u64, exp: u16) -> bool {
+    sig == 1u64 << 63 && exp == 0x3fff
+}
+
 fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     let empty0 = x87_logical_tag(env, 0) == 3;
     let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
@@ -10194,6 +10198,53 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             x87_pop(env);
             return;
         }
+    }
+    // extended の denormal 域は f64 では表せないため、線形項が高次項を
+    // 完全に支配する tiny input だけを整数 significand で処理する。
+    if x87_denormal(s0, e0) {
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        let rc = (fcw >> 10) & 3;
+        let neg = e0 & 0x8000 != 0;
+        if matches!(op, 0xFE | 0xFB) {
+            x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+            x87_write_st(env, 0, (s0, e0));
+            if op == 0xFB {
+                x87_push(env, (1u64 << 63, 0x3fff));
+            }
+            return;
+        }
+        if op == 0xFF {
+            x87_scalar_exception_flag(env, 1 << 5);
+            x87_write_st(env, 0, (1u64 << 63, 0x3fff));
+            return;
+        }
+        if op == 0xF0 {
+            // 2^x-1 ≈ x ln2。ln2 の 64 bit significand は exponent -1
+            // なので 2^64 で割る。
+            let units =
+                crate::x87_trans::mul_denormal_units(s0, 0xb172_17f7_d1cf_79ab, 64, rc, neg);
+            x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+            x87_write_st(env, 0, crate::x87_trans::denormal_units_to_ext(units, neg));
+            return;
+        }
+    }
+    if op == 0xF3 && x87_denormal(s1, e1) && x87_one(s0, e0) {
+        x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+        x87_write_st(env, 1, (s1, e1));
+        x87_pop(env);
+        return;
+    }
+    if op == 0xF9 && x87_denormal(s0, e0) && x87_one(s1, e1) {
+        let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+        let rc = (fcw >> 10) & 3;
+        let neg = e0 & 0x8000 != 0;
+        // log2(1+x) ≈ x/ln2。log2(e) は exponent 0 の 64 bit
+        // significand なので 2^63 で割る。
+        let units = crate::x87_trans::mul_denormal_units(s0, 0xb8aa_3b29_5c17_f0bc, 63, rc, neg);
+        x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+        x87_write_st(env, 1, crate::x87_trans::denormal_units_to_ext(units, neg));
+        x87_pop(env);
+        return;
     }
     let x = x87_ext_to_f64(s0, e0);
     match op {
