@@ -3960,7 +3960,11 @@ fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    if !mask_write(env, set_p, sys.sig_pending) {
+    // sigpending は「配送を block されている pending signal」の集合。
+    // この実装では配送を after_step まで遅らせるため、raw の pending には
+    // まだ配送前の unblocked signal も残り得る。syscall から見える集合は
+    // Linux と同じく block 中のものだけにする。
+    if !mask_write(env, set_p, sys.sig_pending & sys.sig_mask) {
         set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     }
@@ -7681,6 +7685,26 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn rt_sigpending_reports_only_blocked_pending_signals() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sig_pending = (1 << 9) | (1 << 13);
+        sys.sig_mask = 1 << 9;
+        set64(&mut env, Gpr(0), abi::RT_SIGPENDING);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut mask = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut mask, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(mask), 1 << 9);
     }
 
     #[test]
