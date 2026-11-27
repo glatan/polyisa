@@ -1088,6 +1088,13 @@ impl Linux {
             .copied()
             .unwrap_or_default();
         if act.handler <= 1 {
+            // SIG_DFL の terminate/core 系は、unmask 後の非同期配送でも
+            // プロセスを終える。`after_step` からは TrapOutcome を返せないが、
+            // プロセス表と scheduler には死因を記録し、直後の preempt で
+            // 実行可能な他スレッドへ移れるようにする。
+            if act.handler == 0 && signal_default_terminates(sig as u64) {
+                let _ = self.terminate_by_signal(sig);
+            }
             return;
         }
         let old = self.sig_mask;
@@ -8725,6 +8732,23 @@ mod tests {
                 .meta
                 .is_exited(polyisa_kernel::ThreadId(pid))
         );
+    }
+
+    #[test]
+    fn unmasked_pending_default_term_signal_marks_the_task_exited() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let pid = sys.ensure_self().0;
+        sys.sig_pending = 1 << 14; // SIGTERM
+        sys.after_step(&mut env);
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_exited(polyisa_kernel::ThreadId(pid))
+        );
+        assert_eq!(sys.sig_pending & (1 << 14), 0);
     }
 
     #[test]
