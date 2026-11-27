@@ -27856,6 +27856,64 @@ fn run64_avx10_vcomisbf16() {
 }
 
 #[test]
+fn run64_avx10_vmovw() {
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(0xabcd_1234u32),
+    );
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(1, 1), u128::MAX);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, // mov rax,0x2000
+                0x62, 0xF5, 0x7E, 0x08, 0x6E, 0xC1, // vmovw xmm0,xmm1
+                0x62, 0xF5, 0x7E, 0x08, 0x7E, 0x00, // vmovw [rax],xmm0
+                0x62, 0xF5, 0x7E, 0x08, 0x6E, 0x10, // vmovw xmm2,[rax]
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let z0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    let z2: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(2, 0));
+    assert_eq!(z0, 0x1234);
+    assert_eq!(z2, 0x1234);
+    let mut w = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut w, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(w, [0x34, 0x12]);
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

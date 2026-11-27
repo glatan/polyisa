@@ -6514,7 +6514,9 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::Vcomisbf16XvWv
+        Insn::VmovwXvWv
+            | Insn::VmovwWvXv
+            | Insn::Vcomisbf16XvWv
             | Insn::Vminmaxbf16XvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv
             | Insn::Vgetexpbf16XvWv
@@ -6593,6 +6595,46 @@ fn avx10_exec(
             );
         }
     };
+    if matches!(md.insn, Insn::VmovwXvWv | Insn::VmovwWvXv) {
+        let load = md.insn == Insn::VmovwXvWv;
+        let src_reg = if load {
+            decode::rm_reg_x5(md)
+        } else {
+            decode::reg_x5(md)
+        };
+        match decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+            decode::Rm::Reg(_) => {
+                let src = zget(env, src_reg);
+                let mut v = [0u8; 64];
+                v[..2].copy_from_slice(&src[..2]);
+                let dst = if load {
+                    decode::reg_x5(md)
+                } else {
+                    decode::rm_reg_x5(md)
+                };
+                zput(env, dst, &v);
+            }
+            decode::Rm::Mem { a, .. } => {
+                if load {
+                    let mut w = [0u8; 2];
+                    env.backend
+                        .mem
+                        .read(VirtAddr(a), &mut w, acc_r)
+                        .map_err(|er| amx_mem_exit(a, er))?;
+                    let mut v = [0u8; 64];
+                    v[..2].copy_from_slice(&w);
+                    zput(env, decode::reg_x5(md), &v);
+                } else {
+                    let v = zget(env, decode::reg_x5(md));
+                    env.backend
+                        .mem
+                        .write(VirtAddr(a), &v[..2])
+                        .map_err(|er| amx_mem_exit(a, er))?;
+                }
+            }
+        }
+        return Ok(());
+    }
     // 第 2 ソース（rm）。ベクタ幅ぶん読む。b=1 は要素ブロードキャスト
     // （bf16 形のみ宣言上許可）。
     let src2 = |env: &mut BareEnv| -> Result<[u8; 64], InterpExit> {
@@ -18275,6 +18317,8 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::VmovwXvWv
+            | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
             | Insn::Vminmaxbf16XvHvWvIb
             | Insn::Vcvt2ps2phxXvHvWv

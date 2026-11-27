@@ -2864,6 +2864,26 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
     }
+    // VMOVW（EVEX.128.F3.MAP5.W0 6E/7E、scalar copy、vvvv=1111b）。
+    for (op, ops, syn) in [
+        (0x6Eu8, [RegX, RmX] as [OpKind; 2], "{op} {x}, {w}"),
+        (0x7E, [RmX, RegX] as [OpKind; 2], "{op} {w}, {x}"),
+    ] {
+        let mut it = ex(
+            if op == 0x6E { "vmovw_xv_wv" } else { "vmovw_wv_xv" },
+            &ops,
+            PfxSel::PF3,
+            0b001,
+            true,
+            syn,
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.edisp = 2;
+        it.no_mask = true;
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCOMISBF16（EVEX.66.MAP5.W0 2F、scalar、vvvv=1111b）。
     {
         let mut it = ex(
