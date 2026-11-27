@@ -13718,8 +13718,8 @@ fn run_x87_unsupported_format_invalid_masked_and_unmasked() {
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
         env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
         // exponent が非零で integer bit 0 は unnormal / unsupported。
-        x87_seed_valid(&mut env, 0, 0x4000_0000_0000_0000, 1);
-        x87_seed_valid(&mut env, 1, 0x8000_0000_0000_0000, 0x3FFF);
+        x87_seed_valid(&mut env, 0, 0x7FFF_FFFF_FFFF_FFFF, 0x7FFE);
+        x87_seed_valid(&mut env, 1, 0x8000_0000_0000_0000, 0x4000);
         env.backend
             .mem
             .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
@@ -13737,9 +13737,10 @@ fn run_x87_unsupported_format_invalid_masked_and_unmasked() {
     assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0x7FFF));
     assert_ne!(fsw & 1, 0);
     assert_eq!(fsw & 0x8080, 0);
+    assert_eq!(fsw & 0x3F, 1);
 
     let (sig, exp, fsw) = mul_once(0x037E);
-    assert_eq!((sig, exp), (0x4000_0000_0000_0000, 1));
+    assert_eq!((sig, exp), (0x7FFF_FFFF_FFFF_FFFF, 0x7FFE));
     assert_eq!(fsw & 0x8081, 0x8081);
 }
 

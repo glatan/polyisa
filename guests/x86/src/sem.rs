@@ -15592,6 +15592,14 @@ pub(crate) fn mul_ext<B: Backend>(
     let no_snan_pre = bit_not(b, snan_pre);
     let denormal_report = bit_and(b, denormal_in, no_snan_pre);
     x87_exception_flag(b, denormal_report, 1 << 1);
+    let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
+    let not_unsupported_in = bit_not(b, unsupported_in);
+    let not_special_in = bit_not(b, is_special);
+    let not_zero_input = bit_not(b, is_zero);
+    let finite_input0 = bit_and(b, not_special_in, not_zero_input);
+    let finite_input = bit_and(b, finite_input0, not_unsupported_in);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
     let lo = b.mul::<W64>(sig_na, sig_nb);
@@ -15618,10 +15626,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one64);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one64);
     let inexact_raw = bit_or(b, round_set, sticky);
-    let not_special = bit_not(b, is_special);
-    let not_zero_in = bit_not(b, is_zero);
-    let inexact_fin = bit_and(b, inexact_raw, not_special);
-    let inexact_base = bit_and(b, inexact_fin, not_zero_in);
+    let inexact_base = bit_and(b, inexact_raw, finite_input);
     let do_up = x87_round_up(b, sign, round_set, sticky, lsb_set);
     let sig_plus = b.add::<W64>(sig_raw, one64);
     let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
@@ -15642,7 +15647,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let biased = b.sub::<W64>(exp_sum, bias);
     let ov_lim = b.konst::<W64>(16383 + 0x7fff);
     let over = b.cmp::<W64>(Cmp::GeS, exp_sum, ov_lim);
-    let finite_in = bit_and(b, not_special, not_zero_in);
+    let finite_in = finite_input;
     let ovf_occur = bit_and(b, over, finite_in);
     x87_exception_flag(b, ovf_occur, 1 << 3);
     x87_exception_flag(b, ovf_occur, 1 << 5);
@@ -15877,6 +15882,10 @@ pub(crate) fn add_ext<B: Backend>(
     let no_snan_pre = bit_not(b, snan_pre);
     let denormal_report = bit_and(b, denormal_in, no_snan_pre);
     x87_exception_flag(b, denormal_report, 1 << 1);
+    let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
+    let not_unsupported_in = bit_not(b, unsupported_in);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
@@ -16060,7 +16069,8 @@ pub(crate) fn add_ext<B: Backend>(
     let not_sp = bit_not(b, any_sp);
     let use_zero = bit_and(b, use_zero_raw, not_sp);
     let nonzero_path = bit_not(b, use_zero);
-    let finite_path = bit_and(b, not_sp, nonzero_path);
+    let finite_path0 = bit_and(b, not_sp, nonzero_path);
+    let finite_path = bit_and(b, finite_path0, not_unsupported_in);
     let not_cancel_zero = bit_not(b, both_zero);
     let unf_raw = bit_and(b, exp_under, not_cancel_zero);
     let ovf_occur = bit_and(b, exp_ovf, finite_path);
@@ -16068,9 +16078,7 @@ pub(crate) fn add_ext<B: Backend>(
     x87_exception_flag(b, ovf_occur, 1 << 5);
     let inexact_raw = bit_or(b, round_set, sticky_f);
     let inexact_raw = bit_or(b, inexact_raw, den_inexact);
-    let not_zero_path = bit_not(b, use_zero);
-    let inexact_fin = bit_and(b, inexact_raw, not_sp);
-    let inexact = bit_and(b, inexact_fin, not_zero_path);
+    let inexact = bit_and(b, inexact_raw, finite_path);
     x87_exception_flag(b, inexact, 1 << 5);
     let fcw = b.get(fcw_ref());
     let umask_bit = b.konst::<W16>(1 << 4);
@@ -16211,6 +16219,17 @@ pub(crate) fn div_ext<B: Backend>(
     let no_snan_pre = bit_not(b, snan_pre);
     let denormal_report = bit_and(b, denormal_in, no_snan_pre);
     x87_exception_flag(b, denormal_report, 1 << 1);
+    let unsupported_in_a = x87_unsupported_format(b, sig_a, exp_a);
+    let unsupported_in_b = x87_unsupported_format(b, sig_b, exp_b);
+    let unsupported_in = bit_or(b, unsupported_in_a, unsupported_in_b);
+    let not_unsupported_in = bit_not(b, unsupported_in);
+    let any_sp_input = bit_or(b, sp_a, sp_b);
+    let not_sp_input = bit_not(b, any_sp_input);
+    let not_z_input0 = bit_and(b, not_sp_input, not_unsupported_in);
+    let za_n = bit_not(b, z_a);
+    let zb_n = bit_not(b, z_b);
+    let numeric_input0 = bit_and(b, not_z_input0, za_n);
+    let numeric_input = bit_and(b, numeric_input0, zb_n);
     let (sig_na, ea_eff) = x87_normalize_denormal_operand(b, sig_a, ea);
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
@@ -16255,14 +16274,8 @@ pub(crate) fn div_ext<B: Backend>(
     let sticky_ge = bit_and(b, q_ge, r_nz128);
     let sticky_lt = bit_and(b, q_ge_n, rem_nz);
     let sticky = bit_or(b, sticky_ge, sticky_lt);
-    let any_sp_in = bit_or(b, sp_a, sp_b);
     let inexact_raw = bit_or(b, round_set, sticky);
-    let not_sp_in = bit_not(b, any_sp_in);
-    let not_za_in = bit_not(b, z_a);
-    let not_zb_in = bit_not(b, z_b);
-    let finite_in = bit_and(b, inexact_raw, not_sp_in);
-    let nonzero_a_in = bit_and(b, finite_in, not_za_in);
-    let inexact = bit_and(b, nonzero_a_in, not_zb_in);
+    let inexact = bit_and(b, inexact_raw, numeric_input);
     let lsb = b.and::<W64>(sig_trunc, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let do_up = x87_round_up(b, sign_r, round_set, sticky, lsb_set);
@@ -16288,7 +16301,8 @@ pub(crate) fn div_ext<B: Backend>(
     // quantum へ一度だけ丸める。
     let (sig_den, den_round_inexact) =
         x87_round_shift64_tail(b, sig_trunc, one_minus_e, sign_r, inexact_raw);
-    let den_inexact = bit_and(b, e_under, den_round_inexact);
+    let den_inexact0 = bit_and(b, e_under, den_round_inexact);
+    let den_inexact = bit_and(b, den_inexact0, numeric_input);
     let inexact_total = bit_or(b, inexact, den_inexact);
     x87_exception_flag(b, inexact_total, 1 << 5);
     let fcw = b.get(fcw_ref());
@@ -16314,8 +16328,7 @@ pub(crate) fn div_ext<B: Backend>(
     let e_under_z = b.select::<W64>(e_under, e_unf, e_inf);
     let sig_under = b.select::<W64>(e_under, sig_unf, sig_fin);
 
-    let finite_div = bit_and(b, not_sp_in, not_za_in);
-    let finite_div = bit_and(b, finite_div, not_zb_in);
+    let finite_div = numeric_input;
     let ovf_occur = bit_and(b, e_ovf, finite_div);
     x87_exception_flag(b, ovf_occur, 1 << 3);
     x87_exception_flag(b, ovf_occur, 1 << 5);
