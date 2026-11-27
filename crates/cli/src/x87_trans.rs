@@ -248,3 +248,59 @@ pub(crate) fn log2_positive_ext(sig: u64, exp_word: u16) -> Dd {
     let (m, e) = ext_mantissa_exp_dd(sig, exp_word);
     log2_near_one(m).add(Dd::from_f64(f64::from(e)))
 }
+
+pub(crate) const PI: Dd = Dd {
+    hi: std::f64::consts::PI,
+    lo: 1.2246467991473532e-16,
+};
+pub(crate) const PI2: Dd = Dd {
+    hi: std::f64::consts::FRAC_PI_2,
+    lo: 6.123233995736766e-17,
+};
+
+pub(crate) fn sqrt_positive(x: Dd) -> Dd {
+    let mut y = Dd::from_f64((x.hi + x.lo).sqrt());
+    for _ in 0..5 {
+        y = y.add(x.div(y)).div(Dd::from_f64(2.0));
+    }
+    y
+}
+
+pub(crate) fn atan_core(r: Dd) -> Dd {
+    let neg = r.hi < 0.0 || (r.hi == 0.0 && r.lo < 0.0);
+    let mut z = if neg { r.neg() } else { r };
+    let mut steps = 0u32;
+    while z.hi.abs() > 0.25 && steps < 8 {
+        let one = Dd::from_f64(1.0);
+        z = z.div(one.add(sqrt_positive(one.add(z.mul(z)))));
+        steps += 1;
+    }
+    let z2 = z.mul(z);
+    let mut sum = z;
+    let mut term = z;
+    for n in 1u32..128 {
+        term = term.mul(z2).neg();
+        let next = sum.add(term.div(Dd::from_f64(f64::from(2 * n + 1))));
+        if next.hi == sum.hi && next.lo == sum.lo {
+            break;
+        }
+        sum = next;
+    }
+    for _ in 0..steps {
+        sum = sum.mul(Dd::from_f64(2.0));
+    }
+    if neg { sum.neg() } else { sum }
+}
+
+pub(crate) fn atan2_dd(y: Dd, x: Dd) -> Dd {
+    let xneg = x.hi < 0.0 || (x.hi == 0.0 && x.lo < 0.0);
+    let yneg = y.hi < 0.0 || (y.hi == 0.0 && y.lo < 0.0);
+    let base = atan_core(y.div(x));
+    if !xneg {
+        base
+    } else if yneg {
+        base.sub(PI)
+    } else {
+        base.add(PI)
+    }
+}
