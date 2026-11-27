@@ -4073,7 +4073,7 @@ fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
             set64(env, Gpr(0), cx.neg(EFAULT));
             return Some(TrapOutcome::Handled);
         };
-        sys.sig_mask = v;
+        sys.sig_mask = v & !(1 << 8 | 1 << 18); // SIGKILL/SIGSTOP は止められない
     }
     set64(env, Gpr(0), cx.neg(EINTR));
     Some(TrapOutcome::Handled)
