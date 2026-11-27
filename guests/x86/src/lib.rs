@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2441);
+        assert_eq!(INSNS.len(), 2445);
     }
 
     #[test]
@@ -2941,6 +2941,16 @@ fn avx10_decode() {
     assert_eq!(d.insn, Insn::Vfmadd132bf16XvHvWv);
     let d = decode_map(&[0x62, 0xF6, 0x5C, 0x28, 0xBC, 0xDD], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vfnmadd231bf16XvHvWv);
+    // VCVT[,T]PH2I[,U]BS: NP.MAP5.68/69/6A/6B。
+    for (bytes, insn) in [
+        ([0x62, 0xF5, 0x7C, 0x28, 0x68, 0xC2], Insn::Vcvttph2ibsXvWv),
+        ([0x62, 0xF5, 0x7C, 0x28, 0x69, 0xC2], Insn::Vcvtph2ibsXvWv),
+        ([0x62, 0xF5, 0x7C, 0x28, 0x6A, 0xC2], Insn::Vcvttph2iubsXvWv),
+        ([0x62, 0xF5, 0x7C, 0x28, 0x6B, 0xC2], Insn::Vcvtph2iubsXvWv),
+    ] {
+        let d = decode_map(&bytes, modes, f).unwrap();
+        assert_eq!(d.insn, insn);
+    }
     // VCVT[,T]BF162I[,U]BS: MAP5.68/69/6A/6B。
     for (bytes, insn) in [
         (

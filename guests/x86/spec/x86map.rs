@@ -2864,6 +2864,31 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
     }
+    // VCVT[,T]PH2I[,U]BS（FP16→byte saturating conversion）。
+    // 非 truncating 形は 512 ビットレジスタ形で embedded rounding を取る。
+    for (op, mn, trunc) in [
+        (0x68u8, "vcvttph2ibs", true),
+        (0x69, "vcvtph2ibs", false),
+        (0x6A, "vcvttph2iubs", true),
+        (0x6B, "vcvtph2iubs", false),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::Plain,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.er = !trunc;
+        it.sae = trunc;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VCVT[,T]BF162I[,U]BS（BF16→byte saturating conversion）。
     // byte は対応 word 要素の下位へ置き、上位 byte は 0 にする。
     for (op, mn) in [

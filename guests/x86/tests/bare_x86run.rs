@@ -28212,6 +28212,56 @@ fn run64_avx10_vcvtbf162ibs() {
 }
 
 #[test]
+fn run64_avx10_vcvtph2ibs() {
+    // fp16 1.5 は RNE で 2、truncation で 1。結果は word の下位 byte。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x3e00u16), // fp16 1.5
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF5, 0x7C, 0x28, 0x68, 0xC2, // vcvttph2ibs xmm0,ymm2
+                0x62, 0xF5, 0x7C, 0x28, 0x69, 0xDA, // vcvtph2ibs xmm3,ymm2
+                0x62, 0xF5, 0x7C, 0x28, 0x6A, 0xE2, // vcvttph2iubs xmm4,ymm2
+                0x62, 0xF5, 0x7C, 0x28, 0x6B, 0xEA, // vcvtph2iubs xmm5,ymm2
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    for (r, want) in [(0u8, 1u16), (3, 2), (4, 1), (5, 2)] {
+        let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(r, 0));
+        assert_eq!(v as u16, want, "zmm{r}");
+    }
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ
