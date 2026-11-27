@@ -9515,6 +9515,88 @@ mod tests {
     }
 
     #[test]
+    fn pselect6_temporary_mask_unblocks_a_normally_blocked_signal() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_mask = 1 << 9;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x130), &1i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x140), &0u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x180), &0x140u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x188), &8u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::PSELECT6);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0);
+        set64(&mut env, Gpr(8), 0x130);
+        set64(&mut env, Gpr(9), 0x180);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        assert_eq!(sys.sig_mask, 1 << 9);
+        assert_eq!(sys.pwait_orig_mask, None);
+    }
+
+    #[test]
+    fn epoll_pwait_temporary_mask_unblocks_a_normally_blocked_signal() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::EPOLL_CREATE1);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let epfd = get64(&mut env, Gpr(0));
+        sys.sig_mask = 1 << 9;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x140), &0u64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::EPOLL_PWAIT);
+        set64(&mut env, Gpr(7), epfd);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), u64::MAX);
+        set64(&mut env, Gpr(8), 0x140);
+        set64(&mut env, Gpr(9), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        assert_eq!(sys.sig_mask, 1 << 9);
+        assert_eq!(sys.pwait_orig_mask, None);
+    }
+
+    #[test]
     fn ppoll_restores_the_original_mask_when_it_completes_immediately() {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
