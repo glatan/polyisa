@@ -27879,6 +27879,57 @@ fn run64_amx() {
 }
 
 #[test]
+fn run64_amx_tileload_fault_records_start_row() {
+    // TILELOADD は restartable。row0 の読み込み後に row1 が未写像で
+    // fault したら、startRow=1 を残し row0 のデータは保持する。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_INT8;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    cfg[16 + 2..18 + 2].copy_from_slice(&4u16.to_le_bytes());
+    cfg[48 + 1] = 3;
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2ff0), &[1, 2, 3, 4])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+        0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+        0x48, 0xBE, 0xF0, 0x2F, 0, 0, 0, 0, 0, 0, // movabs rsi,0x2ff0
+        0x48, 0xC7, 0xC7, 0x10, 0, 0, 0, // mov rdi,0x10
+        0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, // tileloaddrs (%rsi,%rdi),tmm1
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        20,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert!(matches!(out, Outcome::Unimplemented { .. }));
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    assert_eq!(env.backend.state[tilecfg_off + 1], 1, "startRow");
+    assert_eq!(
+        &env.backend.state[tmm_off + 1024..tmm_off + 1028],
+        &[1, 2, 3, 4],
+        "completed row"
+    );
+}
+
+#[test]
 fn run64_amx_fp8_dot() {
     // 1x1 の FP8 積和。src1 は BF8 1.0 (0x3c)、src2 は HF8 1.0 (0x38)。
     let feats = polyisa_guest_x86::model_feats("x86_64")

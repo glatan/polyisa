@@ -11484,17 +11484,19 @@ fn amx_tile_exec(
                 let cell = TMM_OFF + usize::from(t) * 1024 + r * colsb;
                 if load {
                     let mut row = vec![0u8; colsb];
-                    env.backend
-                        .mem
-                        .read(VirtAddr(a), &mut row, acc_r)
-                        .map_err(|e| amx_mem_exit(a, e))?;
+                    if let Err(e) = env.backend.mem.read(VirtAddr(a), &mut row, acc_r) {
+                        // TILELOADD/TILESTORED は restartable。fault した行を
+                        // startRow に残し、既に完了した行は保持する。
+                        st[TILECFG_OFF + 1] = r as u8;
+                        return Err(amx_mem_exit(a, e));
+                    }
                     st[cell..cell + colsb].copy_from_slice(&row);
                 } else {
                     let row = st[cell..cell + colsb].to_vec();
-                    env.backend
-                        .mem
-                        .write(VirtAddr(a), &row)
-                        .map_err(|e| amx_mem_exit(a, e))?;
+                    if let Err(e) = env.backend.mem.write(VirtAddr(a), &row) {
+                        st[TILECFG_OFF + 1] = r as u8;
+                        return Err(amx_mem_exit(a, e));
+                    }
                 }
             }
             st[TILECFG_OFF + 1] = 0;
