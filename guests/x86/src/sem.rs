@@ -14999,6 +14999,27 @@ pub(crate) fn x87_round_shift64<B: Backend>(
 /// `x87_round_shift64` に、kept significand の下位へ続く exact tail の
 /// 有無を追加した版。乗算の 128 ビット積のように、64 ビットへ切り出す
 /// 前から確定している捨て bit を gradual underflow の丸めへ含める。
+/// FCW.PC から 64 ビット extended significand 基準の追加 drop bit 数を返す。
+/// PC=24 は 40、PC=53 は 11、PC=64（および reserved）は 0。
+fn x87_precision_drop<B: Backend>(b: &mut B) -> (B::V<W64>, B::B) {
+    let fcw = b.get(fcw_ref());
+    let eight = b.konst::<W16>(8);
+    let pc_shifted = b.shr_l::<W16>(fcw, eight);
+    let three = b.konst::<W16>(3);
+    let pc = b.and::<W16>(pc_shifted, three);
+    let z16 = b.konst::<W16>(0);
+    let is24 = b.cmp::<W16>(Cmp::Eq, pc, z16);
+    let two = b.konst::<W16>(2);
+    let is53 = b.cmp::<W16>(Cmp::Eq, pc, two);
+    let d24 = b.konst::<W16>(40);
+    let d53 = b.konst::<W16>(11);
+    let d0 = b.konst::<W16>(0);
+    let drop53 = b.select::<W16>(is53, d53, d0);
+    let drop16 = b.select::<W16>(is24, d24, drop53);
+    let active = b.cmp::<W16>(Cmp::Ne, drop16, z16);
+    (b.zext::<W16, W64>(drop16), active)
+}
+
 pub(crate) fn x87_round_shift64_tail<B: Backend>(
     b: &mut B,
     sig: B::V<W64>,
@@ -15626,7 +15647,6 @@ pub(crate) fn mul_ext<B: Backend>(
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one64);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one64);
     let inexact_raw = bit_or(b, round_set, sticky);
-    let inexact_base = bit_and(b, inexact_raw, finite_input);
     let do_up = x87_round_up(b, sign, round_set, sticky, lsb_set);
     let sig_plus = b.add::<W64>(sig_raw, one64);
     let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
@@ -15636,10 +15656,26 @@ pub(crate) fn mul_ext<B: Backend>(
     let ov_n = b.select::<W64>(do_up, at_max_n, zero64);
     let round_ov = b.cmp::<W64>(Cmp::Ne, ov_n, zero64);
     let int_bit = b.konst::<W64>(1u64 << 63);
-    let sig_norm = b.select::<W64>(round_ov, int_bit, sig_rounded);
+    let sig_norm64 = b.select::<W64>(round_ov, int_bit, sig_rounded);
+    // PC=24/53 では 64 ビットへ丸めてから精度を落とすと double rounding
+    // になる。exact product の 128 ビットを sig_raw + round/sticky tail
+    // として保持しているので、PC target precision へ一度だけ丸める。
+    let (pc_drop, pc_active) = x87_precision_drop(b);
+    let (pc_low, pc_inexact) = x87_round_shift64_tail(b, sig_raw, pc_drop, sign, inexact_raw);
+    let s64 = b.konst::<W64>(64);
+    let pc_bits0 = b.sub::<W64>(s64, pc_drop);
+    let pc_bits = b.select::<W64>(pc_active, pc_bits0, one64);
+    let pc_limit = b.shl::<W64>(one64, pc_bits);
+    let pc_carry = b.cmp::<W64>(Cmp::Eq, pc_low, pc_limit);
+    let pc_aligned = b.shl::<W64>(pc_low, pc_drop);
+    let pc_sig0 = b.select::<W64>(pc_carry, int_bit, pc_aligned);
+    let sig_norm = b.select::<W64>(pc_active, pc_sig0, sig_norm64);
+    let round_any_ov = bit_select(b, pc_active, pc_carry, round_ov);
+    let inexact_eff = bit_select(b, pc_active, pc_inexact, inexact_raw);
+    let inexact_base = bit_and(b, inexact_eff, finite_input);
     let adj0 = b.select::<W64>(ge, one64, zero64);
     let adj1 = b.add::<W64>(adj0, one64);
-    let adj = b.select::<W64>(round_ov, adj1, adj0);
+    let adj = b.select::<W64>(round_any_ov, adj1, adj0);
     let exp_sum0 = b.add::<W64>(ea_eff, eb_eff);
     let exp_sum = b.add::<W64>(exp_sum0, adj);
     let bias = b.konst::<W64>(16383);
@@ -15658,7 +15694,7 @@ pub(crate) fn mul_ext<B: Backend>(
     // のではなく、正規化前の exact product から target quantum へ一度だけ
     // 丸める。exact tail は round/sticky をまとめた inexact_raw で渡す。
     let (sig_den, den_exact_inexact) =
-        x87_round_shift64_tail(b, sig_raw, one_minus_e, sign, inexact_raw);
+        x87_round_shift64_tail(b, sig_raw, one_minus_e, sign, inexact_eff);
     // subnormal へ落とすときに捨てる bit も precision exception の
     // 対象。masked underflow は tiny かつ inexact のときだけ UE を立て、
     // unmasked では exact tiny でも報告する。
@@ -15766,6 +15802,13 @@ pub(crate) fn bit_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     let yn = b.select::<W64>(y, one, zero);
     let combined = b.and::<W64>(xn, yn);
     b.cmp::<W64>(Cmp::Ne, combined, zero)
+}
+
+pub(crate) fn bit_select<B: Backend>(b: &mut B, c: B::B, x: B::B, y: B::B) -> B::B {
+    let cx = bit_and(b, c, x);
+    let nc = bit_not(b, c);
+    let ny = bit_and(b, nc, y);
+    bit_or(b, cx, ny)
 }
 
 pub(crate) fn bit_not<B: Backend>(b: &mut B, x: B::B) -> B::B {
@@ -15995,6 +16038,7 @@ pub(crate) fn add_ext<B: Backend>(
     let lsb = b.and::<W64>(hi_n, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one);
+    let inexact_raw = bit_or(b, round_set, sticky_f);
     let round_up = x87_round_up(b, sign_big, round_set, sticky_f, lsb_set);
     let exp_live = b.cmp::<W64>(Cmp::Ne, exp_n, zero);
     let do_up = bit_and(b, round_up, exp_live);
@@ -16002,9 +16046,25 @@ pub(crate) fn add_ext<B: Backend>(
     let at_max = b.cmp::<W64>(Cmp::Eq, hi_n, max64);
     let ov = bit_and(b, do_up, at_max);
     let hi_rounded_raw = b.select::<W64>(do_up, hi_up, hi_n);
-    let hi_rounded = b.select::<W64>(ov, int_bit, hi_rounded_raw);
+    let hi_rounded64 = b.select::<W64>(ov, int_bit, hi_rounded_raw);
+    // PC=24/53 でも 64 ビットへの丸めを経由せず、normalized exact
+    // sum hi_n:lo_n と sticky から target precision へ一度だけ丸める。
+    let (pc_drop, pc_active) = x87_precision_drop(b);
+    let (pc_low, pc_inexact_raw) = x87_round_shift64_tail(b, hi_n, pc_drop, sign_big, inexact_raw);
+    let pc_bits0 = b.sub::<W64>(s64, pc_drop);
+    let pc_bits = b.select::<W64>(pc_active, pc_bits0, one);
+    let pc_limit = b.shl::<W64>(one, pc_bits);
+    let pc_carry0 = b.cmp::<W64>(Cmp::Eq, pc_low, pc_limit);
+    let pc_carry = bit_and(b, pc_carry0, exp_live);
+    let pc_aligned = b.shl::<W64>(pc_low, pc_drop);
+    let pc_sig_carry = b.select::<W64>(pc_carry, int_bit, pc_aligned);
+    let pc_sig_live = b.select::<W64>(exp_live, pc_sig_carry, hi_n);
+    let hi_rounded = b.select::<W64>(pc_active, pc_sig_live, hi_rounded64);
+    let round_any_ov = bit_select(b, pc_active, pc_carry, ov);
+    let pc_inexact_live = bit_and(b, pc_inexact_raw, exp_live);
+    let inexact_eff = bit_select(b, pc_active, pc_inexact_live, inexact_raw);
     let exp_up = b.add::<W64>(exp_n, one);
-    let exp_rounded = b.select::<W64>(ov, exp_up, exp_n);
+    let exp_rounded = b.select::<W64>(round_any_ov, exp_up, exp_n);
     let exp_under = b.cmp::<W64>(Cmp::LeS, exp_rounded, zero);
     let exp_ovf = b.cmp::<W64>(Cmp::GeS, exp_rounded, special);
     // exponent 0 以下の有限結果は x87 denormal として右へ揃える。
@@ -16076,9 +16136,8 @@ pub(crate) fn add_ext<B: Backend>(
     let ovf_occur = bit_and(b, exp_ovf, finite_path);
     x87_exception_flag(b, ovf_occur, 1 << 3);
     x87_exception_flag(b, ovf_occur, 1 << 5);
-    let inexact_raw = bit_or(b, round_set, sticky_f);
-    let inexact_raw = bit_or(b, inexact_raw, den_inexact);
-    let inexact = bit_and(b, inexact_raw, finite_path);
+    let inexact_pre_den = bit_or(b, inexact_eff, den_inexact);
+    let inexact = bit_and(b, inexact_pre_den, finite_path);
     x87_exception_flag(b, inexact, 1 << 5);
     let fcw = b.get(fcw_ref());
     let umask_bit = b.konst::<W16>(1 << 4);
@@ -16275,7 +16334,6 @@ pub(crate) fn div_ext<B: Backend>(
     let sticky_lt = bit_and(b, q_ge_n, rem_nz);
     let sticky = bit_or(b, sticky_ge, sticky_lt);
     let inexact_raw = bit_or(b, round_set, sticky);
-    let inexact = bit_and(b, inexact_raw, numeric_input);
     let lsb = b.and::<W64>(sig_trunc, one);
     let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
     let do_up = x87_round_up(b, sign_r, round_set, sticky, lsb_set);
@@ -16284,12 +16342,28 @@ pub(crate) fn div_ext<B: Backend>(
     let at_max = b.cmp::<W64>(Cmp::Eq, sig_trunc, max64);
     let round_ov = bit_and(b, do_up, at_max);
     let sig_round = b.select::<W64>(do_up, sig_plus, sig_trunc);
-    let sig_norm = b.select::<W64>(round_ov, int_bit, sig_round);
+    let sig_norm64 = b.select::<W64>(round_ov, int_bit, sig_round);
+    // PC=24/53 でも 64 ビット quotient への丸めを経由せず、
+    // truncate 前の significand と remainder 由来の exact tail から
+    // target precision へ一度だけ丸める。
+    let (pc_drop, pc_active) = x87_precision_drop(b);
+    let (pc_low, pc_inexact) = x87_round_shift64_tail(b, sig_trunc, pc_drop, sign_r, inexact_raw);
+    let k64 = b.konst::<W64>(64);
+    let pc_bits0 = b.sub::<W64>(k64, pc_drop);
+    let pc_bits = b.select::<W64>(pc_active, pc_bits0, one);
+    let pc_limit = b.shl::<W64>(one, pc_bits);
+    let pc_carry = b.cmp::<W64>(Cmp::Eq, pc_low, pc_limit);
+    let pc_aligned = b.shl::<W64>(pc_low, pc_drop);
+    let pc_sig0 = b.select::<W64>(pc_carry, int_bit, pc_aligned);
+    let sig_norm = b.select::<W64>(pc_active, pc_sig0, sig_norm64);
+    let round_any_ov = bit_select(b, pc_active, pc_carry, round_ov);
+    let inexact_eff = bit_select(b, pc_active, pc_inexact, inexact_raw);
+    let inexact = bit_and(b, inexact_eff, numeric_input);
     let ediff = b.sub::<W64>(ea_eff, eb_eff);
     let em1 = b.sub::<W64>(ediff, one);
     let eraw0 = b.select::<W64>(q_ge, ediff, em1);
     let eraw_plus = b.add::<W64>(eraw0, one);
-    let eraw = b.select::<W64>(round_ov, eraw_plus, eraw0);
+    let eraw = b.select::<W64>(round_any_ov, eraw_plus, eraw0);
     let e_norm = b.add::<W64>(eraw, bias);
     // overflow は FCW.RC の masked response、underflow は exponent 0 の
     // denormal へ右へ揃える。
@@ -16300,7 +16374,7 @@ pub(crate) fn div_ext<B: Backend>(
     // normalized quotient と remainder 由来の exact tail から denormal
     // quantum へ一度だけ丸める。
     let (sig_den, den_round_inexact) =
-        x87_round_shift64_tail(b, sig_trunc, one_minus_e, sign_r, inexact_raw);
+        x87_round_shift64_tail(b, sig_trunc, one_minus_e, sign_r, inexact_eff);
     let den_inexact0 = bit_and(b, e_under, den_round_inexact);
     let den_inexact = bit_and(b, den_inexact0, numeric_input);
     let inexact_total = bit_or(b, inexact, den_inexact);

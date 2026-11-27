@@ -14578,6 +14578,68 @@ fn run_x87_fdiv_honors_fcw_precision_control() {
 }
 
 #[test]
+fn run_x87_fadd_precision_control_rounds_exact_sum_once() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x027F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // exact sum を 64 bit へ丸めてから 53 bit へ落とすと、
+    // direct rounding の 0x...2800 ではなく 0x...3000 になる入力。
+    x87_seed_valid(&mut env, 0, 0x8642_8A71_535F_5175, 0x3FFF);
+    x87_seed_valid(&mut env, 1, 0xED5E_8FF6_86A9_068A, 0x3FFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xC1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0xB9D0_8D33_ED04_2800
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x4000
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 5), 0);
+}
+
+#[test]
+fn run_x87_fdiv_precision_control_rounds_exact_quotient_once() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x027F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // exact quotient を 64 bit へ丸めてから 53 bit へ落とすと、
+    // direct rounding の 0x...4800 ではなく 0x...4000 になる入力。
+    x87_seed_valid(&mut env, 0, 0xFA97_EF3B_7DA6_A3ED, 0x3FFF);
+    x87_seed_valid(&mut env, 1, 0x91B7_85B0_8F9E_4FF8, 0x3FFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xF1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0xDC20_1131_64B7_4800
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x3FFF
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 5), 0);
+}
+
+#[test]
 fn run_x87_precision_control_overflow_follows_rounding_mode() {
     fn once(fcw: u16) -> (u64, u16) {
         let mut env = bare_x86_env();
@@ -15602,6 +15664,37 @@ fn run_x87_precision_control_counts_significant_bits_in_denormal() {
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
     let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
     assert_eq!(fsw & (1 << 5), 0);
+}
+
+#[test]
+fn run_x87_fmul_precision_control_rounds_exact_product_once() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x027F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // exact product を 64 bit へ丸めてから 53 bit へ落とすと、
+    // direct rounding の 0x...a800 ではなく 0x...a000 になる入力。
+    x87_seed_valid(&mut env, 0, 0xDE6A_C5A2_8D31_3124, 0x3FFF);
+    x87_seed_valid(&mut env, 1, 0xAB8B_9277_DA8E_4980, 0x3FFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xC9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x950A_953D_E9CD_A800
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x4000
+    );
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & (1 << 5), 0);
 }
 
 #[test]
