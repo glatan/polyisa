@@ -442,3 +442,31 @@ pub(crate) fn denormal_units_to_ext(units: u128, neg: bool) -> (u64, u16) {
     let exp = if units >= 1u128 << 63 { 1u16 } else { 0u16 };
     (units as u64, exp | if neg { 0x8000 } else { 0 })
 }
+
+fn scale_pow2(x: Dd, scale: i32) -> Dd {
+    if x.hi == 0.0 && x.lo == 0.0 {
+        return x;
+    }
+    let clamped = scale.clamp(-2047, 2047);
+    let f = 2f64.powi(clamped);
+    Dd::new(x.hi * f, x.lo * f)
+}
+
+/// exponent 分離した extended 入力の atan2。比值そのものを f64 経路で
+/// オーバーフローさせず、大きな比では逆数側へ落として atan を評価する。
+pub(crate) fn atan2_ext(ysig: u64, yexp_word: u16, xsig: u64, xexp_word: u16) -> Dd {
+    let yneg = yexp_word & 0x8000 != 0;
+    let xneg = xexp_word & 0x8000 != 0;
+    let (ym, ye) = ext_mantissa_exp_dd(ysig, yexp_word & 0x7fff);
+    let (xm, xe) = ext_mantissa_exp_dd(xsig, xexp_word & 0x7fff);
+    let scale = ye - xe;
+    let magnitude = if scale >= 0 {
+        // |y/x| が大きいときは atan(r)=pi/2-atan(1/r)。
+        let inv = scale_pow2(xm.div(ym), -scale);
+        PI2.sub(atan_core(inv))
+    } else {
+        atan_core(scale_pow2(ym.div(xm), scale))
+    };
+    let angle = if !xneg { magnitude } else { PI.sub(magnitude) };
+    if yneg { angle.neg() } else { angle }
+}

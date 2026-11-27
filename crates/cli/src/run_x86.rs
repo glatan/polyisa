@@ -9907,7 +9907,9 @@ fn x87_norm_finite(sig: u64, exp: u16) -> (u64, i32) {
         return (0, 0);
     }
     let lz = sig.leading_zeros() as i32;
-    (sig << lz, i32::from(exp & 0x7fff) - lz)
+    let raw = i32::from(exp & 0x7fff);
+    let effective = if raw == 0 { 1 - lz } else { raw - lz };
+    (sig << lz, effective)
 }
 
 fn x87_trans_write_result(env: &mut BareEnv, op: u8, value: (u64, u16)) {
@@ -9967,6 +9969,46 @@ fn x87_denormal(sig: u64, exp: u16) -> bool {
 
 fn x87_one(sig: u64, exp: u16) -> bool {
     sig == 1u64 << 63 && exp == 0x3fff
+}
+
+/// tiny な y/x を denormal quantum 単位の整数除算として丸める。
+/// 2^16445 倍した商が 64 bit へ収まる領域だけを対象にする。
+fn x87_tiny_ratio_ext(
+    ysig0: u64,
+    yexp0: u16,
+    xsig0: u64,
+    xexp0: u16,
+    rc: u16,
+    neg: bool,
+) -> Option<(u64, u16)> {
+    let (ysig, ey) = x87_norm_finite(ysig0, yexp0);
+    let (xsig, ex) = x87_norm_finite(xsig0, xexp0);
+    let scale = ey - ex + 16445;
+    if !(-63..=63).contains(&scale) {
+        return None;
+    }
+    let (num, den) = if scale >= 0 {
+        ((u128::from(ysig)) << scale, u128::from(xsig))
+    } else {
+        (u128::from(ysig), u128::from(xsig) << (-scale))
+    };
+    let q = num / den;
+    let rem = num % den;
+    let up = match rc {
+        1 => neg && rem != 0,
+        2 => !neg && rem != 0,
+        3 => false,
+        _ => rem * 2 > den || (rem * 2 == den && q & 1 != 0),
+    };
+    let units = q + u128::from(up);
+    if units == 0 {
+        return Some((0, if neg { 0x8000 } else { 0 }));
+    }
+    if units >= 1u128 << 64 {
+        return None;
+    }
+    let exp = if units >= 1u128 << 63 { 1u16 } else { 0u16 };
+    Some((units as u64, exp | if neg { 0x8000 } else { 0 }))
 }
 
 fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
@@ -10199,6 +10241,21 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             return;
         }
     }
+    if op == 0xF3 && e0 & 0x8000 == 0 {
+        let (_, ey) = x87_norm_finite(s1, e1);
+        let (_, ex) = x87_norm_finite(s0, e0);
+        if ey - ex < -16380 {
+            let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
+            let rc = (fcw >> 10) & 3;
+            let neg = e1 & 0x8000 != 0;
+            if let Some(v) = x87_tiny_ratio_ext(s1, e1, s0, e0, rc, neg) {
+                x87_scalar_exception_flag(env, (1 << 4) | (1 << 5));
+                x87_write_st(env, 1, v);
+                x87_pop(env);
+                return;
+            }
+        }
+    }
     // extended の denormal 域は f64 では表せないため、線形項が高次項を
     // 完全に支配する tiny input だけを整数 significand で処理する。
     if x87_denormal(s0, e0) {
@@ -10403,9 +10460,7 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                 }
                 x87_write_st(env, 1, rounded);
             } else if op == 0xF3 {
-                let xin = crate::x87_trans::ext_to_dd(s0, e0);
-                let yin = crate::x87_trans::ext_to_dd(s1, e1);
-                let result = crate::x87_trans::atan2_dd(yin, xin);
+                let result = crate::x87_trans::atan2_ext(s1, e1, s0, e0);
                 x87_write_st(env, 1, crate::x87_trans::dd_to_ext(result, rc));
             } else {
                 x87_write_st(env, 1, x87_f64_to_ext(y));
