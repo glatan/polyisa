@@ -14427,6 +14427,51 @@ fn run_x87_compare_denormal_against_zero() {
 }
 
 #[test]
+fn run_x87_fxtract_denormal_zero_and_inf() {
+    fn once(sig: u64, exp: u16) -> (u64, u16, u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        // push 先 ST(7) を空にする。
+        env.backend.set(polyisa_guest_x86::sem::ftw_ref(), 0xFFFC);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xF4]) // fxtract
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // 最小 denormal は significand 1.0、exponent -16445 へ正規化される。
+    let (ms, me, es, ee, fsw) = once(1, 0);
+    assert_eq!((ms, me), (0x8000_0000_0000_0000, 0x3fff));
+    assert_eq!((es, ee), (0x807A_0000_0000_0000, 0xc00d));
+    assert_ne!(fsw & (1 << 1), 0, "DE");
+    // +0 は ZE。exponent は -inf、significand は符号を保った zero。
+    let (ms, me, es, ee, fsw) = once(0, 0x8000);
+    assert_eq!((ms, me), (0, 0x8000));
+    assert_eq!((es, ee), (0x8000_0000_0000_0000, 0xffff));
+    assert_ne!(fsw & (1 << 2), 0, "ZE");
+    // +inf は exponent +inf、significand も +inf。
+    let (ms, me, es, ee, _) = once(0x8000_0000_0000_0000, 0x7fff);
+    assert_eq!((ms, me), (0x8000_0000_0000_0000, 0x7fff));
+    assert_eq!((es, ee), (0x8000_0000_0000_0000, 0x7fff));
+}
+
+#[test]
 fn run_x87_inexact_result_sets_precision_flag() {
     fn once(sig1: u64, exp1: u16) -> u16 {
         let mut env = bare_x86_env();
