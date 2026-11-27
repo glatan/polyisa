@@ -13966,6 +13966,42 @@ fn run_x87_fdiv_honors_fcw_precision_control() {
 }
 
 #[test]
+fn run_x87_precision_control_overflow_follows_rounding_mode() {
+    fn once(fcw: u16) -> (u64, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), u64::MAX);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x7FFE);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), 0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(1), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD8, 0xC1]) // fadd st(0),st(1)
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        x87_recalc_tag(&mut env, 1);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        )
+    }
+    // PC=24 への丸めで最大有限値から繰り上がる境界では、nearest は
+    // overflow response の infinity になる。toward-zero は繰り上がらず、
+    // 24 ビット精度へ切り捨てた最大有限値を保つ。
+    assert_eq!(once(0x007f), (0x8000_0000_0000_0000, 0x7fff));
+    assert_eq!(once(0x0c7f), (0xFFFF_FF00_0000_0000, 0x7ffe));
+}
+
+#[test]
 fn run_x87_denormal_operand_sets_denormal_flag() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
@@ -13973,8 +14009,8 @@ fn run_x87_denormal_operand_sets_denormal_flag() {
     env.backend.set(Gpr(4).state(), 0x1800);
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
-    // 指数 0・仮数非零は denormal。現在の算術近似では零として
-    // 扱うが、denormal-operand 例外は記録する。
+    // 指数 0・仮数非零は denormal。数値として加算し、
+    // denormal-operand 例外も記録する。
     env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), 1);
     env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), 0);
     env.backend
@@ -14178,6 +14214,47 @@ fn run_x87_add_denormal_operands_as_values() {
     assert_eq!((sig, exp), (0, 0));
     assert_ne!(fsw & (1 << 1), 0);
     assert_eq!(fsw & ((1 << 4) | (1 << 5)), 0);
+}
+
+#[test]
+fn run_x87_frndint_rounds_tiny_denormal_by_fcw() {
+    fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFC]) // frndint
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // 最小 denormal は nearest では符号付き zero、ceil/floor では
+    // 符号に応じて 1 または -1 へ丸まる。いずれも PE を立てる。
+    let (sig, exp, fsw) = once(1, 0, 0x037f);
+    assert_eq!((sig, exp), (0, 0));
+    assert_ne!(fsw & (1 << 5), 0);
+    let (sig, exp, fsw) = once(1, 0x8000, 0x037f);
+    assert_eq!((sig, exp), (0, 0x8000));
+    assert_ne!(fsw & (1 << 5), 0);
+    let (sig, exp, fsw) = once(1, 0, 0x0b7f);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x3fff));
+    assert_ne!(fsw & (1 << 5), 0);
+    let (sig, exp, fsw) = once(1, 0x8000, 0x077f);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0xbfff));
+    assert_ne!(fsw & (1 << 5), 0);
 }
 
 #[test]

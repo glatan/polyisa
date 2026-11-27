@@ -10291,7 +10291,8 @@ pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
                 Ok(())
             },
             |b| {
-                let iv = sem::f80_to_i64(b, sig, exp);
+                let (iv, inexact, _bad) = sem::f80_to_i64_occ(b, sig, exp);
+                sem::x87_exception_flag(b, inexact, 1 << 5);
                 let (isig, mut iexp) = sem::i64_to_ext(b, iv);
                 // 入力が負で結果整数が 0 のときは -0 を保つ。
                 let z64 = b.konst::<W64>(0);

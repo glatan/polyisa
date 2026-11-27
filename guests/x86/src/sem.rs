@@ -14964,7 +14964,7 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let sign = b.shr_l::<W64>(exp64, s15);
     let exp_zero = b.cmp::<W64>(Cmp::Eq, mag, zero);
     let sig_zero = b.cmp::<W64>(Cmp::Eq, sig_in, zero);
-    let input_zero = bit_or(b, exp_zero, sig_zero);
+    let input_zero = bit_and(b, exp_zero, sig_zero);
     let input_special = b.cmp::<W64>(Cmp::Eq, mag, special);
     let non_finite = bit_or(b, input_zero, input_special);
 
@@ -15020,8 +15020,9 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let mag_ovf = b.cmp::<W64>(Cmp::GeU, mag_round, special);
     let ovf = bit_and(b, mag_ovf, active);
     x87_exception_flag(b, ovf, 1 << 3);
-    let sig_pc0 = b.select::<W64>(ovf, int_bit, sig_norm);
-    let mag_pc0 = b.select::<W64>(ovf, special, mag_round);
+    let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign);
+    let sig_pc0 = b.select::<W64>(ovf, sig_ovm, sig_norm);
+    let mag_pc0 = b.select::<W64>(ovf, exp_ovm, mag_round);
     let sig_pc = b.select::<W64>(active, sig_pc0, sig_in);
     let mag_pc = b.select::<W64>(active, mag_pc0, mag);
     let sign_bit = b.shl::<W64>(sign, s15);
@@ -16014,9 +16015,11 @@ pub(crate) fn f80_to_i64_occ<B: Backend>(
     let ovf_63 = bit_and(b, at_63, not_ok_min);
 
     let not_ge = bit_not(b, ge_one);
-    let not_zero = bit_not(b, is_zero_exp);
     let not_special = bit_not(b, is_special);
-    let below = bit_and(b, not_ge, not_zero);
+    let sig_is_zero = b.cmp::<W64>(Cmp::Eq, sig, zero);
+    let zero_input = bit_and(b, is_zero_exp, sig_is_zero);
+    let not_zero_input = bit_not(b, zero_input);
+    let below = bit_and(b, not_ge, not_zero_input);
     let frac = bit_and(b, below, not_special);
     let k_raw = b.sub::<W64>(bias, ea);
     let k = b.select::<W64>(frac, k_raw, zero);
