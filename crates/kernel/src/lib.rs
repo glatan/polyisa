@@ -223,6 +223,8 @@ pub enum ThreadWait {
     /// 時計の満了待ち（poll/select/epoll の timeout・timerfd・
     /// nanosleep）。期限は ABI 側の `fd_wait` が持つ。
     Timer,
+    /// シグナル到着待ち（pause/sigsuspend）。
+    Signal,
 }
 
 #[derive(Debug)]

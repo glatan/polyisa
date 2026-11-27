@@ -703,6 +703,9 @@ impl Linux {
                 polyisa_kernel::ThreadWait::Timer => {
                     eprintln!("run: pid {} waits for timer", id.0);
                 }
+                polyisa_kernel::ThreadWait::Signal => {
+                    eprintln!("run: pid {} waits for signal", id.0);
+                }
             }
         }
     }
@@ -3133,7 +3136,17 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
         return ParkedSignal::Missing;
     };
     if signal_is_pending_target(&task.linux, sig) {
-        task.linux.sig_pending |= 1 << (sig - 1);
+        let bit = 1u64 << (sig - 1);
+        let caught_unmasked = task
+            .linux
+            .sigacts
+            .get(sig as usize - 1)
+            .is_some_and(|a| a.handler > 1)
+            && task.linux.sig_mask & bit == 0;
+        task.linux.sig_pending |= bit;
+        if caught_unmasked {
+            queue.meta.unblock(polyisa_kernel::ThreadId(tid));
+        }
         ParkedSignal::Queued
     } else if signal_is_ignored(&task.linux, sig) {
         ParkedSignal::Noop
@@ -4017,11 +4030,20 @@ fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<
     }
 }
 
-fn sys_pause(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // pause。保留シグナルがあれば `after_step` で配送されるので
-    // EINTR を返す。ない場合も待たずに EINTR（近似）。
-    set64(env, Gpr(0), cx.neg(EINTR));
-    Some(TrapOutcome::Handled)
+fn sys_pause(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // pause は配送可能なシグナルが来るまで眠る。既に配送可能な
+    // pending があるときは、この syscall を EINTR で終え、配送自体は
+    // syscall 後の `after_step` に任せる。
+    if sys.sig_pending & !sys.sig_mask != 0 {
+        set64(env, Gpr(0), cx.neg(EINTR));
+        return Some(TrapOutcome::Handled);
+    }
+    let pid = sys.ensure_self();
+    sys.queue.0.borrow_mut().meta.block(
+        polyisa_kernel::ThreadId(pid.0),
+        polyisa_kernel::ThreadWait::Signal,
+    );
+    Some(TrapOutcome::Blocked)
 }
 
 fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -7685,6 +7707,60 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn pause_blocks_until_a_deliverable_signal_is_pending() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::PAUSE);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .blocked()
+                .iter()
+                .any(|(id, wait)| id.0 == pid && *wait == polyisa_kernel::ThreadWait::Signal)
+        );
+        sys.sig_pending = 1 << 9;
+        set64(&mut env, Gpr(0), abi::PAUSE);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    #[test]
+    fn signal_to_a_paused_child_makes_it_runnable() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        sys.queue.0.borrow_mut().meta.block(
+            polyisa_kernel::ThreadId(child),
+            polyisa_kernel::ThreadWait::Signal,
+        );
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert!(
+            !sys.queue
+                .0
+                .borrow()
+                .meta
+                .blocked()
+                .iter()
+                .any(|(id, _)| id.0 == child)
+        );
     }
 
     #[test]
