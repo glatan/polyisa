@@ -28631,6 +28631,55 @@ fn run64_avx10_bf16_to_fp8() {
 }
 
 #[test]
+fn run64_avx10_bias_bf16_to_fp8() {
+    // BF16 0x3f9f は BF8 へ切り捨てると 0x3c。bias 0x10 が
+    // 下位 5 bit へ加わり carry するため 0x3d になる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_3
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(1, 0), u128::from(0x10u8));
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x3f9fu16),
+    );
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF2, 0xF4, 0x08, 0x74, 0xC2, // vcvtbiasbf162bf8 xmm0,xmm1,xmm2
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v0 as u8, 0x3d);
+}
+
+#[test]
 fn run64_vsyscall() {
     // x86-64 の vsyscall 固定番地（gettimeofday/time/getcpu）を
     // call 経由で呼ぶ。ローダが写像するスタブページ

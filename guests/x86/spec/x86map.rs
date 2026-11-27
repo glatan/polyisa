@@ -3065,6 +3065,27 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_3".to_string());
         v.push(MapItem::Insn(op, it));
     }
+    // AVX10.3 の bias 付き BF16→FP8（MAP5、NP）。
+    for (op, mn) in [
+        (0x74u8, "vcvtbiasbf162bf8s"),
+        (0x18, "vcvtbiasbf162hf8"),
+        (0x1B, "vcvtbiasbf162hf8s"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(true);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
     // VMOVW（EVEX.128.F3.MAP5.W0 6E/7E、scalar copy、vvvv=1111b）。
     for (op, ops, syn) in [
         (0x6Eu8, [RegX, RmX] as [OpKind; 2], "{op} {x}, {w}"),
@@ -4339,6 +4360,24 @@ fn build_map_0f38(m: &mut Model) {
         let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
         let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
         let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(true);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(0x74, it));
+    }
+    // AVX10.3 の bias 付き BF16→BF8。bias は src1 の偶数 byte、
+    // データは src2 の BF16。
+    {
+        let mut it = ex(
+            "vcvtbiasbf162bf8_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::Plain,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
         it.bcast = true;
         it.edisp = 2;
         it.wsel = Some(true);

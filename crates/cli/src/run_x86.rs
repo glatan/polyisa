@@ -6563,6 +6563,10 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbiasbf162bf8XvHvWv
+            | Insn::Vcvtbiasbf162bf8sXvHvWv
+            | Insn::Vcvtbiasbf162hf8XvHvWv
+            | Insn::Vcvtbiasbf162hf8sXvHvWv
             | Insn::Vcvtbf162bf8XvWv
             | Insn::Vcvtbf162bf8sXvWv
             | Insn::Vcvtbf162hf8XvWv
@@ -7377,6 +7381,82 @@ fn avx10_exec(
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
+        }
+        Insn::Vcvtbiasbf162bf8XvHvWv
+        | Insn::Vcvtbiasbf162bf8sXvHvWv
+        | Insn::Vcvtbiasbf162hf8XvHvWv
+        | Insn::Vcvtbiasbf162hf8sXvHvWv => {
+            let hf8 = matches!(
+                insn,
+                Insn::Vcvtbiasbf162hf8XvHvWv | Insn::Vcvtbiasbf162hf8sXvHvWv
+            );
+            let sat = matches!(
+                insn,
+                Insn::Vcvtbiasbf162bf8sXvHvWv | Insn::Vcvtbiasbf162hf8sXvHvWv
+            );
+            for i in 0..lanes16 {
+                if k >> i & 1 == 0 {
+                    out[i] = if md.evex_z { 0 } else { old[i] };
+                    continue;
+                }
+                let w = rd16(&y, i);
+                let bias = x[2 * i] as i8 as i16;
+                let sign = ((w >> 15) as u8) << 7;
+                let exp8 = i32::from((w >> 7) & 0xff);
+                let mant7 = w & 0x7f;
+                let r = if exp8 == 0xff {
+                    if mant7 != 0 {
+                        sign | if hf8 { 0x7f } else { 0x7e }
+                    } else if hf8 {
+                        sign | if sat { 0x7e } else { 0x7f }
+                    } else {
+                        sign | if sat { 0x7b } else { 0x7c }
+                    }
+                } else if exp8 == 0 {
+                    sign
+                } else if hf8 {
+                    let mut exp4 = exp8 - 120;
+                    if exp4 > 15 {
+                        sign | if sat { 0x7e } else { 0x7f }
+                    } else if exp4 >= 1 {
+                        let biased = (mant7 & 0xf) as i16 + bias;
+                        let mut mant3 = (mant7 >> 4) as i16 + (biased >> 4);
+                        if mant3 >= 8 {
+                            mant3 = 0;
+                            exp4 += 1;
+                        }
+                        if exp4 > 15 || (exp4 == 15 && mant3 == 7) {
+                            sign | if sat { 0x7e } else { 0x7f }
+                        } else {
+                            sign | (((exp4 as u8) & 0xf) << 3) | ((mant3 as u8) & 7)
+                        }
+                    } else {
+                        sign
+                    }
+                } else {
+                    let mut exp5 = exp8 - 112;
+                    if exp5 >= 31 {
+                        sign | if sat { 0x7b } else { 0x7c }
+                    } else if exp5 >= 1 {
+                        let biased = (mant7 & 0x1f) as i16 + bias;
+                        let mut mant2 = (mant7 >> 5) as i16 + (biased >> 5);
+                        if mant2 >= 4 {
+                            mant2 = 0;
+                            exp5 += 1;
+                            if exp5 >= 31 {
+                                sign | if sat { 0x7b } else { 0x7c }
+                            } else {
+                                sign | (((exp5 as u8) & 0x1f) << 2) | ((mant2 as u8) & 3)
+                            }
+                        } else {
+                            sign | (((exp5 as u8) & 0x1f) << 2) | ((mant2 as u8) & 3)
+                        }
+                    } else {
+                        sign
+                    }
+                };
+                out[i] = r;
+            }
         }
         Insn::Vcvtbf162bf8XvWv
         | Insn::Vcvtbf162bf8sXvWv
@@ -19242,6 +19322,10 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbiasbf162bf8XvHvWv
+            | Insn::Vcvtbiasbf162bf8sXvHvWv
+            | Insn::Vcvtbiasbf162hf8XvHvWv
+            | Insn::Vcvtbiasbf162hf8sXvHvWv
             | Insn::Vcvtbf162bf8XvWv
             | Insn::Vcvtbf162bf8sXvWv
             | Insn::Vcvtbf162hf8XvWv
