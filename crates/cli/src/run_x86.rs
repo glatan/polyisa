@@ -9918,6 +9918,26 @@ fn x87_positive_power2_exp(sig: u64, exp: u16) -> Option<i32> {
     (n == 1u64 << 63).then_some(e - 16383)
 }
 
+fn x87_log1p_power2_exp(sig: u64, exp: u16) -> Option<i32> {
+    if (exp & 0x7fff) == 0x7fff || sig == 0 {
+        return None;
+    }
+    let (n, e) = x87_norm_finite(sig, exp);
+    let unbiased = e - 16383;
+    let ones = n.leading_ones() as i32;
+    if n << ones != 0 {
+        return None;
+    }
+    if exp & 0x8000 == 0 {
+        // x=2^k-1 は k 個の leading one を持ち、指数は k-1。
+        (unbiased >= 0 && ones == unbiased + 1).then_some(ones)
+    } else {
+        // 負側では x=2^-k-1=-(1-2^-k)。指数 -1 で k 個の
+        // leading one を持つときだけ 1+x が 2^-k になる。
+        (unbiased == -1).then_some(-ones)
+    }
+}
+
 fn x87_scaled_int_product_exact(sig: u64, scale: i32) -> bool {
     if sig == 0 || scale == 0 {
         return true;
@@ -10192,12 +10212,19 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
                 if !(num_zero && den_positive) {
                     x87_scalar_exception_flag(env, 1 << 5);
                 }
-            } else if op == 0xF1 {
+            } else if matches!(op, 0xF1 | 0xF9) {
                 let y_zero = (e1 & 0x7fff) == 0 && s1 == 0;
                 let y_inf = (e1 & 0x7fff) == 0x7fff && s1 == 1u64 << 63;
+                let log_int = if op == 0xF1 {
+                    x87_positive_power2_exp(s0, e0)
+                } else if (e0 & 0x7fff) == 0 && s0 == 0 {
+                    Some(0)
+                } else {
+                    x87_log1p_power2_exp(s0, e0)
+                };
                 let exact = if y_zero || y_inf {
                     true
-                } else if let Some(n) = x87_positive_power2_exp(s0, e0) {
+                } else if let Some(n) = log_int {
                     let (ysig, _) = x87_norm_finite(s1, e1);
                     x87_scaled_int_product_exact(ysig, n)
                 } else {
