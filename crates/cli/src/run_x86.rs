@@ -6514,7 +6514,8 @@ fn avx10_step(
     use polyisa_guest_x86::Insn;
     if !matches!(
         md.insn,
-        Insn::VmovwXvWv
+        Insn::Vcvthf82phXvWv
+            | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv
             | Insn::Vminmaxbf16XvHvWvIb
@@ -6660,6 +6661,8 @@ fn avx10_exec(
                 } else {
                     let n = if md.insn == Insn::Vcomisbf16XvWv {
                         2
+                    } else if md.insn == Insn::Vcvthf82phXvWv {
+                        vbytes / 2
                     } else {
                         vbytes
                     };
@@ -6762,6 +6765,33 @@ fn avx10_exec(
         return Ok(());
     }
     match insn {
+        Insn::Vcvthf82phXvWv => {
+            for i in 0..lanes16 {
+                let v = y[i];
+                let sign = u16::from(v & 0x80) << 8;
+                let e = (v & 0x78) >> 3;
+                let mut m = v & 7;
+                let mut en = i32::from(e) + 8;
+                if e == 0 && m != 0 {
+                    let lz = if m > 3 {
+                        0
+                    } else if m > 1 {
+                        1
+                    } else {
+                        2
+                    };
+                    en -= lz;
+                    m = (m << (lz + 1)) & 7;
+                } else if e == 0 {
+                    en = 0;
+                } else if e == 0xf && m == 7 {
+                    en = 0x1f;
+                }
+                let h = sign | (((en as u16) & 0x1f) << 10) | (u16::from(m) << 7);
+                out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
         Insn::Vminmaxbf16XvHvWvIb => {
             for i in 0..lanes16 {
                 let a = bf_r(&x, i);
@@ -18317,6 +18347,7 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vbcstnesh2psXvWv
             | Insn::Vbcstnebf162psXvWv
             | Insn::Vcvtneps2bf16XvWv
+            | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
             | Insn::Vcomisbf16XvWv

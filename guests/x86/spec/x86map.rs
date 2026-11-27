@@ -2864,6 +2864,24 @@ fn build_map_avx10(m: &mut Model) {
         it.when = Pred::Flag("avx10_2".to_string());
         v.push(MapItem::Insn(0x51, it));
     }
+    // VCVTHF82PH（EVEX.F2.MAP5.W0 1E、半幅の E4M3 入力を FP16 へ）。
+    {
+        let mut it = ex(
+            "vcvthf82ph_xv_wv",
+            &[RegX, RmX],
+            PfxSel::PF2,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.wsel = Some(false);
+        it.when = Pred::Any(vec![
+            Pred::Flag("avx10_2".to_string()),
+            Pred::Flag("avx10_v1_aux".to_string()),
+        ]);
+        v.push(MapItem::Insn(0x1E, it));
+    }
     // VMOVW（EVEX.128.F3.MAP5.W0 6E/7E、scalar copy、vvvv=1111b）。
     for (op, ops, syn) in [
         (0x6Eu8, [RegX, RmX] as [OpKind; 2], "{op} {x}, {w}"),
