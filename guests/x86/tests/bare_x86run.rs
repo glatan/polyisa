@@ -13115,6 +13115,113 @@ fn run_x87_fistp_empty_source_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_fstp_m64_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0x1B])
+            .unwrap(); // fstp qword [rbx]
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut buf = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            u64::from_le_bytes(buf),
+        )
+    }
+    let (fsw, top, mem) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, mem), (1, 0xfff8_0000_0000_0000));
+    let (fsw, top, mem) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, mem), (0, 0));
+}
+
+#[test]
+fn run_x87_fstp_m80_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, [u8; 10]) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDB, 0x3B])
+            .unwrap(); // fstp tbyte [rbx]
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        let mut buf = [0u8; 10];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            buf,
+        )
+    }
+    let indefinite = [0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0xFF];
+    let (fsw, top, mem) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, mem), (1, indefinite));
+    let (fsw, top, mem) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, mem), (0, [0; 10]));
+}
+
+#[test]
+fn run_x87_fstp_st_empty_source_masked_and_unmasked() {
+    fn once(fcw: u16) -> (u16, u16, u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDD, 0xD9])
+            .unwrap(); // fstp st(1)
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            x87_tag(&mut env, 1),
+        )
+    }
+    let (fsw, top, sig, exp, tag) = once(0x037F);
+    assert_eq!(fsw & 0x241, 0x41);
+    assert_eq!(fsw & 0x8080, 0);
+    assert_eq!((top, sig, exp, tag), (1, 0xC000_0000_0000_0000, 0xffff, 2));
+    let (fsw, top, sig, exp, tag) = once(0x037E);
+    assert_eq!(fsw & 0x82C1, 0x80C1);
+    assert_eq!((top, sig, exp, tag), (0, 0, 0, 3));
+}
+
+#[test]
 fn run_x87_fsin_empty_source_masked_and_unmasked() {
     fn once(fcw: u16) -> (u16, u16, u64, u16) {
         let mut env = bare_x86_env();

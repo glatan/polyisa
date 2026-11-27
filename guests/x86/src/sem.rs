@@ -14360,40 +14360,37 @@ pub fn fld_m64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Fl
     push_f64(b, bits)
 }
 
+/// FSTP m80 の共通処理。source empty の masked response は
+/// floating-point indefinite を書いて pop し、unmasked では書かず pop しない。
+pub(crate) fn fstp_m80_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp, fault) = read_st_source(b, top);
+    let commit = x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        b.store::<W64>(addr, sig, DATA_WRITE)?;
+        let eight = b.konst::<W64>(8);
+        let exp_addr = b.add::<W64>(addr, eight);
+        b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
+        pop_st(b, top)
+    })
+}
+
 /// FSTP m80 [base] (DB /7 mod=00)。仮数 8 バイトと指数 2 バイトを書いて捨てる。seq 0x4d0725 対応.
 pub fn fstp_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = read64(b, base);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FSTP m80 [base+index*scale] (DB /7 SIB mod=00)。seq 0x4d0869 の (%rsp) は no_index 側.
 pub fn fstp_m80_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = sib_addr_scaled(b, shift, 0, base, idx);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FSTP m80 [base+disp32] (DB /7 SIB mod=10, no_index)。seq 0x4d0874 対応.
 pub fn fstp_m80_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = eff_addr32(b, base, disp);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FSTP m80 [base+index*scale+disp32] (DB /7 SIB mod=10)。
@@ -14404,38 +14401,20 @@ pub fn fstp_m80_sibd32<B: Backend>(
     shift: u32,
     disp: i32,
 ) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = sib_addr_scaled(b, shift, disp, base, idx);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FSTP m80 [base+disp8] (DB /7 SIB mod=01, no_index)。seq 0x4d74d7 対応.
 pub fn fstp_m80_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = eff_addr(b, base, disp);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FSTP m80 [base+index*scale+disp8] (DB /7 SIB mod=01)。
 pub fn fstp_m80_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
     let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
-    b.store::<W64>(addr, sig, DATA_WRITE)?;
-    let eight = b.konst::<W64>(8);
-    let exp_addr = b.add::<W64>(addr, eight);
-    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m80_at(b, addr)
 }
 
 /// FLD m80 [base+disp32] (DB /5 SIB mod=10, no_index)。seq 0x4d0853 対応.
@@ -14776,9 +14755,12 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let summed = b.add::<W16>(top, ii);
     let seven = b.konst::<W16>(7);
     let dst = b.and::<W16>(summed, seven);
-    let (sig, exp) = read_st(b, top);
-    write_st(b, dst, sig, exp);
-    pop_st(b, top)
+    let (sig, exp, fault) = read_st_source(b, top);
+    let commit = x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        write_st(b, dst, sig, exp);
+        pop_st(b, top)
+    })
 }
 
 /// backend 上の false 定数。
@@ -16814,24 +16796,29 @@ pub(crate) fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
     Ok(())
 }
 
+/// FSTP m64 の共通処理。empty source の masked response は
+/// indefinite NaN を変換して書き、unmasked では書かず pop しない。
+pub(crate) fn fstp_m64_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp, fault) = read_st_source(b, top);
+    let commit = x87_commit_after_fault(b, fault);
+    b.if_then(commit, |b| {
+        let bits = f80_to_f64(b, sig, exp);
+        b.store::<W64>(addr, bits, DATA_WRITE)?;
+        pop_st(b, top)
+    })
+}
+
 /// FSTP m64 [base+disp8] (DD /3 SIB mod=01, no_index)。seq 0x4d3169 対応.
 pub fn fstp_m64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
-    let bits = f80_to_f64(b, sig, exp);
     let addr = eff_addr(b, base, disp);
-    b.store::<W64>(addr, bits, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m64_at(b, addr)
 }
 
 /// FSTP m64 [base+index*scale+disp8] (DD /3 SIB mod=01)。
 pub fn fstp_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
-    let top = b.get(top_ref());
-    let (sig, exp) = read_st(b, top);
-    let bits = f80_to_f64(b, sig, exp);
     let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
-    b.store::<W64>(addr, bits, DATA_WRITE)?;
-    pop_st(b, top)
+    fstp_m64_at(b, addr)
 }
 
 /// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.
