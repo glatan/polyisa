@@ -26761,6 +26761,127 @@ fn run64_ace_mx_scale_format_corners() {
 }
 
 #[test]
+fn run64_ace_top2phps_preserves_fp16_subnormals() {
+    // FP16 min-subnormal 2^-24 は FP32 では正規数として正確に表せる。
+    // TOP2PHPS の widening は DAZ を掛けないので、1.0×2^-24 は zero に
+    // flush されず 0x33800000 になる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE
+        | polyisa_guest_x86::FEAT_ACE_OP_FP16;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    env.backend.state[core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg)] = 2;
+    // row0 の low half=1.0、col0 の low half=FP16 min-subnormal。
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(0x0000_3c00u32),
+    );
+    env.backend
+        .set(polyisa_guest_x86::sem::zreg_ref(0, 0), u128::from(1u32));
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xF2, 0x7F, 0x48, 0x5C, 0xF1, // top2phps tmm6,zmm1,zmm0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        8,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let got = u32::from_le_bytes(
+        env.backend.state[tmm_off + 6 * 1024..tmm_off + 6 * 1024 + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(got, 0x3380_0000);
+}
+
+#[test]
+fn run64_ace_mx_fixpoint_rounding_boundaries() {
+    // BF8 の fixed-point 値は integer なので、rank-4 の積和で
+    // 24-bit significand の tie/sticky 境界を厳密に構成できる。
+    // 33554432+n を 2^-32 倍すると、n=1,2,3 は偶数側 tie 境界、
+    // n=5,6,7 は奇数側 tie 境界になる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let scale_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
+    env.backend.state[tilecfg_off] = 2;
+    env.backend.state[scale_off..scale_off + 128].fill(0x7f);
+    let set32 = |env: &mut BareEnv, r: u8, lane: usize, v: u32| {
+        let part = polyisa_guest_x86::sem::zreg_ref(r, lane / 4);
+        let cur: u128 = env.backend.get(part);
+        let mut b = cur.to_le_bytes();
+        b[(lane % 4) * 4..(lane % 4) * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(part, u128::from_le_bytes(b));
+    };
+    // A: 最初の2項だけ BF8 min-subnormal（fixed-point 1）。
+    set32(&mut env, 8, 0, 0x0000_0101);
+    // B col: 0x60 は fixed-point 33554432。2項目に 1,2,3,5,6,7 を置く。
+    for (col, small) in [1u32, 2, 3, 5, 6, 7].into_iter().enumerate() {
+        set32(&mut env, 9, col, 0x60 | small << 8);
+    }
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xD3, 0x34, 0x48, 0x8D, 0xE0, 0x00, // top4mxbf8ps tmm4,zmm8,zmm9,0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        8,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let got = |col: usize| {
+        let at = tmm_off + 4 * 1024 + col * 4;
+        u32::from_le_bytes(env.backend.state[at..at + 4].try_into().unwrap())
+    };
+    assert_eq!(got(0), 0x3c00_0000, "even LSB, below tie rounds down");
+    assert_eq!(got(1), 0x3c00_0000, "even LSB, exact tie rounds down");
+    assert_eq!(got(2), 0x3c00_0001, "even LSB, above tie rounds up");
+    assert_eq!(got(3), 0x3c00_0001, "odd LSB, below tie rounds down");
+    assert_eq!(got(4), 0x3c00_0002, "odd LSB, exact tie rounds up");
+    assert_eq!(got(5), 0x3c00_0002, "odd LSB, above tie rounds up");
+}
+
+#[test]
 fn run64_ace_top1ps_unmasked_invalid_faults_before_tile_write() {
     // inf*0 は IE を立てる。IM=0 なら ACE-E7 の #XM fault で、
     // MXCSR は更新されるが tile は fault 前の値を保つ。
