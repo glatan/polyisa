@@ -28568,6 +28568,54 @@ fn run64_amx_ldtilecfg_palette0_ignores_payload() {
 }
 
 #[test]
+fn run64_amx_ldtilecfg_rejects_invalid_palette1_configs() {
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_AMX_TILE;
+    for case in 0..4 {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+        let mut cfg = [0u8; 64];
+        cfg[0] = 1;
+        cfg[16..18].copy_from_slice(&4u16.to_le_bytes());
+        cfg[48] = 1;
+        match case {
+            0 => cfg[2] = 1,   // 予約バイト
+            1 => cfg[16] = 65, // colsb > 64
+            2 => cfg[48] = 17, // rows > 16
+            _ => cfg[16] = 0,  // rows だけ非零
+        }
+        env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+        env.backend
+            .mem
+            .write(
+                VirtAddr(0x1000),
+                &[
+                    0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, // movabs rax,0x2000
+                    0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+                ],
+            )
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            10,
+            true,
+            feats,
+            &polyisa_guest_x86::model_params("x86_64"),
+        );
+        assert!(
+            matches!(out, Outcome::Unimplemented { .. }),
+            "case {case}: {out:?}"
+        );
+    }
+}
+
+#[test]
 fn run64_amx_fp8_dot() {
     // 1x1 の FP8 積和。src1 は BF8 1.0 (0x3c)、src2 は HF8 1.0 (0x38)。
     let feats = polyisa_guest_x86::model_feats("x86_64")
