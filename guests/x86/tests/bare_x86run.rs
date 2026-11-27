@@ -26609,6 +26609,78 @@ fn run64_ace_top2bf16_numeric_corners() {
 }
 
 #[test]
+fn run64_ace_mx_fp8_exceptional_values() {
+    // ACE v1 MX FP8 の exceptional value 規則。E8M0 NaN scale、
+    // FP8 NaN、Inf×0、反符号 Inf 同士の和は QNaN indefinite。
+    // 同符号 Inf は Inf のまま accumulate する。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_ACE;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_00e7);
+    let tilecfg_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+    let tmm_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let scale_off = core::mem::offset_of!(polyisa_guest_x86::CpuState, scaledata);
+    env.backend.state[tilecfg_off] = 2;
+    env.backend.state[scale_off..scale_off + 128].fill(0x7f);
+    env.backend.state[scale_off] = 0xff; // col0 の B-scale は E8M0 NaN
+    let set32 = |env: &mut BareEnv, r: u8, lane: usize, v: u32| {
+        let part = polyisa_guest_x86::sem::zreg_ref(r, lane / 4);
+        let cur: u128 = env.backend.get(part);
+        let mut b = cur.to_le_bytes();
+        b[(lane % 4) * 4..(lane % 4) * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        env.backend.set(part, u128::from_le_bytes(b));
+    };
+    // BF8: 0x3c=1.0、0x7c=+Inf、0xfc=-Inf、0x7d=NaN。
+    // A row0 は byte0/2 が 1.0、byte1/3 が 0。
+    set32(&mut env, 8, 0, 0x003c_003c);
+    set32(&mut env, 9, 0, 0x0000_003c); // scale NaN で無関係
+    set32(&mut env, 9, 1, 0x0000_007d); // NaN input
+    set32(&mut env, 9, 2, 0x0000_7c00); // byte1 Inf × A byte1 zero
+    set32(&mut env, 9, 3, 0x0000_007c); // byte0 Inf × A byte0 1.0
+    set32(&mut env, 9, 4, 0x0000_fc7c); // +Inf と -Inf の和
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x62, 0xD3, 0x34, 0x48, 0x8D, 0xE0, 0x00, // top4mxbf8ps tmm4,zmm8,zmm9,0
+                0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                0x48, 0x31, 0xFF, // xor rdi,rdi
+                0x0F, 0x05, // syscall
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let got = |col: usize| {
+        u32::from_le_bytes(
+            env.backend.state[tmm_off + 4 * 1024 + col * 4..tmm_off + 4 * 1024 + col * 4 + 4]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(got(0), 0xffc0_0000, "E8M0 NaN scale");
+    assert_eq!(got(1), 0xffc0_0000, "FP8 NaN input");
+    assert_eq!(got(2), 0xffc0_0000, "Inf times zero");
+    assert_eq!(got(3), 0x7f80_0000, "same-sign Inf product");
+    assert_eq!(got(4), 0xffc0_0000, "opposite-sign Inf sum");
+}
+
+#[test]
 fn run64_ace_top1ps_unmasked_invalid_faults_before_tile_write() {
     // inf*0 は IE を立てる。IM=0 なら ACE-E7 の #XM fault で、
     // MXCSR は更新されるが tile は fault 前の値を保つ。

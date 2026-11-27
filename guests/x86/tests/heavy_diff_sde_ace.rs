@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Intel SDE との ACE 実行差分（層: diff、E3）。
 //!
-//! ACE palette 2 の TOP2BF16PS を通る静的 ELF を作り、
-//! TILEMOVROW read で取り出した 16 行を stdout へ書く。入力には
-//! BF16 の zero/subnormal/Inf/NaN と FP32 accumulator の corner case を
-//! 混ぜ、同じ ELF を polyisa と `sde64 -future-ag` で比較する。
+//! ACE palette 2 の TOP2BF16PS/TOP4MXBSSPS を通る静的 ELF を作り、
+//! TILEMOVROW read で取り出した各行を stdout へ書く。BF16 側は
+//! SDE とドラフト pseudocode が一致する有限 normal/zero の領域に限定し、
+//! 同じ ELF を polyisa と `sde64 -future-ag` で比較する。
 //! sde64 または clang がなければスキップする。
 
 use std::path::{Path, PathBuf};
@@ -47,7 +47,21 @@ static u32 brow[16] __attribute__((aligned(64))) = {
     0x3f80bf80,0x00000000,0x20003f00,0xbf804040,
     0x12342eed,0x200077fe,0xc0003f80,0x00000000
 };
-static u32 out[256] __attribute__((aligned(64)));
+// MX INT8 の deterministic な入力。E8M0 scale は palette 2 初期値の
+// 1.0 (0x7f) を使い、整数 fixed-point と行/列/scale-group の対応を見る。
+static u32 mx_a[16] __attribute__((aligned(64))) = {
+    0x01020304,0xfefdfcf0,0x7f8040c0,0x10111213,
+    0x20212223,0x30313233,0x40414243,0x50515253,
+    0x60616263,0x70717273,0x80818283,0x90919293,
+    0xa0a1a2a3,0xb0b1b2b3,0xc0c1c2c3,0xd0d1d2d3
+};
+static u32 mx_b[16] __attribute__((aligned(64))) = {
+    0x04030201,0xf0fcfdfe,0xc040807f,0x13121110,
+    0x23222120,0x33323130,0x43424140,0x53525150,
+    0x63626160,0x73727170,0x83828180,0x93929190,
+    0xa3a2a1a0,0xb3b2b1b0,0xc3c2c1c0,0xd3d2d1d0
+};
+static u32 out[512] __attribute__((aligned(64)));
 
 void _start(void) {
     (void)sys3(158, 0x1023, 17, 0);
@@ -94,10 +108,47 @@ void _start(void) {
         "vmovdqu64 %%zmm0, 896(%4)\n\t"
         ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC1,15\n\t"
         "vmovdqu64 %%zmm0, 960(%4)\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x49,0xD8\n\t"       // tilezero tmm3
+        "vmovdqu64 (%5), %%zmm6\n\t"
+        "vmovdqu64 (%6), %%zmm7\n\t"
+        ".byte 0x62,0xF3,0x47,0x48,0x8F,0xDE,0x00\n\t" // top4mxbssps tmm3,zmm6,zmm7,0
+
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,0\n\t"
+        "vmovdqu64 %%zmm0, 1024(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,1\n\t"
+        "vmovdqu64 %%zmm0, 1088(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,2\n\t"
+        "vmovdqu64 %%zmm0, 1152(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,3\n\t"
+        "vmovdqu64 %%zmm0, 1216(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,4\n\t"
+        "vmovdqu64 %%zmm0, 1280(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,5\n\t"
+        "vmovdqu64 %%zmm0, 1344(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,6\n\t"
+        "vmovdqu64 %%zmm0, 1408(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,7\n\t"
+        "vmovdqu64 %%zmm0, 1472(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,8\n\t"
+        "vmovdqu64 %%zmm0, 1536(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,9\n\t"
+        "vmovdqu64 %%zmm0, 1600(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,10\n\t"
+        "vmovdqu64 %%zmm0, 1664(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,11\n\t"
+        "vmovdqu64 %%zmm0, 1728(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,12\n\t"
+        "vmovdqu64 %%zmm0, 1792(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,13\n\t"
+        "vmovdqu64 %%zmm0, 1856(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,14\n\t"
+        "vmovdqu64 %%zmm0, 1920(%4)\n\t"
+        ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,15\n\t"
+        "vmovdqu64 %%zmm0, 1984(%4)\n\t"
         :
-        : "r"(cfg), "r"(accrow), "r"(arow), "r"(brow), "r"(out)
+        : "r"(cfg), "r"(accrow), "r"(arow), "r"(brow), "r"(out), "r"(mx_a), "r"(mx_b)
         : "rax", "memory");
-    (void)sys3(1, 1, (long)out, 1024);
+    (void)sys3(1, 1, (long)out, 2048);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }"#;
@@ -156,7 +207,7 @@ fn poly_run(bytes: &[u8], path: &str) -> (Vec<u8>, Option<u64>) {
 }
 
 #[test]
-fn diff_sde_ace_top2bf16ps() {
+fn diff_sde_ace_outer_products() {
     if Command::new("clang").arg("--version").output().is_err() {
         eprintln!("clang がない。スキップ");
         return;
@@ -176,17 +227,22 @@ fn diff_sde_ace_top2bf16ps() {
         .output()
         .expect("sde64");
     assert!(out.status.success(), "sde status {:?}", out.status);
-    assert_eq!(out.stdout.len(), 1024, "sde stdout len");
+    assert_eq!(out.stdout.len(), 2048, "sde stdout len");
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(poly.len(), 1024, "poly stdout len");
+    assert_eq!(poly.len(), 2048, "poly stdout len");
     if poly != out.stdout {
         let mut bad = Vec::new();
-        for i in 0..256 {
+        for i in 0..512 {
             let a = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let b = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if a != b {
-                bad.push(format!("r{}c{} poly={a:08x} sde={b:08x}", i / 16, i % 16));
+                bad.push(format!(
+                    "{} r{}c{} poly={a:08x} sde={b:08x}",
+                    if i < 256 { "top2bf16ps" } else { "top4mxbssps" },
+                    (i % 256) / 16,
+                    i % 16
+                ));
             }
         }
         panic!(
