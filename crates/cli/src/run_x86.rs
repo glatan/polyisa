@@ -10307,11 +10307,10 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     match op {
         // FSIN/FCOS は ST(0) を置き換える。
         0xFE | 0xFF => {
-            let input = crate::x87_trans::ext_to_dd(s0, e0);
             let y = if op == 0xFE {
-                crate::x87_trans::sin_reduced(input)
+                crate::x87_trans::sin_reduced_ext(s0, e0)
             } else {
-                crate::x87_trans::cos_reduced(input)
+                crate::x87_trans::cos_reduced_ext(s0, e0)
             };
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
@@ -10322,7 +10321,6 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         }
         // FSINCOS は ST(0) に sin、cos を新しい ST(0) として push する。
         0xFB => {
-            let input = crate::x87_trans::ext_to_dd(s0, e0);
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
@@ -10331,11 +10329,11 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             x87_write_st(
                 env,
                 0,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::sin_reduced(input), rc),
+                crate::x87_trans::dd_to_ext(crate::x87_trans::sin_reduced_ext(s0, e0), rc),
             );
             x87_push(
                 env,
-                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced(input), rc),
+                crate::x87_trans::dd_to_ext(crate::x87_trans::cos_reduced_ext(s0, e0), rc),
             );
         }
         // F2XM1 は 2^x-1。FPTAN は tan の後に 1.0 を push する。
@@ -10350,14 +10348,13 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
             x87_write_st(env, 0, crate::x87_trans::dd_to_ext(y, rc));
         }
         0xF2 => {
-            let input = crate::x87_trans::ext_to_dd(s0, e0);
             let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());
             let rc = (fcw >> 10) & 3;
             if inexact_unary_transcendental {
                 x87_scalar_exception_flag(env, 1 << 5);
             }
-            let sin = crate::x87_trans::sin_reduced(input);
-            let cos = crate::x87_trans::cos_reduced(input);
+            let sin = crate::x87_trans::sin_reduced_ext(s0, e0);
+            let cos = crate::x87_trans::cos_reduced_ext(s0, e0);
             x87_write_st(env, 0, crate::x87_trans::dd_to_ext(sin.div(cos), rc));
             x87_push(env, x87_f64_to_ext(1.0));
         }

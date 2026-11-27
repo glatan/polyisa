@@ -412,7 +412,7 @@ mod imp {
             let disp = if op.1 == "f2xm1" {
                 (rng.next() % 16) as i32 - 16
             } else {
-                (rng.next() % 57) as i32 - 16
+                (rng.next() % 79) as i32 - 16
             };
             let input = (sig, ((0x3fff + disp) as u16) | sign);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
@@ -433,7 +433,7 @@ mod imp {
             let op = push_ops[(rng.next() % push_ops.len() as u64) as usize];
             let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
             let sig = (1u64 << 63) | rng.next();
-            let disp = (rng.next() % 57) as i32 - 16;
+            let disp = (rng.next() % 79) as i32 - 16;
             let input = (sig, ((0x3fff + disp) as u16) | sign);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
             let (h0, h1, hsw) = host_push_pair(input, op.0, fcw);

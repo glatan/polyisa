@@ -503,3 +503,170 @@ pub(crate) fn atan2_ext(ysig: u64, yexp_word: u16, xsig: u64, xexp_word: u16) ->
     let angle = if !xneg { magnitude } else { PI.sub(magnitude) };
     if yneg { angle.neg() } else { angle }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct U256([u64; 4]);
+
+impl U256 {
+    fn zero() -> Self {
+        Self([0; 4])
+    }
+
+    fn shl64(x: u64, shift: u32) -> Self {
+        let mut out = Self::zero();
+        let limb = (shift / 64) as usize;
+        let bits = shift % 64;
+        if limb < 4 {
+            out.0[limb] = x << bits;
+            if bits != 0 && limb + 1 < 4 {
+                out.0[limb + 1] = x >> (64 - bits);
+            }
+        }
+        out
+    }
+
+    fn mul_u64_u128(x: u64, y: u128) -> Self {
+        let y0 = y as u64;
+        let y1 = (y >> 64) as u64;
+        let a = u128::from(x) * u128::from(y0);
+        let b = u128::from(x) * u128::from(y1) + (a >> 64);
+        Self([a as u64, b as u64, (b >> 64) as u64, 0])
+    }
+
+    fn cmp(self, rhs: Self) -> core::cmp::Ordering {
+        for i in (0..4).rev() {
+            match self.0[i].cmp(&rhs.0[i]) {
+                core::cmp::Ordering::Equal => {}
+                ord => return ord,
+            }
+        }
+        core::cmp::Ordering::Equal
+    }
+
+    fn sub(self, rhs: Self) -> Self {
+        let mut out = [0u64; 4];
+        let mut borrow = false;
+        for i in 0..4 {
+            let (v, b1) = self.0[i].overflowing_sub(rhs.0[i]);
+            let (v, b2) = v.overflowing_sub(u64::from(borrow));
+            out[i] = v;
+            borrow = b1 || b2;
+        }
+        Self(out)
+    }
+
+    fn is_zero(self) -> bool {
+        self.0.iter().all(|v| *v == 0)
+    }
+
+    fn bit(self, pos: u32) -> bool {
+        let limb = (pos / 64) as usize;
+        limb < 4 && self.0[limb] >> (pos % 64) & 1 != 0
+    }
+
+    fn highest(self) -> Option<u32> {
+        for i in (0..4).rev() {
+            if self.0[i] != 0 {
+                return Some(i as u32 * 64 + (63 - self.0[i].leading_zeros()));
+            }
+        }
+        None
+    }
+
+    fn extract_low(self, bits: u32) -> u64 {
+        let mut out = 0u64;
+        for pos in 0..bits.min(64) {
+            if self.bit(pos) {
+                out |= 1u64 << pos;
+            }
+        }
+        out
+    }
+
+    fn extract_high53(self, top: u32) -> u64 {
+        let low = top.saturating_sub(52);
+        let mut out = 0u64;
+        for bit in 0..53u32 {
+            if self.bit(low + bit) {
+                out |= 1u64 << bit;
+            }
+        }
+        out
+    }
+}
+
+fn nearest_integer_dd(x: Dd) -> i64 {
+    let base_floor = x.hi.floor();
+    let base = base_floor as i64;
+    let frac = (x.hi - base_floor) + x.lo;
+    base + frac.round() as i64
+}
+
+fn exact_residue_pi2(sig: u64, exp_word: u16, q: u64) -> Dd {
+    // 入力は sig*2^(E-63)、x87 の π/2 近似は P68*2^-67。
+    // 両者を 2^-67 quantum の整数へそろえ、qP を正確に引く。
+    let lz = sig.leading_zeros() as i32;
+    let nsig = sig << lz;
+    let raw_exp = i32::from(exp_word & 0x7fff);
+    let effective = if raw_exp == 0 { 1 - lz } else { raw_exp - lz };
+    let unbiased = effective - 16383;
+    let shift = unbiased - 63 + 67;
+    if !(0..=96).contains(&shift) {
+        // trig の valid domain では正規入力はここへ来る。denormal や
+        // 小さい入力は q=0 側で処理する。
+        return ext_to_dd(sig, exp_word);
+    }
+    let xu = U256::shl64(nsig, shift as u32);
+    let pu = U256::mul_u64_u128(q, HW_PI2_P68);
+    let negative = xu.cmp(pu) == core::cmp::Ordering::Less;
+    let mag = if negative { pu.sub(xu) } else { xu.sub(pu) };
+    if mag.is_zero() {
+        return Dd::from_f64(0.0);
+    }
+    let Some(top) = mag.highest() else {
+        return Dd::from_f64(0.0);
+    };
+    let high_bits = top.min(52);
+    let hi_int = mag.extract_high53(top);
+    let low_pos = top - high_bits;
+    let hi = (hi_int as f64) * 2f64.powi(low_pos as i32 - 67);
+    let low_bits = top.saturating_sub(52);
+    let lo_int = mag.extract_low(low_bits);
+    let lo = (lo_int as f64) * 2f64.powi(-67);
+    let out = Dd::new(hi, lo);
+    if negative { out.neg() } else { out }
+}
+
+/// positive finite extended 入力を x87 の有限 π/2 で正確に引数削減する。
+/// 商は double-double で十分な精度で求め、剰余は整数 bit 列で計算する。
+pub(crate) fn reduce_pi2_positive_ext(sig: u64, exp_word: u16) -> (Dd, i64) {
+    let x = ext_to_dd(sig, exp_word & 0x7fff);
+    let qf = x.mul(Dd::from_f64(1.0).div(hw_pi2()));
+    let qi = nearest_integer_dd(qf);
+    if qi == 0 {
+        return (x, 0);
+    }
+    (exact_residue_pi2(sig, exp_word & 0x7fff, qi as u64), qi)
+}
+
+pub(crate) fn sin_reduced_ext(sig: u64, exp_word: u16) -> Dd {
+    let neg = exp_word & 0x8000 != 0;
+    let (r, q) = reduce_pi2_positive_ext(sig, exp_word);
+    let mag = match q.rem_euclid(4) {
+        0 => sin_small(r),
+        1 => cos_small(r),
+        2 => sin_small(r).neg(),
+        _ => cos_small(r).neg(),
+    };
+    if neg { mag.neg() } else { mag }
+}
+
+pub(crate) fn cos_reduced_ext(sig: u64, exp_word: u16) -> Dd {
+    let (r, q) = reduce_pi2_positive_ext(sig, exp_word);
+    match q.rem_euclid(4) {
+        0 => cos_small(r),
+        1 => sin_small(r).neg(),
+        2 => cos_small(r).neg(),
+        _ => sin_small(r),
+    }
+}
