@@ -3282,17 +3282,28 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
                 {
                     sys.sig_pending |= 1 << (sig - 1);
                 }
-            } else if pid > 0
-                && sys
-                    .procs
-                    .borrow()
-                    .pgid(polyisa_kernel::ProcessId(pid as u64))
-                    .is_none()
-            {
-                // 他プロセス宛ての配送はないが、存在しない
-                // pid への送信は ESRCH。
-                set64(env, Gpr(0), cx.neg(ESRCH));
-                return Some(TrapOutcome::Handled);
+            } else if pid > 0 {
+                let target = polyisa_kernel::ProcessId(pid as u64);
+                if sys.procs.borrow().pgid(target).is_none() {
+                    set64(env, Gpr(0), cx.neg(ESRCH));
+                    return Some(TrapOutcome::Handled);
+                }
+                // 実行を停めている子プロセスは scheduler に Linux 状態ごと
+                // 残っている。プロセス宛てシグナルをその pending 集合へ積み、
+                // 次に実行可能になったときの通常配送へ任せる。
+                let mut queue = sys.queue.0.borrow_mut();
+                if let Some(task) = queue
+                    .parked
+                    .iter_mut()
+                    .find(|task| task.linux.pid == target.0)
+                    && task
+                        .linux
+                        .sigacts
+                        .get(sig as usize - 1)
+                        .is_some_and(|a| a.handler > 1)
+                {
+                    task.linux.sig_pending |= 1 << (sig - 1);
+                }
             }
         }
         set64(env, Gpr(0), 0);
@@ -8447,6 +8458,32 @@ mod tests {
             .read(VirtAddr(0x100), &mut status, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(status), 9);
+    }
+
+    #[test]
+    fn kill_queues_a_handler_signal_on_the_parked_child() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x9000; // SIGUSR1
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .expect("parked child");
+        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
     }
 
     #[test]
