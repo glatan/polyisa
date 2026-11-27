@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2461);
+        assert_eq!(INSNS.len(), 2463);
     }
 
     #[test]
@@ -2917,6 +2917,7 @@ fn avx10_decode() {
     let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
     // avx10_2 の依存連鎖（avx10 → avx512f/bw/cd/dq/vl）も立てる。
     let f = FEAT_AVX10_2
+        | FEAT_AVX10_3
         | FEAT_AVX10
         | FEAT_AVX512F
         | FEAT_AVX512BW
@@ -3054,6 +3055,11 @@ fn avx10_decode() {
     // VCVTHF82PH: EVEX.F2.MAP5.W0 1E。
     let d = decode_map(&[0x62, 0xF5, 0x7F, 0x28, 0x1E, 0xC1], modes, f).unwrap();
     assert_eq!(d.insn, Insn::Vcvthf82phXvWv);
+    // AVX10.3 FP8→BF16: EVEX.F2.MAP5.W1/W0 1F。
+    let d = decode_map(&[0x62, 0xF5, 0xFF, 0x28, 0x1F, 0xC1], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvtbf82bf16XvWv);
+    let d = decode_map(&[0x62, 0xF5, 0x7F, 0x28, 0x1F, 0xC1], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvthf82bf16XvWv);
     // VMOVW: EVEX.128.F3.MAP5.W0 6E/7E scalar copy。
     let d = decode_map(&[0x62, 0xF5, 0x7E, 0x08, 0x6E, 0xC1], modes, f).unwrap();
     assert_eq!(d.insn, Insn::VmovwXvWv);

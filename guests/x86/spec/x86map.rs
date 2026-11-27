@@ -3030,6 +3030,22 @@ fn build_map_avx10(m: &mut Model) {
         ]);
         v.push(MapItem::Insn(0x1E, it));
     }
+    // AVX10.3 の FP8→BF16 exact upconvert（EVEX.F2.MAP5 1F）。
+    // W1 は E5M2、W0 は E4M3。入力は出力の半幅。
+    for (wr, mn) in [(true, "vcvtbf82bf16"), (false, "vcvthf82bf16")] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::PF2,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.wsel = Some(wr);
+        it.when = Pred::Flag("avx10_3".to_string());
+        v.push(MapItem::Insn(0x1F, it));
+    }
     // VMOVW（EVEX.128.F3.MAP5.W0 6E/7E、scalar copy、vvvv=1111b）。
     for (op, ops, syn) in [
         (0x6Eu8, [RegX, RmX] as [OpKind; 2], "{op} {x}, {w}"),

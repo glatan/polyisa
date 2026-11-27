@@ -6563,6 +6563,8 @@ fn avx10_step(
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf82bf16XvWv
+            | Insn::Vcvthf82bf16XvWv
             | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
@@ -6621,7 +6623,7 @@ fn avx10_exec(
     mode: u8,
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
-    use polyisa_softfloat::{BF16, F16, F32, F64, Rm};
+    use polyisa_softfloat::{BF16, E4M3, E5M2, F16, F32, F64, Rm};
     // AVX10.2 の VNNI/VMPSADBW は VEX 形と Insn を共有する。
     // EVEX 幅は evex_ll、VEX 幅は vex_l から決める。
     let ll = if md.evex {
@@ -6851,8 +6853,10 @@ fn avx10_exec(
                 } else {
                     let n = if md.insn == Insn::Vcomisbf16XvWv {
                         2
-                    } else if md.insn == Insn::Vcvthf82phXvWv
-                        || matches!(md.insn, Insn::Vcvttps2qqsXvWv | Insn::Vcvttps2uqqsXvWv)
+                    } else if matches!(
+                        md.insn,
+                        Insn::Vcvthf82phXvWv | Insn::Vcvtbf82bf16XvWv | Insn::Vcvthf82bf16XvWv
+                    ) || matches!(md.insn, Insn::Vcvttps2qqsXvWv | Insn::Vcvttps2uqqsXvWv)
                     {
                         vbytes / 2
                     } else {
@@ -7362,6 +7366,18 @@ fn avx10_exec(
                     en = 0x1f;
                 }
                 let h = sign | (((en as u16) & 0x1f) << 10) | (u16::from(m) << 7);
+                out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
+        Insn::Vcvtbf82bf16XvWv | Insn::Vcvthf82bf16XvWv => {
+            for i in 0..lanes16 {
+                let fp32 = if insn == Insn::Vcvtbf82bf16XvWv {
+                    E5M2::from_bits(u64::from(y[i])).to_f32(Rm::Rne).0
+                } else {
+                    E4M3::from_bits(u64::from(y[i])).to_f32(Rm::Rne).0
+                };
+                let h = fp32.to_bf16(Rm::Rne).0.bits() as u16;
                 out[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
             }
             merge16(&mut out, &old, md);
@@ -19156,6 +19172,8 @@ fn map_needs_concrete(md: &polyisa_guest_x86::MapDec) -> bool {
             | Insn::Vcvtbiasph2hf8XvHvWv
             | Insn::Vcvtbiasph2hf8sXvHvWv
             | Insn::VdpphpsXvHvWv
+            | Insn::Vcvtbf82bf16XvWv
+            | Insn::Vcvthf82bf16XvWv
             | Insn::Vcvthf82phXvWv
             | Insn::VmovwXvWv
             | Insn::VmovwWvXv
