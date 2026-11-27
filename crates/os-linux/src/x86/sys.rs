@@ -3144,7 +3144,13 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
             .is_some_and(|a| a.handler > 1)
             && task.linux.sig_mask & bit == 0;
         task.linux.sig_pending |= bit;
-        if caught_unmasked {
+        if caught_unmasked
+            && queue
+                .meta
+                .blocked()
+                .iter()
+                .any(|(id, wait)| id.0 == tid && *wait == polyisa_kernel::ThreadWait::Signal)
+        {
             queue.meta.unblock(polyisa_kernel::ThreadId(tid));
         }
         ParkedSignal::Queued
@@ -7760,6 +7766,38 @@ mod tests {
                 .blocked()
                 .iter()
                 .any(|(id, _)| id.0 == child)
+        );
+    }
+
+    #[test]
+    fn signal_to_a_child_waiting_in_wait4_does_not_requeue_it() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        sys.queue.0.borrow_mut().meta.block(
+            polyisa_kernel::ThreadId(child),
+            polyisa_kernel::ThreadWait::Child { which: -1 },
+        );
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .blocked()
+                .iter()
+                .any(|(id, wait)| id.0 == child
+                    && *wait == polyisa_kernel::ThreadWait::Child { which: -1 })
         );
     }
 
