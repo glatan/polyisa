@@ -535,7 +535,7 @@ impl V7 {
             if p.read {
                 return Disp::Fail(errno::EBADF);
             }
-            return match self.pipe_tab.write(p.id, &data) {
+            return match self.pipe_tab.write_unbounded(p.id, &data) {
                 Some(k) => Disp::Ret(k as u16),
                 None => Disp::Fail(errno::EPIPE),
             };

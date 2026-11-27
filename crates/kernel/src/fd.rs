@@ -35,6 +35,10 @@ struct Pipe {
     wr_nonblock: bool,
 }
 
+/// Linux 既定のパイプ容量。現行の syscall 層は一度に 4096 バイトまで
+/// 書くため、各 write は PIPE_BUF 以下の atomic write として扱える。
+pub const PIPE_CAPACITY: usize = 65536;
+
 /// パイプからの読み出し。
 #[derive(Debug, PartialEq, Eq)]
 pub enum PipeRead {
@@ -44,6 +48,17 @@ pub enum PipeRead {
     Eof,
     /// 書き手が残っていて、バッファが空。
     Empty,
+}
+
+/// パイプへの書き込み結果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum PipeWrite {
+    /// 書き込んだバイト数。
+    Wrote(usize),
+    /// 容量不足。PIPE_BUF 以下の write なので部分書込みはしない。
+    Full,
+    /// 読み手がいない。
+    Broken,
 }
 
 impl PipeTable {
@@ -106,8 +121,26 @@ impl PipeTable {
         }
     }
 
-    /// 書き手が読む相手を失っていれば `None`。
-    pub fn write(&mut self, id: u64, bytes: &[u8]) -> Option<usize> {
+    /// パイプへ書く。読み手喪失は `Broken`、容量不足は `Full`。
+    /// 一度の write は PIPE_BUF 以下なので、容量が足りなければ何も
+    /// 書かず atomic 性を保つ。
+    pub fn write(&mut self, id: u64, bytes: &[u8]) -> PipeWrite {
+        let Some(pipe) = self.get_mut(id) else {
+            return PipeWrite::Broken;
+        };
+        if pipe.readers == 0 {
+            return PipeWrite::Broken;
+        }
+        if bytes.len() > PIPE_CAPACITY.saturating_sub(pipe.data.len()) {
+            return PipeWrite::Full;
+        }
+        pipe.data.extend(bytes);
+        PipeWrite::Wrote(bytes.len())
+    }
+
+    /// 容量制御を持たない古い OS パーソナリティ向けの従来経路。
+    /// 読み手がいなければ `None`、それ以外は容量を見ずに書く。
+    pub fn write_unbounded(&mut self, id: u64, bytes: &[u8]) -> Option<usize> {
         let pipe = self.get_mut(id)?;
         if pipe.readers == 0 {
             return None;
@@ -1571,8 +1604,9 @@ impl FdTable {
                 }
                 let id = *id;
                 match self.pipes.borrow_mut().write(id, bytes) {
-                    Some(n) => FdWrite::Done(n),
-                    None => FdWrite::Pipe,
+                    PipeWrite::Wrote(n) => FdWrite::Done(n),
+                    PipeWrite::Full => FdWrite::Full,
+                    PipeWrite::Broken => FdWrite::Pipe,
                 }
             }
             FdTarget::PairSock { pair, end } => {

@@ -211,8 +211,8 @@ fn child_selected(parent: ProcessId, parent_pgid: Option<u64>, proc: &Proc, whic
 pub enum ThreadWait {
     /// `wait`。`which` が -1 のときはどの子でもよい。
     Child { which: i64 },
-    /// 空のパイプの読み。
-    Pipe { id: u64 },
+    /// パイプ端の待ち。`read` が真なら空の読み、偽なら満杯の書き。
+    Pipe { id: u64, read: bool },
     /// カーネル内 fd 対象の準備待ち（select/poll/epoll・accept・
     /// ソケット対の送受）。監視の中身は ABI 側の `fd_wait` が持ち、
     /// 状態変化のたびに parked 全件を再評価して解除する。
@@ -286,9 +286,16 @@ impl GuestScheduler {
     }
 
     /// そのパイプを待っているスレッドを実行可能に戻す。
-    pub fn unblock_pipe(&mut self, id: u64) {
+    /// パイプの読み側または書き側の待ちを解除する。
+    pub fn unblock_pipe(&mut self, id: u64, read: bool) {
         for thread in &mut self.threads {
-            if matches!(thread.wait, Some(ThreadWait::Pipe { id: waiting }) if waiting == id) {
+            if matches!(
+                thread.wait,
+                Some(ThreadWait::Pipe {
+                    id: waiting,
+                    read: waiting_read,
+                }) if waiting == id && waiting_read == read
+            ) {
                 thread.wait = None;
             }
         }
@@ -442,13 +449,25 @@ mod tests {
         let mut pipes = PipeTable::default();
         let id = pipes.open();
         assert_eq!(pipes.read(id, 4), PipeRead::Empty);
-        assert_eq!(pipes.write(id, b"ab"), Some(2));
+        assert_eq!(pipes.write(id, b"ab"), PipeWrite::Wrote(2));
         assert_eq!(pipes.read(id, 1), PipeRead::Bytes(b"a".to_vec()));
         pipes.close(id, false);
         assert_eq!(pipes.read(id, 4), PipeRead::Bytes(b"b".to_vec()));
         assert_eq!(pipes.read(id, 4), PipeRead::Eof);
         pipes.close(id, true);
-        assert_eq!(pipes.write(id, b"z"), None);
+        assert_eq!(pipes.write(id, b"z"), PipeWrite::Broken);
+    }
+
+    #[test]
+    fn pipe_write_is_atomic_at_the_capacity_boundary() {
+        let mut pipes = PipeTable::default();
+        let id = pipes.open();
+        let full = vec![b'x'; PIPE_CAPACITY];
+        assert_eq!(pipes.write(id, &full), PipeWrite::Wrote(PIPE_CAPACITY));
+        assert_eq!(pipes.write(id, b"z"), PipeWrite::Full);
+        assert_eq!(pipes.read(id, 4096), PipeRead::Bytes(vec![b'x'; 4096]));
+        assert_eq!(pipes.write(id, &[b'y'; 4096]), PipeWrite::Wrote(4096));
+        assert_eq!(pipes.write(id, b"z"), PipeWrite::Full);
     }
 
     #[test]

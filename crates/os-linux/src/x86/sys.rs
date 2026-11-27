@@ -102,7 +102,8 @@ pub struct Linux {
     /// 自分以外のスレッド。スケジューラと環境を共有する。
     queue: SharedQueue,
     /// 空のパイプを読もうとして待っているパイプ。
-    pipe_wait: Option<u64>,
+    /// パイプ待ちの対象と方向。真なら空の読み、偽なら満杯の書き。
+    pipe_wait: Option<(u64, bool)>,
     /// fd 準備待ち（ソケット・待ち合わせ系）の中身。
     fd_wait: Option<crate::sock::Wait>,
     /// 解けたばかりの fd 待ち。解除時に退避し、起きて再実行された
@@ -282,8 +283,11 @@ impl Linux {
             return false;
         };
         for (id, wake_r, wake_w) in self.fds.close_target(&target) {
-            if wake_r || wake_w {
-                self.wake_pipe(id);
+            if wake_r {
+                self.wake_pipe(id, true);
+            }
+            if wake_w {
+                self.wake_pipe(id, false);
             }
         }
         true
@@ -304,16 +308,16 @@ impl Linux {
         self.fds.place(newfd, t);
     }
 
-    /// そのパイプの読みを待っているスレッドを実行可能に戻す。
-    fn wake_pipe(&mut self, id: u64) {
-        self.queue.0.borrow_mut().meta.unblock_pipe(id);
+    /// そのパイプ端の待ちを実行可能に戻す。`read` は待ちの方向。
+    fn wake_pipe(&mut self, id: u64, read: bool) {
+        self.queue.0.borrow_mut().meta.unblock_pipe(id, read);
         let queue = self.queue.clone();
         for task in &mut queue.0.borrow_mut().parked {
-            if task.linux.pipe_wait == Some(id) {
+            if task.linux.pipe_wait == Some((id, read)) {
                 task.linux.pipe_wait = None;
             }
         }
-        if self.pipe_wait == Some(id) {
+        if self.pipe_wait == Some((id, read)) {
             self.pipe_wait = None;
         }
     }
@@ -719,8 +723,9 @@ impl Linux {
                 polyisa_kernel::ThreadWait::Child { which } => {
                     eprintln!("run: pid {} waits for child {which}", id.0);
                 }
-                polyisa_kernel::ThreadWait::Pipe { id: pipe } => {
-                    eprintln!("run: pid {} waits for pipe {pipe}", id.0);
+                polyisa_kernel::ThreadWait::Pipe { id: pipe, read } => {
+                    let dir = if read { "read" } else { "write" };
+                    eprintln!("run: pid {} waits for pipe {pipe} {dir}", id.0);
                 }
                 polyisa_kernel::ThreadWait::Fd => {
                     eprintln!("run: pid {} waits for fd readiness", id.0);
@@ -2019,6 +2024,7 @@ fn pipe_read(
             if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
                 return Some(TrapOutcome::Unimplemented);
             }
+            sys.wake_pipe(end.0, false);
             set64(env, Gpr(0), bytes.len() as u64);
             Some(TrapOutcome::Handled)
         }
@@ -2041,10 +2047,13 @@ fn pipe_read(
             if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), true) {
                 return Some(TrapOutcome::Handled);
             }
-            sys.pipe_wait = Some(end.0);
+            sys.pipe_wait = Some((end.0, true));
             sys.queue.0.borrow_mut().meta.block(
                 polyisa_kernel::ThreadId(id.0),
-                polyisa_kernel::ThreadWait::Pipe { id: end.0 },
+                polyisa_kernel::ThreadWait::Pipe {
+                    id: end.0,
+                    read: true,
+                },
             );
             Some(TrapOutcome::Blocked)
         }
@@ -2079,12 +2088,40 @@ fn pipe_write(
     }
     let wrote = sys.fds.pipes().borrow_mut().write(end.0, &chunk);
     match wrote {
-        None => {
+        polyisa_kernel::PipeWrite::Broken => {
+            if let Some(out) = raise_sigpipe(sys) {
+                return Some(out);
+            }
             set64(env, Gpr(0), cx.neg(EPIPE));
             Some(TrapOutcome::Handled)
         }
-        Some(n) => {
-            sys.wake_pipe(end.0);
+        polyisa_kernel::PipeWrite::Full => {
+            if sys.fds.pipes().borrow().nonblock(end.0, false) {
+                set64(env, Gpr(0), cx.neg(EAGAIN));
+                return Some(TrapOutcome::Handled);
+            }
+            sys.pipe_wait = None;
+            let id = sys.ensure_self();
+            sys.queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock(polyisa_kernel::ThreadId(id.0));
+            if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), true) {
+                return Some(TrapOutcome::Handled);
+            }
+            sys.pipe_wait = Some((end.0, false));
+            sys.queue.0.borrow_mut().meta.block(
+                polyisa_kernel::ThreadId(id.0),
+                polyisa_kernel::ThreadWait::Pipe {
+                    id: end.0,
+                    read: false,
+                },
+            );
+            Some(TrapOutcome::Blocked)
+        }
+        polyisa_kernel::PipeWrite::Wrote(n) => {
+            sys.wake_pipe(end.0, true);
             set64(env, Gpr(0), n as u64);
             Some(TrapOutcome::Handled)
         }
@@ -2351,6 +2388,9 @@ fn fd_write_other(
             Some(TrapOutcome::Handled)
         }
         FdWrite::Pipe => {
+            if let Some(out) = raise_sigpipe(sys) {
+                return Some(out);
+            }
             set64(env, Gpr(0), cx.neg(EPIPE));
             Some(TrapOutcome::Handled)
         }
@@ -3284,6 +3324,20 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
     outcome
 }
 
+/// write 系で発生した SIGPIPE を現在のスレッドへ送る。
+/// 既定動作の終了が即時必要ならその outcome を返し、それ以外は
+/// syscall が EPIPE を返せるようにする。
+fn raise_sigpipe(sys: &mut Linux) -> Option<TrapOutcome> {
+    const SIGPIPE: u64 = 13;
+    if !send_signal_to_current(sys, SIGPIPE)
+        && !signal_is_ignored(sys, SIGPIPE)
+        && signal_default_terminates(SIGPIPE)
+    {
+        return Some(sys.terminate_by_signal(SIGPIPE as u32));
+    }
+    None
+}
+
 fn send_signal_to_current(sys: &mut Linux, sig: u64) -> bool {
     if signal_is_pending_target(sys, sig) {
         sys.sig_pending |= 1 << (sig - 1);
@@ -3735,6 +3789,7 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             match got {
                 polyisa_kernel::PipeRead::Bytes(bytes) => {
                     let n = bytes.len();
+                    sys.wake_pipe(end.0, false);
                     let w = match out_fd {
                         1 => sys.write_fd1(&bytes),
                         _ => std::io::Write::write(&mut std::io::stderr(), &bytes).unwrap_or(0),
@@ -3751,10 +3806,13 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
                         break;
                     }
                     let id = sys.ensure_self();
-                    sys.pipe_wait = Some(end.0);
+                    sys.pipe_wait = Some((end.0, true));
                     sys.queue.0.borrow_mut().meta.block(
                         polyisa_kernel::ThreadId(id.0),
-                        polyisa_kernel::ThreadWait::Pipe { id: end.0 },
+                        polyisa_kernel::ThreadWait::Pipe {
+                            id: end.0,
+                            read: true,
+                        },
                     );
                     return Some(TrapOutcome::Blocked);
                 }
@@ -5001,8 +5059,11 @@ fn install_exec(
         wakes.extend(sys.fds.close_target(t));
     }
     for (id, wake_r, wake_w) in wakes {
-        if wake_r || wake_w {
-            sys.wake_pipe(id);
+        if wake_r {
+            sys.wake_pipe(id, true);
+        }
+        if wake_w {
+            sys.wake_pipe(id, false);
         }
     }
     Ok(())
@@ -9075,10 +9136,10 @@ mod tests {
                 .iter_mut()
                 .find(|task| task.linux.pid == child)
                 .expect("parked child");
-            task.linux.pipe_wait = Some(7);
+            task.linux.pipe_wait = Some((7, true));
             queue.meta.block(
                 polyisa_kernel::ThreadId(child),
-                polyisa_kernel::ThreadWait::Pipe { id: 7 },
+                polyisa_kernel::ThreadWait::Pipe { id: 7, read: true },
             );
         }
         set64(&mut env, Gpr(0), abi::KILL);
@@ -9117,6 +9178,144 @@ mod tests {
         set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+    }
+
+    #[test]
+    fn nonblock_pipe_write_to_a_full_pipe_returns_eagain() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE2);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o4000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut fds = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x104), &mut fds, data_access())
+            .unwrap();
+        let write_fd = u32::from_le_bytes(fds);
+        let id = match sys.fd_target(write_fd) {
+            Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
+            other => panic!("unexpected pipe write target: {other:?}"),
+        };
+        let fill = vec![b'x'; polyisa_kernel::PIPE_CAPACITY];
+        assert_eq!(
+            sys.fds.pipes().borrow_mut().write(id, &fill),
+            polyisa_kernel::PipeWrite::Wrote(polyisa_kernel::PIPE_CAPACITY)
+        );
+        env.backend.mem.write(VirtAddr(0x400), b"z").unwrap();
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), write_fd as u64);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+    }
+
+    #[test]
+    fn pipe_write_interrupted_without_sa_restart_returns_eintr_after_handler() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x104), &mut fds, data_access())
+            .unwrap();
+        let write_fd = u32::from_le_bytes(fds);
+        let id = match sys.fd_target(write_fd) {
+            Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
+            other => panic!("unexpected pipe write target: {other:?}"),
+        };
+        let fill = vec![b'x'; polyisa_kernel::PIPE_CAPACITY];
+        assert_eq!(
+            sys.fds.pipes().borrow_mut().write(id, &fill),
+            polyisa_kernel::PipeWrite::Wrote(polyisa_kernel::PIPE_CAPACITY)
+        );
+        env.backend.mem.write(VirtAddr(0x400), b"z").unwrap();
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), write_fd as u64);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x302);
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    fn close_pipe_reader_and_write(sys: &mut Linux, env: &mut BareEnv) -> u32 {
+        use crate::x86_64 as abi;
+        set64(env, Gpr(0), abi::PIPE);
+        set64(env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        set64(env, Gpr(0), abi::CLOSE);
+        set64(env, Gpr(7), read_fd as u64);
+        assert!(matches!(sys.handle_trap(env, 0), TrapOutcome::Handled));
+        env.backend.mem.write(VirtAddr(0x400), b"z").unwrap();
+        set64(env, Gpr(0), abi::WRITE);
+        set64(env, Gpr(7), write_fd as u64);
+        set64(env, Gpr(6), 0x400);
+        set64(env, Gpr(2), 1);
+        write_fd
+    }
+
+    #[test]
+    fn pipe_write_without_a_reader_terminates_on_default_sigpipe() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        close_pipe_reader_and_write(&mut sys, &mut env);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0),
+            TrapOutcome::Exit(13)
+        ));
+    }
+
+    #[test]
+    fn pipe_write_without_a_reader_returns_epipe_when_sigpipe_is_ignored() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[12].handler = 1;
+        close_pipe_reader_and_write(&mut sys, &mut env);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPIPE));
+        assert_eq!(sys.sig_pending & (1 << 12), 0);
+    }
+
+    #[test]
+    fn pipe_write_without_a_reader_keeps_blocked_sigpipe_pending() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sig_mask = 1 << 12;
+        close_pipe_reader_and_write(&mut sys, &mut env);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPIPE));
+        assert_ne!(sys.sig_pending & (1 << 12), 0);
     }
 
     #[test]
