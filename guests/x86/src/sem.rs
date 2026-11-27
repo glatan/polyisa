@@ -15957,7 +15957,7 @@ pub(crate) fn add_ext_nan<B: Backend>(
     let (sig_nb, eb_eff) = x87_normalize_denormal_operand(b, sig_b, eb);
 
     let exp_gt = b.cmp::<W64>(Cmp::GtS, ea_eff, eb_eff);
-    let exp_eq = b.cmp::<W64>(Cmp::Eq, ea, eb);
+    let exp_eq = b.cmp::<W64>(Cmp::Eq, ea_eff, eb_eff);
     let sig_ge = b.cmp::<W64>(Cmp::GeU, sig_na, sig_nb);
     let eq_and_ge = bit_and(b, exp_eq, sig_ge);
     let a_is_big = bit_or(b, exp_gt, eq_and_ge);
