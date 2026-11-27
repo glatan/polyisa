@@ -10225,7 +10225,9 @@ pub fn fld_const<B: Backend>(b: &mut B, which: u8) -> Flow<B> {
     sem::push_ext(b, s, e)
 }
 
-/// FSQRT。80 ビットを倍精度に落として平方根し戻す（精度は倍精度近似）。
+/// FSQRT。有限正数は 128 ビット整数平方根から 64 ビット仮数へ丸める。
+/// denormal 入力は正規化して扱い、NaN・無限大・符号付き零と負数の
+/// invalid operation を x87 の規則にそろえる。
 pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp, fault) = sem::read_st_source(b, top);
@@ -10240,34 +10242,97 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 Ok(())
             },
             |b| {
-                // 負の非零・非 NaN 入力は invalid operation。結果 NaN は
-                // 既存の host f64 経路に任せ、ここでは例外フラグだけ立てる。
-                let e64 = b.zext::<W16, W64>(exp);
-                let z64 = b.konst::<W64>(0);
-                let one64 = b.konst::<W64>(1);
-                let s15 = b.konst::<W64>(15);
-                let sign = b.shr_l::<W64>(e64, s15);
-                let neg = b.cmp::<W64>(Cmp::Eq, sign, one64);
+                let zero = b.konst::<W64>(0);
+                let one = b.konst::<W64>(1);
                 let mask15 = b.konst::<W64>(0x7fff);
-                let ea = b.and::<W64>(e64, mask15);
-                let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
-                let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, z64);
+                let special = mask15;
+                let s15 = b.konst::<W64>(15);
+                let bias = b.konst::<W64>(16383);
+                let int_bit = b.konst::<W64>(1u64 << 63);
+                let exp64 = b.zext::<W16, W64>(exp);
+                let ea = b.and::<W64>(exp64, mask15);
+                let sign = b.shr_l::<W64>(exp64, s15);
+                let neg = b.cmp::<W64>(Cmp::Eq, sign, one);
+                let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, zero);
+                let sig_zero = b.cmp::<W64>(Cmp::Eq, sig, zero);
+                let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, zero);
                 let is_zero = sem::bit_and(b, exp_zero, sig_zero);
+                let denormal = sem::bit_and(b, exp_zero, sig_nz);
+                sem::x87_exception_flag(b, denormal, 1 << 1);
+                let sp = b.cmp::<W64>(Cmp::Eq, ea, special);
                 let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
                 let frac = b.and::<W64>(sig, frac_mask);
-                let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, z64);
-                let sp = b.cmp::<W64>(Cmp::Eq, ea, mask15);
+                let frac_nz = b.cmp::<W64>(Cmp::Ne, frac, zero);
+                let frac_z = sem::bit_not(b, frac_nz);
                 let is_nan = sem::bit_and(b, sp, frac_nz);
+                let is_inf = sem::bit_and(b, sp, frac_z);
                 let nonzero = sem::bit_not(b, is_zero);
                 let not_nan = sem::bit_not(b, is_nan);
                 let neg_nonzero = sem::bit_and(b, neg, nonzero);
                 let invalid = sem::bit_and(b, neg_nonzero, not_nan);
                 sem::x87_exception_flag(b, invalid, 1);
-                let v = sem::f80_to_f64(b, sig, exp);
-                let f = b.trunc::<W64, polyisa_sem::F64>(v);
-                let r = b.fsqrt::<polyisa_sem::F64>(f);
-                let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
-                let (sr, er) = sem::f64_to_ext(b, r64);
+
+                // sqrt(sig * 2^u) を整数平方根で求める。u が偶数なら
+                // sqrt(sig << 63)、奇数なら sqrt(sig << 64) が目的の
+                // 64 ビット仮数になる。指数は floor(u/2)+bias。
+                let (sig_norm, ea_eff) = sem::x87_normalize_denormal_operand(b, sig, ea);
+                let unb = b.sub::<W64>(ea_eff, bias);
+                let odd_bit = b.and::<W64>(unb, one);
+                let odd = b.cmp::<W64>(Cmp::Eq, odd_bit, one);
+                let k63 = b.konst::<W64>(63);
+                let k64 = b.konst::<W64>(64);
+                let nshift = b.select::<W64>(odd, k64, k63);
+                let sig128 = b.zext::<W64, W128>(sig_norm);
+                let nshift128 = b.zext::<W64, W128>(nshift);
+                let n = b.shl::<W128>(sig128, nshift128);
+                let root = sem::isqrt128_floor(b, n);
+                let root128 = b.zext::<W64, W128>(root);
+                let root_sq = b.mul::<W128>(root128, root128);
+                let low_diff = b.sub::<W128>(n, root_sq);
+                let z128 = b.konst::<W128>(0);
+                let inexact128 = b.cmp::<W128>(Cmp::Ne, low_diff, z128);
+                let root_plus = b.add::<W64>(root, one);
+                let root_plus128 = b.zext::<W64, W128>(root_plus);
+                let plus_sq = b.mul::<W128>(root_plus128, root_plus128);
+                let high_diff = b.sub::<W128>(plus_sq, n);
+                let high_closer = b.cmp::<W128>(Cmp::LtU, high_diff, low_diff);
+                let tie = b.cmp::<W128>(Cmp::Eq, high_diff, low_diff);
+                let lsb = b.and::<W64>(root, one);
+                let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
+                let tie_up = sem::bit_and(b, tie, lsb_set);
+                let nearest_up0 = sem::bit_or(b, high_closer, tie_up);
+                let nearest_up = sem::bit_and(b, nearest_up0, inexact128);
+
+                let fcw = b.get(sem::fcw_ref());
+                let fcw64 = b.zext::<W16, W64>(fcw);
+                let ten = b.konst::<W64>(10);
+                let three = b.konst::<W64>(3);
+                let rc0 = b.shr_l::<W64>(fcw64, ten);
+                let rc = b.and::<W64>(rc0, three);
+                let two = b.konst::<W64>(2);
+                let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
+                let ceil_up = sem::bit_and(b, ceil, inexact128);
+                let do_up = sem::bit_or(b, nearest_up, ceil_up);
+                sem::x87_exception_flag(b, inexact128, 1 << 5);
+
+                let root_inc = b.select::<W64>(do_up, root_plus, root);
+                let root_carry = b.cmp::<W64>(Cmp::Eq, root_inc, zero);
+                let root_fin = b.select::<W64>(root_carry, int_bit, root_inc);
+                let half = b.shr_a::<W64>(unb, one);
+                let out_e0 = b.add::<W64>(half, bias);
+                let carry_v = b.select::<W64>(root_carry, one, zero);
+                let out_e = b.add::<W64>(out_e0, carry_v);
+                // 特殊値と zero を優先し、有限正数だけ整数平方根の結果を使う。
+                let inf_sig = b.select::<W64>(is_inf, int_bit, root_fin);
+                let inf_exp = b.select::<W64>(is_inf, special, out_e);
+                let zero_sig = b.select::<W64>(is_zero, sig, inf_sig);
+                let zero_exp64 = b.select::<W64>(is_zero, exp64, inf_exp);
+                let bad_nan = sem::bit_or(b, is_nan, invalid);
+                let final_sig = b.select::<W64>(bad_nan, indef_sig, zero_sig);
+                let indef_exp64 = b.konst::<W64>(0xffff);
+                let exp_word64 = b.select::<W64>(bad_nan, indef_exp64, zero_exp64);
+                let exp_word = b.trunc::<W64, W16>(exp_word64);
+                let (sr, er) = sem::x87_apply_precision(b, final_sig, exp_word);
                 sem::write_st(b, top, sr, er);
                 Ok(())
             },

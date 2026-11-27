@@ -15031,6 +15031,21 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     (sig_pc, b.trunc::<W64, W16>(exp64_out))
 }
 
+/// u128 の floor square root を 64 ビットで返す。入力は 2^128 未満、
+/// 出力は 2^64 未満に収まる。ビットごとの試行なので除算は使わない。
+pub(crate) fn isqrt128_floor<B: Backend>(b: &mut B, n: B::V<W128>) -> B::V<W64> {
+    let mut res = b.konst::<W64>(0);
+    for bit in (0..64).rev() {
+        let bitv = b.konst::<W64>(1u64 << bit);
+        let cand = b.or::<W64>(res, bitv);
+        let cand128 = b.zext::<W64, W128>(cand);
+        let sq = b.mul::<W128>(cand128, cand128);
+        let le = b.cmp::<W128>(Cmp::LeU, sq, n);
+        res = b.select::<W64>(le, cand, res);
+    }
+    res
+}
+
 /// 有限の 80 ビット入力を乗算・除算の内部で使う正規形へ直す。
 /// 指数 0 の非零 denormal だけを扱い、正規化後の指数は符号付き整数として
 /// u64 の2の補数に乗せる。zero・unsupported/unnormal・special は呼び出し側が

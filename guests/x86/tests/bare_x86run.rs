@@ -14258,6 +14258,51 @@ fn run_x87_frndint_rounds_tiny_denormal_by_fcw() {
 }
 
 #[test]
+fn run_x87_fsqrt_uses_extended_precision_integer_sqrt() {
+    fn once(sig: u64, exp: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFA]) // fsqrt
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // sqrt(2) を 64 ビット仮数へ最近接偶数丸めした値。host f64 を
+    // 経由すると下位 11 ビットが落ちてこの値にならない。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0x4000);
+    assert_eq!((sig, exp), (0xB504_F333_F9DE_6484, 0x3fff));
+    assert_ne!(fsw & (1 << 5), 0);
+    // sqrt(4) は exact。PE は立たない。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0x4001);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x4000));
+    assert_eq!(fsw & (1 << 5), 0);
+    // 最小 denormal の平方根は sqrt(2) * 2^-8223。DE と PE が立つ。
+    let (sig, exp, fsw) = once(1, 0);
+    assert_eq!((sig, exp), (0xB504_F333_F9DE_6484, 0x1fe0));
+    assert_ne!(fsw & (1 << 1), 0);
+    assert_ne!(fsw & (1 << 5), 0);
+    // -1 は invalid operation で x87 indefinite。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0xbfff);
+    assert_eq!((sig, exp), (0xC000_0000_0000_0000, 0xffff));
+    assert_ne!(fsw & 1, 0);
+}
+
+#[test]
 fn run_x87_inexact_result_sets_precision_flag() {
     fn once(sig1: u64, exp1: u16) -> u16 {
         let mut env = bare_x86_env();
