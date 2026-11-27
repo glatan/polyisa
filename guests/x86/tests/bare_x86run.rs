@@ -28205,6 +28205,69 @@ fn run64_amx_fp16_split_partial_sums() {
 }
 
 #[test]
+fn run64_amx_complex_fp16_real_imag() {
+    // (1+2i)*(3+4i): real=-5、imag=10。complex FP16 は B を
+    // row-major complex number として読み、結果は real/imag の2命令に分かれる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_COMPLEX;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 2, Perms::RW).unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    for (i, (colsb, rows)) in [(4u16, 1u8), (4, 1), (4, 1), (4, 1)].iter().enumerate() {
+        cfg[16 + 2 * i..18 + 2 * i].copy_from_slice(&colsb.to_le_bytes());
+        cfg[48 + i] = *rows;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    let a = u32::from(0x3c00u16) | u32::from(0x4000u16) << 16; // 1+2i
+    let b = u32::from(0x4200u16) | u32::from(0x4400u16) << 16; // 3+4i
+    env.backend
+        .mem
+        .write(VirtAddr(0x2100), &a.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2110), &b.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x78, 0x49, 0x00, 0x48, 0xBE, 0x00,
+        0x21, 0, 0, 0, 0, 0, 0, 0x48, 0x31, 0xFF, 0xC4, 0xE2, 0x7B, 0x4B, 0x0C,
+        0x3E, // tileloadd (%rsi,%rdi),tmm1
+        0x48, 0xBE, 0x10, 0x21, 0, 0, 0, 0, 0, 0, 0xC4, 0xE2, 0x79, 0x4B, 0x14,
+        0x3E, // tileloaddt1 (%rsi,%rdi),tmm2
+        0xC4, 0xE2, 0x68, 0x6C, 0xC1, // tcmmrlfp16ps %tmm2,%tmm1,%tmm0
+        0xC4, 0xE2, 0x69, 0x6C, 0xD9, // tcmmimfp16ps %tmm2,%tmm1,%tmm3
+        0x48, 0xC7, 0xC0, 0x3C, 0, 0, 0, 0x48, 0x31, 0xFF, 0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let tmm = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+    let real = u32::from_le_bytes(env.backend.state[tmm..tmm + 4].try_into().unwrap());
+    let imag = u32::from_le_bytes(
+        env.backend.state[tmm + 3 * 1024..tmm + 3 * 1024 + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(real, (-5.0f32).to_bits());
+    assert_eq!(imag, 10.0f32.to_bits());
+}
+
+#[test]
 fn run64_amx_avx512_tilemovrow_palette1() {
     // AMX-AVX512-only では SCALEDATA(XCR0[20]) なしで palette 1 の
     // TILEMOVROW read を実行できる。行は colsb stride で読み、

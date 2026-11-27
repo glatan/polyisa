@@ -11744,9 +11744,11 @@ fn amx_tile_exec(
                             st[dcell..dcell + 4].copy_from_slice(&bits.to_le_bytes());
                         }
                         _ => {
-                            // 複素 FP16: dword 対の実・虚で f32 に拡張して積和する。
-                            let mut acc =
-                                f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            // 複素 FP16 も partial sum を2本に分ける。実部は
+                            // re*re と (-im)*im、虚部は im*re と re*im を独立に
+                            // fused multiply-add し、最後に2本を足してから C へ加える。
+                            let mut even = 0.0f32;
+                            let mut odd = 0.0f32;
                             for kk in 0..k {
                                 let aw = u32::from_le_bytes(
                                     st[tile_cell(st, s1, m) + 4 * kk
@@ -11760,17 +11762,28 @@ fn amx_tile_exec(
                                         .try_into()
                                         .unwrap(),
                                 );
-                                let (a_re, a_im) =
-                                    (f16_to_f32(aw as u16), f16_to_f32((aw >> 16) as u16));
-                                let (b_re, b_im) =
-                                    (f16_to_f32(bw as u16), f16_to_f32((bw >> 16) as u16));
+                                let a_re = f16_to_f32(aw as u16);
+                                let a_im = f16_to_f32((aw >> 16) as u16);
+                                let b_re = f16_to_f32(bw as u16);
+                                let b_im = f16_to_f32((bw >> 16) as u16);
                                 if insn == Insn::Tcmmrlfp16ps {
-                                    acc += a_re * b_re - a_im * b_im;
+                                    even = a_re.mul_add(b_re, even);
+                                    odd = (-a_im).mul_add(b_im, odd);
                                 } else {
-                                    acc += a_re * b_im + a_im * b_re;
+                                    even = a_im.mul_add(b_re, even);
+                                    odd = a_re.mul_add(b_im, odd);
                                 }
                             }
-                            st[dcell..dcell + 4].copy_from_slice(&acc.to_le_bytes());
+                            let pair_sum = even + odd;
+                            let acc0 = f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            let out = acc0 + pair_sum;
+                            let bits = out.to_bits();
+                            let bits = if bits & 0x7fff_ffff != 0 && bits & 0x7f80_0000 == 0 {
+                                bits & 0x8000_0000
+                            } else {
+                                bits
+                            };
+                            st[dcell..dcell + 4].copy_from_slice(&bits.to_le_bytes());
                         }
                     }
                 }
