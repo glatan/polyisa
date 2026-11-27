@@ -338,7 +338,7 @@ mod imp {
             let disp = if op.1 == "f2xm1" {
                 (rng.next() % 16) as i32 - 16
             } else {
-                (rng.next() % 25) as i32 - 16
+                (rng.next() % 57) as i32 - 16
             };
             let input = (sig, ((0x3fff + disp) as u16) | sign);
             let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
