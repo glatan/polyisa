@@ -15264,15 +15264,10 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let k40 = b.konst::<W64>(40);
     let k11 = b.konst::<W64>(11);
     let drop_pc = b.select::<W64>(pc24, k40, k11);
-    // denormal では先頭の zero bits は精度に寄与しない。正規数と同じ
-    // drop 幅を使うと、leading zero を含む 64 ビット幅で数えてしまい、
-    // 指定された significant bits より余分に削る。exponent 0 の非零値は
-    // clz 分だけ drop を縮め、負になるときは丸めない。
-    let lz = clz64(b, sig_in);
-    let drop_sub = b.sub::<W64>(drop_pc, lz);
-    let drop_pos = b.cmp::<W64>(Cmp::GtS, drop_sub, zero);
-    let drop_den = b.select::<W64>(drop_pos, drop_sub, zero);
-    let drop_pc_eff = b.select::<W64>(exp_zero, drop_den, drop_pc);
+    // precision control は extended significand の integer bit 位置を
+    // 基準にした桁数を削る。denormal の leading zero もその桁位置に
+    // 含まれるため、exponent 0 でも drop 幅は正規数と同じである。
+    let drop_pc_eff = drop_pc;
     let drop = b.select::<W64>(active, drop_pc_eff, one);
     let sh_round = b.sub::<W64>(drop, one);
     let one_sh = b.shl::<W64>(one, drop);
@@ -15294,6 +15289,17 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let low_nz = b.cmp::<W64>(Cmp::Ne, low, zero);
     let inexact = bit_and(b, low_nz, active);
     x87_exception_flag(b, inexact, 1 << 5);
+    // precision control の丸めで精度を失う true denormal は tiny かつ
+    // inexact なので underflow も報告する。exponent 0 で integer bit を
+    // 持つ pseudo-denormal は数値として最小正規数側なので対象外である。
+    let ibit_pc = b.konst::<W64>(1u64 << 63);
+    let ibit_set0 = b.and::<W64>(sig_in, ibit_pc);
+    let ibit_clear = b.cmp::<W64>(Cmp::Eq, ibit_set0, zero);
+    let sig_nonzero_pc = b.cmp::<W64>(Cmp::Ne, sig_in, zero);
+    let true_den0 = bit_and(b, exp_zero, sig_nonzero_pc);
+    let true_den = bit_and(b, true_den0, ibit_clear);
+    let den_unf = bit_and(b, true_den, inexact);
+    x87_exception_flag(b, den_unf, 1 << 4);
 
     let max64 = b.konst::<W64>(u64::MAX);
     let inv_mask = b.xor::<W64>(max64, low_mask);
