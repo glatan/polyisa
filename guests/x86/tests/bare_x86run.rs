@@ -13744,6 +13744,36 @@ fn run_x87_unsupported_format_invalid_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_pseudo_denormal_uses_exponent_one() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1800);
+    env.backend
+        .set(polyisa_guest_x86::sem::fcw_ref(), 0x037Fu16);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    // exponent 0 / integer bit 1 の pseudo-denormal は、387 以降では
+    // exponent 1 の denormal として扱う。2 倍すれば exponent 2 になる。
+    x87_seed_valid(&mut env, 0, 0x8000_0000_0000_0000, 0);
+    x87_seed_valid(&mut env, 1, 0x8000_0000_0000_0000, 0x4000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0xC9]) // fmul st(0),st(1)
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        0x8000_0000_0000_0000
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 2);
+    let fsw = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & 2, 0);
+    assert_eq!(fsw & 0x10, 0);
+}
+
+#[test]
 fn run_x87_fucomi_unsupported_format_is_invalid_even_when_unordered() {
     let mut env = bare_x86_env();
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
