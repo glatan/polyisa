@@ -1060,7 +1060,7 @@ impl Linux {
             self.close_fd(3 + idx as u32);
         }
         self.procs.borrow_mut().kill(me, sig);
-        notify_parent_sigchld(self, me, false);
+        finish_child_exit(self, me);
         self.queue
             .0
             .borrow_mut()
@@ -2895,7 +2895,7 @@ fn sys_exit(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     if sys.pid != 0 {
         let me = polyisa_kernel::ProcessId(sys.pid);
         sys.procs.borrow_mut().exit(me, code);
-        notify_parent_sigchld(sys, me, false);
+        finish_child_exit(sys, me);
     }
     Some(TrapOutcome::Exit(code))
 }
@@ -3403,10 +3403,40 @@ fn notify_parent_sigchld(sys: &mut Linux, child: polyisa_kernel::ProcessId, job_
     }
 }
 
+/// 親の SIGCHLD 動作が子を自動回収するなら、終了した子を表から外す。
+/// Linux では SA_NOCLDWAIT だけでなく SIGCHLD=SIG_IGN も同じ効果を持つ。
+fn autoreap_child_if_configured(sys: &mut Linux, child: polyisa_kernel::ProcessId) {
+    let Some(parent) = sys.procs.borrow().parent_of(child) else {
+        return;
+    };
+    let act = if parent.0 == sys.pid {
+        sys.sigacts.get(16).copied()
+    } else {
+        sys.queue
+            .0
+            .borrow()
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == parent.0)
+            .and_then(|task| task.linux.sigacts.get(16).copied())
+    };
+    let autoreap =
+        act.is_some_and(|act| act.handler == 1 || act.flags & crate::x86::SA_NOCLDWAIT != 0);
+    if autoreap {
+        sys.procs.borrow_mut().discard(child);
+    }
+}
+
+/// 子プロセスの終了通知と、親の設定による自動回収を行う。
+fn finish_child_exit(sys: &mut Linux, child: polyisa_kernel::ProcessId) {
+    notify_parent_sigchld(sys, child, false);
+    autoreap_child_if_configured(sys, child);
+}
+
 /// parked な対象プロセスをシグナル死因として終了させる。
 fn terminate_parked_by_signal(sys: &mut Linux, target: polyisa_kernel::ProcessId, sig: u64) {
     sys.procs.borrow_mut().kill(target, sig as u32);
-    notify_parent_sigchld(sys, target, false);
+    finish_child_exit(sys, target);
     sys.queue
         .0
         .borrow_mut()
@@ -3869,7 +3899,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
             continue;
         }
         sys.procs.borrow_mut().kill(target, SIGKILL as u32);
-        notify_parent_sigchld(sys, target, false);
+        finish_child_exit(sys, target);
         sys.queue
             .0
             .borrow_mut()
@@ -10619,6 +10649,33 @@ mod tests {
         let child = polyisa_kernel::ProcessId(get64(&mut env, Gpr(0)));
         terminate_parked_by_signal(&mut sys, child, 9);
         assert_ne!(sys.sig_pending & (1 << 16), 0);
+    }
+
+    #[test]
+    fn sigchld_nocldwait_autoreaps_a_dead_child() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[16].flags = crate::x86::SA_NOCLDWAIT;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        terminate_parked_by_signal(&mut sys, polyisa_kernel::ProcessId(child), 9);
+        assert!(
+            sys.procs
+                .borrow()
+                .pgid(polyisa_kernel::ProcessId(child))
+                .is_none()
+        );
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ECHILD));
     }
 
     #[test]

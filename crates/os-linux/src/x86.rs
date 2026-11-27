@@ -3126,6 +3126,7 @@ pub fn required_sigstksz_for_xfeatures(xfeatures: u64) -> u64 {
 
 /// SA_ONSTACK で配送する。
 pub const SA_NOCLDSTOP: u64 = 1;
+pub const SA_NOCLDWAIT: u64 = 2;
 pub const SA_RESTART: u64 = 0x1000_0000;
 pub const SA_ONSTACK: u64 = 0x0800_0000;
 /// 代替スタック上で実行中を表す ss_flags の値。

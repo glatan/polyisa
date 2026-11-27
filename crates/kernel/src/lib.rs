@@ -182,6 +182,15 @@ impl ProcessTable {
         true
     }
 
+    /// ゾンビにせず表から外す。SA_NOCLDWAIT/SIG_IGN の自動回収に使う。
+    pub fn discard(&mut self, id: ProcessId) -> bool {
+        let Some(idx) = self.procs.iter().position(|proc| proc.id == id) else {
+            return false;
+        };
+        self.procs.remove(idx);
+        true
+    }
+
     /// 親のないプロセスなら真。表にいなければ偽。
     #[must_use]
     pub fn is_root(&self, id: ProcessId) -> bool {
