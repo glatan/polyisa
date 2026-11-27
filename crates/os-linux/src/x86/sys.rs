@@ -1060,6 +1060,7 @@ impl Linux {
             self.close_fd(3 + idx as u32);
         }
         self.procs.borrow_mut().kill(me, sig);
+        notify_parent_sigchld(self, me);
         self.queue
             .0
             .borrow_mut()
@@ -2891,9 +2892,9 @@ fn sys_readv(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 fn sys_exit(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let code = get64(env, cx.r_a) as u32;
     if sys.pid != 0 {
-        sys.procs
-            .borrow_mut()
-            .exit(polyisa_kernel::ProcessId(sys.pid), code);
+        let me = polyisa_kernel::ProcessId(sys.pid);
+        sys.procs.borrow_mut().exit(me, code);
+        notify_parent_sigchld(sys, me);
     }
     Some(TrapOutcome::Exit(code))
 }
@@ -3369,9 +3370,25 @@ fn signal_stop_applies(linux: &Linux, sig: u64) -> bool {
     act.handler == 0 && linux.sig_mask & bit == 0
 }
 
+/// 子プロセスの終了を親へ SIGCHLD で通知する。
+/// SIGCHLD の既定動作は ignore なので、handler または block がある場合だけ
+/// pending に残る。親が現在のスレッドなら自分へ、parked ならその状態へ積む。
+fn notify_parent_sigchld(sys: &mut Linux, child: polyisa_kernel::ProcessId) {
+    const SIGCHLD: u64 = 17;
+    let Some(parent) = sys.procs.borrow().parent_of(child) else {
+        return;
+    };
+    if parent.0 == sys.pid {
+        let _ = send_signal_to_current(sys, SIGCHLD);
+    } else {
+        let _ = send_signal_to_parked(sys, parent.0, SIGCHLD);
+    }
+}
+
 /// parked な対象プロセスをシグナル死因として終了させる。
 fn terminate_parked_by_signal(sys: &mut Linux, target: polyisa_kernel::ProcessId, sig: u64) {
     sys.procs.borrow_mut().kill(target, sig as u32);
+    notify_parent_sigchld(sys, target);
     sys.queue
         .0
         .borrow_mut()
@@ -3830,6 +3847,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
             continue;
         }
         sys.procs.borrow_mut().kill(target, SIGKILL as u32);
+        notify_parent_sigchld(sys, target);
         sys.queue
             .0
             .borrow_mut()
@@ -10536,6 +10554,22 @@ mod tests {
             .read(VirtAddr(0x100), &mut status, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(status), 4 << 8);
+    }
+
+    #[test]
+    fn child_exit_queues_sigchld_when_the_parent_catches_it() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[16].handler = 0x1000;
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = polyisa_kernel::ProcessId(get64(&mut env, Gpr(0)));
+        terminate_parked_by_signal(&mut sys, child, 9);
+        assert_ne!(sys.sig_pending & (1 << 16), 0);
     }
 
     #[test]
