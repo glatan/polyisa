@@ -28995,6 +28995,72 @@ fn run64_avx10_vpmovssdb() {
 }
 
 #[test]
+fn run64_avx10_vpmovssdb_mem() {
+    // メモリ宛て形では dword 要素ごとに byte を詰めて書く。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(1, 0),
+        u128::from(-200i32 as u32),
+    );
+    // vpmovssdb [r8],xmm1。EVEX.R'/X/B は 0 で r8 は通常の rex 拡張側。
+    let mut prog = vec![0x62, 0xF2, 0x7E, 0x08, 0x41, 0x0B];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(3), 0x2000);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats(),
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(b, [0x81]);
+}
+
+#[test]
+fn run64_avx10_fp8_broadcast_src() {
+    // VCVTPS2BF8 の m32bcst 形は dword を全要素へ複製する。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &1.0f32.to_le_bytes())
+        .unwrap();
+    // vcvtps2bf8 xmm0,[r8]{1to4}。EVEX.b=1 は byte4 bit1。
+    let mut prog = vec![0x62, 0xF5, 0x7E, 0x18, 0x39, 0x03];
+    prog.extend_from_slice(&avx10_exit_tail());
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(3), 0x2000);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        10,
+        true,
+        avx10_aux_feats(),
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let v0: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v0 as u32, 0x3c3c_3c3c);
+}
+
+#[test]
 fn run64_avx10_vunpackb() {
     // size=2,start=0。0xe4 の 2-bit 要素は 0,1,2,3。
     let mut env = bare_x86_env();

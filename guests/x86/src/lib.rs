@@ -2304,8 +2304,10 @@ mod tests {
             "avx512f",
             "avx10",
             "avx10_2",
+            "avx10_3",
             "avx10_v1_aux",
             "avx10_v2_aux",
+            "avx10_bmm",
             "amx_tile",
             "ace",
             "ace_v2",
@@ -2350,8 +2352,8 @@ mod tests {
         assert_eq!(tbl[21][3] & 0xC, 0xC, "padlock present+enabled");
         assert_eq!(tbl[0][0], 0x24, "max basic leaf");
         assert_eq!(tbl[3][3] & (1 << 19), 1 << 19, "leaf7 avx10");
-        assert_eq!(tbl[22], [1, 0x7_0002, 0, 0], "leaf24 avx10 version");
-        assert_eq!(tbl[23], [0, 0, 0xC, 0], "leaf24 aux bits");
+        assert_eq!(tbl[22], [1, 0x7_0003, 0, 0], "leaf24 avx10 version");
+        assert_eq!(tbl[23], [0, 0, 0xE, 0], "leaf24 aux bits");
         assert_eq!(tbl[24], [2 | 0x7_0000, 0, 0, 0], "leaf1d ace palette");
         assert_eq!(tbl[25], [0x80, 0x2b00, 2, 0], "leaf d scaledata component");
         // フィーチャーなしではビットは立たない。
