@@ -1314,6 +1314,35 @@ impl Linux {
     }
 
     /// SYSCALL と INT 0x80 は 2 バイト。完了した呼び出しの次へ進める。
+    /// ブロックする syscall の再入時に、配送可能シグナルを syscall 境界で処理する。
+    /// SA_RESTART が効く syscall では eip を syscall のまま残してフレームへ入り、
+    /// sigreturn 後に再実行させる。効かない場合は EINTR で syscall を完了し、
+    /// その戻り値を持つ中断コンテキストをフレームへ保存する。
+    fn interrupt_blocked_syscall(
+        &mut self,
+        env: &mut BareEnv,
+        eintr: u64,
+        restartable: bool,
+    ) -> bool {
+        let deliver = self.sig_pending & !self.sig_mask;
+        if deliver == 0 {
+            return false;
+        }
+        let sig = deliver.trailing_zeros() + 1;
+        let act = self
+            .sigacts
+            .get(sig as usize - 1)
+            .copied()
+            .unwrap_or_default();
+        let restart = restartable && act.flags & crate::x86::SA_RESTART != 0;
+        if !restart {
+            set64(env, Gpr(0), eintr);
+            self.advance_past_syscall(env);
+        }
+        self.deliver_pending(env);
+        true
+    }
+
     fn advance_past_syscall(&self, env: &mut BareEnv) {
         let eip = eip_of(env);
         env.backend
@@ -3163,11 +3192,14 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
             && task.linux.sig_mask & bit == 0;
         task.linux.sig_pending |= bit;
         if caught_unmasked
-            && queue
-                .meta
-                .blocked()
-                .iter()
-                .any(|(id, wait)| id.0 == tid && *wait == polyisa_kernel::ThreadWait::Signal)
+            && queue.meta.blocked().iter().any(|(id, wait)| {
+                id.0 == tid
+                    && matches!(
+                        wait,
+                        polyisa_kernel::ThreadWait::Signal
+                            | polyisa_kernel::ThreadWait::Child { .. }
+                    )
+            })
         {
             queue.meta.unblock(polyisa_kernel::ThreadId(tid));
         }
@@ -4734,6 +4766,9 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         .borrow_mut()
         .meta
         .unblock(polyisa_kernel::ThreadId(sys.pid));
+    if sys.interrupt_blocked_syscall(env, cx.neg(EINTR), true) {
+        return Some(TrapOutcome::Handled);
+    }
     let parent = polyisa_kernel::ProcessId(sys.pid);
     match sys.procs.borrow_mut().try_reap(parent, which) {
         polyisa_kernel::Reap::Exited { pid, code, signal } => {
@@ -5063,6 +5098,21 @@ mod tests {
     fn bare() -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
         env.backend.mem.map(VirtAddr(0), 2, Perms::RW).unwrap();
+        env
+    }
+
+    fn bare_signal_env() -> BareEnv {
+        let mut env = bare();
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
         env
     }
 
@@ -8897,6 +8947,50 @@ mod tests {
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
         assert_eq!(sys.sig_pending & (1 << 9), 0);
+    }
+
+    #[test]
+    fn wait4_interrupted_without_sa_restart_returns_eintr_after_handler() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), u64::MAX);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x302);
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    #[test]
+    fn wait4_interrupted_with_sa_restart_returns_to_the_syscall() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sig_pending = 1 << 9;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), u64::MAX);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x300);
     }
 
     #[test]
