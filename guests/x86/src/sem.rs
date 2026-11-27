@@ -15030,6 +15030,7 @@ pub(crate) fn x87_apply_precision<B: Backend>(
     let mag_ovf = b.cmp::<W64>(Cmp::GeU, mag_round, special);
     let ovf = bit_and(b, mag_ovf, active);
     x87_exception_flag(b, ovf, 1 << 3);
+    x87_exception_flag(b, ovf, 1 << 5);
     let (sig_ovm, exp_ovm) = x87_overflow_masked_response(b, sign);
     let sig_pc0 = b.select::<W64>(ovf, sig_ovm, sig_norm);
     let mag_pc0 = b.select::<W64>(ovf, exp_ovm, mag_round);
@@ -15237,6 +15238,7 @@ pub(crate) fn mul_ext<B: Backend>(
     let finite_in = bit_and(b, not_special, not_zero_in);
     let ovf_occur = bit_and(b, over, finite_in);
     x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, ovf_occur, 1 << 5);
     // underflow した正規化結果は exponent 0 の denormal として右へ
     // 揃える。丸めはまだ 64 ビット精度で行った近似で、subnormal 境界の
     // double rounding は残る。shift が 64 を超える入力は 0 へ潰す。
@@ -15606,6 +15608,7 @@ pub(crate) fn add_ext<B: Backend>(
     let unf_raw = bit_and(b, exp_under, not_cancel_zero);
     let ovf_occur = bit_and(b, exp_ovf, finite_path);
     x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, ovf_occur, 1 << 5);
     let inexact_raw = bit_or(b, round_set, sticky_f);
     let inexact_raw = bit_or(b, inexact_raw, den_inexact);
     let not_zero_path = bit_not(b, use_zero);
@@ -15825,6 +15828,7 @@ pub(crate) fn div_ext<B: Backend>(
     let finite_div = bit_and(b, finite_div, not_zb_in);
     let ovf_occur = bit_and(b, e_ovf, finite_div);
     x87_exception_flag(b, ovf_occur, 1 << 3);
+    x87_exception_flag(b, ovf_occur, 1 << 5);
     let fcw = b.get(fcw_ref());
     let umask_bit = b.konst::<W16>(1 << 4);
     let umask = b.and::<W16>(fcw, umask_bit);

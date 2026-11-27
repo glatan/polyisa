@@ -14069,6 +14069,7 @@ fn run_x87_mul_sets_overflow_and_underflow_flags() {
     let (osig, oexp, ofsw) = once(0xFFFF_FFFF_FFFF_FFFF, 0x7FFE, 0x8000_0000_0000_0000, 0x4000);
     assert_eq!((osig, oexp), (0x8000_0000_0000_0000, 0x7FFF));
     assert_ne!(ofsw & (1 << 3), 0);
+    assert_ne!(ofsw & (1 << 5), 0);
     let (usig, uexp, ufsw) = once(0x8000_0000_0000_0000, 0x0001, 0x8000_0000_0000_0000, 0x3FFE);
     assert_eq!((usig, uexp), (0x4000_0000_0000_0000, 0));
     assert_eq!(ufsw & ((1 << 4) | (1 << 5)), 0);
