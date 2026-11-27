@@ -85,6 +85,8 @@ pub struct Linux {
     /// シグナルフレームへはこの値を uc_sigmask として入れ、
     /// sigreturn で本来の mask へ戻す。
     sigsuspend_mask: Option<u64>,
+    /// pselect/ppoll/epoll_pwait の一時 mask に入る前の本来の mask。
+    pwait_orig_mask: Option<u64>,
     /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
     sig_pending: u64,
     /// 非同期シグナルの既定動作で終わるべきシグナル番号。
@@ -351,6 +353,21 @@ impl Linux {
         abi
     }
 
+    /// pwait 系の一時 mask を適用する。SIGKILL/SIGSTOP は止められない。
+    fn apply_pwait_mask(&mut self, mask: u64) {
+        if self.pwait_orig_mask.is_none() {
+            self.pwait_orig_mask = Some(self.sig_mask);
+        }
+        self.sig_mask = mask & !(1 << 8 | 1 << 18);
+    }
+
+    /// pwait 系の syscall がユーザへ戻るときに本来の mask を戻す。
+    fn restore_pwait_mask(&mut self) {
+        if let Some(mask) = self.pwait_orig_mask.take() {
+            self.sig_mask = mask;
+        }
+    }
+
     /// 待ち合わせ系 syscall の正準層呼び出し。`prev` は前回張った
     /// 待ち（起きて再実行された呼び出しの期限切れ判定に使う）。
     fn wait_call(
@@ -371,8 +388,26 @@ impl Linux {
         ];
         let now = self.mono_ns();
         let pending = self.sig_pending;
-        let r = crate::wait::dispatch(&mut self.fds, &abi, env, name, &args, prev, now, pending)?;
-        self.sock_finish_interruptible(env, r, false)
+        let mut pwait_mask = None;
+        let r = crate::wait::dispatch(
+            &mut self.fds,
+            &abi,
+            env,
+            name,
+            &args,
+            prev,
+            now,
+            pending,
+            &mut pwait_mask,
+        )?;
+        if let Some(mask) = pwait_mask {
+            self.apply_pwait_mask(mask);
+        }
+        let out = self.sock_finish_interruptible(env, r, false);
+        if !matches!(out, Some(TrapOutcome::Blocked)) {
+            self.restore_pwait_mask();
+        }
+        out
     }
 
     /// AF_UNIX のパス写像器を作る（guest_root・cwd を束縛した
@@ -975,6 +1010,7 @@ impl Linux {
             sigacts: self.sigacts.clone(),
             sig_mask: self.sig_mask,
             sigsuspend_mask: None,
+            pwait_orig_mask: None,
             sig_pending: 0,
             async_exit: None,
             sigaltstack: self.sigaltstack,
@@ -1142,7 +1178,11 @@ impl Linux {
         }
         let runtime_old = self.sig_mask;
         let suspended = self.sigsuspend_mask.is_some();
-        let frame_old = self.sigsuspend_mask.take().unwrap_or(runtime_old);
+        let frame_old = self
+            .sigsuspend_mask
+            .take()
+            .or_else(|| self.pwait_orig_mask.take())
+            .unwrap_or(runtime_old);
         self.sig_mask = runtime_old
             | act.mask
             | if act.flags & crate::x86::SA_NODEFER == 0 {
@@ -9413,6 +9453,79 @@ mod tests {
         set64(&mut env, Gpr(8), 4);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    fn ppoll_with_mask(sys: &mut Linux, env: &mut BareEnv, mask: u64) {
+        use crate::x86_64 as abi;
+        env.backend
+            .mem
+            .write(VirtAddr(0x140), &mask.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(env, Gpr(0), abi::PPOLL);
+        set64(env, Gpr(7), 0x120);
+        set64(env, Gpr(6), 0);
+        set64(env, Gpr(2), 0x130);
+        set64(env, Gpr(10), 0x140);
+        set64(env, Gpr(8), 8);
+        let _ = sys.handle_trap(env, 0);
+    }
+
+    #[test]
+    fn ppoll_temporary_mask_unblocks_a_normally_blocked_signal() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_mask = 1 << 9;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x130), &1i64.to_le_bytes())
+            .unwrap();
+        ppoll_with_mask(&mut sys, &mut env, 0);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+        assert_eq!(sys.sig_mask, 1 << 9);
+        assert_eq!(sys.pwait_orig_mask, None);
+    }
+
+    #[test]
+    fn ppoll_temporary_mask_can_block_a_pending_signal() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[9].handler = 0x1000;
+        sys.sig_pending = 1 << 9;
+        env.backend
+            .mem
+            .write(VirtAddr(0x130), &1i64.to_le_bytes())
+            .unwrap();
+        ppoll_with_mask(&mut sys, &mut env, 1 << 9);
+        assert_eq!(sys.sig_mask, 1 << 9);
+        assert_eq!(sys.pwait_orig_mask, Some(0));
+        assert!(sys.fd_wait.is_some());
+    }
+
+    #[test]
+    fn ppoll_restores_the_original_mask_when_it_completes_immediately() {
+        let mut sys = Linux::x86_64();
+        let mut env = bare_signal_env();
+        sys.ensure_self();
+        sys.sig_mask = 1 << 9;
+        // ts={0,0} なら待たずに完了する。
+        env.backend.mem.write(VirtAddr(0x130), &[0u8; 16]).unwrap();
+        ppoll_with_mask(&mut sys, &mut env, 0);
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.sig_mask, 1 << 9);
+        assert_eq!(sys.pwait_orig_mask, None);
     }
 
     #[test]

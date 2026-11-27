@@ -494,6 +494,7 @@ fn sys_select(
     prev: Option<&Wait>,
     now: u64,
     pending: u64,
+    pwait_mask: &mut Option<u64>,
 ) -> Result<Out, u32> {
     let (nfds, rd, wr, ex, tv) = if old_block {
         let w = abi.ptr_size as u64;
@@ -512,7 +513,9 @@ fn sys_select(
         let w = u64::from(abi.ptr_size);
         let mask = rd_u(env, abi.endian, args[5], w as usize).ok_or(errno::EFAULT)?;
         let size = rd_u(env, abi.endian, args[5] + w, w as usize).ok_or(errno::EFAULT)?;
-        rd_pwait_mask(env, abi, mask, size)?;
+        if let Some(mask) = rd_pwait_mask(env, abi, mask, size)? {
+            *pwait_mask = Some(mask);
+        }
     }
     do_select(
         fds,
@@ -893,6 +896,7 @@ pub fn dispatch(
     prev: Option<&Wait>,
     now: u64,
     pending: u64,
+    pwait_mask: &mut Option<u64>,
 ) -> Option<Result<Out, u32>> {
     // `*_time64`/epoll_pwait2 は __kernel_timespec（64 ビット幅）。
     let abi = &abi.for_name(name);
@@ -911,8 +915,10 @@ pub fn dispatch(
                 Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = rd_pwait_mask(env, abi, args[3], args[4]) {
-                return Some(Err(e));
+            match rd_pwait_mask(env, abi, args[3], args[4]) {
+                Ok(Some(mask)) => *pwait_mask = Some(mask),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
             do_poll(fds, abi, env, args[0], args[1], dl, prev, now, pending)
         }
@@ -928,6 +934,7 @@ pub fn dispatch(
             prev,
             now,
             pending,
+            pwait_mask,
         ),
         "epoll_create" => sys_epoll_create(fds, abi, args[0], 0).map(Out::Done),
         "epoll_create1" => sys_epoll_create(fds, abi, 1, args[0]).map(Out::Done),
@@ -941,10 +948,12 @@ pub fn dispatch(
             } else {
                 Some(now.saturating_add((ms as u64).saturating_mul(1_000_000)))
             };
-            if name == "epoll_pwait"
-                && let Err(e) = rd_pwait_mask(env, abi, args[4], args[5])
-            {
-                return Some(Err(e));
+            if name == "epoll_pwait" {
+                match rd_pwait_mask(env, abi, args[4], args[5]) {
+                    Ok(Some(mask)) => *pwait_mask = Some(mask),
+                    Ok(None) => {}
+                    Err(e) => return Some(Err(e)),
+                }
             }
             sys_epoll_wait(
                 fds, abi, env, args[0], args[1], args[2], dl, prev, now, pending,
@@ -956,8 +965,10 @@ pub fn dispatch(
                 Ok(t) => t.map(|ns| now.saturating_add(ns)),
                 Err(e) => return Some(Err(e)),
             };
-            if let Err(e) = rd_pwait_mask(env, abi, args[4], args[5]) {
-                return Some(Err(e));
+            match rd_pwait_mask(env, abi, args[4], args[5]) {
+                Ok(Some(mask)) => *pwait_mask = Some(mask),
+                Ok(None) => {}
+                Err(e) => return Some(Err(e)),
             }
             sys_epoll_wait(
                 fds, abi, env, args[0], args[1], args[2], dl, prev, now, pending,
@@ -1007,7 +1018,18 @@ pub fn drive(
     let mut prev: Option<Wait> = None;
     loop {
         let now = mono_ns();
-        match dispatch(fds, abi, env, name, args, prev.as_ref(), now, pending)? {
+        let mut pwait_mask = None;
+        match dispatch(
+            fds,
+            abi,
+            env,
+            name,
+            args,
+            prev.as_ref(),
+            now,
+            pending,
+            &mut pwait_mask,
+        )? {
             Ok(Out::Done(v)) => return Some(Ok(v)),
             Err(e) => return Some(Err(e)),
             Ok(Out::Wait(w)) => match serve(fds, &w, pending, mono_ns) {
