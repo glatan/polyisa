@@ -89,6 +89,10 @@ pub struct Linux {
     pwait_orig_mask: Option<u64>,
     /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
     sig_pending: u64,
+    /// プロセス宛てシグナルの共有 pending。CLONE_THREAD のスレッド
+    /// グループで共有し、配送時に block していないスレッドが受け取る。
+    /// fork の子は空のものを新しく持つ。
+    shared_pending: std::rc::Rc<std::cell::Cell<u64>>,
     /// 非同期シグナルの既定動作で終わるべきシグナル番号。
     async_exit: Option<u32>,
     /// 代替シグナルスタック（task の sas_ss_*）。
@@ -409,7 +413,7 @@ impl Linux {
             get64(env, cx.r_f),
         ];
         let now = self.mono_ns();
-        let pending = self.sig_pending;
+        let pending = self.effective_pending();
         let mut pwait_mask = None;
         let r = crate::wait::dispatch(
             &mut self.fds,
@@ -595,7 +599,7 @@ impl Linux {
             let Some(w) = &task.linux.fd_wait else {
                 continue;
             };
-            if Self::wait_ready(&task.linux.fds, w, now, task.linux.sig_pending) {
+            if Self::wait_ready(&task.linux.fds, w, now, task.linux.effective_pending()) {
                 task.linux.fd_wait_prev = task.linux.fd_wait.take();
                 ready.push(polyisa_kernel::ThreadId(task.linux.pid));
             }
@@ -607,7 +611,7 @@ impl Linux {
         let self_ready = self
             .fd_wait
             .as_ref()
-            .is_some_and(|w| Self::wait_ready(&self.fds, w, now, self.sig_pending));
+            .is_some_and(|w| Self::wait_ready(&self.fds, w, now, self.effective_pending()));
         if self_ready {
             self.fd_wait_prev = self.fd_wait.take();
             let pid = self.pid;
@@ -1037,6 +1041,7 @@ impl Linux {
             sigsuspend_mask: None,
             pwait_orig_mask: None,
             sig_pending: 0,
+            shared_pending: std::rc::Rc::new(std::cell::Cell::new(0)),
             async_exit: None,
             sigaltstack: self.sigaltstack,
             procs: std::rc::Rc::clone(&self.procs),
@@ -1186,14 +1191,20 @@ impl Linux {
     // への配送、タイマ由来のシグナル、sigaltstack はない。
     // x32 は rt_sigframe_x32 形式で配送する。syscall 番号ではなく
     // プロセス ABI で戻り形式を選ぶ近似は残る。
+    /// スレッド分とプロセス共有分の和。配送判定はこちらで行う。
+    fn effective_pending(&self) -> u64 {
+        self.sig_pending | self.shared_pending.get()
+    }
+
     fn deliver_pending(&mut self, env: &mut BareEnv) {
-        let deliver = self.sig_pending & !self.sig_mask;
+        let deliver = self.effective_pending() & !self.sig_mask;
         if deliver == 0 {
             return;
         }
         let sig = deliver.trailing_zeros() + 1;
         let bit = 1u64 << (sig - 1);
         self.sig_pending &= !bit;
+        self.shared_pending.set(self.shared_pending.get() & !bit);
         let act = self
             .sigacts
             .borrow()
@@ -1532,7 +1543,7 @@ impl Linux {
         eintr: u64,
         restartable: bool,
     ) -> bool {
-        let deliver = self.sig_pending & !self.sig_mask;
+        let deliver = self.effective_pending() & !self.sig_mask;
         if deliver == 0 {
             return false;
         }
@@ -3525,9 +3536,9 @@ fn notify_parent_sigchld(sys: &mut Linux, child: polyisa_kernel::ProcessId, job_
         }
     }
     if parent.0 == sys.pid {
-        let _ = send_signal_to_current(sys, SIGCHLD);
+        let _ = send_signal_to_current(sys, SIGCHLD, true);
     } else {
-        let _ = send_signal_to_parked(sys, parent.0, SIGCHLD);
+        let _ = send_signal_to_parked(sys, parent.0, SIGCHLD, true);
     }
 }
 
@@ -3624,7 +3635,12 @@ enum ParkedSignal {
     Continue,
 }
 
-fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
+fn send_signal_to_parked(
+    sys: &mut Linux,
+    tid: u64,
+    sig: u64,
+    process_directed: bool,
+) -> ParkedSignal {
     let mut queue = sys.queue.0.borrow_mut();
     let interrupted = queue.meta.blocked().iter().find_map(|(id, wait)| {
         if id.0 == tid
@@ -3657,10 +3673,16 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
         // SIGCONT は pending stop を捨て、stop 系は pending SIGCONT を捨てる。
         if sig == 18 {
             task.linux.sig_pending &= !stop_signal_bits();
+            task.linux
+                .shared_pending
+                .set(task.linux.shared_pending.get() & !stop_signal_bits());
             cont = true;
         }
         let stop_now = if signal_default_stops(sig) {
             task.linux.sig_pending &= !(1 << 17);
+            task.linux
+                .shared_pending
+                .set(task.linux.shared_pending.get() & !(1 << 17));
             signal_stop_applies(&task.linux, sig)
         } else {
             false
@@ -3677,7 +3699,12 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
                 .get(sig as usize - 1)
                 .is_some_and(|a| a.handler > 1)
                 && task.linux.sig_mask & bit == 0;
-            task.linux.sig_pending |= bit;
+            if process_directed {
+                let sp = std::rc::Rc::clone(&task.linux.shared_pending);
+                sp.set(sp.get() | bit);
+            } else {
+                task.linux.sig_pending |= bit;
+            }
             if caught_unmasked && interrupted.is_some() {
                 match interrupted {
                     Some(polyisa_kernel::ThreadWait::Child { .. }) => task.linux.wait = None,
@@ -3727,7 +3754,7 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
 /// syscall が EPIPE を返せるようにする。
 fn raise_sigpipe(sys: &mut Linux) -> Option<TrapOutcome> {
     const SIGPIPE: u64 = 13;
-    if !send_signal_to_current(sys, SIGPIPE)
+    if !send_signal_to_current(sys, SIGPIPE, false)
         && !signal_is_ignored(sys, SIGPIPE)
         && signal_default_terminates(SIGPIPE)
     {
@@ -3736,15 +3763,26 @@ fn raise_sigpipe(sys: &mut Linux) -> Option<TrapOutcome> {
     None
 }
 
-fn send_signal_to_current(sys: &mut Linux, sig: u64) -> bool {
+fn send_signal_to_current(sys: &mut Linux, sig: u64, process_directed: bool) -> bool {
     if sig == 18 {
         sys.sig_pending &= !stop_signal_bits();
+        sys.shared_pending
+            .set(sys.shared_pending.get() & !stop_signal_bits());
     }
     if signal_default_stops(sig) {
         sys.sig_pending &= !(1 << 17);
+        sys.shared_pending
+            .set(sys.shared_pending.get() & !(1 << 17));
     }
     if signal_is_pending_target(sys, sig) {
-        sys.sig_pending |= 1 << (sig - 1);
+        let bit = 1 << (sig - 1);
+        if process_directed {
+            // プロセス宛ては共有 pending へ。配送時に block していない
+            // スレッドが受け取る。
+            sys.shared_pending.set(sys.shared_pending.get() | bit);
+        } else {
+            sys.sig_pending |= bit;
+        }
         true
     } else {
         false
@@ -3774,9 +3812,9 @@ fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        let outcome = send_signal_to_parked(sys, tid, sig);
+        let outcome = send_signal_to_parked(sys, tid, sig, false);
         finish_parked_signal(sys, polyisa_kernel::ProcessId(tid), outcome, sig);
-    } else if sig > 0 && !send_signal_to_current(sys, sig) {
+    } else if sig > 0 && !send_signal_to_current(sys, sig, false) {
         if signal_stop_applies(sys, sig) {
             return Some(stop_current_by_signal(sys, env, sig));
         }
@@ -4047,7 +4085,7 @@ fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
                 sys.fd_wait_prev = None;
                 // 配送可能シグナルがあれば EINTR。futex はカーネルが
                 // 再開しないので SA_RESTART でもユーザへ EINTR が見える。
-                if sys.sig_pending & !sys.sig_mask != 0
+                if sys.effective_pending() & !sys.sig_mask != 0
                     && sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false)
                 {
                     return Some(TrapOutcome::Handled);
@@ -4252,7 +4290,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
                 // グループの他スレッドが受け取りうる。
                 let tid = group_signal_target(sys, target.0, sig as u64);
                 if tid == me.0 {
-                    if !send_signal_to_current(sys, sig as u64) {
+                    if !send_signal_to_current(sys, sig as u64, true) {
                         if signal_stop_applies(sys, sig as u64) {
                             self_stops = true;
                         } else if !signal_is_ignored(sys, sig as u64)
@@ -4262,7 +4300,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
                         }
                     }
                 } else {
-                    let outcome = send_signal_to_parked(sys, tid, sig as u64);
+                    let outcome = send_signal_to_parked(sys, tid, sig as u64, true);
                     finish_parked_signal(sys, target, outcome, sig as u64);
                 }
             }
@@ -4828,7 +4866,7 @@ fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     // この実装では配送を after_step まで遅らせるため、raw の pending には
     // まだ配送前の unblocked signal も残り得る。syscall から見える集合は
     // Linux と同じく block 中のものだけにする。
-    if !mask_write(env, set_p, sys.sig_pending & sys.sig_mask) {
+    if !mask_write(env, set_p, sys.effective_pending() & sys.sig_mask) {
         set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     }
@@ -4885,7 +4923,7 @@ fn sys_pause(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     // pause は配送可能なシグナルが来るまで眠る。既に配送可能な
     // pending があるときは、この syscall を EINTR で終え、配送自体は
     // syscall 後の `after_step` に任せる。
-    if sys.sig_pending & !sys.sig_mask != 0 {
+    if sys.effective_pending() & !sys.sig_mask != 0 {
         set64(env, Gpr(0), cx.neg(EINTR));
         return Some(TrapOutcome::Handled);
     }
@@ -4926,7 +4964,7 @@ fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         sys.sigsuspend_mask = Some(sys.sig_mask);
         sys.sig_mask = v & !(1 << 8 | 1 << 18); // SIGKILL/SIGSTOP は止められない
     }
-    if sys.sig_pending & !sys.sig_mask != 0 {
+    if sys.effective_pending() & !sys.sig_mask != 0 {
         set64(env, Gpr(0), cx.neg(EINTR));
         return Some(TrapOutcome::Handled);
     }
@@ -4963,9 +5001,9 @@ fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         return Some(TrapOutcome::Handled);
     }
     if sig > 0 && tid != me.0 {
-        let outcome = send_signal_to_parked(sys, tid, sig);
+        let outcome = send_signal_to_parked(sys, tid, sig, false);
         finish_parked_signal(sys, polyisa_kernel::ProcessId(tid), outcome, sig);
-    } else if sig > 0 && !send_signal_to_current(sys, sig) {
+    } else if sig > 0 && !send_signal_to_current(sys, sig, false) {
         if signal_stop_applies(sys, sig) {
             return Some(stop_current_by_signal(sys, env, sig));
         }
@@ -5100,7 +5138,7 @@ fn nanosleep_impl(
     }
 
     // 配送可能シグナルがあれば rem を書いて EINTR コンテキストを作る。
-    let interrupting = sys.sig_pending & !sys.sig_mask != 0;
+    let interrupting = sys.effective_pending() & !sys.sig_mask != 0;
     if interrupting {
         let left = deadline.saturating_sub(now);
         if rem != 0 && !abstime {
@@ -5665,6 +5703,7 @@ fn spawn_thread(
     // 強制する）ので、スレッドは常にハンドラ表を共有する。
     // Ref: SRC-LINUX (7.3)。
     child_linux.sigacts = std::rc::Rc::clone(&sys.sigacts);
+    child_linux.shared_pending = std::rc::Rc::clone(&sys.shared_pending);
     sys.queue
         .0
         .borrow_mut()
@@ -8142,11 +8181,17 @@ mod tests {
         set64(&mut env, Gpr(6), SIGUSR1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        // 自分（リーダ）には積まれず、子スレッドの pending に入る。
-        assert_eq!(
-            sys.sig_pending & (1u64 << (SIGUSR1 - 1)),
+        // プロセス宛ては共有 pending に入る。リーダは mask しているので
+        // 配送不能だが、block していない子スレッドでは配送可能になる。
+        assert_ne!(
+            sys.shared_pending.get() & (1u64 << (SIGUSR1 - 1)),
             0,
-            "リーダは block 中"
+            "共有 pending に積まれる"
+        );
+        assert_eq!(
+            sys.effective_pending() & !sys.sig_mask & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "リーダは mask しているので配送不能"
         );
         let queue = sys.queue.0.borrow();
         let task = queue
@@ -8155,9 +8200,9 @@ mod tests {
             .find(|task| task.linux.pid == child)
             .unwrap();
         assert_ne!(
-            task.linux.sig_pending & (1u64 << (SIGUSR1 - 1)),
+            task.linux.effective_pending() & !task.linux.sig_mask & (1u64 << (SIGUSR1 - 1)),
             0,
-            "block していない子スレッドへ届く"
+            "block していない子スレッドでは配送可能"
         );
     }
 
@@ -8684,7 +8729,7 @@ mod tests {
         assert!(sys.take_exit(&mut env, 0), "親へスケジュールされる");
         assert_eq!(sys.pid, parent);
         assert_eq!(
-            sys.sig_pending & (1u64 << (17 - 1)),
+            sys.effective_pending() & (1u64 << (17 - 1)),
             0,
             "スレッド終了で SIGCHLD は飛ばない"
         );
@@ -8889,6 +8934,116 @@ mod tests {
         ));
         let act = sys.sigacts.borrow().get(9).copied().unwrap_or_default();
         assert_eq!(act.handler, 0, "fork 子の変更は親に見えない");
+    }
+
+    #[test]
+    fn process_signal_pends_shared_until_someone_unmasks() {
+        // 全スレッドが block している間は共有 pending に残り、
+        // 誰かが unmask するとそのスレッドで配送される。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 2, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        const SIGUSR1: u64 = 10;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+            handler: 0x1100,
+            ..crate::x86::SigAct::default()
+        };
+        sys.sig_mask |= 1u64 << (SIGUSR1 - 1);
+        // シグナルフレームの書き込みに必要な rsp と xstate の設定。
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), SIGUSR1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // block 中は共有 pending に残り、配送されない。
+        assert_ne!(
+            sys.shared_pending.get() & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "共有 pending に残る"
+        );
+        sys.after_step(&mut env);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eip_ref()),
+            0x1000,
+            "block 中はハンドラへ行かない"
+        );
+        // sigpending には block 中のシグナルが見える。
+        set64(&mut env, Gpr(0), abi::RT_SIGPENDING);
+        set64(&mut env, Gpr(7), 0x1800);
+        set64(&mut env, Gpr(6), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut buf = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1800), &mut buf, data_access())
+            .unwrap();
+        assert_ne!(
+            u64::from_le_bytes(buf) & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "sigpending はスレッド分とプロセス分の和"
+        );
+        // unmask すると配送される。
+        sys.sig_mask &= !(1u64 << (SIGUSR1 - 1));
+        sys.after_step(&mut env);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eip_ref()),
+            0x1100,
+            "unmask でハンドラへ配送"
+        );
+        assert_eq!(
+            sys.shared_pending.get() & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "配送で共有 pending から消える"
+        );
+    }
+
+    #[test]
+    fn thread_directed_signal_stays_per_thread() {
+        // tkill はスレッド宛てなので共有 pending には入らない。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        const SIGUSR1: u64 = 10;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+            handler: 0x1100,
+            ..crate::x86::SigAct::default()
+        };
+        sys.sig_mask |= 1u64 << (SIGUSR1 - 1);
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::TKILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), SIGUSR1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_ne!(
+            sys.sig_pending & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "スレッド pending に入る"
+        );
+        assert_eq!(
+            sys.shared_pending.get() & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "共有 pending には入らない"
+        );
     }
 
     #[test]
@@ -10076,13 +10231,13 @@ mod tests {
         set64(&mut env, Gpr(6), 10);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        assert_ne!(sys.sig_pending & (1 << 9), 0);
+        assert_ne!(sys.effective_pending() & (1 << 9), 0);
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0);
         sys.sig_mask = 0;
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
-        assert_eq!(sys.sig_pending & (1 << 9), 0);
+        assert_eq!(sys.effective_pending() & (1 << 9), 0);
     }
 
     #[test]
@@ -11231,12 +11386,12 @@ mod tests {
             .iter()
             .find(|task| task.linux.pid == child)
             .expect("parked child");
-        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
+        assert_ne!(task.linux.effective_pending() & (1 << 9), 0);
         drop(queue);
         assert!(sys.swap_in(&mut env, child));
         sys.after_step(&mut env);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
-        assert_eq!(sys.sig_pending & (1 << 9), 0);
+        assert_eq!(sys.effective_pending() & (1 << 9), 0);
     }
 
     #[test]
@@ -11727,7 +11882,7 @@ mod tests {
         close_pipe_reader_and_write(&mut sys, &mut env);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPIPE));
-        assert_eq!(sys.sig_pending & (1 << 12), 0);
+        assert_eq!(sys.effective_pending() & (1 << 12), 0);
     }
 
     #[test]
@@ -11742,7 +11897,7 @@ mod tests {
         close_pipe_reader_and_write(&mut sys, &mut env);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPIPE));
-        assert_ne!(sys.sig_pending & (1 << 12), 0);
+        assert_ne!(sys.effective_pending() & (1 << 12), 0);
     }
 
     #[test]
@@ -11910,7 +12065,7 @@ mod tests {
                 .meta
                 .is_exited(polyisa_kernel::ThreadId(pid))
         );
-        assert_eq!(sys.sig_pending & (1 << 14), 0);
+        assert_eq!(sys.effective_pending() & (1 << 14), 0);
         assert_eq!(sys.take_async_exit(), Some(15));
         assert_eq!(sys.take_async_exit(), None);
     }
@@ -11931,7 +12086,7 @@ mod tests {
         set64(&mut env, Gpr(6), 10);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        assert_eq!(sys.sig_pending & (1 << 9), 0);
+        assert_eq!(sys.effective_pending() & (1 << 9), 0);
     }
 
     #[test]
@@ -11953,14 +12108,14 @@ mod tests {
         set64(&mut env, Gpr(6), 10);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        assert_ne!(sys.sig_pending & (1 << 9), 0);
+        assert_ne!(sys.effective_pending() & (1 << 9), 0);
         let queue = sys.queue.0.borrow();
         let task = queue
             .parked
             .iter()
             .find(|task| task.linux.pid == child)
             .expect("parked child");
-        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
+        assert_ne!(task.linux.effective_pending() & (1 << 9), 0);
     }
 
     #[test]
@@ -11989,7 +12144,7 @@ mod tests {
             .iter()
             .find(|task| task.linux.pid == child)
             .expect("parked child");
-        assert_ne!(task.linux.sig_pending & (1 << 9), 0);
+        assert_ne!(task.linux.effective_pending() & (1 << 9), 0);
     }
 
     #[test]
@@ -12058,11 +12213,11 @@ mod tests {
                 .meta
                 .is_stopped(polyisa_kernel::ThreadId(pid))
         );
-        assert_ne!(sys.sig_pending & (1 << 19), 0);
+        assert_ne!(sys.effective_pending() & (1 << 19), 0);
 
         sys.sig_mask = 0;
         sys.deliver_pending(&mut env);
-        assert_eq!(sys.sig_pending & (1 << 19), 0);
+        assert_eq!(sys.effective_pending() & (1 << 19), 0);
         assert!(
             sys.queue
                 .0
@@ -12112,7 +12267,7 @@ mod tests {
             .iter()
             .find(|task| task.linux.pid == child)
             .expect("parked child");
-        assert_ne!(task.linux.sig_pending & (1 << 17), 0);
+        assert_ne!(task.linux.effective_pending() & (1 << 17), 0);
         drop(queue);
 
         // SIGCONT は配送が block されていても停止状態だけは即時解除する。
@@ -12217,15 +12372,16 @@ mod tests {
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 19);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_ne!(sys.sig_pending & (1 << 16), 0);
+        assert_ne!(sys.effective_pending() & (1 << 16), 0);
 
         sys.sig_pending = 0;
+        sys.shared_pending.set(0);
         sys.sigacts.borrow_mut()[16].flags = crate::x86::SA_NOCLDSTOP;
         set64(&mut env, Gpr(0), abi::KILL);
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 18);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(sys.sig_pending & (1 << 16), 0);
+        assert_eq!(sys.effective_pending() & (1 << 16), 0);
     }
 
     #[test]
@@ -12243,7 +12399,7 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         let child = polyisa_kernel::ProcessId(get64(&mut env, Gpr(0)));
         terminate_parked_by_signal(&mut sys, child, 9);
-        assert_ne!(sys.sig_pending & (1 << 16), 0);
+        assert_ne!(sys.effective_pending() & (1 << 16), 0);
     }
 
     #[test]
