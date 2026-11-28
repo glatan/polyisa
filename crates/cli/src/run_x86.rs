@@ -2714,6 +2714,8 @@ fn is_mmx_nonemms(insn: Insn) -> bool {
             | Cvttpd2piPvWv
             | Cvtps2piPvWv
             | Cvtpd2piPvWv
+            | Cvtpi2psXvQv
+            | Cvtpi2pdXvQv
             | Movdq2qPvXv
             | Movq2dqXvQv
             | PsrlwQvIb

@@ -14953,6 +14953,50 @@ fn run_mmx_entry_and_emms_update_x87_tags() {
 }
 
 #[test]
+fn run_cvtpi2_memform_no_mmx_transition() {
+    // 実機観測（host probe）: CVTPI2PS/CVTPI2PD の register form は
+    // MMX 状態遷移（TOP=0・全 tag valid）を起こすが、memory form は
+    // MM レジスタを読まないため遷移しない。fld1 で TOP=7・R7 valid
+    // （ftw=0x3fff）にしたあとの遷移有無を確認する。
+    // memory form: 遷移なし。
+    let prog_mem: &[u8] = &[
+        0xD9, 0xE8, // fld1
+        0x0F, 0x2A, 0x05, 0x04, 0x20, 0x00, 0x00, // cvtpi2ps xmm0,[0x2004]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, mut env) = run32(prog_mem, 10);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        7,
+        "memory form は TOP を変えない"
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::ftw_ref()),
+        0x3fff,
+        "memory form は tag を変えない"
+    );
+    // register form: MMX 遷移で TOP=0・全 tag valid。
+    let prog_reg: &[u8] = &[
+        0xD9, 0xE8, // fld1
+        0x0F, 0x2A, 0xC0, // cvtpi2ps xmm0,mm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, mut env) = run32(prog_reg, 10);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        0,
+        "register form は MMX 遷移する"
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::ftw_ref()),
+        0,
+        "register form は全 tag valid にする"
+    );
+}
+
+#[test]
 fn run_x87_pending_exception_blocks_mmx_and_emms() {
     // PADDB と EMMS はどちらも x87 例外の配送点である。IE pending が
     // unmasked のままなら、MMX 状態遷移を行わず #MF へ進む。
