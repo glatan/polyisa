@@ -2306,10 +2306,23 @@ pub fn sys_clock_gettime(
             // CLOCK_MONOTONIC ほか。ゲスト実行の起点からの経過。
             (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
         };
+        // timespec の語幅。x86-64/x32 と i386 time64 は 64+64、
+        // i386 の旧 clock_gettime は 32+32。
+        let time64 = matches!(
+            get64(env, Gpr(0)),
+            crate::x86_32::CLOCK_GETTIME64 | crate::x86_32::CLOCK_GETRES_TIME64
+        );
+        let wide = (cx.is64 && !cx.x32) || (!cx.is64 && time64);
         let mut both = [0u8; 16];
-        both[..8].copy_from_slice(&sec.to_le_bytes());
-        both[8..].copy_from_slice(&nsec.to_le_bytes());
-        if env.backend.mem.write(VirtAddr(tp), &both).is_err() {
+        if wide {
+            both[..8].copy_from_slice(&sec.to_le_bytes());
+            both[8..].copy_from_slice(&nsec.to_le_bytes());
+        } else {
+            both[..4].copy_from_slice(&(sec as i32).to_le_bytes());
+            both[4..8].copy_from_slice(&(nsec as i32).to_le_bytes());
+        }
+        let len = if wide { 16 } else { 8 };
+        if env.backend.mem.write(VirtAddr(tp), &both[..len]).is_err() {
             return Some(TrapOutcome::Unimplemented);
         }
     }
