@@ -172,8 +172,18 @@ fn round_units(units: i128, frac: f64, shift: u32, rc: u16, neg: bool) -> u128 {
         )
     };
     let any = rem != 0 || frac != 0.0;
-    let over_half = rem > half || (rem == half && frac > 0.0);
-    let at_half = rem == half && frac == 0.0;
+    // shift=0 では rem/half がともに 0 に潰れるので、frac を量子の半分
+    // 0.5 と直接比較する。shift>=1 では rem+frac と half の比較は
+    // `rem > half || (rem == half && frac > 0)` で正確（frac < 1 より
+    // rem < half なら rem+frac < half、rem==half では frac が決め手）。
+    let (over_half, at_half) = if shift == 0 {
+        (frac > 0.5, frac == 0.5)
+    } else {
+        (
+            rem > half || (rem == half && frac > 0.0),
+            rem == half && frac == 0.0,
+        )
+    };
     let up = match rc {
         1 => neg && any,
         2 => !neg && any,
@@ -217,6 +227,15 @@ pub(crate) fn dd_to_ext_scaled_meta(value: Dd, scale_exp: i32, rc: u16) -> ExtRo
     if normal_rounded >= 1u128 << 64 {
         normal_sig = (normal_rounded >> 1) as u64;
         normal_exp += 1;
+    } else if normal_rounded != 0 && normal_rounded < 1u128 << 63 {
+        // hi がちょうど 2^n で lo が負の微小量だと、units は 2^63 を
+        // わずかに割り、整数 bit の落ちた非正規形になる。extended の
+        // normal は bit63 を立てる必要があるので 1 bit 左へそろえて
+        // exponent を下げる。dd の lo は hi の 2^-53 級までなので、
+        // ずれは 1 bit を超えない。cos の微小入力で 1.0 直前の値が
+        // この経路を通る。
+        normal_sig = (normal_rounded << 1) as u64;
+        normal_exp -= 1;
     }
     if unbiased >= -16382 {
         return ExtRounded {

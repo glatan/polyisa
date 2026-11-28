@@ -10281,6 +10281,24 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
         (0, 0)
     };
     let binary = matches!(op, 0xF1 | 0xF3 | 0xF9);
+    // pseudo-denormal（exponent 0・整数 bit セット）は unsupported
+    // ではない。SDM Vol.1 8.3.2: 387 以降は生成しないが、operand と
+    // して現れた場合は biased exponent を 1 とみなして denormal と
+    // して正しく扱い、denormal 例外を生成する。exponent を 1 に
+    // 書き換えると同一 significand の最小正規数と数値が一致するので、
+    // その encoding に直して計算する。Ref: SPEC-X86-INTEL-SDM (v093)。
+    let pseudo = |sig: u64, exp: u16| (exp & 0x7fff) == 0 && sig & (1u64 << 63) != 0;
+    let pseudo0 = pseudo(s0, e0);
+    let pseudo1 = binary && pseudo(s1, e1);
+    let fix = |sig: u64, exp: u16, is_pseudo: bool| {
+        if is_pseudo {
+            (sig, (exp & 0x8000) | 1)
+        } else {
+            (sig, exp)
+        }
+    };
+    let (s0, e0) = fix(s0, e0, pseudo0);
+    let (s1, e1) = fix(s1, e1, pseudo1);
     let unsupported = x87_scalar_unsupported(s0, e0) || (binary && x87_scalar_unsupported(s1, e1));
     let nan0 = x87_scalar_nan(s0, e0);
     let nan1 = binary && x87_scalar_nan(s1, e1);
@@ -10369,7 +10387,8 @@ fn x87_transcendental_exec(env: &mut BareEnv, op: u8) {
     }
     // denormal operand は pre-operation exception。NaN/unsupported と
     // domain invalid を先に処理し、masked でなければ結果を commit しない。
-    let denormal_operand = x87_denormal(s0, e0) || (binary && x87_denormal(s1, e1));
+    let denormal_operand =
+        x87_denormal(s0, e0) || (binary && x87_denormal(s1, e1)) || pseudo0 || pseudo1;
     if denormal_operand {
         x87_scalar_exception_flag(env, 2);
         let fcw: u16 = env.backend.get(polyisa_guest_x86::sem::fcw_ref());

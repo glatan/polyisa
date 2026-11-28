@@ -208,9 +208,14 @@ mod imp {
         }
         let ae = a.1 & 0x7fff;
         let be = b.1 & 0x7fff;
-        if ae == 0x7fff || be == 0x7fff || ae == 0 || be == 0 {
+        if ae == 0x7fff || be == 0x7fff {
             return false;
         }
+        // denormal の quantum は固定で、exponent 1 の最小正規数と
+        // 連続している。exponent 0 を 1 として扱えば同じ quantum の
+        // significand 比較に統一できる。
+        let ae = if ae == 0 { 1 } else { ae };
+        let be = if be == 0 { 1 } else { be };
         if ae == be {
             return a.0.abs_diff(b.0) <= ulp;
         }
@@ -760,21 +765,7 @@ fn diff_host_x87_transcendental_accuracy() {
     imp::run_transcendental_accuracy();
 }
 
-/// tiny/underflow 入力の transcendental 差分。2026-11-28 時点で
-/// 既知の不一致があり ignore 運用。再現は `cargo test -p
-/// polyisa-guest-x86 --test heavy_diff_host_x87 -- --ignored`。
-/// 不一致は 2 類:
-/// (a) pseudo-denormal 入力（exp=0・bit63 セット）を poly は IE の
-///     unsupported として扱うが、host は正規化して演算し DE+PE を立てる
-///     （例: fsin in=f4f3123167f49381/0000 → host は入力正規化値を返す）。
-///     算術命令では host/poly とも unsupported で一致するため、
-///     transcendental 固有の分類の問題。一次資料での確認が必要。
-/// (b) fcos の微小入力で host は 1.0 直前の正規化済み値を返すのに
-///     poly は integer bit の落ちた非正規形を返す（例:
-///     in=9f03cbdfa893b8b1/3fe0 → host fffffffffffffffd/3ffe、
-///     poly 7fffffffffffffff/3fff）。出力正規化の実バグ。
 #[test]
-#[ignore = "既知の transcendental tiny 不一致。上記コメント参照"]
 fn diff_host_x87_transcendental_tiny() {
     #[cfg(all(target_arch = "x86_64", unix))]
     imp::run_transcendental_tiny();
