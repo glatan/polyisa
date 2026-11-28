@@ -6051,17 +6051,12 @@ fn ace_write_rm64(
 /// `tilecfg`）の更新は行数・列バイト数が実行時値なので、IR/意味論
 /// DSL ではなくインタプリタ層の具体値で組む。対象命令なら実行して
 /// `Some(結果)` を返し、それ以外は `None` で通常経路へ。
-fn amx_tile_step(
-    env: &mut BareEnv,
-    md: &polyisa_guest_x86::MapDec,
-    next_rip: u64,
-    seg: u64,
-    eip: u32,
-    feats: u128,
-) -> Option<Result<(), InterpExit>> {
+// tile/AMX/ACE 系命令の分類。これらは VEX エンコーディングだが
+// ベクトル状態ではなく tile 状態を使い、許可条件は XCR0[18:17]。
+fn is_amx_tile_insn(insn: &polyisa_guest_x86::Insn) -> bool {
     use polyisa_guest_x86::Insn;
-    if !matches!(
-        md.insn,
+    matches!(
+        *insn,
         Insn::Ldtilecfg
             | Insn::Sttilecfg
             | Insn::Tilerelease
@@ -6126,7 +6121,40 @@ fn amx_tile_step(
             | Insn::Top4mxbsups
             | Insn::Top4mxbusps
             | Insn::Top4mxbuups
-    ) {
+    )
+}
+
+// BMI1/BMI2 の VEX GPR 演算。ベクトル状態を使わないので
+// XCR0[2:1] の許可は要らない。
+fn is_gpr_vex_insn(insn: &polyisa_guest_x86::Insn) -> bool {
+    use polyisa_guest_x86::Insn;
+    matches!(
+        *insn,
+        Insn::AndnGvByEv
+            | Insn::BlsrByEv
+            | Insn::BlsmskByEv
+            | Insn::BlsiByEv
+            | Insn::BextrGvEvBy
+            | Insn::BzhiGvEvBy
+            | Insn::PdepGvByEv
+            | Insn::PextGvByEv
+            | Insn::MulxGvByEv
+            | Insn::ShlxGvEvBy
+            | Insn::ShrxGvEvBy
+            | Insn::SarxGvEvBy
+            | Insn::RorxGvEvIb
+    )
+}
+
+fn amx_tile_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+    feats: u128,
+) -> Option<Result<(), InterpExit>> {
+    if !is_amx_tile_insn(&md.insn) {
         return None;
     }
     Some(amx_tile_exec(env, md, next_rip, seg, eip, feats))
@@ -12274,6 +12302,17 @@ fn step_x86_map(
                 return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
             }
         } else {
+            let r = env.step(|b| polyisa_guest_x86::sem_ea::undefined(b, eip));
+            return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+        }
+    }
+    // VEX のベクトル命令は XCR0[2:1]=11（SSE+AVX）が許可されている
+    // ときだけ実行できる。未許可では #UD。BMI 系の GPR 演算はベクトル
+    // 状態を使わず対象外、tile 系は XCR0[18:17] が独自の許可条件で
+    // amx_tile_step が検査する。EVEX は別経路で検査済み。
+    if md.vex && !md.evex && !is_gpr_vex_insn(&md.insn) && !is_amx_tile_insn(&md.insn) {
+        let x0: u64 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
+        if x0 & 6 != 6 {
             let r = env.step(|b| polyisa_guest_x86::sem_ea::undefined(b, eip));
             return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
         }

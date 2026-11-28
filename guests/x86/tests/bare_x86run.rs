@@ -32724,3 +32724,47 @@ fn run_xsave_pkru_roundtrip() {
         "xrstor が PKRU を復元する"
     );
 }
+
+#[test]
+fn run64_vex_xcr0_gating() {
+    // VEX のベクトル命令は XCR0[2:1]=11（SSE+AVX）が許可されている
+    // ときだけ実行でき、未許可では #UD。BMI 系の GPR 演算（ANDN 等）
+    // はベクトル状態を使わないので XCR0[2:1] に依らず実行できる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    // (bytes, xcr0, #UD かどうか, 名前)
+    let vmovups = &[0xC5, 0xF8, 0x10, 0xC0][..]; // vmovups xmm0,xmm0
+    let vzeroupper = &[0xC5, 0xF8, 0x77][..];
+    let andn = &[0xC4, 0xE2, 0x78, 0xF2, 0xC0][..]; // andn eax,eax,eax
+    for (prog, xcr0, expect_ud, name) in [
+        (vmovups, 1u64, true, "vmovups xcr0=1"),
+        (vmovups, 7u64, false, "vmovups xcr0=7"),
+        (vzeroupper, 1u64, true, "vzeroupper xcr0=1"),
+        (vzeroupper, 7u64, false, "vzeroupper xcr0=7"),
+        (andn, 1u64, false, "andn xcr0=1"),
+        (andn, 0u64, false, "andn xcr0=0"),
+    ] {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), xcr0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            1,
+            true,
+            feats,
+            &polyisa_guest_x86::DEFAULT_PARAMS,
+        );
+        if expect_ud {
+            assert!(
+                matches!(out, Outcome::Unimplemented { .. }),
+                "{name}: {out:?}"
+            );
+        } else {
+            assert!(matches!(out, Outcome::StepLimit { .. }), "{name}: {out:?}");
+        }
+    }
+}
