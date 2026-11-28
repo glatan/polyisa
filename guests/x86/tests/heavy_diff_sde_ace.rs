@@ -61,7 +61,7 @@ static u32 mx_b[16] __attribute__((aligned(64))) = {
     0x63626160,0x73727170,0x83828180,0x93929190,
     0xa3a2a1a0,0xb3b2b1b0,0xc3c2c1c0,0xd3d2d1d0
 };
-static u32 out[512] __attribute__((aligned(64)));
+static u32 out[640] __attribute__((aligned(64)));
 
 void _start(void) {
     (void)sys3(158, 0x1023, 17, 0);
@@ -143,12 +143,30 @@ void _start(void) {
         "vmovdqu64 %%zmm0, 1856(%4)\n\t"
         ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,14\n\t"
         "vmovdqu64 %%zmm0, 1920(%4)\n\t"
+        // tcvtrow 系: tmm1 の row を int32/fp32 として読み、fp32/bf16/fp16
+        // へ変換する。row2 は整数、row3 は 1.5 等の fp32 ビットパターン。
+        ".byte 0x62,0xF3,0x7E,0x48,0x07,0xC1,0x02\n\t" // tcvtrowd2ps zmm0,tmm1,2
+        "vmovdqu64 %%zmm0, 2048(%4)\n\t"
+        ".byte 0x62,0xF3,0x7F,0x48,0x07,0xC9,0x03\n\t" // tcvtrowps2bf16h zmm1,tmm1,3
+        "vmovdqu64 %%zmm1, 2112(%4)\n\t"
+        ".byte 0x62,0xF3,0x7E,0x48,0x77,0xD1,0x03\n\t" // tcvtrowps2bf16l zmm2,tmm1,3
+        "vmovdqu64 %%zmm2, 2176(%4)\n\t"
+        ".byte 0x62,0xF3,0x7C,0x48,0x07,0xD9,0x03\n\t" // tcvtrowps2phh zmm3,tmm1,3
+        "vmovdqu64 %%zmm3, 2240(%4)\n\t"
+        // tilemovcol: accrow を列 0 として tmm1 へ書き戻し、row0/1 を
+        // 再読出しして列書き込みの効果を見る。
+        "vmovdqu64 (%1), %%zmm4\n\t"
+        ".byte 0x62,0xF3,0xFD,0x48,0x2F,0xCC,0x00\n\t" // tilemovcol tmm1,zmm4,0
+        ".byte 0x62,0xF3,0xFD,0x48,0x07,0xC8,0x00\n\t" // tilemovrow zmm0,tmm1,0
+        "vmovdqu64 %%zmm0, 2304(%4)\n\t"
+        ".byte 0x62,0xF3,0xFD,0x48,0x07,0xC8,0x01\n\t" // tilemovrow zmm0,tmm1,1
+        "vmovdqu64 %%zmm0, 2368(%4)\n\t"
         ".byte 0x62,0xF3,0x7D,0x48,0x07,0xC3,15\n\t"
         "vmovdqu64 %%zmm0, 1984(%4)\n\t"
         :
         : "r"(cfg), "r"(accrow), "r"(arow), "r"(brow), "r"(out), "r"(mx_a), "r"(mx_b)
         : "rax", "memory");
-    (void)sys3(1, 1, (long)out, 2048);
+    (void)sys3(1, 1, (long)out, 2432);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }"#;
@@ -227,20 +245,33 @@ fn diff_sde_ace_outer_products() {
         .output()
         .expect("sde64");
     assert!(out.status.success(), "sde status {:?}", out.status);
-    assert_eq!(out.stdout.len(), 2048, "sde stdout len");
+    assert_eq!(out.stdout.len(), 2432, "sde stdout len");
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(poly.len(), 2048, "poly stdout len");
+    assert_eq!(poly.len(), 2432, "poly stdout len");
     if poly != out.stdout {
         let mut bad = Vec::new();
-        for i in 0..512 {
+        for i in 0..608 {
             let a = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let b = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if a != b {
                 bad.push(format!(
-                    "{} r{}c{} poly={a:08x} sde={b:08x}",
-                    if i < 256 { "top2bf16ps" } else { "top4mxbssps" },
-                    (i % 256) / 16,
+                    "{} d{} poly={a:08x} sde={b:08x}",
+                    if i < 256 {
+                        "top2bf16ps"
+                    } else if i < 512 {
+                        "top4mxbssps"
+                    } else if i < 528 {
+                        "tcvtrowd2ps"
+                    } else if i < 544 {
+                        "tcvtrowps2bf16h"
+                    } else if i < 560 {
+                        "tcvtrowps2bf16l"
+                    } else if i < 576 {
+                        "tcvtrowps2phh"
+                    } else {
+                        "tilemovcol"
+                    },
                     i % 16
                 ));
             }
