@@ -10450,16 +10450,47 @@ pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
                 let numeric0 = sem::bit_not(b, sp);
                 let numeric1 = sem::bit_not(b, invalid);
                 let numeric = sem::bit_and(b, numeric0, numeric1);
-                let inexact_numeric = sem::bit_and(b, inexact128, numeric);
+                // FCW.PC が 24/53 のときは 64 ビットへ丸めてから落とす
+                // 二段丸めをせず、exact root と剰余から PC 幅へ一度だけ
+                // 丸める。round/sticky は root の落ちる bit から取り、
+                // 剰余の非零は最終 sticky として畳み込む。
+                let eight = b.konst::<W64>(8);
+                let pc_sh = b.shr_l::<W64>(fcw64, eight);
+                let pc = b.and::<W64>(pc_sh, three);
+                let pc24 = b.cmp::<W64>(Cmp::Eq, pc, zero);
+                let pc53 = b.cmp::<W64>(Cmp::Eq, pc, two);
+                let pc_active = sem::bit_or(b, pc24, pc53);
+                let k40 = b.konst::<W64>(40);
+                let k11 = b.konst::<W64>(11);
+                let pc_drop = b.select::<W64>(pc24, k40, k11);
+                let sign_z = b.konst::<W64>(0);
+                let (pc_low, pc_inexact) =
+                    sem::x87_round_shift64_tail(b, root, pc_drop, sign_z, inexact128);
+                let k64b = b.konst::<W64>(64);
+                let pc_bits = b.sub::<W64>(k64b, pc_drop);
+                let pc_limit = b.shl::<W64>(one, pc_bits);
+                let pc_carry = b.cmp::<W64>(Cmp::Eq, pc_low, pc_limit);
+                let pc_aligned = b.shl::<W64>(pc_low, pc_drop);
+                let pc_sig = b.select::<W64>(pc_carry, int_bit, pc_aligned);
+                let pc_carry_v = b.select::<W64>(pc_carry, one, zero);
+                // 指数は floor(unb/2)+bias で、繰り上がり時だけ +1。
+                // out_e0 は後段と同じ式をここで独立に計算する。
+                let pc_half = b.shr_a::<W64>(unb, one);
+                let pc_e0 = b.add::<W64>(pc_half, bias);
+                let pc_e = b.add::<W64>(pc_e0, pc_carry_v);
+                let inexact_eff = sem::bit_select(b, pc_active, pc_inexact, inexact128);
+                let inexact_numeric = sem::bit_and(b, inexact_eff, numeric);
                 sem::x87_exception_flag(b, inexact_numeric, 1 << 5);
 
                 let root_inc = b.select::<W64>(do_up, root_plus, root);
                 let root_carry = b.cmp::<W64>(Cmp::Eq, root_inc, zero);
-                let root_fin = b.select::<W64>(root_carry, int_bit, root_inc);
+                let root_fin64 = b.select::<W64>(root_carry, int_bit, root_inc);
                 let half = b.shr_a::<W64>(unb, one);
                 let out_e0 = b.add::<W64>(half, bias);
                 let carry_v = b.select::<W64>(root_carry, one, zero);
-                let out_e = b.add::<W64>(out_e0, carry_v);
+                let out_e64 = b.add::<W64>(out_e0, carry_v);
+                let root_fin = b.select::<W64>(pc_active, pc_sig, root_fin64);
+                let out_e = b.select::<W64>(pc_active, pc_e, out_e64);
                 // 特殊値と zero を優先し、有限正数だけ整数平方根の結果を使う。
                 let inf_sig = b.select::<W64>(is_inf, int_bit, root_fin);
                 let inf_exp = b.select::<W64>(is_inf, special, out_e);

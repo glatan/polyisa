@@ -15682,6 +15682,52 @@ fn run_x87_fsqrt_uses_extended_precision_integer_sqrt() {
 }
 
 #[test]
+fn run_x87_fsqrt_precision_control_single_rounding() {
+    // FCW.PC=53/24 のとき exact root から直接 target 精度へ丸める。
+    // 正しく丸められる host f64/f32 sqrt と一致しなければならない。
+    fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16, u16) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(4).state(), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xD9, 0xFA]) // fsqrt
+            .unwrap();
+        x87_recalc_tag(&mut env, 0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+        )
+    }
+    // PC=53: FCW bits 8-9 = 10。
+    let fcw53 = 0x027fu16;
+    // sqrt(2.0) in 53 bits matches host f64 sqrt exactly。
+    let expect53 = (1u64 << 63) | (((2.0f64).sqrt().to_bits() & 0x000f_ffff_ffff_ffff) << 11);
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0x4000, fcw53);
+    assert_eq!((sig, exp), (expect53, 0x3fff));
+    assert_ne!(fsw & (1 << 5), 0);
+    // PC=24: bits 8-9 = 00。
+    let fcw24 = 0x007fu16;
+    let expect24 = (1u64 << 63) | (((f32::sqrt(2.0).to_bits() as u64) & 0x007f_ffff) << 40);
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0x4000, fcw24);
+    assert_eq!((sig, exp), (expect24, 0x3fff));
+    assert_ne!(fsw & (1 << 5), 0);
+    // exact な入力 sqrt(4)=2 では PC=24 でも PE が立たない。
+    let (sig, exp, fsw) = once(0x8000_0000_0000_0000, 0x4001, fcw24);
+    assert_eq!((sig, exp), (0x8000_0000_0000_0000, 0x4000));
+    assert_eq!(fsw & (1 << 5), 0);
+}
+
+#[test]
 fn run_x87_fxtract_unsupported_and_zero_preoperation_response() {
     fn once(sig: u64, exp: u16, fcw: u16) -> (u64, u16, u64, u16, u16, u16) {
         let mut env = bare_x86_env();
