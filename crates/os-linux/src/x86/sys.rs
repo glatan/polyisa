@@ -5539,7 +5539,7 @@ fn sys_brk(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcom
 /// 子は実行可能なスレッドとして置き、親には子の識別子を返す。
 fn sys_fork(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     // fork()。アドレス空間は複製する。CLONE_VM の vfork は受けない。
-    spawn_child(sys, env, 0)
+    spawn_child(sys, env, 0, 0)
 }
 
 fn sys_vfork(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5553,7 +5553,7 @@ fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     let stack = get64(env, cx.r_b);
     let have = flags & (crate::clone_flag::VM | crate::clone_flag::THREAD);
     if have == 0 {
-        return spawn_child(sys, env, stack);
+        return spawn_child(sys, env, stack, flags);
     }
     // CLONE_THREAD には CLONE_VM が要る。片方だけの指定は Linux と同じく EINVAL。
     // Ref: SRC-LINUX (7.3).
@@ -5566,17 +5566,38 @@ fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     if !sys.is64 || sys.x32 {
         return Some(TrapOutcome::Unimplemented);
     }
+    // CLONE_SETTID は pid の指定であり、特権が要る。musl/glibc の
+    // pthread は使わないので、実機の非特権と同じく EPERM にする。
+    if flags & crate::clone_flag::SETTID != 0 {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    }
     let tls = get64(env, cx.r_e);
     let ctid = get64(env, cx.r_d);
+    let ptid = get64(env, cx.r_c);
     let set_tls = flags & crate::clone_flag::SETTLS != 0;
     let clear_tid = flags & crate::clone_flag::CHILD_CLEARTID != 0;
-    spawn_thread(sys, env, stack, tls, set_tls, ctid, clear_tid)
+    let parent_settid = flags & crate::clone_flag::PARENT_SETTID != 0;
+    let child_settid = flags & crate::clone_flag::CHILD_SETTID != 0;
+    spawn_thread(
+        sys,
+        env,
+        stack,
+        tls,
+        set_tls,
+        ctid,
+        clear_tid,
+        ptid,
+        parent_settid,
+        child_settid,
+    )
 }
 
 /// CLONE_VM|CLONE_THREAD のスレッド生成。子は新しいスタックで syscall の
 /// 次の命令から戻り、アドレス空間は親と共有する。共有は、実メモリを
 /// 実行中スレッドの env にだけ置き、park 時に queue のホルダーへ移す
 /// 移転モデルで実現する。fs base は CLONE_SETTLS のとき tls 引数を使う。
+#[allow(clippy::too_many_arguments)]
 fn spawn_thread(
     sys: &mut Linux,
     env: &mut BareEnv,
@@ -5585,6 +5606,9 @@ fn spawn_thread(
     set_tls: bool,
     ctid: u64,
     clear_tid: bool,
+    ptid: u64,
+    parent_settid: bool,
+    child_settid: bool,
 ) -> Option<TrapOutcome> {
     let parent = sys.ensure_self();
     // スレッドは wait 対象にも SIGCHLD にもしない区別付きで登録する。
@@ -5636,13 +5660,29 @@ fn spawn_thread(
         env: child_env,
         linux: child_linux,
     });
+    // tid の書き込み。共有メモリは親の env にあるので、
+    // どちらのフラグもここで書ける。失敗しても生成は成立している
+    // ので、実機どおり書けなければ EFAULT ではなく生成を優先する。
+    let tid_bytes = (child_pid.0 as u32).to_le_bytes();
+    if parent_settid && ptid != 0 {
+        let _ = env.backend.mem.write(VirtAddr(ptid), &tid_bytes);
+    }
+    if child_settid && ctid != 0 {
+        let _ = env.backend.mem.write(VirtAddr(ctid), &tid_bytes);
+    }
     set64(env, Gpr(0), child_pid.0);
     Some(TrapOutcome::Handled)
 }
 
-fn spawn_child(sys: &mut Linux, env: &mut BareEnv, stack: u64) -> Option<TrapOutcome> {
+fn spawn_child(sys: &mut Linux, env: &mut BareEnv, stack: u64, flags: u64) -> Option<TrapOutcome> {
     let parent = sys.ensure_self();
-    let child_pid = sys.procs.borrow_mut().fork(parent);
+    // CLONE_PARENT は呼び出し側ではなくその親を子の親にする。
+    let proc_parent = if flags & crate::clone_flag::PARENT != 0 {
+        sys.procs.borrow().parent_of(parent).unwrap_or(parent)
+    } else {
+        parent
+    };
+    let child_pid = sys.procs.borrow_mut().fork(proc_parent);
     let mut child_env = env.clone();
     set64(&mut child_env, Gpr(0), 0);
     if stack != 0 {
@@ -8625,6 +8665,69 @@ mod tests {
         set64(&mut env, Gpr(10), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -10, "ECHILD");
+    }
+
+    #[test]
+    fn clone_parent_settid_and_child_settid_write_tid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM
+                | crate::clone_flag::THREAD
+                | crate::clone_flag::PARENT_SETTID
+                | crate::clone_flag::CHILD_SETTID,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        set64(&mut env, Gpr(2), 0x2000); // ptid
+        set64(&mut env, Gpr(10), 0x2010); // ctid
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf) as u64,
+            child,
+            "PARENT_SETTID は ptid へ tid を書く"
+        );
+        env.backend
+            .mem
+            .read(VirtAddr(0x2010), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf) as u64,
+            child,
+            "CHILD_SETTID は ctid へ tid を書く"
+        );
+    }
+
+    #[test]
+    fn clone_settid_is_eperm() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD | crate::clone_flag::SETTID,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -1, "EPERM");
     }
 
     #[test]
