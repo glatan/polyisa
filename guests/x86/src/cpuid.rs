@@ -17,7 +17,7 @@ use crate::IDENT_BITS;
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・7.1・0xD.0・
 /// 0xD.1・0xD.2・0x1D.0・0x1D.1・0x1E.0・0x1E.1、拡張は
 /// 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 34] = [
+pub const LEAF_IDS: [(u32, u32); 35] = [
     (0, 0),
     (1, 0),
     (4, 0),
@@ -32,6 +32,7 @@ pub const LEAF_IDS: [(u32, u32); 34] = [
     (0xD, 5),
     (0xD, 6),
     (0xD, 7),
+    (0xD, 9),
     (0xD, 17),
     (0xD, 18),
     (0xD, 19),
@@ -106,7 +107,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 34] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 35] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -168,6 +169,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             (5, 0x40, false),
             (6, 0x200, false),
             (7, 0x400, false),
+            (9, 0x8, false),
             (17, 0x40, true),
             (18, 0x2000, true),
             (19, XSAVE_APX_SIZE, true),
@@ -226,6 +228,8 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             } else {
                 0x240
             };
+            // PKRU 成分（bit9、+0xa80 の 8 バイト）は無条件に存在する。
+            sz = sz.max(0xa80 + 8);
             if features.contains("apx") {
                 sz = sz.max(XSAVE_APX_OFF + XSAVE_APX_SIZE);
             }
@@ -268,6 +272,14 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         },
         if features.contains("avx512f") {
             [0x400, XSAVE_HI16ZMM_OFF, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 9: PKRU 成分（8 バイト、+0xa80）。
+        // 整列要求はない。polyisa は PKRU を無条件の状態として
+        // 持つので xsave 対応モデルでは常に報告する。
+        if features.contains("xsave") {
+            [8, 0xa80, 0, 0]
         } else {
             [0; 4]
         },
@@ -458,7 +470,10 @@ pub fn xstate_size(mask: u64) -> u64 {
 /// XCOMP_SUPP は leaf D の uabi 成分と一致する）。
 #[must_use]
 pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
-    let mut m = 0x3u64;
+    // bit9 の PKRU は polyisa が無条件に持つ状態なので常に対応
+    // 成分とする（xsave 非対応モデルでは xcomp_supp 自体が
+    // 参照されない）。
+    let mut m = 0x203u64;
     if features.contains("avx") {
         m |= 0x4;
     }

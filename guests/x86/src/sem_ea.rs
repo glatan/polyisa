@@ -15198,6 +15198,15 @@ pub fn xsave_area_mask<B: Backend>(
         }
         Ok(())
     })?;
+    // PKRU 成分（bit9、0xA80、8 バイト）。0x680 から始まる
+    // Hi16_ZMM の終端 0xa80 直後の空きを使う。
+    let wpkru = mask_bit(b, m, 9);
+    b.if_then(wpkru, |b| {
+        let v: B::V<W64> = b.get(sem::pkru_ref());
+        let ah = madd(b, a, 0xa80);
+        decode::mem_store::<B, W64>(b, ah, wseg, v)?;
+        Ok(())
+    })?;
     // AMX。実機の標準レイアウトでは XTILECFG=0xac0（64
     // バイト）、XTILEDATA=0xb00（8192 バイト）。この配置は
     // CPUID leaf D の成分情報と対にする。
@@ -15451,6 +15460,21 @@ pub fn xrstor_area_mask<B: Backend>(
         for i in 0..16u8 {
             b.set(sem::x_ref(Gpr(16 + i)), z);
         }
+        Ok(())
+    })?;
+    // PKRU。bit9 が XSTATE_BV にあれば 0xa80 から復元し、
+    // なければ RFBM∩XCR0 の成分は初期値 0 に戻す。
+    let rpkru = mask_bit(b, rst, 9);
+    b.if_then(rpkru, |b| {
+        let ah = madd(b, a, 0xa80);
+        let v: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+        b.set(sem::pkru_ref(), v);
+        Ok(())
+    })?;
+    let ipkru = mask_bit(b, ini, 9);
+    b.if_then(ipkru, |b| {
+        let z = b.konst::<W64>(0);
+        b.set(sem::pkru_ref(), z);
         Ok(())
     })?;
     // AMX。XTILECFG と XTILEDATA は独立した成分として扱うが、

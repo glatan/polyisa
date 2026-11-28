@@ -32341,3 +32341,100 @@ fn run_xstate_fault_conditions() {
         "xrstor 非整列は #GP"
     );
 }
+
+/// PKRU xstate 成分。xsave が bit9 で PKRU を 0xa80 へ書き、
+/// xrstor が復元する。XSTATE_BV に bit9 がなければ初期値 0 へ戻る。
+#[test]
+fn run_xsave_pkru_roundtrip() {
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // xcr0 = 0x203（x87|sse|pkru）。ユーザーモードの xsetbv は
+    // 使えないので harness が直接設定する。
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 0x203);
+    // xsave → pkru を harness 側でクリア → xrstor の往復。
+    // wrpkru/rdpkru の実行配線は未整備なので、PKRU 状態の操作は
+    // harness から行う（検証対象は xstate 配線）。
+    let prog: &[u8] = &[
+        // xsave [rbx]、mask edx:eax = 0:0x203
+        0x31, 0xD2, // xor edx,edx
+        0xB8, 0x03, 0x02, 0x00, 0x00, // mov eax,0x203
+        0x0F, 0xAE, 0x23, // xsave [rbx]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .set(polyisa_guest_x86::sem::pkru_ref(), 0xAABBCC00);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    // xsave が 0xa80 に PKRU を書いたことを確認
+    let mut buf = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000 + 0xa80),
+            &mut buf,
+            polyisa_mem::Access::DATA_LE,
+        )
+        .unwrap();
+    assert_eq!(
+        u64::from_le_bytes(buf),
+        0xAABBCC00,
+        "xsave が PKRU を +0xa80 へ書く"
+    );
+    // XSTATE_BV（+512）に bit9 が立つことを確認
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000 + 512),
+            &mut buf,
+            polyisa_mem::Access::DATA_LE,
+        )
+        .unwrap();
+    assert_ne!(
+        u64::from_le_bytes(buf) & 0x200,
+        0,
+        "XSTATE_BV に bit9 が立つ"
+    );
+    // pkru をクリアして xrstor だけを実行する第2フェーズ
+    let prog2: &[u8] = &[
+        0x31, 0xD2, // xor edx,edx
+        0xB8, 0x03, 0x02, 0x00, 0x00, // mov eax,0x203
+        0x0F, 0xAE, 0x2B, // xrstor [rbx]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog2).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::pkru_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::pkru_ref()),
+        0xAABBCC00,
+        "xrstor が PKRU を復元する"
+    );
+}

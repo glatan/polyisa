@@ -82,7 +82,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 34],
+    pub cpuid: [[u32; 4]; 35],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -169,7 +169,7 @@ impl Default for CpuState {
             gs_base: 0,
             sregs: Default::default(),
             fsw: 0,
-            cpuid: [[0; 4]; 34],
+            cpuid: [[0; 4]; 35],
             mxcsr: 0,
             gdtr_base: 0,
             gdtr_limit: 0,
