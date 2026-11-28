@@ -698,6 +698,54 @@ mod imp {
             )
         );
     }
+    /// transcendental の tiny/underflow 入力の host 差分。
+    /// 既知の不一致があるため #[ignore] 運用の再現 corpus。
+    pub fn run_transcendental_tiny() {
+        let unary_ops = [
+            ([0xd9, 0xf0], "f2xm1"),
+            ([0xd9, 0xfe], "fsin"),
+            ([0xd9, 0xff], "fcos"),
+        ];
+        let mut rng = Rng(0x87D1_77AA);
+        let fcws = [0x007f, 0x027f, 0x037f, 0x077f, 0x0b7f, 0x0f7f];
+        let mut reports = Vec::new();
+        for i in 0..256 {
+            let op = unary_ops[(rng.next() % unary_ops.len() as u64) as usize];
+            let sign = if rng.next() & 1 != 0 { 0x8000 } else { 0 };
+            let input = match rng.next() % 3 {
+                0 => {
+                    let sig = rng.next() | (if rng.next() & 1 != 0 { 1u64 << 63 } else { 1 });
+                    (sig, sign)
+                }
+                1 => {
+                    let sig = (1u64 << 63) | rng.next();
+                    (sig, (1 + (rng.next() % 8) as u16) | sign)
+                }
+                _ => {
+                    let sig = (1u64 << 63) | rng.next();
+                    (sig, (0x3fffu16 - 20 - (rng.next() % 20) as u16) | sign)
+                }
+            };
+            let fcw = fcws[(rng.next() % fcws.len() as u64) as usize];
+            let (hv, hsw) = host_unary(input, op.0, fcw);
+            let (pv, psw) = poly_unary(input, op.0, fcw);
+            if !trans_value_matches(hv, pv) || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "tiny {i} {} fcw={fcw:04x}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    op.1, input.0, input.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+                if reports.len() >= 20 {
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            reports.is_empty(),
+            "host x87 tiny diff:\n{}",
+            reports.join("\n")
+        );
+    }
 }
 
 #[test]
@@ -710,4 +758,24 @@ fn diff_host_x87_arithmetic() {
 fn diff_host_x87_transcendental_accuracy() {
     #[cfg(all(target_arch = "x86_64", unix))]
     imp::run_transcendental_accuracy();
+}
+
+/// tiny/underflow 入力の transcendental 差分。2026-11-28 時点で
+/// 既知の不一致があり ignore 運用。再現は `cargo test -p
+/// polyisa-guest-x86 --test heavy_diff_host_x87 -- --ignored`。
+/// 不一致は 2 類:
+/// (a) pseudo-denormal 入力（exp=0・bit63 セット）を poly は IE の
+///     unsupported として扱うが、host は正規化して演算し DE+PE を立てる
+///     （例: fsin in=f4f3123167f49381/0000 → host は入力正規化値を返す）。
+///     算術命令では host/poly とも unsupported で一致するため、
+///     transcendental 固有の分類の問題。一次資料での確認が必要。
+/// (b) fcos の微小入力で host は 1.0 直前の正規化済み値を返すのに
+///     poly は integer bit の落ちた非正規形を返す（例:
+///     in=9f03cbdfa893b8b1/3fe0 → host fffffffffffffffd/3ffe、
+///     poly 7fffffffffffffff/3fff）。出力正規化の実バグ。
+#[test]
+#[ignore = "既知の transcendental tiny 不一致。上記コメント参照"]
+fn diff_host_x87_transcendental_tiny() {
+    #[cfg(all(target_arch = "x86_64", unix))]
+    imp::run_transcendental_tiny();
 }
