@@ -14,6 +14,9 @@ fn bare_x86_env() -> BareEnv {
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     env.backend
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+    // ハードウェアリセット値。全 FP 例外が masked。
+    env.backend
+        .set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80u32);
     env
 }
 
@@ -20205,9 +20208,9 @@ fn run_a1_ldmxcsr_stmxcsr() {
         0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
     ];
     let (out, env) = run32(prog, 100);
-    // stmxcsr は MXCSR=0（テスト env は既定 0）→ ebx=0。
+    // stmxcsr は初期 MXCSR=0x1F80 → ebx=0x1F80。
     // ldmxcsr で 0xAA55 を読み、再度 stmxcsr → ecx=0xAA55。
-    assert_eq!(out, Outcome::Exit(0xAA55));
+    assert_eq!(out, Outcome::Exit(0x1F80 | 0xAA55));
     let _ = env;
 }
 
@@ -32386,6 +32389,64 @@ fn run_xstate_fault_conditions() {
         Some(ExceptionKind::Protection),
         "xrstor 非整列は #GP"
     );
+}
+
+#[test]
+fn run64_avx10_saturating_conversion_unmasked_xm() {
+    use polyisa_sem::ExceptionKind;
+    // vcvttps2ibs で 1.5 を trunc すると inexact。MXCSR の precision
+    // mask(bit12)を落とすと unmasked になり #XM で fault する。
+    // destination は commit されない。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(2, 0),
+        u128::from(0x3fc0_0000u32), // fp32 1.5
+    );
+    env.backend.set(
+        polyisa_guest_x86::sem::zreg_ref(0, 0),
+        u128::from(0xdead_beefu32),
+    );
+    // precision mask(bit12)だけ落とす。
+    env.backend
+        .set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80 & !(1 << 12));
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x62, 0xF5, 0x7D, 0x28, 0x68, 0xC2], // vcvttps2ibs xmm0,ymm2
+        )
+        .unwrap();
+    let mut sys = ExcProbe {
+        kind: None,
+        addr: None,
+    };
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        1,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    let _ = out;
+    assert_eq!(sys.kind, Some(ExceptionKind::Fp), "unmasked PE は #XM");
+    // fault なので destination は書き戻されない。
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::zreg_ref(0, 0));
+    assert_eq!(v as u32, 0xdead_beef, "fault では非 commit");
+    // MXCSR の PE flag は立つ（handler が原因を読むため）。
+    let mx: u32 = env.backend.get(polyisa_guest_x86::sem::mxcsr_ref());
+    assert_ne!(mx & (1 << 5), 0, "PE flag は commit される");
 }
 
 #[test]

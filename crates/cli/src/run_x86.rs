@@ -9235,11 +9235,26 @@ fn avx10_exec(
             }
         }
     }
-    zput(env, dst_r, &out);
-    if mx_status != 0 {
+    // embedded rounding(SAE)では FP 例外は完全に抑制される。
+    // それ以外では MXCSR flag を commit し、unmasked の例外があれば
+    // destination を commit せず #XM を fault として配送する。
+    let sae = md.evex_b && md.modrm >> 6 == 3;
+    if !sae && mx_status != 0 {
         let mxcsr: u32 = env.backend.get(sem::mxcsr_ref());
         env.backend.set(sem::mxcsr_ref(), mxcsr | mx_status);
+        let unmasked = [(0u8, 7u8), (1, 8), (2, 9), (3, 10), (4, 11), (5, 12)]
+            .iter()
+            .any(|&(st, mask)| mx_status & (1 << st) != 0 && mxcsr & (1 << mask) == 0);
+        if unmasked {
+            return Err(InterpExit::Exception(polyisa_sem::GuestException {
+                kind: ExceptionKind::Fp,
+                code: 19,
+                addr: Some(u64::from(eip)),
+                in_delay_slot: false,
+            }));
+        }
     }
+    zput(env, dst_r, &out);
     env.backend.fp_flags |= flags;
     Ok(())
 }
