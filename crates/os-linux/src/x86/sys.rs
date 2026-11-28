@@ -9379,6 +9379,7 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
         // val3=1 なら一致して成功（waiter がいなくても 0 で返る）。
+        set64(&mut env, Gpr(0), abi::FUTEX);
         set64(&mut env, Gpr(9), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
