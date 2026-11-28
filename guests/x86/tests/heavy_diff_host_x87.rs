@@ -751,6 +751,106 @@ mod imp {
             reports.join("\n")
         );
     }
+
+    /// 例外優先順位の host 差分。IE の各カテゴリ（∞-∞、0×∞、0/0、
+    /// ∞/∞、sqrt 負入力）、NaN 伝播優先（sNaN の IE+quiet、両入力 NaN
+    /// の選択）、denormal/pseudo-denormal 被演算子の DE、および
+    /// sNaN+denormal 同時成立時の優先を、masked 全般で厳密比較する。
+    /// これらは特殊値なので値も例外フラグも厳密一致を要求する。
+    pub fn run_exception_priority() {
+        let inf = (1u64 << 63, 0x7fffu16);
+        let ninf = (1u64 << 63, 0xffffu16);
+        let zero = (0u64, 0u16);
+        let one = (1u64 << 63, 0x3fffu16);
+        let two = (1u64 << 63, 0x4000u16);
+        let negone = (1u64 << 63, 0xbfffu16);
+        // qNaN: bit62（quiet）立ち。payload 違いで識別。
+        let qnan1 = (0xc000_0000_0000_0001u64, 0x7fffu16);
+        let qnan2 = (0xc000_0000_0000_0002u64, 0x7fffu16);
+        // sNaN: bit62 が 0。
+        let snan = (0x8000_0000_0000_0004u64, 0x7fffu16);
+        // QNaN indefinite: 符号付きの無 payload。
+        let denorm = (1u64, 0u16);
+        let pdenorm = (1u64 << 63, 0u16);
+        let fadd = [0xd8, 0xc1];
+        let fmul = [0xd8, 0xc9];
+        let fsub = [0xd8, 0xe1];
+        let fdiv = [0xd8, 0xf1];
+        // (op, name, in0=st0, in1=st1 の順ではなく host_op(input0,input1)
+        //  の契機に合わせる)
+        type BinCase = ([u8; 2], &'static str, (u64, u16), (u64, u16));
+        let cases: &[BinCase] = &[
+            // IE カテゴリ
+            (fsub, "inf-inf", inf, inf),
+            (fsub, "ninf-ninf", ninf, ninf),
+            (fsub, "inf-ninf は valid", inf, ninf),
+            (fdiv, "inf/inf", inf, inf),
+            (fdiv, "0/0", zero, zero),
+            (fmul, "0*inf", zero, inf),
+            (fmul, "inf*0 順序逆", inf, zero),
+            // NaN 伝播
+            (fadd, "qnan+1", qnan1, one),
+            (fadd, "1+qnan", one, qnan1),
+            (fadd, "snan+1 → IE+quiet", snan, one),
+            (fadd, "qnan1+qnan2", qnan1, qnan2),
+            (fadd, "qnan2+qnan1 逆順", qnan2, qnan1),
+            (fadd, "snan+qnan 優先", snan, qnan1),
+            (fadd, "qnan+snan 逆順", qnan1, snan),
+            (fmul, "snan*2", snan, two),
+            (fsub, "snan-snan", snan, snan),
+            // denormal/pseudo-denormal 被演算子 → DE で演算継続
+            (fadd, "denorm+1", denorm, one),
+            (fmul, "denorm*2", denorm, two),
+            (fadd, "pdenorm+1", pdenorm, one),
+            (fmul, "pdenorm*2", pdenorm, two),
+            (fdiv, "1/pdenorm", one, pdenorm),
+            // 例外同時成立: sNaN（IE）と denormal（DE）の混合
+            (fadd, "snan+denorm", snan, denorm),
+            (fadd, "denorm+snan", denorm, snan),
+            // denormal 同士の加算（結果も denormal）
+            (fadd, "denorm+denorm", denorm, denorm),
+        ];
+        let fcws = [0x037fu16, 0x0f7f];
+        let mut reports = Vec::new();
+        for (op, name, in0, in1) in cases {
+            for fcw in fcws {
+                let (hv, hsw) = host_op(*in0, *in1, *op, fcw);
+                let (pv, psw) = poly_op(*in0, *in1, *op, fcw);
+                if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                    reports.push(format!(
+                        "{name} fcw={fcw:04x}: in0={:x}/{:04x} in1={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                        in0.0, in0.1, in1.0, in1.1,
+                        hv.0, hv.1, hsw, pv.0, pv.1, psw
+                    ));
+                }
+            }
+        }
+        // sqrt の IE/DE カテゴリ
+        type UnCase = ([u8; 2], &'static str, (u64, u16));
+        let unary: &[UnCase] = &[
+            ([0xd9, 0xfa], "sqrt(-1) → IE", negone),
+            ([0xd9, 0xfa], "sqrt(denorm) → DE", denorm),
+            ([0xd9, 0xfa], "sqrt(snan) → IE", snan),
+            ([0xd9, 0xfa], "sqrt(qnan) 伝播", qnan1),
+            ([0xd9, 0xfc], "frndint(snan) → IE", snan),
+            ([0xd9, 0xfc], "frndint(denorm) → DE", denorm),
+        ];
+        for (op, name, inp) in unary {
+            let (hv, hsw) = host_unary(*inp, *op, 0x037f);
+            let (pv, psw) = poly_unary(*inp, *op, 0x037f);
+            if hv != pv || (hsw & EXCEPTION_MASK) != (psw & EXCEPTION_MASK) {
+                reports.push(format!(
+                    "{name}: in={:x}/{:04x} host={:x}/{:04x},sw{:04x} poly={:x}/{:04x},sw{:04x}",
+                    inp.0, inp.1, hv.0, hv.1, hsw, pv.0, pv.1, psw
+                ));
+            }
+        }
+        assert!(
+            reports.is_empty(),
+            "host x87 exception-priority diff:\n{}",
+            reports.join("\n")
+        );
+    }
 }
 
 #[test]
@@ -769,4 +869,10 @@ fn diff_host_x87_transcendental_accuracy() {
 fn diff_host_x87_transcendental_tiny() {
     #[cfg(all(target_arch = "x86_64", unix))]
     imp::run_transcendental_tiny();
+}
+
+#[test]
+fn diff_host_x87_exception_priority() {
+    #[cfg(all(target_arch = "x86_64", unix))]
+    imp::run_exception_priority();
 }
