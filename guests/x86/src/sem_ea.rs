@@ -15405,6 +15405,20 @@ pub fn xrstor_area_mask<B: Backend>(
     b.if_then(load_mx, |b| {
         let a24 = madd(b, a, 24);
         let mx: B::V<W32> = decode::mem_load(b, a24, wseg)?;
+        // MXCSR の予約 bit（上位 16 ビット）が立つ復元は #GP。
+        let hi16 = b.konst::<W32>(0xffff_0000);
+        let rsvd = b.and::<W32>(mx, hi16);
+        let z32 = b.konst::<W32>(0);
+        let bad_mx = b.cmp::<W32>(Cmp::Ne, rsvd, z32);
+        b.if_then(bad_mx, |b| {
+            use polyisa_sem::{ExceptionKind, GuestException};
+            Err(b.raise(GuestException {
+                kind: ExceptionKind::Protection,
+                code: 13,
+                addr: None,
+                in_delay_slot: false,
+            }))
+        })?;
         b.set(sem::mxcsr_ref(), mx);
         Ok(())
     })?;

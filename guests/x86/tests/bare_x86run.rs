@@ -32388,6 +32388,70 @@ fn run_xstate_fault_conditions() {
     );
 }
 
+#[test]
+fn run_xrstor_mxcsr_reserved_bits_gp() {
+    use polyisa_sem::ExceptionKind;
+    let feats = polyisa_guest_x86::model_feats("x86_64");
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // xrstor [rbx]、rbx=0x2000 は 64 バイト整列。
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x0F, 0xAE, 0x2B])
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 2); // eax: RFBM bit1 (SSE)
+    env.backend.set(Gpr(2).state(), 0); // edx
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 0x3);
+    // MXCSR は領域 +24。予約 bit16 を立てる。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000 + 24), &0x1_0000u32.to_le_bytes())
+        .unwrap();
+    let mut sys = ExcProbe {
+        kind: None,
+        addr: None,
+    };
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        4,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    let _ = out;
+    assert_eq!(
+        sys.kind,
+        Some(ExceptionKind::Protection),
+        "xrstor で MXCSR 予約 bit は #GP"
+    );
+    // 予約 bit を落とせば正常に復元される。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000 + 24), &0x1f80u32.to_le_bytes())
+        .unwrap();
+    let mut sys2 = ExcProbe {
+        kind: None,
+        addr: None,
+    };
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys2,
+        1,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert!(matches!(out, Outcome::StepLimit { .. }));
+    assert_eq!(sys2.kind, None);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::mxcsr_ref()), 0x1f80);
+}
+
 /// PKRU xstate 成分。xsave が bit9 で PKRU を 0xa80 へ書き、
 /// xrstor が復元する。XSTATE_BV に bit9 がなければ初期値 0 へ戻る。
 #[test]
