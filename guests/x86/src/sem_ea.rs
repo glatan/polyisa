@@ -5686,23 +5686,83 @@ pub fn cvtf2i<B: Backend>(
 ) -> Result<(), B::Exit> {
     let s = rx(b, ea, fbits)?;
     let rm = if trunc_rm { 1 } else { 0 };
+    // 範囲外・NaN・Inf の応答は整数 indefinite（32bit なら 0x80000000、
+    // 64bit ならその 64bit 版）で、飽和ではない。softfloat の汎用変換は
+    // 飽和するので、indefinite の条件をこちらで検出して選択する。
+    // 32bit 出力では i64 への変換が全パターンを正確に保持する
+    // （丸めは整数への丸めで同じ、範囲だけ広い）ため、整数域の
+    // 範囲検査で NaN/Inf/範囲外を一律に検出できる。
+    // 64bit 出力では入力を境界浮動小数と比較する。f64/f32 では
+    // ±2^63 の近傍に丸めのタイが生じうる中間値が存在しないため、
+    // `input < 2^63 かつ -2^63 <= input` が正確な有効条件になる
+    // （NaN では両比較が偽になり invalid へ落ちる）。
     let v = if fbits == 64 {
         let s64: B::V<W64> = b.trunc::<W128, W64>(s);
         let f = b.trunc::<W64, polyisa_sem::F64>(s64);
         if d.rex & 8 != 0 {
-            b.fcvt_s64::<polyisa_sem::F64>(f, rm)
+            let wide = b.fcvt_s64::<polyisa_sem::F64>(f, rm);
+            let pos_i = b.konst::<W64>(0x43e0_0000_0000_0000);
+            let pos = b.trunc::<W64, polyisa_sem::F64>(pos_i);
+            let neg_i = b.konst::<W64>(0xc3e0_0000_0000_0000);
+            let neg = b.trunc::<W64, polyisa_sem::F64>(neg_i);
+            let lt = b.flt::<polyisa_sem::F64>(f, pos);
+            let ge = b.fle::<polyisa_sem::F64>(neg, f);
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let i1 = b.select::<W64>(lt, one, zero);
+            let i2 = b.select::<W64>(ge, one, zero);
+            let both = b.and::<W64>(i1, i2);
+            let valid = b.cmp::<W64>(polyisa_sem::Cmp::Ne, both, zero);
+            let indef = b.konst::<W64>(0x8000_0000_0000_0000);
+            b.select::<W64>(valid, wide, indef)
         } else {
-            let v32 = b.fcvt_s32::<polyisa_sem::F64>(f, rm);
-            b.sext::<W32, W64>(v32)
+            let wide = b.fcvt_s64::<polyisa_sem::F64>(f, rm);
+            let lo = b.konst::<W64>(0xffff_ffff_8000_0000);
+            let hi = b.konst::<W64>(0x0000_0000_7fff_ffff);
+            let ge = b.cmp::<W64>(polyisa_sem::Cmp::GeS, wide, lo);
+            let le = b.cmp::<W64>(polyisa_sem::Cmp::LeS, wide, hi);
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let i1 = b.select::<W64>(ge, one, zero);
+            let i2 = b.select::<W64>(le, one, zero);
+            let both = b.and::<W64>(i1, i2);
+            let valid = b.cmp::<W64>(polyisa_sem::Cmp::Ne, both, zero);
+            let indef = b.konst::<W64>(0xffff_ffff_8000_0000);
+            b.select::<W64>(valid, wide, indef)
         }
     } else {
         let s32: B::V<W32> = b.trunc::<W128, W32>(s);
         let f = b.trunc::<W32, polyisa_sem::F32>(s32);
         if d.rex & 8 != 0 {
-            b.fcvt_s64::<polyisa_sem::F32>(f, rm)
+            let wide = b.fcvt_s64::<polyisa_sem::F32>(f, rm);
+            let pos_i = b.konst::<W32>(0x5f00_0000);
+            let pos = b.trunc::<W32, polyisa_sem::F32>(pos_i);
+            let neg_i = b.konst::<W32>(0xdf00_0000);
+            let neg = b.trunc::<W32, polyisa_sem::F32>(neg_i);
+            let lt = b.flt::<polyisa_sem::F32>(f, pos);
+            let ge = b.fle::<polyisa_sem::F32>(neg, f);
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let i1 = b.select::<W64>(lt, one, zero);
+            let i2 = b.select::<W64>(ge, one, zero);
+            let both = b.and::<W64>(i1, i2);
+            let valid = b.cmp::<W64>(polyisa_sem::Cmp::Ne, both, zero);
+            let indef = b.konst::<W64>(0x8000_0000_0000_0000);
+            b.select::<W64>(valid, wide, indef)
         } else {
-            let v32 = b.fcvt_s32::<polyisa_sem::F32>(f, rm);
-            b.sext::<W32, W64>(v32)
+            let wide = b.fcvt_s64::<polyisa_sem::F32>(f, rm);
+            let lo = b.konst::<W64>(0xffff_ffff_8000_0000);
+            let hi = b.konst::<W64>(0x0000_0000_7fff_ffff);
+            let ge = b.cmp::<W64>(polyisa_sem::Cmp::GeS, wide, lo);
+            let le = b.cmp::<W64>(polyisa_sem::Cmp::LeS, wide, hi);
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let i1 = b.select::<W64>(ge, one, zero);
+            let i2 = b.select::<W64>(le, one, zero);
+            let both = b.and::<W64>(i1, i2);
+            let valid = b.cmp::<W64>(polyisa_sem::Cmp::Ne, both, zero);
+            let indef = b.konst::<W64>(0xffff_ffff_8000_0000);
+            b.select::<W64>(valid, wide, indef)
         }
     };
     if d.rex & 8 != 0 {
@@ -5739,12 +5799,12 @@ pub fn cvtff<B: Backend>(
             let v128 = b.zext::<W64, W128>(v64);
             put_lane128(b, a128, v128, 0, 64)
         } else {
-            // CVTPS2PD: lo/hi の f32 → 2 つの f64
+            // CVTPS2PD: lane0/lane1 の f32 → 2 つの f64。
+            // 上位入力は lane1（bits 32-63）なので 32 シフトで引く。
             let lo32: B::V<W32> = b.trunc::<W128, W32>(s);
-            let s64k = b.konst::<W128>(64);
-            let s_hi = b.shr_l::<W128>(s, s64k);
-            let hi64: B::V<W64> = b.trunc::<W128, W64>(s_hi);
-            let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+            let s32k = b.konst::<W128>(32);
+            let s_hi = b.shr_l::<W128>(s, s32k);
+            let hi32: B::V<W32> = b.trunc::<W128, W32>(s_hi);
             let fl = b.trunc::<W32, F32>(lo32);
             let fh = b.trunc::<W32, F32>(hi32);
             let vl = b.fcvt_ff::<F32, F64>(fl, 0);

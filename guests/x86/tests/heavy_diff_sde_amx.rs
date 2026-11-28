@@ -35,20 +35,35 @@ void _start(void) {
         cfg[16 + i * 2] = 8;
         cfg[48 + i] = 2;
     }
-    static const u8 a[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-    static const u8 b[16] = {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-    static u32 dst[4] = {0};
+    // 符号の識別には high bit を持つ入力が要る。0xff は signed -1 /
+    // unsigned 255、0x80 は signed -128 / unsigned 128 と、4 つの符号
+    // 組合せすべてで積が変わる。
+    static const u8 a[16] = {0xff,0x80,0x7f,0x01,0xfe,0x02,0x81,0x7e,
+                             0xff,0x80,0x7f,0x01,0xfe,0x02,0x81,0x7e};
+    static const u8 b[16] = {0xff,0x80,0x7f,0x01,0x03,0xfd,0x82,0x7d,
+                             0xff,0x80,0x7f,0x01,0x03,0xfd,0x82,0x7d};
+    static u32 dst[16] = {0};
     asm volatile(
         ".byte 0xC4,0xE2,0x78,0x49,0x00\n\t"       // ldtilecfg (%rax)
         ".byte 0xC4,0xE2,0x7B,0x4B,0x0C,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm1
         "mov %4, %%rsi\n\t"
         ".byte 0xC4,0xE2,0x7B,0x4B,0x14,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm2
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"      // tilezero tmm0
         ".byte 0xC4,0xE2,0x6B,0x5E,0xC1\n\t"      // tdpbssd %tmm2,%tmm1,%tmm0
         ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"      // tilezero tmm0
+        ".byte 0xC4,0xE2,0x6A,0x5E,0xC1\n\t"      // tdpbsud %tmm2,%tmm1,%tmm0
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x44,0x3B,0x10\n\t" // tilestored %tmm0,0x10(%rbx,%rdi)
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"      // tilezero tmm0
+        ".byte 0xC4,0xE2,0x69,0x5E,0xC1\n\t"      // tdpbusd %tmm2,%tmm1,%tmm0
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x44,0x3B,0x20\n\t" // tilestored %tmm0,0x20(%rbx,%rdi)
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"      // tilezero tmm0
+        ".byte 0xC4,0xE2,0x68,0x5E,0xC1\n\t"      // tdpbuud %tmm2,%tmm1,%tmm0
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x44,0x3B,0x30\n\t" // tilestored %tmm0,0x30(%rbx,%rdi)
         :
         : "a"(cfg), "S"(a), "D"(8), "b"(dst), "r"(b)
         : "memory");
-    (void)sys3(1, 1, (long)dst, 16);
+    (void)sys3(1, 1, (long)dst, 64);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }
@@ -130,12 +145,21 @@ fn diff_sde_amx_int8() {
     assert!(out.status.success(), "sde status {:?}", out.status);
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(poly.len(), 16, "poly stdout len");
-    assert_eq!(out.stdout.len(), 16, "sde stdout len");
-    assert_eq!(poly, out.stdout, "tilestored bytes");
-    let expect = [8u32, 10, 24, 26]
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect::<Vec<_>>();
-    assert_eq!(poly, expect, "known TDPBSSD result");
+    assert_eq!(poly.len(), 64, "poly stdout len");
+    assert_eq!(out.stdout.len(), 64, "sde stdout len");
+    if poly != out.stdout {
+        let mut bad = Vec::new();
+        for i in 0..16 {
+            let a = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
+            let b = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
+            if a != b {
+                bad.push(format!(
+                    "{} d{} poly={a:08x} sde={b:08x}",
+                    ["tdpbssd", "tdpbsud", "tdpbusd", "tdpbuud"][i / 4],
+                    i % 4
+                ));
+            }
+        }
+        panic!("AMX-INT8 mismatch: {}", bad.join(" "));
+    }
 }

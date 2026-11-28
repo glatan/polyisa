@@ -227,20 +227,20 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 520);
         // mxcsr（sregs 12 + fsw 2 + cpuid 544 を
         // gs_base 以降に足した位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 1088);
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 1104);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 1144);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 1152);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 1160);
-        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 1168);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1424);
-        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1936);
-        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2960);
-        assert_eq!(core::mem::offset_of!(CpuState, x2), 3024);
-        assert_eq!(core::mem::offset_of!(CpuState, tmm), 3152);
-        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 3152 + 8 * 1024);
-        assert_eq!(core::mem::offset_of!(CpuState, misc_enable), 11536);
-        assert_eq!(core::mem::size_of::<CpuState>(), 11544);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 1160);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 1168);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 1176);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 1184);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 1440);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1952);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2976);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 3040);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 3168);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 3168 + 8 * 1024);
+        assert_eq!(core::mem::offset_of!(CpuState, misc_enable), 11552);
+        assert_eq!(core::mem::size_of::<CpuState>(), 11560);
     }
 
     #[test]
@@ -2334,41 +2334,42 @@ mod tests {
         assert_eq!(tbl[7][3] & (1 << 15), 1 << 15, "user_msr");
         assert_eq!(tbl[8][0] & 0x1e_00e7, 0x1e_00e7, "leaf d xcr0 components");
         assert_eq!(tbl[8][1], 0x2b80, "leaf d xsave max size");
-        assert_eq!(tbl[9], [3, 0x2ac0, 0, 0], "leaf d xsaveopt/xsavec");
+        assert_eq!(tbl[9], [3, 11008, 0, 0], "leaf d xsaveopt/xsavec");
         assert_eq!(tbl[11], [0x40, 0x440, 0, 0], "leaf d opmask component");
         assert_eq!(tbl[12], [0x200, 0x480, 0, 0], "leaf d zmm_hi256 component");
         assert_eq!(tbl[13], [0x400, 0x680, 0, 0], "leaf d hi16_zmm component");
-        assert_eq!(tbl[14], [0x40, 0xac0, 2, 0], "leaf d xtilecfg component");
-        assert_eq!(tbl[15], [0x2000, 0xb00, 2, 0], "leaf d xtiledata component");
-        assert_eq!(tbl[16], [0x80, 0x3c0, 2, 0], "leaf d apx egpr component");
-        assert_eq!(tbl[17][0], 2, "leaf 1d max palette");
-        assert_eq!(tbl[18][0], 0x0400_2000, "leaf 1d tile geometry eax");
-        assert_eq!(tbl[18][1], 0x0008_0040, "leaf 1d tile geometry ebx");
-        assert_eq!(tbl[18][2], 0x10, "leaf 1d max rows");
-        assert_eq!(tbl[19][1], 16 | (64 << 8), "leaf 1e tmul shape");
+        assert_eq!(tbl[14], [8, 0xa80, 0, 0], "leaf d pkru component");
+        assert_eq!(tbl[15], [0x40, 0xac0, 2, 0], "leaf d xtilecfg component");
+        assert_eq!(tbl[16], [0x2000, 0xb00, 2, 0], "leaf d xtiledata component");
+        assert_eq!(tbl[17], [0x80, 0x3c0, 2, 0], "leaf d apx egpr component");
+        assert_eq!(tbl[18][0], 2, "leaf 1d max palette");
+        assert_eq!(tbl[19][0], 0x0400_2000, "leaf 1d tile geometry eax");
+        assert_eq!(tbl[19][1], 0x0008_0040, "leaf 1d tile geometry ebx");
+        assert_eq!(tbl[19][2], 0x10, "leaf 1d max rows");
+        assert_eq!(tbl[20][1], 16 | (64 << 8), "leaf 1e tmul shape");
         assert_eq!(
-            tbl[20][0] & 0x18f,
+            tbl[21][0] & 0x18f,
             0x18f,
             "leaf 1e amx mirrors+avx512+movrs"
         );
         // LEAF_IDS 順: index 12 = 0x8000_0001、index 13 = 0x8000_0008。
-        assert_eq!(tbl[22][2] & (1 << 29), 1 << 29, "mwaitx");
-        assert_eq!(tbl[23][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
-        assert_eq!(tbl[23][0], 0x3020, "addr size");
-        assert_eq!(tbl[24][0], 0xC000_0001, "via max leaf");
-        assert_eq!(tbl[25][3] & 0xC, 0xC, "padlock present+enabled");
+        assert_eq!(tbl[23][2] & (1 << 29), 1 << 29, "mwaitx");
+        assert_eq!(tbl[24][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
+        assert_eq!(tbl[24][0], 0x3020, "addr size");
+        assert_eq!(tbl[25][0], 0xC000_0001, "via max leaf");
+        assert_eq!(tbl[26][3] & 0xC, 0xC, "padlock present+enabled");
         assert_eq!(tbl[0][0], 0x24, "max basic leaf");
         assert_eq!(tbl[7][3] & (1 << 19), 1 << 19, "leaf7 avx10");
-        assert_eq!(tbl[26], [1, 0x7_0003, 0, 0], "leaf24 avx10 version");
-        assert_eq!(tbl[27], [0, 0, 0x8E, 0], "leaf24 aux bits");
-        assert_eq!(tbl[28], [2 | 0x7_0000, 0, 0, 0], "leaf1d ace palette");
-        assert_eq!(tbl[29], [0x80, 0x2b00, 2, 0], "leaf d scaledata component");
+        assert_eq!(tbl[27], [1, 0x7_0003, 0, 0], "leaf24 avx10 version");
+        assert_eq!(tbl[28], [0, 0, 0x8E, 0], "leaf24 aux bits");
+        assert_eq!(tbl[29], [2 | 0x7_0000, 0, 0, 0], "leaf1d ace palette");
+        assert_eq!(tbl[30], [0x80, 0x2b00, 2, 0], "leaf d scaledata component");
         assert_eq!(tbl[2], [0x21, 0x01c0_003f, 63, 0], "leaf4 l1d");
         assert_eq!(tbl[5], [0x63, 0x03c0_003f, 32767, 0], "leaf4 l3");
-        assert_eq!(tbl[30], [1, 100, 24_000_000, 0], "leaf15 frequency");
-        assert_eq!(tbl[31], [2400, 2400, 0, 0], "leaf16 frequency");
-        assert_eq!(tbl[32], [0, 1, 0x100, 0], "leaf1f smt topology");
-        assert_eq!(tbl[33], [0, 1, 0x102, 0], "leaf1f core topology");
+        assert_eq!(tbl[31], [1, 100, 24_000_000, 0], "leaf15 frequency");
+        assert_eq!(tbl[32], [2400, 2400, 0, 0], "leaf16 frequency");
+        assert_eq!(tbl[33], [0, 1, 0x100, 0], "leaf1f smt topology");
+        assert_eq!(tbl[34], [0, 1, 0x102, 0], "leaf1f core topology");
         // フィーチャーなしではビットは立たない。
         let empty = std::collections::BTreeSet::new();
         let tbl = cpuid::derive(&empty, &Default::default());

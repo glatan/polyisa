@@ -94,6 +94,68 @@ fn mnemonic_of(syntax: &str) -> &str {
     syntax.split_whitespace().next().unwrap_or(syntax)
 }
 
+/// バイト列テストの mnemonic 言及を抽出する。
+///
+/// x86 のテストは命令をバイト列で埋め込み、行末コメントやインライン
+/// asm 文字列に mnemonic を書く規約である。`Insn::`/`sem::` の直接
+/// トークンだけではこの証拠を捕捉できないため、コメント/asm の
+/// 先頭トークンを mnemonic 表に引く。variant の特定はできないので、
+/// 同じ mnemonic を持つ全 variant に同一の family 単位の証拠を付ける。
+/// コメントの先頭トークンだけを見るのは、日本語や散文中の英単語が
+/// mnemonic と衝突するのを避けるためである。
+fn mnemonic_mentions(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let hex_count = |line: &str| {
+        let b = line.as_bytes();
+        let mut n = 0;
+        let mut i = 0;
+        while i + 3 < b.len() {
+            if b[i] == b'0'
+                && (b[i + 1] == b'x' || b[i + 1] == b'X')
+                && b[i + 2].is_ascii_hexdigit()
+                && b[i + 3].is_ascii_hexdigit()
+            {
+                n += 1;
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        n
+    };
+    fn first_token(s: &str) -> Option<&str> {
+        s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
+            .find(|t| t.len() >= 2 && t.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
+    }
+    for line in text.lines() {
+        // バイト列を持つ行の行末コメント。`// push2 %rsp,%r12` の形。
+        if (line.contains(".byte") || hex_count(line) >= 2)
+            && let Some(pos) = line.find("//")
+            && let Some(tok) = first_token(&line[pos + 2..])
+        {
+            out.insert(tok.replace('.', "_"));
+        }
+    }
+    // インライン asm 文字列リテラル。`"tdpbusd %zmm1\n\t"` の形で、
+    // 命令は改行で区切られている。文字列の先頭トークンを各行から取る。
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        let body = &after[..end];
+        if body.contains("\n") {
+            for insn_line in body.split("\n") {
+                let insn_line = insn_line.trim_start_matches("\t").trim_start();
+                if let Some(tok) = first_token(insn_line) {
+                    out.insert(tok.replace('.', "_"));
+                }
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
 fn scan_riscv_act(
     root: &Path,
     cov: &mut BTreeMap<String, InsnCoverage>,
@@ -216,6 +278,17 @@ pub(crate) fn write_coverage(root: &Path) -> Result<Vec<PathBuf>, String> {
                     cov.entry(name.clone())
                         .or_default()
                         .add(layer, format!("{stem}: 直接 sem 呼出し"));
+                }
+            }
+            // バイト列テストの mnemonic 言及。variant は特定できないので
+            // 同じ mnemonic の全 variant に family 単位の証拠を付ける。
+            for mention in mnemonic_mentions(&text) {
+                if let Some(internals) = mnemonic_to_name.get(&mention) {
+                    for internal in internals {
+                        cov.entry(internal.clone())
+                            .or_default()
+                            .add(layer, format!("{stem}: バイト列テストの mnemonic 言及"));
+                    }
                 }
             }
         }
