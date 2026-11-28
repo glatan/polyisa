@@ -141,6 +141,8 @@ pub struct Linux {
     /// futex wait で眠っているアドレス。wake 後に syscall が再実行された
     /// とき、初回の待ち入りと区別して 0 を返すために使う。
     futex_wait: Option<u64>,
+    /// `rt_sigtimedwait` で待ち受けているシグナル集合。再実行の判定に使う。
+    sigtimedwait_set: Option<u64>,
     /// スレッド終了時に 0 を書いて futex waiter を起こすアドレス。
     /// set_tid_address または CLONE_CHILD_CLEARTID で張る。pthread の
     /// join はこの futex で眠る。fork の子には引き継がない。
@@ -1066,6 +1068,7 @@ impl Linux {
             tgid: 0,
             mm_group: None,
             futex_wait: None,
+            sigtimedwait_set: None,
             clear_child_tid: None,
             futex_deadline: None,
         }
@@ -3705,7 +3708,8 @@ fn send_signal_to_parked(
             } else {
                 task.linux.sig_pending |= bit;
             }
-            if caught_unmasked && interrupted.is_some() {
+            let signal_waiter = matches!(interrupted, Some(polyisa_kernel::ThreadWait::Signal));
+            if (caught_unmasked || signal_waiter) && interrupted.is_some() {
                 match interrupted {
                     Some(polyisa_kernel::ThreadWait::Child { .. }) => task.linux.wait = None,
                     Some(polyisa_kernel::ThreadWait::Pipe { .. }) => task.linux.pipe_wait = None,
@@ -4951,9 +4955,112 @@ fn sys_pause(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     Some(TrapOutcome::Blocked)
 }
 
-fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_rt_sigtimedwait(env, cx)
+fn sys_rt_sigtimedwait(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rt_sigtimedwait(set, info, timeout, sigsetsize)。set に含まれる
+    // シグナルが pending になるまで眠り、pending になったものを消費
+    // してシグナル番号を返す。消費したシグナルはハンドラへ配送されない。
+    // timeout は相対時刻で、NULL は無限に待つ。期限切れは EAGAIN。
+    let set_p = get64(env, cx.r_a);
+    let info_p = get64(env, cx.r_b);
+    let timeout_p = get64(env, cx.r_c);
+    let size = get64(env, cx.r_d);
+    if size != 8 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if set_p == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(set) = mask_read(env, set_p) else {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    };
+    // セット内で pending なシグナルを消費する。初回でも再実行でも同じ判定。
+    let pending_in_set = sys.effective_pending() & set;
+    if pending_in_set != 0 {
+        sys.sigtimedwait_set = None;
+        sys.fd_wait = None;
+        sys.fd_wait_prev = None;
+        let sig = pending_in_set.trailing_zeros() + 1;
+        let bit = 1u64 << (sig - 1);
+        sys.sig_pending &= !bit;
+        sys.shared_pending.set(sys.shared_pending.get() & !bit);
+        if info_p != 0 {
+            // siginfo_t は 128 バイト。si_signo だけを埋め、残りは 0。
+            let mut info = [0u8; 128];
+            info[..4].copy_from_slice(&(sig as i32).to_le_bytes());
+            // SI_USER / SI_KERNEL の区別は追わない。0 は SI_USER 相当。
+            if env.backend.mem.write(VirtAddr(info_p), &info).is_err() {
+                set64(env, Gpr(0), cx.neg(EFAULT));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+        set64(env, Gpr(0), sig as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    // 再実行（待機から起きた）のときの完了判定。
+    if sys.sigtimedwait_set == Some(set) {
+        sys.sigtimedwait_set = None;
+        let fd_wait = sys.fd_wait.take();
+        sys.fd_wait_prev = None;
+        // セット外の配送可能シグナルがあれば EINTR。
+        if sys.effective_pending() & !sys.sig_mask != 0
+            && sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false)
+        {
+            return Some(TrapOutcome::Handled);
+        }
+        // 期限切れなら EAGAIN。それ以外（スプリアスな起床）なら
+        // 再び眠りへ落ちる。
+        let expired = fd_wait
+            .and_then(|w| w.deadline)
+            .is_some_and(|dl| sys.mono_ns() >= dl);
+        if expired {
+            set64(env, Gpr(0), cx.neg(EAGAIN));
+            sys.advance_past_syscall(env);
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    // 期限の解釈。timeout は相対時刻で NULL は無限。
+    let deadline = if timeout_p == 0 {
+        None
+    } else {
+        let Some((sec, nsec)) = read_timespec(sys, env, timeout_p) else {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        };
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        let ns = (sec as u64).saturating_mul(1_000_000_000) + nsec as u64;
+        Some(sys.mono_ns().saturating_add(ns))
+    };
+    // 既に期限が過ぎていれば眠らず EAGAIN。
+    if deadline.is_some_and(|dl| sys.mono_ns() >= dl) {
+        set64(env, Gpr(0), cx.neg(EAGAIN));
+        return Some(TrapOutcome::Handled);
+    }
+    // 配送可能なシグナルがあるまま眠ると、起こす契機がもう来ない。
+    // sigsuspend と同じく EINTR として配送へ回す。
+    if sys.effective_pending() & !sys.sig_mask != 0
+        && sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false)
+    {
+        return Some(TrapOutcome::Handled);
+    }
+    sys.sigtimedwait_set = Some(set);
+    if let Some(dl) = deadline {
+        sys.fd_wait = Some(crate::sock::Wait {
+            fds: Vec::new(),
+            deadline: Some(dl),
+        });
+    }
+    let pid = sys.ensure_self();
+    sys.queue.0.borrow_mut().meta.block(
+        polyisa_kernel::ThreadId(pid.0),
+        polyisa_kernel::ThreadWait::Signal,
+    );
+    Some(TrapOutcome::Blocked)
 }
 
 fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -9119,6 +9226,108 @@ mod tests {
     }
 
     #[test]
+    fn sigtimedwait_consumes_pending_signal_without_delivery() {
+        // セット内のシグナルが pending なら、ハンドラ配送せず消費して
+        // シグナル番号を返す。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        const SIGUSR1: u64 = 10;
+        // mask に SIGUSR1 を入れておく（通常の sigwait 用法）。
+        sys.sig_mask |= 1u64 << (SIGUSR1 - 1);
+        // セット SIGUSR1 を置く。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1800), &(1u64 << (SIGUSR1 - 1)).to_le_bytes())
+            .unwrap();
+        // スレッド宛てで SIGUSR1 を pending させる。
+        sys.sig_pending |= 1u64 << (SIGUSR1 - 1);
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        set64(&mut env, Gpr(7), 0x1800); // set
+        set64(&mut env, Gpr(6), 0x1900); // info
+        set64(&mut env, Gpr(2), 0); // timeout NULL
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), SIGUSR1, "シグナル番号を返す");
+        assert_eq!(
+            sys.sig_pending & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "消費されて pending から消える"
+        );
+        // siginfo の si_signo が書かれる。
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1900), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(i32::from_le_bytes(buf) as u64, SIGUSR1);
+    }
+
+    #[test]
+    fn sigtimedwait_blocks_and_wakes_on_signal() {
+        // pending がなければ眠り、シグナルが届くと起きて消費する。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        const SIGUSR1: u64 = 10;
+        sys.sig_mask |= 1u64 << (SIGUSR1 - 1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1800), &(1u64 << (SIGUSR1 - 1)).to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        set64(&mut env, Gpr(7), 0x1800);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(
+            matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked),
+            "pending がなければ眠る"
+        );
+        // シグナルを自分へ送ると起床する。
+        let pid = sys.ensure_self().0;
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), SIGUSR1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 再実行すると消費して返る。
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        set64(&mut env, Gpr(7), 0x1800);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), SIGUSR1);
+    }
+
+    #[test]
+    fn sigtimedwait_times_out_with_eagain() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1800), &(1u64 << 9).to_le_bytes())
+            .unwrap();
+        // timeout {0, 0} は poll 相当で即座に EAGAIN。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1900), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1908), &0i64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        set64(&mut env, Gpr(7), 0x1800);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x1900);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+    }
+
+    #[test]
     fn fork_returns_child_pid() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
@@ -10261,9 +10470,10 @@ mod tests {
         set64(&mut env, Gpr(10), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // set=0 は EFAULT。
         set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EFAULT));
         // set=0 は EFAULT。有効な空 mask では配送可能なシグナルが
         // 来るまで眠る。
         set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
