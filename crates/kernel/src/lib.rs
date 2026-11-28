@@ -436,6 +436,54 @@ impl GuestScheduler {
         woken
     }
 
+    /// FUTEX_REQUEUE。addr1 を待つスレッドを wake_max 個まで起こし、
+    /// 残りを requeue_max 個まで addr2 の待ちへ移す。戻り値は起こした
+    /// 数と移した数の和。bitset の絞り込みは行わない（requeue は
+    /// bitset 引数を持たない）。
+    pub fn requeue_futex(
+        &mut self,
+        addr1: u64,
+        addr2: u64,
+        wake_max: u32,
+        requeue_max: u32,
+    ) -> u32 {
+        let mut count = 0;
+        let mut woken = 0;
+        for thread in &mut self.threads {
+            if woken >= wake_max {
+                break;
+            }
+            if matches!(
+                thread.wait,
+                Some(ThreadWait::Futex { addr: waiting, .. }) if waiting == addr1
+            ) {
+                thread.wait = None;
+                woken += 1;
+            }
+        }
+        count += woken;
+        let mut moved = 0;
+        for thread in &mut self.threads {
+            if moved >= requeue_max {
+                break;
+            }
+            if let Some(ThreadWait::Futex {
+                addr: waiting,
+                bitset,
+            }) = thread.wait
+                && waiting == addr1
+            {
+                thread.wait = Some(ThreadWait::Futex {
+                    addr: addr2,
+                    bitset,
+                });
+                moved += 1;
+            }
+        }
+        count += moved;
+        count
+    }
+
     /// そのアドレスを futex で待っているスレッドがいるか。
     #[must_use]
     pub fn has_futex_waiter(&self, addr: u64) -> bool {
@@ -723,6 +771,30 @@ mod tests {
                 signal: None,
             }
         );
+    }
+
+    #[test]
+    fn requeue_futex_wakes_and_moves_waiters() {
+        let mut meta = crate::GuestScheduler::default();
+        for i in 1..=3u64 {
+            meta.insert(ThreadId(i));
+            meta.block(
+                ThreadId(i),
+                ThreadWait::Futex {
+                    addr: 0x1000,
+                    bitset: u32::MAX,
+                },
+            );
+        }
+        // 1 つ起こし、2 つを 0x2000 へ移す。
+        let n = meta.requeue_futex(0x1000, 0x2000, 1, 2);
+        assert_eq!(n, 3, "起こした数と移した数の和");
+        // 0x1000 の waiter はもういない。
+        assert!(!meta.has_futex_waiter(0x1000));
+        // 0x2000 に 2 人いる。wake すると起きる。
+        assert!(meta.has_futex_waiter(0x2000));
+        assert_eq!(meta.unblock_futex(0x2000, 10, u32::MAX), 2);
+        assert!(!meta.has_futex_waiter(0x2000));
     }
 
     #[test]

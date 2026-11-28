@@ -4074,6 +4074,8 @@ fn realtime_to_waitclock(sys: &mut Linux, rt_ns: i128) -> u64 {
 fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_CLOCK_REALTIME: u64 = 256;
@@ -4201,6 +4203,36 @@ fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
                 .borrow_mut()
                 .meta
                 .unblock_futex(uaddr, val, bits);
+            set64(env, Gpr(0), u64::from(n));
+            Some(TrapOutcome::Handled)
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            // REQUEUE は第4引数が timeout ではなく val2（移す数の上限）、
+            // 第5引数が uaddr2、CMP_REQUEUE は第6引数が val3 になる。
+            let val2 = timeout_ptr as u32;
+            let uaddr2 = get64(env, cx.r_e);
+            if op == FUTEX_CMP_REQUEUE {
+                let mut buf = [0u8; 4];
+                if env
+                    .backend
+                    .mem
+                    .read(VirtAddr(uaddr), &mut buf, data_access())
+                    .is_err()
+                {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                }
+                if u32::from_le_bytes(buf) != bitset_arg {
+                    set64(env, Gpr(0), cx.neg(EAGAIN));
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            let n = sys
+                .queue
+                .0
+                .borrow_mut()
+                .meta
+                .requeue_futex(uaddr, uaddr2, val, val2);
             set64(env, Gpr(0), u64::from(n));
             Some(TrapOutcome::Handled)
         }
@@ -9325,6 +9357,31 @@ mod tests {
         set64(&mut env, Gpr(10), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+    }
+
+    #[test]
+    fn futex_cmp_requeue_mismatch_returns_eagain() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // *uaddr = 1。val3=2 なら不一致で EAGAIN。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &1u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x1000); // uaddr
+        set64(&mut env, Gpr(6), 4); // FUTEX_CMP_REQUEUE
+        set64(&mut env, Gpr(2), 1); // val（起こす数）
+        set64(&mut env, Gpr(10), 1); // val2（移す数）
+        set64(&mut env, Gpr(8), 0x2000); // uaddr2
+        set64(&mut env, Gpr(9), 2); // val3
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+        // val3=1 なら一致して成功（waiter がいなくても 0 で返る）。
+        set64(&mut env, Gpr(9), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]
