@@ -3903,6 +3903,79 @@ fn sys_getpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     crate::x86::sys_getpgid(&borrowed, me, env, cx)
 }
 
+/// スレッドのリーダ pid。parked なスレッドまたは自分自身について、
+/// tgid があればそれを、なければ自分の pid を返す。
+fn thread_leader(sys: &Linux, tid: u64) -> u64 {
+    if tid == sys.pid {
+        return if sys.tgid != 0 { sys.tgid } else { sys.pid };
+    }
+    let queue = sys.queue.0.borrow();
+    queue
+        .parked
+        .iter()
+        .find(|task| task.linux.pid == tid)
+        .map(|task| {
+            if task.linux.tgid != 0 {
+                task.linux.tgid
+            } else {
+                task.linux.pid
+            }
+        })
+        .unwrap_or(tid)
+}
+
+/// スレッドがシグナルを block しているか。parked なスレッドまたは自分自身。
+fn thread_blocks_signal(sys: &Linux, tid: u64, sig: u64) -> bool {
+    let bit = 1u64 << (sig - 1);
+    if tid == sys.pid {
+        return sys.sig_mask & bit != 0;
+    }
+    let queue = sys.queue.0.borrow();
+    queue
+        .parked
+        .iter()
+        .find(|task| task.linux.pid == tid)
+        .map(|task| task.linux.sig_mask & bit != 0)
+        .unwrap_or(false)
+}
+
+/// process-directed signal の配送先をスレッドグループから選ぶ。
+/// 対象が block していなければ対象自身。block していれば、グループ内で
+/// block していない最初のメンバー。全員 block なら対象自身へ積む
+/// （process pending の近似）。グループを持たなければ対象自身。
+fn group_signal_target(sys: &Linux, target: u64, sig: u64) -> u64 {
+    if sig == 0 || !thread_blocks_signal(sys, target, sig) {
+        return target;
+    }
+    let leader = thread_leader(sys, target);
+    if leader == target && sys.pid != target {
+        // 対象が単独プロセス（グループなし）なら配送先は変わらない。
+        let has_group = {
+            let queue = sys.queue.0.borrow();
+            queue.parked.iter().any(|task| {
+                task.linux.pid != target && thread_leader(sys, task.linux.pid) == leader
+            })
+        };
+        if !has_group {
+            return target;
+        }
+    }
+    // 自分（実行中）がグループにいて block していなければ自分へ。
+    if thread_leader(sys, sys.pid) == leader && !thread_blocks_signal(sys, sys.pid, sig) {
+        return sys.pid;
+    }
+    let queue = sys.queue.0.borrow();
+    for task in &queue.parked {
+        if task.linux.pid != target
+            && thread_leader(sys, task.linux.pid) == leader
+            && task.linux.sig_mask & (1u64 << (sig - 1)) == 0
+        {
+            return task.linux.pid;
+        }
+    }
+    target
+}
+
 fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     const SIGKILL: i64 = 9;
     let pid = get64(env, cx.r_a) as i64;
@@ -3927,7 +4000,11 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
             let mut self_terminates = false;
             let mut self_stops = false;
             for target in targets {
-                if target == me {
+                // process-directed signal は、グループ内で block していない
+                // スレッドへ届ける。自分宛てでも、自分が block していれば
+                // グループの他スレッドが受け取りうる。
+                let tid = group_signal_target(sys, target.0, sig as u64);
+                if tid == me.0 {
                     if !send_signal_to_current(sys, sig as u64) {
                         if signal_stop_applies(sys, sig as u64) {
                             self_stops = true;
@@ -3938,7 +4015,7 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
                         }
                     }
                 } else {
-                    let outcome = send_signal_to_parked(sys, target.0, sig as u64);
+                    let outcome = send_signal_to_parked(sys, tid, sig as u64);
                     finish_parked_signal(sys, target, outcome, sig as u64);
                 }
             }
@@ -4631,7 +4708,8 @@ fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
             .pgid(polyisa_kernel::ProcessId(tid))
             .is_some()
     };
-    if !exists_thread || tgid != tid {
+    // tgid はスレッドグループのリーダと一致すればよい（単独プロセスは tid 自身）。
+    if !exists_thread || (tgid != tid && tgid != thread_leader(sys, tid)) {
         set64(env, Gpr(0), cx.neg(ESRCH));
         return Some(TrapOutcome::Handled);
     }
@@ -7709,6 +7787,99 @@ mod tests {
                 .is_exited(polyisa_kernel::ThreadId(parent)),
             "exit は自分だけを終わらせる"
         );
+    }
+
+    #[test]
+    fn kill_to_blocked_leader_reaches_unblocked_thread() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // リーダ（自分）が SIGUSR1(10) を block していても、グループの
+        // 他スレッドが受けていればそちらへ届く。
+        const SIGUSR1: u64 = 10;
+        let handler = 0x1100u64;
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+            handler,
+            ..crate::x86::SigAct::default()
+        };
+        for task in &mut sys.queue.0.borrow_mut().parked {
+            task.linux.sigacts.resize(64, crate::x86::SigAct::default());
+            task.linux.sigacts[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+                handler,
+                ..crate::x86::SigAct::default()
+            };
+        }
+        sys.sig_mask |= 1u64 << (SIGUSR1 - 1);
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), parent);
+        set64(&mut env, Gpr(6), SIGUSR1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 自分（リーダ）には積まれず、子スレッドの pending に入る。
+        assert_eq!(
+            sys.sig_pending & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "リーダは block 中"
+        );
+        let queue = sys.queue.0.borrow();
+        let task = queue
+            .parked
+            .iter()
+            .find(|task| task.linux.pid == child)
+            .unwrap();
+        assert_ne!(
+            task.linux.sig_pending & (1u64 << (SIGUSR1 - 1)),
+            0,
+            "block していない子スレッドへ届く"
+        );
+    }
+
+    #[test]
+    fn tgkill_accepts_leader_tgid_for_member() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // tgkill(tgid=リーダ, tid=メンバー, 0) は存在確認として成功する。
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), parent);
+        set64(&mut env, Gpr(6), child);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0, "tgid=リーダ/tid=メンバーは有効");
+        // 逆（tgid=メンバー, tid=リーダ）は ESRCH。
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), parent);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -3, "ESRCH");
     }
 
     #[test]
