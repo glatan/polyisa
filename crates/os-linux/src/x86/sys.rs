@@ -162,6 +162,9 @@ pub struct Linux {
     /// （Linux でも itimer はプロセス単位だが、ここでは生成スレッド
     /// 単位の近似とする）。
     itimer: [Option<(u64, u64)>; 3],
+    /// timer_create のタイマー。（シグナル番号, 期限, 間隔）。
+    /// 添字+1 が timerid。SIGEV_SIGNAL だけを扱う。
+    posix_timers: Vec<Option<(u64, u64, u64)>>,
 }
 
 /// fd 表の参照。CLONE_FILES で共有する表は RefCell 経由の Ref、
@@ -1164,6 +1167,7 @@ impl Linux {
             futex_deadline: None,
             share_fs: false,
             itimer: [None; 3],
+            posix_timers: Vec::new(),
         }
     }
 
@@ -1311,6 +1315,27 @@ impl Linux {
                 Some((now + interval, interval))
             } else {
                 None
+            };
+        }
+        // timer_create のタイマー満了。sigev_signo をプロセス宛てに積み、
+        // interval があれば再装填する。
+        let timers = self.posix_timers.clone();
+        for (slot, t) in timers.iter().enumerate() {
+            let Some((signo, deadline, interval)) = t else {
+                continue;
+            };
+            let (signo, deadline, interval) = (*signo, *deadline, *interval);
+            if now < deadline {
+                continue;
+            }
+            self.shared_pending
+                .set(self.shared_pending.get() | (1u64 << (signo - 1)));
+            // one-shot の満了は disarm だが timerid は残る
+            // （timer_delete は成功しなければならない）。
+            self.posix_timers[slot] = if interval != 0 {
+                Some((signo, now + interval, interval))
+            } else {
+                Some((signo, u64::MAX, 0))
             };
         }
         let deliver = self.effective_pending() & !self.sig_mask;
@@ -1835,6 +1860,9 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("msgctl", sys_msgctl),
     ("getitimer", sys_getitimer),
     ("setitimer", sys_setitimer),
+    ("timer_create", sys_timer_create),
+    ("timer_settime", sys_timer_settime),
+    ("timer_delete", sys_timer_delete),
     ("socket", sys_socket),
     ("socketpair", sys_socketpair),
     ("bind", sys_bind),
@@ -3468,6 +3496,107 @@ fn sys_setitimer(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
             Some((now + val, iv))
         };
     }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_timer_create(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // timer_create(clockid, sigevent, timerid)。SIGEV_SIGNAL(0) だけを
+    // 扱う。sigevent は x86-64 で sigev_value(8)+signo(4)+notify(4)。
+    // NULL sigevent は signo=SIGALRM の SIGEV_SIGNAL 相当。
+    let sevp = get64(env, cx.r_b);
+    let timeridp = get64(env, cx.r_c);
+    let mut signo = 14u64;
+    if sevp != 0 {
+        let mut buf = [0u8; 16];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(sevp), &mut buf, data_access())
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        let notify = i32::from_le_bytes(buf[12..16].try_into().unwrap());
+        if notify != 0 {
+            // SIGEV_THREAD 等は未対応。
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        signo = u64::from(i32::from_le_bytes(buf[8..12].try_into().unwrap()) as u32);
+    }
+    if signo == 0 || signo > 64 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 空きスロットを探す。なければ伸ばす。
+    let slot = sys
+        .posix_timers
+        .iter()
+        .position(Option::is_none)
+        .unwrap_or_else(|| {
+            sys.posix_timers.push(None);
+            sys.posix_timers.len() - 1
+        });
+    sys.posix_timers[slot] = Some((signo, u64::MAX, 0));
+    if env
+        .backend
+        .mem
+        .write(VirtAddr(timeridp), &(slot as u32).to_le_bytes())
+        .is_err()
+    {
+        sys.posix_timers[slot] = None;
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_timer_settime(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // timer_settime(id, flags, new, old)。itimerspec は interval が先。
+    // flags & TIMER_ABSTIME は未対応で EINVAL にせず絶対時刻として扱う近似。
+    let id = get64(env, cx.r_a) as usize;
+    let newp = get64(env, cx.r_c);
+    if id >= sys.posix_timers.len() || sys.posix_timers[id].is_none() {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut buf = [0u8; 32];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(newp), &mut buf, data_access())
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    let iv = rd(0) * 1_000_000_000 + rd(8);
+    let val = rd(16) * 1_000_000_000 + rd(24);
+    let now = sys.mono_ns();
+    let Some((signo, _, _)) = sys.posix_timers[id] else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    sys.posix_timers[id] = if val == 0 {
+        Some((signo, u64::MAX, 0))
+    } else {
+        Some((signo, now + val, iv))
+    };
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_timer_delete(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let id = get64(env, cx.r_a) as usize;
+    if id >= sys.posix_timers.len() || sys.posix_timers[id].is_none() {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.posix_timers[id] = None;
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
@@ -9370,6 +9499,56 @@ mod tests {
             .read(VirtAddr(0x1000), &mut buf, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(buf), 55);
+    }
+
+    #[test]
+    fn timer_create_fires_custom_signal() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // sigevent: value=0, signo=10(SIGUSR1), notify=0(SIGEV_SIGNAL)。
+        let mut sev = [0u8; 16];
+        sev[8..12].copy_from_slice(&10i32.to_le_bytes());
+        sev[12..16].copy_from_slice(&0i32.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x1000), &sev).unwrap();
+        set64(&mut env, Gpr(0), abi::TIMER_CREATE);
+        set64(&mut env, Gpr(7), 1); // CLOCK_MONOTONIC
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 0x1100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut idbuf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1100), &mut idbuf, data_access())
+            .unwrap();
+        let id = u32::from_le_bytes(idbuf);
+        // SIGUSR1(bit9)を block して配送を保留にする。
+        sys.sig_mask = 1 << 9;
+        // timer_settime: 1ms one-shot。itimerspec は 8 バイト幅。
+        env.backend.mem.write(VirtAddr(0x1200), &[0u8; 32]).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1200 + 24), &1000u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::TIMER_SETTIME);
+        set64(&mut env, Gpr(7), id as u64);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x1200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        sys.after_step(&mut env);
+        assert_ne!(
+            sys.shared_pending.get() & (1 << 9),
+            0,
+            "sigev_signo の SIGUSR1 が pending へ立つ"
+        );
+        // timer_delete で解除できる。
+        set64(&mut env, Gpr(0), abi::TIMER_DELETE);
+        set64(&mut env, Gpr(7), id as u64);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

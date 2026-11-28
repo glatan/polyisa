@@ -2303,7 +2303,10 @@ pub fn sys_clock_gettime(
                 elapsed.subsec_nanos() as i64,
             )
         } else {
-            // CLOCK_MONOTONIC ほか。ゲスト実行の起点からの経過。
+            // CLOCK_MONOTONIC(1) ほか。PROCESS/THREAD_CPUTIME(2/3) も
+            // ここに含め、ゲスト実行の起点からの経過で近似する。
+            // emulator はアイドル待ちとゲスト実行を区別しない。
+            // 未知の clockid も従来通りこの近似で返す。
             (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
         };
         // timespec の語幅。x86-64/x32 と i386 time64 は 64+64、
