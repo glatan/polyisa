@@ -9022,6 +9022,33 @@ fn avx10_exec(
                 if m != 0 && m < 0x0080_0000 {
                     accb &= 0x8000_0000;
                 }
+                // NaN の伝播は入力優先順位に従う: src1lo > src2lo >
+                // src1hi > src2hi > srcdest。選ばれた NaN は fp32 へ
+                // 変換し quiet 化する。bf16 の quiet bit は fraction の
+                // 最上位(bit6)で、fp32 では bit22 に対応する。
+                let nan16 = |w: u16| w & 0x7f80 == 0x7f80 && w & 0x7f != 0;
+                let xlo = bf_r(&x, 2 * i).bits() as u16;
+                let ylo = bf_r(&y, 2 * i).bits() as u16;
+                let xhi = bf_r(&x, 2 * i + 1).bits() as u16;
+                let yhi = bf_r(&y, 2 * i + 1).bits() as u16;
+                let quiet32 = |w: u16| (u32::from(w) << 16) | 0x0040_0000;
+                let pri_nan = if nan16(xlo) {
+                    Some(quiet32(xlo))
+                } else if nan16(ylo) {
+                    Some(quiet32(ylo))
+                } else if nan16(xhi) {
+                    Some(quiet32(xhi))
+                } else if nan16(yhi) {
+                    Some(quiet32(yhi))
+                } else if accb & 0x7f80_0000 == 0x7f80_0000 && accb & 0x007f_ffff != 0 {
+                    Some(accb | 0x0040_0000)
+                } else {
+                    None
+                };
+                if let Some(nb) = pri_nan {
+                    out[i * 4..i * 4 + 4].copy_from_slice(&nb.to_le_bytes());
+                    continue;
+                }
                 let acc = F32::from_bits(u64::from(accb));
                 let (lo, f1) = bf2f(bf_r(&x, 2 * i)).mul_rm(bf2f(bf_r(&y, 2 * i)), Rm::Rne);
                 let (hi, f2) = bf2f(bf_r(&x, 2 * i + 1)).mul_rm(bf2f(bf_r(&y, 2 * i + 1)), Rm::Rne);

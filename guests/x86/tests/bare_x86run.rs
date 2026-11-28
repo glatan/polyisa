@@ -31987,3 +31987,77 @@ fn run64_vsyscall() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1000, true);
     assert_eq!(out, Outcome::Exit(42));
 }
+
+/// VDPBF16PS の累積順序・NaN 優先順位・denormal flush。
+/// acc + hi を先に RNE で丸め、次に lo を足す。1.0 + 2^-24 + 2^-24 は
+/// 各ステップの丸めで 1.0 に戻る（単一回の丸めなら 1+2^-23 になる）。
+#[test]
+fn run_vdpbf16ps_accumulation_order_and_nan_priority() {
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    // acc: lane0=1.0, lane1=NaN, lane2=0, lane3=denormal
+    let acc: &[u32] = &[0x3F800000, 0x7FC00099, 0x00000000, 0x00000001];
+    // src1 bf16 pairs: lane0=(1.0,1.0), lane1=(hi=1.0,lo=NaN),
+    // lane2=(denormal,denormal), lane3=(0,0)
+    let x: &[u32] = &[0x3F803F80, 0x3F807FC1, 0x00010001, 0x00000000];
+    // src2: lane0=(2^-24,2^-24), lane1=(2.0,2.0), lane2=(2.0,2.0), lane3=(0,0)
+    let y: &[u32] = &[0x33803380, 0x40004000, 0x40004000, 0x00000000];
+    for (i, v) in acc.iter().enumerate() {
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 4 * i as u64), &v.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2010 + 4 * i as u64), &x[i].to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2020 + 4 * i as u64), &y[i].to_le_bytes())
+            .unwrap();
+    }
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0xC5, 0xFA, 0x6F, 0x00, // vmovdqu xmm0,[rax]
+        0xC5, 0xFA, 0x6F, 0x48, 0x10, // vmovdqu xmm1,[rax+0x10]
+        0xC5, 0xFA, 0x6F, 0x50, 0x20, // vmovdqu xmm2,[rax+0x20]
+        0x62, 0xF2, 0x76, 0x08, 0x52, 0xC2, // vdpbf16ps xmm0,xmm1,xmm2
+        0xC5, 0xFA, 0x7F, 0x03, // vmovdqu [rbx],xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut buf = [0u8; 16];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    let lane = |i: usize| u32::from_le_bytes(buf[i * 4..i * 4 + 4].try_into().unwrap());
+    assert_eq!(
+        lane(0),
+        0x3F800000,
+        "1.0+2^-24+2^-24 は各 step で 1.0 へ丸まる"
+    );
+    assert_eq!(lane(1), 0x7FC10000, "NaN は src1lo 優先で quiet 伝播");
+    assert_eq!(lane(2), 0x00000000, "denormal 入力は zero 扱い");
+    assert_eq!(lane(3), 0x00000000, "denormal の acc は zero 扱い");
+}

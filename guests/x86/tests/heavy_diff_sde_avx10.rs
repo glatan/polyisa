@@ -153,10 +153,21 @@ void _start(void) {
         ".byte 0x62,0xF2,0x74,0x28,0x52,0xC2\n\t" // vdpphps ymm0,ymm1,ymm2
         "vmovdqu64 %%ymm0, 1408(%0)\n\t"
         "vstmxcsr 1440(%0)\n\t"
+
+        // BF16 pair dot product。acc に NaN/denormal/Inf を含む ps_a を
+        // 使い、入力対は bf16_in（denormal/Inf/NaN 混在）と ph_in の
+        // ビット列。MXCSR は更新されないはず。
+        "ldmxcsr (%10)\n\t"
+        "vmovdqu64 (%1), %%ymm0\n\t"
+        "vmovdqu64 (%6), %%ymm1\n\t"
+        "vmovdqu64 (%5), %%ymm2\n\t"
+        ".byte 0x62,0xF2,0x76,0x28,0x52,0xC2\n\t" // vdpbf16ps ymm0,ymm1,ymm2
+        "vmovdqu64 %%ymm0, 1472(%0)\n\t"
+        "vstmxcsr 1504(%0)\n\t"
         :
         : "r"(out), "r"(ps_a), "r"(ps_b), "r"(hf8_in), "r"(bias_in), "r"(ph_in), "r"(bf16_in), "r"(0), "r"(0), "r"(0), "r"(mxcsr_init)
         : "rax", "memory");
-    (void)sys3(1, 1, (long)out, 1472);
+    (void)sys3(1, 1, (long)out, 1536);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }"#;
@@ -235,13 +246,13 @@ fn diff_sde_avx10_numeric_corpus() {
         .output()
         .expect("sde64");
     assert!(out.status.success(), "sde status {:?}", out.status);
-    assert_eq!(out.stdout.len(), 1472, "sde stdout len");
+    assert_eq!(out.stdout.len(), 1536, "sde stdout len");
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Ok(0), "poly exit");
-    assert_eq!(poly.len(), 1472, "poly stdout len");
+    assert_eq!(poly.len(), 1536, "poly stdout len");
     if poly != out.stdout {
         let mut bad = Vec::new();
-        for i in 0..368 {
+        for i in 0..384 {
             let a = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let b = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if a != b {
