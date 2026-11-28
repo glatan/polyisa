@@ -14663,6 +14663,19 @@ pub fn mem_hint<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
 /// XGETBV。EAX=XCR0[31:0]、EDX=XCR0[63:32]。ECX≠0 の #GP は
 /// モデル化しない。
 pub fn xgetbv<B: Backend>(b: &mut B) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    // ECX が 0 でなければ #GP（唯一の XCR 番号は 0）。
+    let ecx = decode::grd32(b, Gpr(1));
+    let z32 = b.konst::<W32>(0);
+    let bad = b.cmp::<W32>(Cmp::Ne, ecx, z32);
+    b.if_then(bad, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 0x0D,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
     let x: B::V<W64> = b.get(sem::xcr0_ref());
     let lo = b.trunc::<W64, W32>(x);
     decode::gwr32(b, Gpr(0), lo);
@@ -15084,8 +15097,26 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
+    xsave_align_chk(b, *a)?;
     let m = xsave_mask(b);
     xsave_area_mask(b, *a, *wseg, mode, m)
+}
+
+/// XSAVE/XRSTOR/FXSAVE 系の 64 バイト整列検査。違反は #GP。
+pub fn xsave_align_chk<B: Backend>(b: &mut B, a: B::V<W64>) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    let m63 = b.konst::<W64>(63);
+    let low = b.and::<W64>(a, m63);
+    let z64 = b.konst::<W64>(0);
+    let bad = b.cmp::<W64>(Cmp::Ne, low, z64);
+    b.if_then(bad, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 0x0D,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })
 }
 
 /// XSAVE の標準レイアウトを、明示した成分マスクで書く。
@@ -15303,6 +15334,7 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let Rm::Mem { a, wseg } = ea else {
         return Ok(());
     };
+    xsave_align_chk(b, *a)?;
     let m = xsave_mask(b);
     xrstor_area_mask(b, *a, *wseg, mode, m)
 }

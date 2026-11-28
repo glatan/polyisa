@@ -32287,3 +32287,57 @@ fn run_avx10_satcvt_mxcsr() {
     assert_eq!(rd64(0x30), i64::MAX as u64, "1e300 は飽和");
     assert_eq!(rd32(0x38) & 1, 1, "範囲外で invalid");
 }
+
+/// XGETBV の ECX!=0 と XSAVE/XRSTOR の 64 バイト非整列は #GP。
+#[test]
+fn run_xstate_fault_conditions() {
+    use polyisa_sem::ExceptionKind;
+    // xgetbv で ecx=1 → #GP
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
+    let run = |prog: &[u8], rcx: u64| {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(1).state(), rcx as u32);
+        env.backend.set(Gpr(3).state(), 0x2008);
+        env.backend
+            .set(polyisa_guest_x86::sem::xcr0_ref(), 0x8_0003);
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let mut sys = ExcProbe {
+            kind: None,
+            addr: None,
+        };
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            1,
+            true,
+            feats,
+            &polyisa_guest_x86::model_params("x86_64"),
+        );
+        // 例外時は probe が Exit(0)、成功時は 1 ステップで止まる。
+        assert!(matches!(out, Outcome::Exit(0) | Outcome::StepLimit { .. }));
+        sys.kind
+    };
+    // xgetbv = 0F 01 D0
+    assert_eq!(
+        run(&[0x0F, 0x01, 0xD0], 1),
+        Some(ExceptionKind::Protection),
+        "xgetbv ecx=1 は #GP"
+    );
+    assert_eq!(run(&[0x0F, 0x01, 0xD0], 0), None, "xgetbv ecx=0 は正常");
+    // xsave [rbx] = 0F AE 23。rbx=0x2008 は 64 バイト非整列 → #GP
+    assert_eq!(
+        run(&[0x0F, 0xAE, 0x23], 0),
+        Some(ExceptionKind::Protection),
+        "xsave 非整列は #GP"
+    );
+    // xrstor [rbx] = 0F AE 2B
+    assert_eq!(
+        run(&[0x0F, 0xAE, 0x2B], 0),
+        Some(ExceptionKind::Protection),
+        "xrstor 非整列は #GP"
+    );
+}
