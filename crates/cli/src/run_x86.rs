@@ -10856,7 +10856,9 @@ fn amx_tile_exec(
     };
     let insn = md.insn;
     let xcr0_tile = env.backend.get(sem::xcr0_ref());
-    let max_palette_tile = env.backend.get(sem::cpuid_ref(13, 0)) & 0xff;
+    // CPUID leaf 1D subleaf 0 は圧縮表の index 17。EAX[7:0] が
+    // 最大 palette 番号（AMX=1、ACE=2）を報告する。
+    let max_palette_tile = env.backend.get(sem::cpuid_ref(17, 0)) & 0xff;
     if matches!(insn, Insn::Top1ps | Insn::Top1pd) {
         const ACE_XCR0: u64 = 0x16_00e6;
         let src1 = decode::rm_reg_x5(md);

@@ -29623,7 +29623,7 @@ fn run64_ace_palette2_ldtilecfg() {
     env.backend
         .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_0003);
     env.backend
-        .set(polyisa_guest_x86::sem::cpuid_ref(13, 0), 2u32);
+        .set(polyisa_guest_x86::sem::cpuid_ref(17, 0), 2u32);
     let mut cfg = [0u8; 64];
     cfg[0] = 2;
     env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
