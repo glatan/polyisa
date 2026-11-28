@@ -5561,20 +5561,21 @@ fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    // 引数の並びは x86-64 の clone(flags, stack, ptid, ctid, tls)。
-    // i386/x32 は並びが違うので今は受けない。
-    if !sys.is64 || sys.x32 {
-        return Some(TrapOutcome::Unimplemented);
-    }
+    // 引数の並びは ABI ごとに違う。x86-64/x32 は
+    // clone(flags, stack, ptid, ctid, tls)、i386 は
+    // clone(flags, stack, ptid, tls, ctid) と tls/ctid が逆。
+    // Ref: SRC-LINUX (7.3).
     // CLONE_SETTID は pid の指定であり、特権が要る。musl/glibc の
     // pthread は使わないので、実機の非特権と同じく EPERM にする。
     if flags & crate::clone_flag::SETTID != 0 {
         set64(env, Gpr(0), cx.neg(EPERM));
         return Some(TrapOutcome::Handled);
     }
-    let tls = get64(env, cx.r_e);
-    let ctid = get64(env, cx.r_d);
-    let ptid = get64(env, cx.r_c);
+    let (ptid, ctid, tls) = if sys.is64 {
+        (get64(env, cx.r_c), get64(env, cx.r_d), get64(env, cx.r_e))
+    } else {
+        (get64(env, cx.r_c), get64(env, cx.r_e), get64(env, cx.r_d))
+    };
     let set_tls = flags & crate::clone_flag::SETTLS != 0;
     let clear_tid = flags & crate::clone_flag::CHILD_CLEARTID != 0;
     let parent_settid = flags & crate::clone_flag::PARENT_SETTID != 0;
@@ -8728,6 +8729,50 @@ mod tests {
         set64(&mut env, Gpr(6), 0x9800);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -1, "EPERM");
+    }
+
+    #[test]
+    fn clone32_uses_i386_argument_order() {
+        // i386 は clone(flags, stack, ptid, tls, ctid) と tls/ctid が逆。
+        // x86-64 の並びで解釈すると ctid へ書く場所を誤る。
+        let mut sys = Linux::x86_32();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // int 0x80 の引数レジスタは ebx/ecx/edx/esi/edi。
+        set64(&mut env, Gpr(0), 120); // i386 clone
+        set64(
+            &mut env,
+            Gpr(3),
+            crate::clone_flag::VM
+                | crate::clone_flag::THREAD
+                | crate::clone_flag::CHILD_SETTID
+                | crate::clone_flag::PARENT_SETTID,
+        );
+        set64(&mut env, Gpr(1), 0x9800); // stack
+        set64(&mut env, Gpr(2), 0x2000); // ptid
+        set64(&mut env, Gpr(6), 0xaaaa); // tls（3番目ではなく4番目）
+        set64(&mut env, Gpr(7), 0x2010); // ctid（edi、5番目）
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 0, "i386 でもスレッドが生成される");
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf) as u64, child, "ptid へ tid");
+        env.backend
+            .mem
+            .read(VirtAddr(0x2010), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf) as u64,
+            child,
+            "ctid は edi から読む"
+        );
     }
 
     #[test]
