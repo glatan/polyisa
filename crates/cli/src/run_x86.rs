@@ -11027,7 +11027,14 @@ fn amx_tile_exec(
     let xcr0_tile = env.backend.get(sem::xcr0_ref());
     // CPUID leaf 1D subleaf 0 は圧縮表の index 17。EAX[7:0] が
     // 最大 palette 番号（AMX=1、ACE=2）を報告する。
-    let max_palette_tile = env.backend.get(sem::cpuid_ref(17, 0)) & 0xff;
+    // leaf 0x1D.0 の EAX bit0-7 が max_palette。LEAF_IDS の位置で
+    // 引く（葉の追加で index がずれる事故を避けるため、数値ではなく
+    // 葉番号から位置を引く）。
+    let palette_leaf = polyisa_guest_x86::cpuid::LEAF_IDS
+        .iter()
+        .position(|&(leaf, sub)| leaf == 0x1D && sub == 0)
+        .expect("leaf 0x1D.0 は LEAF_IDS にある");
+    let max_palette_tile = env.backend.get(sem::cpuid_ref(palette_leaf, 0)) & 0xff;
     if matches!(insn, Insn::Top1ps | Insn::Top1pd) {
         const ACE_XCR0: u64 = 0x16_00e6;
         let src1 = decode::rm_reg_x5(md);

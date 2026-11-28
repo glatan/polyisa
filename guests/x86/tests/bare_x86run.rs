@@ -29788,8 +29788,15 @@ fn run64_ace_palette2_ldtilecfg() {
     env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
     env.backend
         .set(polyisa_guest_x86::sem::xcr0_ref(), 0x16_0003);
+    // leaf 0x1D.0（tile palette 情報）の EAX bit0-7 が max_palette。
+    // LEAF_IDS 上の位置は葉番号から引く（葉の追加で index がずれる
+    // 事故を避ける）。
+    let palette_leaf = polyisa_guest_x86::cpuid::LEAF_IDS
+        .iter()
+        .position(|&(leaf, sub)| leaf == 0x1D && sub == 0)
+        .unwrap();
     env.backend
-        .set(polyisa_guest_x86::sem::cpuid_ref(17, 0), 2u32);
+        .set(polyisa_guest_x86::sem::cpuid_ref(palette_leaf, 0), 2u32);
     let mut cfg = [0u8; 64];
     cfg[0] = 2;
     env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
