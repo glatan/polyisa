@@ -148,6 +148,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("llvm-mc")],
     },
     TestBinary {
+        binary: "heavy_program_pthread",
+        needs: &[Req::Data(".testdata/pthread-musl/pthread_test")],
+    },
+    TestBinary {
         binary: "heavy_program_busybox",
         needs: &[Req::Data(".testdata/bin-distro/busybox")],
     },

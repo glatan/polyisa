@@ -94,6 +94,10 @@ name = "heavy_program_busybox"
 required-features = ["guest-x86"]
 
 [[test]]
+name = "heavy_program_pthread"
+required-features = ["guest-x86"]
+
+[[test]]
 name = "heavy_program_busybox_i386"
 required-features = ["guest-x86"]
 
