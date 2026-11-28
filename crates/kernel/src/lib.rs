@@ -40,6 +40,9 @@ struct Proc {
     /// 停止からの継続がまだ wait へ報告されていない。
     continued: bool,
     pgid: u64,
+    /// CLONE_THREAD で作られたスレッド。親の wait 対象にせず、
+    /// 終了時の SIGCHLD も送らない。
+    thread: bool,
 }
 
 /// `wait` の結果。
@@ -75,6 +78,7 @@ impl ProcessTable {
             stop_reported: false,
             continued: false,
             pgid: id.0,
+            thread: false,
         });
         id
     }
@@ -129,6 +133,22 @@ impl ProcessTable {
             proc.pgid = pgid;
         }
         child
+    }
+
+    /// CLONE_THREAD のスレッドを親の子として作る。
+    /// wait 対象と SIGCHLD から外すため thread を立てる。
+    pub fn fork_thread(&mut self, parent: ProcessId) -> ProcessId {
+        let child = self.fork(parent);
+        if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == child) {
+            proc.thread = true;
+        }
+        child
+    }
+
+    /// CLONE_THREAD のスレッドなら真。表にいなければ偽。
+    #[must_use]
+    pub fn is_thread(&self, id: ProcessId) -> bool {
+        self.procs.iter().any(|proc| proc.id == id && proc.thread)
     }
 
     /// シグナルの既定動作で停止する。既に終了していれば偽。
@@ -276,6 +296,9 @@ impl ProcessTable {
 }
 
 fn child_selected(parent: ProcessId, parent_pgid: Option<u64>, proc: &Proc, which: i64) -> bool {
+    if proc.thread {
+        return false;
+    }
     if proc.parent != Some(parent) {
         return false;
     }

@@ -152,6 +152,14 @@ pub mod clone_flag {
     pub const VM: u64 = 0x100;
     pub const THREAD: u64 = 0x0001_0000;
     pub const SETTLS: u64 = 0x0008_0000;
+    pub const CHILD_CLEARTID: u64 = 0x0020_0000;
+    pub const CHILD_SETTID: u64 = 0x0100_0000;
+    pub const PARENT_SETTID: u64 = 0x0010_0000;
+    pub const SETTID: u64 = 0x0000_1000;
+    pub const PARENT: u64 = 0x0000_8000;
+    pub const FILES: u64 = 0x0000_0400;
+    pub const FS: u64 = 0x0000_0200;
+    pub const SIGHAND: u64 = 0x0000_0800;
 }
 
 /// 正常終了の wait ステータス。終了コードは 8–15 ビットに置く。

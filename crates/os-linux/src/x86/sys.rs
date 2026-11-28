@@ -137,6 +137,10 @@ pub struct Linux {
     /// futex wait で眠っているアドレス。wake 後に syscall が再実行された
     /// とき、初回の待ち入りと区別して 0 を返すために使う。
     futex_wait: Option<u64>,
+    /// スレッド終了時に 0 を書いて futex waiter を起こすアドレス。
+    /// set_tid_address または CLONE_CHILD_CLEARTID で張る。pthread の
+    /// join はこの futex で眠る。fork の子には引き継がない。
+    clear_child_tid: Option<u64>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -1054,6 +1058,7 @@ impl Linux {
             tgid: 0,
             mm_group: None,
             futex_wait: None,
+            clear_child_tid: None,
         }
     }
 
@@ -1333,10 +1338,35 @@ impl Linux {
         true
     }
 
+    /// 自分と同じスレッドグループに、まだ終了していない parked な
+    /// メンバーがいるか。待ちで block されているメンバーも生存に数える。
+    fn group_members_alive(&self) -> bool {
+        let leader = if self.tgid != 0 { self.tgid } else { self.pid };
+        let queue = self.queue.0.borrow();
+        queue.parked.iter().any(|task| {
+            let l = if task.linux.tgid != 0 {
+                task.linux.tgid
+            } else {
+                task.linux.pid
+            };
+            l == leader
+                && !queue
+                    .meta
+                    .is_exited(polyisa_kernel::ThreadId(task.linux.pid))
+        })
+    }
+
     /// 子の終了を記録し、親か残りの実行可能なスレッドへ戻る。
     /// 戻る相手がいるときだけ真。初期プロセスの終了は偽で、呼び出し側へ渡す。
     fn yield_on_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
         let me = self.ensure_self();
+        // clear_child_tid へ 0 を書き、そのアドレスで眠る futex waiter
+        // （pthread の join）を起こす。メモリはまだ終了中スレッドの
+        // env にあるので、共有グループの他スレッドからも見える。
+        if let Some(ctid) = self.clear_child_tid.take() {
+            let _ = env.backend.mem.write(VirtAddr(ctid), &[0, 0, 0, 0]);
+            self.queue.0.borrow_mut().meta.unblock_futex(ctid, 1);
+        }
         let nfd = self.fds.len();
         for fd in 0..3u32 {
             self.close_fd(fd);
@@ -1353,7 +1383,10 @@ impl Linux {
             .mark_exited(polyisa_kernel::ThreadId(me.0));
         // 閉じた fd を観ていた他スレッドの待ちを解消する。
         self.sweep_fd_waits();
-        if root {
+        // root（グループリーダ）でも、同じスレッドグループに生存する
+        // メンバーがいればプロセスは生きる。pthread_exit したメイン
+        // スレッドの後で worker が走り続ける形に対応する。
+        if root && !self.group_members_alive() {
             return false;
         }
         let target = {
@@ -2983,9 +3016,12 @@ fn sys_mmap(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
 }
 
 fn sys_set_tid_address(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // clear_child_tid を記録し、スレッド終了時に 0 を書いて
+    // そのアドレスで眠る futex waiter（pthread の join）を起こす。
     let me = sys.ensure_self().0;
-    crate::x86::sys_set_tid_address(me, env, cx)
+    sys.clear_child_tid = Some(get64(env, cx.r_a));
+    set64(env, Gpr(0), me);
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_set_thread_area(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3502,7 +3538,13 @@ fn autoreap_child_if_configured(sys: &mut Linux, child: polyisa_kernel::ProcessI
 }
 
 /// 子プロセスの終了通知と、親の設定による自動回収を行う。
+/// CLONE_THREAD のスレッドは wait 対象でなく SIGCHLD も送らないので、
+/// ゾンビにせずそのまま表から外す。
 fn finish_child_exit(sys: &mut Linux, child: polyisa_kernel::ProcessId) {
+    if sys.procs.borrow().is_thread(child) {
+        sys.procs.borrow_mut().discard(child);
+        return;
+    }
     notify_parent_sigchld(sys, child, false);
     autoreap_child_if_configured(sys, child);
 }
@@ -5390,8 +5432,10 @@ fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         return Some(TrapOutcome::Unimplemented);
     }
     let tls = get64(env, cx.r_e);
+    let ctid = get64(env, cx.r_d);
     let set_tls = flags & crate::clone_flag::SETTLS != 0;
-    spawn_thread(sys, env, stack, tls, set_tls)
+    let clear_tid = flags & crate::clone_flag::CHILD_CLEARTID != 0;
+    spawn_thread(sys, env, stack, tls, set_tls, ctid, clear_tid)
 }
 
 /// CLONE_VM|CLONE_THREAD のスレッド生成。子は新しいスタックで syscall の
@@ -5404,9 +5448,12 @@ fn spawn_thread(
     stack: u64,
     tls: u64,
     set_tls: bool,
+    ctid: u64,
+    clear_tid: bool,
 ) -> Option<TrapOutcome> {
     let parent = sys.ensure_self();
-    let child_pid = sys.procs.borrow_mut().fork(parent);
+    // スレッドは wait 対象にも SIGCHLD にもしない区別付きで登録する。
+    let child_pid = sys.procs.borrow_mut().fork_thread(parent);
     let mut child_env = env.clone();
     // メモリはコピーしない。複製された実体を空へ差し替え、共有グループの
     // 実メモリは親（実行中）の env に残す。子が初めて走るときに親から
@@ -5431,6 +5478,9 @@ fn spawn_thread(
     child_linux.pid = child_pid.0;
     child_linux.steps = 0;
     child_linux.wait = None;
+    if clear_tid {
+        child_linux.clear_child_tid = Some(ctid);
+    }
     // スレッドグループ。リーダの pid をグループ識別子に使い、
     // 親がまだグループを持たなければここで張る。実メモリは実行中の
     // 親の env にあるので、ホルダーは空のままでよい。
@@ -8013,6 +8063,161 @@ mod tests {
         set64(&mut env, Gpr(2), 3); // 実際は 7
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -11, "EAGAIN");
+    }
+
+    #[test]
+    fn clear_child_tid_wakes_join_futex() {
+        use crate::x86_64 as abi;
+        // join 相当: 親が子の tid アドレスで futex wait し、子の終了で
+        // 0 が書かれて waiter が起きる。
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 子が set_tid_address(0x2000) で clear_child_tid を張る。
+        assert!(sys.swap_in(&mut env, child));
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SET_TID_ADDRESS);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        // 親へ戻り、子の tid アドレスで値 1 のまま futex wait すると block。
+        assert!(sys.swap_in(&mut env, parent));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0); // FUTEX_WAIT
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.queue.0.borrow().meta.has_futex_waiter(0x2000));
+        // 子が終了すると、0 が書かれて親の futex 待ちは解ける。
+        assert!(sys.swap_in(&mut env, child));
+        assert!(sys.take_exit(&mut env, 0), "親へスケジュールされる");
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 0, "終了時に 0 が書かれる");
+        assert!(
+            !sys.queue.0.borrow().meta.has_futex_waiter(0x2000),
+            "join の futex waiter が起きた"
+        );
+    }
+
+    #[test]
+    fn clone_child_cleartid_records_ctid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &9u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD | crate::clone_flag::CHILD_CLEARTID,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        set64(&mut env, Gpr(10), 0x2000); // ctid
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(sys.swap_in(&mut env, child));
+        assert!(sys.take_exit(&mut env, 0));
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf),
+            0,
+            "CLONE_CHILD_CLEARTID の ctid へ 0"
+        );
+    }
+
+    #[test]
+    fn root_exit_survives_while_group_members_live() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let root = sys.pid;
+        // root が終了しても、生存するメンバーがいるのでエミュレーションは
+        // 終わらずメンバーへスケジュールされる。
+        assert!(sys.take_exit(&mut env, 0), "root exit でもグループは生きる");
+        assert_eq!(sys.pid, child, "メンバーへ切り替わる");
+        // 最後のメンバーが終わると、もう実行するものがない。
+        assert!(!sys.take_exit(&mut env, 0), "最後のメンバーの終了で終わる");
+        let _ = root;
+    }
+
+    #[test]
+    fn thread_exit_sends_no_sigchld_and_is_not_waitable() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        assert!(sys.swap_in(&mut env, child));
+        assert!(sys.take_exit(&mut env, 0), "親へスケジュールされる");
+        assert_eq!(sys.pid, parent);
+        assert_eq!(
+            sys.sig_pending & (1u64 << (17 - 1)),
+            0,
+            "スレッド終了で SIGCHLD は飛ばない"
+        );
+        // wait4(-1) はスレッドを回収できず、子なしの ECHILD。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), u64::MAX); // -1
+        set64(&mut env, Gpr(6), 0x2000);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -10, "ECHILD");
     }
 
     #[test]
