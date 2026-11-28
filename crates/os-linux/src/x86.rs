@@ -27,6 +27,7 @@ pub const ENOEXEC: u32 = 8;
 pub const EBADF: u32 = 9;
 pub const ECHILD: u32 = 10;
 pub const EAGAIN: u32 = 11;
+pub const ETIMEDOUT: u32 = 110;
 pub const EINTR: u32 = 4;
 pub const EFAULT: u32 = 14;
 pub const EACCES: u32 = 13;
@@ -1120,22 +1121,29 @@ pub fn stat_buf(m: &std::fs::Metadata, ino: u64, is64: bool) -> Vec<u8> {
     }
 }
 
-/// gettimeofday(tv, tz)。CLOCK_REALTIME と同じ固定値を返す.
+/// gettimeofday(tv, tz)。CLOCK_REALTIME と同じ時刻を返す.
 /// i386 は {i32 sec, i32 usec} の8B、x86-64 は {i64,i64} の16B を書く.
 /// Ref: SRC-LINUX (7.3).
-pub fn sys_gettimeofday(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_gettimeofday(
+    mono: &mut Option<std::time::Instant>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
     let tv = get64(env, cx.r_a);
     if tv != 0 {
-        let secs = 946_688_400i64;
+        let start = *mono.get_or_insert_with(std::time::Instant::now);
+        let elapsed = start.elapsed();
+        let secs = 946_688_400i64 + elapsed.as_secs() as i64;
+        let usec = elapsed.subsec_micros() as i64;
         let buf: Vec<u8> = if cx.is64 {
             let mut v = Vec::with_capacity(16);
             v.extend_from_slice(&secs.to_le_bytes());
-            v.extend_from_slice(&0i64.to_le_bytes());
+            v.extend_from_slice(&usec.to_le_bytes());
             v
         } else {
             let mut v = Vec::with_capacity(8);
             v.extend_from_slice(&(secs as i32).to_le_bytes());
-            v.extend_from_slice(&0i32.to_le_bytes());
+            v.extend_from_slice(&(usec as i32).to_le_bytes());
             v
         };
         if env.backend.mem.write(VirtAddr(tv), &buf).is_err() {
@@ -2284,13 +2292,18 @@ pub fn sys_clock_gettime(
     let clk = get64(env, cx.r_a);
     let tp = get64(env, cx.r_b);
     if tp != 0 {
+        let start = *mono.get_or_insert_with(std::time::Instant::now);
+        let elapsed = start.elapsed();
         let (sec, nsec) = if clk == 0 {
-            // CLOCK_REALTIME
-            (946_688_400i64, 0i64)
+            // CLOCK_REALTIME。2000-01-01 01:00:00 UTC を基底に、
+            // MONOTONIC と同じ速さで進める。cond の timedwait が
+            // 絶対時刻で眠れるように、凍結はしない。
+            (
+                946_688_400i64 + elapsed.as_secs() as i64,
+                elapsed.subsec_nanos() as i64,
+            )
         } else {
             // CLOCK_MONOTONIC ほか。ゲスト実行の起点からの経過。
-            let start = *mono.get_or_insert_with(std::time::Instant::now);
-            let elapsed = start.elapsed();
             (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
         };
         let mut both = [0u8; 16];

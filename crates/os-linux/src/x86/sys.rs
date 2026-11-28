@@ -141,6 +141,9 @@ pub struct Linux {
     /// set_tid_address または CLONE_CHILD_CLEARTID で張る。pthread の
     /// join はこの futex で眠る。fork の子には引き継がない。
     clear_child_tid: Option<u64>,
+    /// futex wait の期限。wait 時計の絶対時刻で、wake か期限切れで
+    /// 再実行された syscall が ETIMEDOUT と完了を区別するために使う。
+    futex_deadline: Option<u64>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -796,7 +799,7 @@ impl Linux {
                 polyisa_kernel::ThreadWait::Signal => {
                     eprintln!("run: pid {} waits for signal", id.0);
                 }
-                polyisa_kernel::ThreadWait::Futex { addr } => {
+                polyisa_kernel::ThreadWait::Futex { addr, .. } => {
                     eprintln!("run: pid {} waits for futex {addr:#x}", id.0);
                 }
             }
@@ -1059,6 +1062,7 @@ impl Linux {
             mm_group: None,
             futex_wait: None,
             clear_child_tid: None,
+            futex_deadline: None,
         }
     }
 
@@ -1365,7 +1369,11 @@ impl Linux {
         // env にあるので、共有グループの他スレッドからも見える。
         if let Some(ctid) = self.clear_child_tid.take() {
             let _ = env.backend.mem.write(VirtAddr(ctid), &[0, 0, 0, 0]);
-            self.queue.0.borrow_mut().meta.unblock_futex(ctid, 1);
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock_futex(ctid, 1, u32::MAX);
         }
         let nfd = self.fds.len();
         for fd in 0..3u32 {
@@ -3618,6 +3626,7 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
                     | polyisa_kernel::ThreadWait::Fd
                     | polyisa_kernel::ThreadWait::HostFd
                     | polyisa_kernel::ThreadWait::Timer
+                    | polyisa_kernel::ThreadWait::Futex { .. }
             )
         {
             Some(*wait)
@@ -3954,25 +3963,95 @@ fn sys_getpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     crate::x86::sys_getpgid(&borrowed, me, env, cx)
 }
 
-/// futex の WAIT/WAKE。CLONE_VM のスレッドはアドレス空間を共有するので、
-/// ゲスト仮想アドレスがそのまま待ち合わせのキーになる。pthread の
-/// mutex/join が使う最小構成で、タイムアウトと bitset 系は未対応。
-/// シグナルによる中断も現状はモデル化しない。
+/// timespec を読む。戻り値は (sec, nsec)。読めなければ None。
+fn read_timespec(sys: &Linux, env: &mut BareEnv, ptr: u64) -> Option<(i64, i64)> {
+    let wide = sys.is64 && !sys.x32;
+    let len = if wide { 16 } else { 8 };
+    let mut buf = [0u8; 16];
+    env.backend
+        .mem
+        .read(VirtAddr(ptr), &mut buf[..len], data_access())
+        .ok()?;
+    let (sec, nsec) = if wide {
+        (
+            i64::from_le_bytes(buf[..8].try_into().unwrap()),
+            i64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        )
+    } else {
+        (
+            i64::from(i32::from_le_bytes(buf[..4].try_into().unwrap())),
+            i64::from(i32::from_le_bytes(buf[4..8].try_into().unwrap())),
+        )
+    };
+    Some((sec, nsec))
+}
+
+/// REALTIME の絶対時刻 ns を wait 時計の期限へ換算する。
+/// REALTIME は MONOTONIC と同じ速さで進み、差は基底 946688400 秒で一定。
+fn realtime_to_waitclock(sys: &mut Linux, rt_ns: i128) -> u64 {
+    const REALTIME_BASE_NS: i128 = 946_688_400 * 1_000_000_000;
+    let mono_target = rt_ns - REALTIME_BASE_NS;
+    let now = sys.mono_ns();
+    let report_start = *sys.mono_start.get_or_insert_with(std::time::Instant::now);
+    let report_now = report_start.elapsed().as_nanos() as i128;
+    let offset = now as i128 - report_now;
+    (mono_target + offset).max(0) as u64
+}
+
+/// futex。WAIT/WAKE に加えてタイムアウトと WAIT/WAKE_BITSET を持つ。
+/// CLONE_VM のスレッドはアドレス空間を共有するので、ゲスト仮想アドレスが
+/// そのまま待ち合わせのキーになる。シグナル中断は EINTR で返し、
+/// タイムアウトは wait 時計の絶対期限へ換算して覚える。
 fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_WAIT_BITSET: u64 = 9;
+    const FUTEX_WAKE_BITSET: u64 = 10;
+    const FUTEX_CLOCK_REALTIME: u64 = 256;
     let uaddr = get64(env, cx.r_a);
-    let op = get64(env, cx.r_b) & 0x7f; // PRIVATE/REALTIME の旗を外す
+    let raw_op = get64(env, cx.r_b);
+    let op = raw_op & 0x7f; // PRIVATE フラグを外す
+    let clock_rt = raw_op & FUTEX_CLOCK_REALTIME != 0;
     let val = get64(env, cx.r_c) as u32;
+    let timeout_ptr = get64(env, cx.r_d);
+    let bitset_arg = get64(env, cx.r_f) as u32;
     match op {
-        FUTEX_WAIT => {
-            // wake 後の再実行。待ちへ入った記憶があるときは 0 で完了する。
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            let bitset = if op == FUTEX_WAIT_BITSET {
+                bitset_arg
+            } else {
+                u32::MAX
+            };
+            if bitset == 0 {
+                set64(env, Gpr(0), cx.neg(EINVAL));
+                return Some(TrapOutcome::Handled);
+            }
+            // wake・期限切れ・シグナル後の再実行。待ちへ入った記憶が
+            // あるときは原因に応じて完了する。
             if sys.futex_wait == Some(uaddr) {
+                let deadline = sys.futex_deadline;
                 sys.futex_wait = None;
+                sys.futex_deadline = None;
+                sys.fd_wait = None;
+                sys.fd_wait_prev = None;
+                // 配送可能シグナルがあれば EINTR。futex はカーネルが
+                // 再開しないので SA_RESTART でもユーザへ EINTR が見える。
+                if sys.sig_pending & !sys.sig_mask != 0
+                    && sys.interrupt_blocked_syscall(env, cx.neg(EINTR), false)
+                {
+                    return Some(TrapOutcome::Handled);
+                }
+                let now = sys.mono_ns();
+                if deadline.is_some_and(|dl| now >= dl) {
+                    set64(env, Gpr(0), cx.neg(ETIMEDOUT));
+                    sys.advance_past_syscall(env);
+                    return Some(TrapOutcome::Handled);
+                }
                 set64(env, Gpr(0), 0);
                 return Some(TrapOutcome::Handled);
             }
             sys.futex_wait = None;
+            sys.futex_deadline = None;
             let mut buf = [0u8; 4];
             if env
                 .backend
@@ -3987,16 +4066,72 @@ fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
                 set64(env, Gpr(0), cx.neg(EAGAIN));
                 return Some(TrapOutcome::Handled);
             }
+            // 期限の解釈。WAIT_BITSET は REALTIME 絶対時刻、WAIT は
+            // 相対時刻。WAIT に CLOCK_REALTIME フラグがあるときも
+            // REALTIME 絶対時刻とみなす。
+            let deadline = if timeout_ptr == 0 {
+                None
+            } else {
+                let Some((sec, nsec)) = read_timespec(sys, env, timeout_ptr) else {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                };
+                if !(0..1_000_000_000).contains(&nsec) {
+                    set64(env, Gpr(0), cx.neg(EINVAL));
+                    return Some(TrapOutcome::Handled);
+                }
+                let ns = (sec as i128) * 1_000_000_000 + nsec as i128;
+                let absolute = op == FUTEX_WAIT_BITSET || clock_rt;
+                if absolute {
+                    Some(realtime_to_waitclock(sys, ns))
+                } else {
+                    if sec < 0 {
+                        set64(env, Gpr(0), cx.neg(EINVAL));
+                        return Some(TrapOutcome::Handled);
+                    }
+                    Some(sys.mono_ns().saturating_add(ns.max(0) as u64))
+                }
+            };
+            // 既に期限が過ぎていれば眠らず ETIMEDOUT。
+            if deadline.is_some_and(|dl| sys.mono_ns() >= dl) {
+                set64(env, Gpr(0), cx.neg(ETIMEDOUT));
+                return Some(TrapOutcome::Handled);
+            }
             let pid = sys.ensure_self();
             sys.futex_wait = Some(uaddr);
+            sys.futex_deadline = deadline;
+            if let Some(dl) = deadline {
+                // 期限切れでの起床は fd 待ちの掃討系統に乗せる。
+                sys.fd_wait = Some(crate::sock::Wait {
+                    fds: Vec::new(),
+                    deadline: Some(dl),
+                });
+            }
             sys.queue.0.borrow_mut().meta.block(
                 polyisa_kernel::ThreadId(pid.0),
-                polyisa_kernel::ThreadWait::Futex { addr: uaddr },
+                polyisa_kernel::ThreadWait::Futex {
+                    addr: uaddr,
+                    bitset,
+                },
             );
             Some(TrapOutcome::Blocked)
         }
-        FUTEX_WAKE => {
-            let n = sys.queue.0.borrow_mut().meta.unblock_futex(uaddr, val);
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
+            let bits = if op == FUTEX_WAKE_BITSET {
+                bitset_arg
+            } else {
+                u32::MAX
+            };
+            if bits == 0 {
+                set64(env, Gpr(0), cx.neg(EINVAL));
+                return Some(TrapOutcome::Handled);
+            }
+            let n = sys
+                .queue
+                .0
+                .borrow_mut()
+                .meta
+                .unblock_futex(uaddr, val, bits);
             set64(env, Gpr(0), u64::from(n));
             Some(TrapOutcome::Handled)
         }
@@ -5022,8 +5157,8 @@ fn sys_clock_nanosleep(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Optio
     nanosleep_impl(sys, env, cx, req, rem, flags & 1 != 0, true)
 }
 
-fn sys_gettimeofday(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    crate::x86::sys_gettimeofday(env, cx)
+fn sys_gettimeofday(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    crate::x86::sys_gettimeofday(&mut sys.mono_start, env, cx)
 }
 
 fn sys_getcpu(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -8048,6 +8183,278 @@ mod tests {
     }
 
     #[test]
+    fn futex_wait_timeout_expires_with_etimedout() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        // timespec {0sec, 1000nsec}
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), &0i64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x108), &1000i64.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0); // FUTEX_WAIT
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0x100); // timeout ptr
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.futex_deadline.is_some(), "相対 timeout で期限が張る");
+        // 期限を過去へ倒して掃討すると、再実行は ETIMEDOUT。
+        sys.futex_deadline = Some(0);
+        if let Some(wait) = &mut sys.fd_wait {
+            wait.deadline = Some(0);
+        }
+        sys.sweep_fd_waits();
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -110, "ETIMEDOUT");
+        assert_eq!(sys.futex_wait, None);
+    }
+
+    #[test]
+    fn futex_wait_without_timeout_has_no_deadline() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0); // timeout なし
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert_eq!(sys.futex_deadline, None);
+        assert!(sys.fd_wait.is_none(), "タイマ掃討には載らない");
+    }
+
+    #[test]
+    fn futex_wait_bitset_blocks_and_zero_bitset_is_einval() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        // bitset 0 は EINVAL。
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 9); // FUTEX_WAIT_BITSET
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0);
+        set64(&mut env, Gpr(9), 0); // bitset
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -22, "EINVAL");
+        // 有効な bitset で block する。
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 9);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0);
+        set64(&mut env, Gpr(9), 0x2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.queue.0.borrow().meta.has_futex_waiter(0x2000));
+    }
+
+    #[test]
+    fn futex_wake_bitset_selects_matching_waiters() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 子が bitset 0x2 で WAIT_BITSET に入る。
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 9);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0);
+        set64(&mut env, Gpr(9), 0x2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        // 親へ戻る。交差しない bitset では起きない。
+        assert!(sys.swap_in(&mut env, parent));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 10); // FUTEX_WAKE_BITSET
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(9), 0x4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(
+            get64(&mut env, Gpr(0)),
+            0,
+            "bitset が交差しないので起きない"
+        );
+        assert!(sys.queue.0.borrow().meta.has_futex_waiter(0x2000));
+        // 交差する bitset で起きる。
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 10);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(9), 0x3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1, "bitset が交差するので起きる");
+        assert!(!sys.queue.0.borrow().meta.has_futex_waiter(0x2000));
+    }
+
+    #[test]
+    fn clock_realtime_progresses_with_monotonic() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.ensure_self();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
+        set64(&mut env, Gpr(7), 0); // REALTIME
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut buf = [0u8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut buf, data_access())
+            .unwrap();
+        let sec = i64::from_le_bytes(buf[..8].try_into().unwrap());
+        assert!(sec >= 946_688_400, "REALTIME は基底以降で進む: {sec}");
+        // 少し経ってから再度読むと、単調に増える。
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut buf, data_access())
+            .unwrap();
+        let sec2 = i64::from_le_bytes(buf[..8].try_into().unwrap());
+        let nsec2 = i64::from_le_bytes(buf[8..].try_into().unwrap());
+        assert!(
+            sec2 > sec || nsec2 > 0,
+            "REALTIME は凍結せず進む: {sec}.{nsec2}"
+        );
+    }
+
+    #[test]
+    fn futex_wait_interrupted_by_signal_returns_eintr() {
+        use crate::x86_64 as abi;
+        const SIGUSR1: u64 = 10;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        // シグナルフレームはスタックから下へ伸びるので、低位も写像する。
+        env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        // 子スレッドのスタック 0x9800 とフレームの伸びる下位を写像する。
+        env.backend.mem.map(VirtAddr(0x8000), 2, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(4), 0x1800);
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
+        env.backend
+            .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 7);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 7);
+        env.backend
+            .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
+        // ハンドラは clone で子へ写るように先に張る。
+        sys.ensure_self();
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts[SIGUSR1 as usize - 1].handler = 0x1000;
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 子が futex wait に入る。
+        assert!(sys.swap_in(&mut env, child));
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        // 親へ戻り、子へシグナルを送ると futex 待ちが割り込まれる。
+        assert!(sys.swap_in(&mut env, parent));
+        set64(&mut env, Gpr(0), abi::TKILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), SIGUSR1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert!(
+            !sys.queue.0.borrow().meta.has_futex_waiter(0x2000),
+            "シグナルで futex 待ちは解ける"
+        );
+        // 子が syscall を再実行すると、ハンドラを挟んで EINTR になる。
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eip_ref()),
+            0x1000,
+            "ハンドラへ入る"
+        );
+        let rsp = get64(&mut env, Gpr(4));
+        set64(&mut env, Gpr(4), rsp + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -4, "EINTR");
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eip_ref()),
+            0x302,
+            "syscall の次へ進む"
+        );
+    }
+
+    #[test]
     fn futex_wait_mismatched_value_is_eagain() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
@@ -10178,8 +10585,10 @@ mod tests {
     }
 
     #[test]
-    fn clock_gettime_realtime_is_fixed() {
+    fn clock_gettime_realtime_starts_at_base() {
         use crate::x86_64 as abi;
+        // REALTIME は 2000-01-01 01:00:00 UTC を基底に MONOTONIC と
+        // 同じ速さで進む。凍結はしない（cond の timedwait のため）。
         let mut sys = Linux::x86_64();
         let mut env = bare();
         set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
@@ -10192,11 +10601,9 @@ mod tests {
             .mem
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
-        assert_eq!(
-            i64::from_le_bytes(back[0..8].try_into().unwrap()),
-            946_688_400
-        );
-        assert_eq!(i64::from_le_bytes(back[8..16].try_into().unwrap()), 0);
+        let sec = i64::from_le_bytes(back[0..8].try_into().unwrap());
+        assert!(sec >= 946_688_400, "基底以降: {sec}");
+        assert!(sec < 946_688_400 + 60, "直後なので基底に近い: {sec}");
     }
 
     #[test]

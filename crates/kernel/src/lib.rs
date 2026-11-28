@@ -335,8 +335,9 @@ pub enum ThreadWait {
     Signal,
     /// futex のアドレス待ち。`addr` はゲスト仮想アドレス。
     /// CLONE_VM のスレッド間ではアドレス空間を共有するので、
-    /// アドレスがそのまま待ち合わせのキーになる。
-    Futex { addr: u64 },
+    /// アドレスがそのまま待ち合わせのキーになる。`bitset` は
+    /// FUTEX_WAIT_BITSET の起床選別で、素の WAIT では全ビット。
+    Futex { addr: u64, bitset: u32 },
 }
 
 #[derive(Debug)]
@@ -416,8 +417,9 @@ impl GuestScheduler {
     }
 
     /// futex のアドレスを待っているスレッドを最大 `max` まで実行可能に戻す。
-    /// 戻したスレッド数を返す。
-    pub fn unblock_futex(&mut self, addr: u64, max: u32) -> u32 {
+    /// `wake_bits` と待ち側の bitset が交差するものだけを戻す。
+    /// 素の FUTEX_WAKE では全ビットを渡す。戻したスレッド数を返す。
+    pub fn unblock_futex(&mut self, addr: u64, max: u32, wake_bits: u32) -> u32 {
         let mut woken = 0;
         for thread in &mut self.threads {
             if woken >= max {
@@ -425,7 +427,7 @@ impl GuestScheduler {
             }
             if matches!(
                 thread.wait,
-                Some(ThreadWait::Futex { addr: waiting }) if waiting == addr
+                Some(ThreadWait::Futex { addr: waiting, bitset }) if waiting == addr && bitset & wake_bits != 0
             ) {
                 thread.wait = None;
                 woken += 1;
@@ -440,7 +442,7 @@ impl GuestScheduler {
         self.threads.iter().any(|thread| {
             matches!(
                 thread.wait,
-                Some(ThreadWait::Futex { addr: waiting }) if waiting == addr
+                Some(ThreadWait::Futex { addr: waiting, .. }) if waiting == addr
             )
         })
     }
