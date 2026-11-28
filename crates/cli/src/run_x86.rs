@@ -6837,6 +6837,34 @@ fn avx10_exec(
         } else {
             <polyisa_sem::W32 as decode::Hw>::put(&mut env.backend, g, md, val as u32);
         }
+        // MXCSR の invalid/precision。invalid は NaN/Inf/範囲外
+        // （飽和が起きた場合）、precision はそれ以外で小数部を
+        // 落とした場合。
+        let (sat_lo, sat_hi) = if wide {
+            if unsigned {
+                (tv < 0.0, tv >= 18_446_744_073_709_551_616.0)
+            } else {
+                (
+                    tv < -9_223_372_036_854_775_808.0,
+                    tv >= 9_223_372_036_854_775_808.0,
+                )
+            }
+        } else if unsigned {
+            (tv < 0.0, tv >= 4_294_967_296.0)
+        } else {
+            (tv < -2_147_483_648.0, tv >= 2_147_483_648.0)
+        };
+        let invalid = tv.is_nan() || tv.is_infinite() || sat_lo || sat_hi;
+        let mut st = 0u32;
+        if invalid {
+            st |= 1;
+        } else if tv != v {
+            st |= 1 << 5;
+        }
+        if st != 0 {
+            let cur: u32 = env.backend.get(sem::mxcsr_ref());
+            env.backend.set(sem::mxcsr_ref(), cur | st);
+        }
         return Ok(());
     }
     if matches!(md.insn, Insn::VmovwXvWv | Insn::VmovwWvXv) {
@@ -7523,6 +7551,29 @@ fn avx10_exec(
                 } else {
                     (tv as i32) as u32 as u64
                 };
+                // MXCSR の invalid/precision。invalid は NaN/Inf/範囲外
+                // （飽和が起きた場合）、precision はそれ以外で小数部を
+                // 落とした場合。mask されたレーンでは立てない。
+                let (sat_lo, sat_hi) = if qout {
+                    if unsigned {
+                        (tv < 0.0, tv >= 18_446_744_073_709_551_616.0)
+                    } else {
+                        (
+                            tv < -9_223_372_036_854_775_808.0,
+                            tv >= 9_223_372_036_854_775_808.0,
+                        )
+                    }
+                } else if unsigned {
+                    (tv < 0.0, tv >= 4_294_967_296.0)
+                } else {
+                    (tv < -2_147_483_648.0, tv >= 2_147_483_648.0)
+                };
+                let invalid = tv.is_nan() || tv.is_infinite() || sat_lo || sat_hi;
+                if invalid {
+                    mx_status |= 1;
+                } else if tv != v {
+                    mx_status |= 1 << 5;
+                }
                 for j in 0..obw {
                     out[i * obw + j] = (val >> (8 * j)) as u8;
                 }

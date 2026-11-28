@@ -32190,3 +32190,100 @@ fn run64_apx_push2pop2_exceptions() {
         "v64(ndd) が高位"
     );
 }
+
+/// AVX10 saturating conversion の MXCSR invalid/precision 生成。
+#[test]
+fn run_avx10_satcvt_mxcsr() {
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // 入力: 3.7 / NaN / 5.0 / 1e300
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &3.7f64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x7FF8000000000001u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &5.0f64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &1e300f64.to_le_bytes())
+        .unwrap();
+    // MXCSR 初期値 0x1F80（すべて mask）
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &0x1F80u32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        // case1: 3.7 → 3, precision
+        0x0F, 0xAE, 0x50, 0x20, // ldmxcsr [rax+0x20]
+        0xF2, 0x0F, 0x10, 0x08, // movsd xmm1,[rax]
+        0x62, 0xF5, 0xFF, 0x08, 0x6D, 0xC1, // vcvttsd2sis xmm1,rax
+        0x48, 0x89, 0x03, // mov [rbx],rax
+        0x0F, 0xAE, 0x5B, 0x08, // stmxcsr [rbx+8]
+        // case2: NaN → 0, invalid
+        0x48, 0xB8, 0x08, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2008
+        0x0F, 0xAE, 0x50, 0x18, // ldmxcsr [rax+0x18] (=0x2020)
+        0xF2, 0x0F, 0x10, 0x08, // movsd xmm1,[rax]
+        0x62, 0xF5, 0xFF, 0x08, 0x6D, 0xC1, // vcvttsd2sis xmm1,rax
+        0x48, 0x89, 0x43, 0x10, // mov [rbx+0x10],rax
+        0x0F, 0xAE, 0x5B, 0x18, // stmxcsr [rbx+0x18]
+        // case3: 5.0 exact → flag なし
+        0x48, 0xB8, 0x10, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2010
+        0x0F, 0xAE, 0x50, 0x10, // ldmxcsr [rax+0x10] (=0x2020)
+        0xF2, 0x0F, 0x10, 0x08, // movsd xmm1,[rax]
+        0x62, 0xF5, 0xFF, 0x08, 0x6D, 0xC1, // vcvttsd2sis xmm1,rax
+        0x48, 0x89, 0x43, 0x20, // mov [rbx+0x20],rax
+        0x0F, 0xAE, 0x5B, 0x28, // stmxcsr [rbx+0x28]
+        // case4: 1e300 → 飽和, invalid
+        0x48, 0xB8, 0x18, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2018
+        0x0F, 0xAE, 0x50, 0x08, // ldmxcsr [rax+0x8] (=0x2020)
+        0xF2, 0x0F, 0x10, 0x08, // movsd xmm1,[rax]
+        0x62, 0xF5, 0xFF, 0x08, 0x6D, 0xC1, // vcvttsd2sis xmm1,rax
+        0x48, 0x89, 0x43, 0x30, // mov [rbx+0x30],rax
+        0x0F, 0xAE, 0x5B, 0x38, // stmxcsr [rbx+0x38]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let mut buf = [0u8; 0x40];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    let rd64 = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
+    let rd32 = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+    assert_eq!(rd64(0), 3, "3.7 は 3 へ truncate");
+    assert_eq!(rd32(8) & 0x20, 0x20, "fractional で precision");
+    assert_eq!(rd32(8) & 1, 0, "in-range では invalid なし");
+    assert_eq!(rd64(0x10), 0, "NaN は 0");
+    assert_eq!(rd32(0x18) & 1, 1, "NaN で invalid");
+    assert_eq!(rd64(0x20), 5, "5.0 は 5");
+    assert_eq!(rd32(0x28) & 0x21, 0, "exact では flag なし");
+    assert_eq!(rd64(0x30), i64::MAX as u64, "1e300 は飽和");
+    assert_eq!(rd32(0x38) & 1, 1, "範囲外で invalid");
+}
