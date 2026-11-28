@@ -127,14 +127,49 @@ fn mnemonic_mentions(text: &str) -> BTreeSet<String> {
         s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
             .find(|t| t.len() >= 2 && t.chars().next().is_some_and(|c| c.is_ascii_lowercase()))
     }
+    // テスト関数名に埋め込まれた mnemonic。`fn run_fxch_st1_swaps` や
+    // `fn run_x87_fxch_empty_source` の命名規約があり、トークン分割で
+    // mnemonic 表に引く。散文トークンは表に無いので自然に落ちる。
+    // （and/or 等の英単語と衝突する mnemonic は偽陽性になりうるが、
+    // 証拠の過少計上を直す方が優先度は高い）
     for line in text.lines() {
-        // バイト列を持つ行の行末コメント。`// push2 %rsp,%r12` の形。
-        if (line.contains(".byte") || hex_count(line) >= 2)
-            && let Some(pos) = line.find("//")
-            && let Some(tok) = first_token(&line[pos + 2..])
-        {
-            out.insert(tok.replace('.', "_"));
+        let Some(pos) = line.find("fn ") else {
+            continue;
+        };
+        let rest = &line[pos + 3..];
+        let end = rest.find('(').unwrap_or(rest.len());
+        let fname = &rest[..end];
+        if !(fname.starts_with("run_") || fname.starts_with("test")) {
+            continue;
         }
+        for tok in fname.split('_') {
+            if tok.len() >= 2 {
+                out.insert(tok.to_string());
+            }
+        }
+    }
+    let mut prev_had_bytes = false;
+    for line in text.lines() {
+        let has_bytes = line.contains(".byte") || hex_count(line) >= 2;
+        // バイト列を持つ行（またはバイト列行から続く式の終端行）の
+        // 行末コメント。`// push2 %rsp,%r12` の形。
+        if (has_bytes || prev_had_bytes)
+            && let Some(pos) = line.find("//")
+        {
+            let comment = &line[pos + 2..];
+            if let Some(tok) = first_token(comment) {
+                out.insert(tok.replace('.', "_"));
+            }
+            // `D9 C9 = fxch %st(1)` のように hex ダンプのあと `=` で
+            // mnemonic を書く規約。コメント行自体はバイトを持たなくても
+            // 関数内に現れる。
+            if let Some(eq) = comment.find("= ")
+                && let Some(tok) = first_token(&comment[eq + 2..])
+            {
+                out.insert(tok.replace('.', "_"));
+            }
+        }
+        prev_had_bytes = has_bytes && !line.contains(';');
     }
     // インライン asm 文字列リテラル。`"tdpbusd %zmm1\n\t"` の形で、
     // 命令は改行で区切られている。文字列の先頭トークンを各行から取る。
