@@ -3116,6 +3116,17 @@ fn dispatch_map_inner<B: Backend>(
         let enabled = b.cmp::<W64>(Cmp::Ne, v, z);
         b.if_then_else(enabled, |_| Ok(()), |b| sem_ea::undefined(b, eip))?;
     }
+    // EVEX のベクトル命令（map4=APX を除く）は XCR0[2:1]=11（SSE+AVX）
+    // と XCR0[7:5]=111（opmask/zmm）の両方が許可されているときだけ実行
+    // できる。未許可では #UD。VEX 命令は GPR 系（BMI）が状態を要しない
+    // ため一括では判定できず、既知の残件とする。
+    if d.evex && d.vex_map != 4 {
+        let x0: B::V<W64> = b.get(polyisa_guest_x86::sem::xcr0_ref());
+        let need = b.konst::<W64>(0xe6u64);
+        let v = b.and::<W64>(x0, need);
+        let enabled = b.cmp::<W64>(Cmp::Eq, v, need);
+        b.if_then_else(enabled, |_| Ok(()), |b| sem_ea::undefined(b, eip))?;
+    }
     let w = d.osize;
     // VEX の GPR 演算（BMI 系）の被演算子幅。64 ビットモードでは
     // VEX.W（`d.rex` bit3 に畳み込み済み）で 32/64、他モードは常に 32。
@@ -6707,6 +6718,14 @@ fn avx10_exec(
 ) -> Result<(), InterpExit> {
     use polyisa_guest_x86::{Insn, decode, sem};
     use polyisa_softfloat::{BF16, E4M3, E5M2, F16, F32, F64, Rm};
+    // EVEX のベクトル命令は XCR0[2:1]=11（SSE+AVX）と XCR0[7:5]=111
+    // （opmask/zmm）が許可されているときだけ実行できる。未許可は #UD。
+    if md.evex {
+        let x0: u64 = env.backend.get(sem::xcr0_ref());
+        if x0 & 0xe6 != 0xe6 {
+            return Err(amx_ud(eip));
+        }
+    }
     // AVX10.2 の VNNI/VMPSADBW は VEX 形と Insn を共有する。
     // EVEX 幅は evex_ll、VEX 幅は vex_l から決める。
     let ll = if md.evex {

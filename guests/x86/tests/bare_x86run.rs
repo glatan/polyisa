@@ -17,6 +17,11 @@ fn bare_x86_env() -> BareEnv {
     // ハードウェアリセット値。全 FP 例外が masked。
     env.backend
         .set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1f80u32);
+    // xstate 成分はすべて有効化しておく。bare 環境は OS の役割も兼ね、
+    // AVX/AVX512/PKRU/AMX/APX を XCR0 で許可する。特定の値を確かめる
+    // テストは上書きする。
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0xe02e7u64);
     env
 }
 
