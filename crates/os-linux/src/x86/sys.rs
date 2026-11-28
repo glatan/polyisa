@@ -2559,6 +2559,29 @@ fn sys_read(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     let stdin_empty =
         (fd == 0 || (fd < 3 && sys.std_is_stdin[fd as usize])) && sys.std_attached(fd);
     if stdin_empty {
+        // 制御端末の読み取り。background プロセスグループからの読みは
+        // SIGTTIN(21) を起こす。配送は syscall 境界の後なので、ここでは
+        // 読まずに EINTR を返す近似とする。
+        // Ref: SRC-LINUX (7.3) の job control。
+        let me = sys.pid;
+        let (sid, pgid, fg) = {
+            let procs = sys.procs.borrow();
+            let id = polyisa_kernel::ProcessId(me);
+            (
+                procs.sid(id).unwrap_or(me),
+                procs.pgid(id).unwrap_or(me),
+                procs.tc_getpgrp(procs.sid(id).unwrap_or(me)),
+            )
+        };
+        let _ = sid;
+        if pgid != fg {
+            sys.shared_pending
+                .set(sys.shared_pending.get() | (1u64 << 20));
+            set64(env, Gpr(0), cx.neg(EINTR));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    if stdin_empty {
         let mut done = 0u64;
         let mut chunk = vec![0u8; IO_CHUNK];
         while left > 0 {
@@ -4149,10 +4172,17 @@ fn sys_setpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
 }
 
 fn sys_setsid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    let me = sys.ensure_self().0;
-    let mut borrowed = sys.procs.borrow_mut();
-    crate::x86::sys_setsid(&mut borrowed, me, env, cx)
+    // setsid()。プロセスグループの先頭は EPERM で失敗する。成功すると
+    // 自分が新しいセッションとグループの先頭になり、その番号を返す。
+    // Ref: SRC-LINUX (7.3).
+    let me = sys.ensure_self();
+    let ok = sys.procs.borrow_mut().make_session(me);
+    if ok {
+        set64(env, Gpr(0), me.0);
+    } else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+    }
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_getpriority(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5457,7 +5487,59 @@ fn sys_time(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     crate::x86::sys_time(env, cx)
 }
 
-fn sys_ioctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_ioctl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 端末の job control。TIOCGPGRP は foreground グループを書き、
+    // TIOCSPGRP は設定する。background からの TIOCSPGRP は SIGTTOU を
+    // 起こす（block/ignore されていなければ）。
+    const TIOCGPGRP: u32 = 0x540f;
+    const TIOCSPGRP: u32 = 0x5410;
+    let req = get64(env, cx.r_b) as u32;
+    if req == TIOCGPGRP || req == TIOCSPGRP {
+        let me = sys.ensure_self();
+        let ptr = get64(env, cx.r_c);
+        let (sid, pgid) = {
+            let procs = sys.procs.borrow();
+            (
+                procs.sid(me).unwrap_or(me.0),
+                procs.pgid(me).unwrap_or(me.0),
+            )
+        };
+        if req == TIOCGPGRP {
+            let fg = sys.procs.borrow().tc_getpgrp(sid);
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(ptr), &(fg as u32).to_le_bytes())
+                .is_err()
+            {
+                set64(env, Gpr(0), cx.neg(EFAULT));
+                return Some(TrapOutcome::Handled);
+            }
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        let mut buf = [0u8; 4];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(ptr), &mut buf, data_access())
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        let new_fg = u64::from(u32::from_le_bytes(buf));
+        let fg = sys.procs.borrow().tc_getpgrp(sid);
+        if pgid != fg {
+            // background からの tcsetpgrp。SIGTTOU(22) をプロセス宛てに
+            // 積む。既定では停止する。
+            sys.shared_pending
+                .set(sys.shared_pending.get() | (1u64 << 21));
+        }
+        sys.procs.borrow_mut().tc_setpgrp(sid, new_fg);
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     crate::x86::sys_ioctl(env, cx)
 }
@@ -9201,6 +9283,96 @@ mod tests {
     }
 
     #[test]
+    fn sigttin_on_background_terminal_read() {
+        use crate::x86_64 as abi;
+        // foreground でないプロセスグループが端末(fd 0)を読むと
+        // SIGTTIN がプロセス宛て pending へ立ち、読みは EINTR になる。
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // 自分を foreground でないグループへ移す。初期プロセスは
+        // pgid=pid=1 で fg も 1。setpgid(0, 99) はグループ 99 へ移す
+        // 形にはならない（存在しないグループ）が、ここでは procs を
+        // 直接操作して背景化する。
+        let me = sys.ensure_self();
+        sys.procs.borrow_mut().set_pgid(me, 999);
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x2000);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(
+            get64(&mut env, Gpr(0)),
+            neg_errno64(EINTR),
+            "background の端末読みは EINTR"
+        );
+        assert_ne!(
+            sys.shared_pending.get() & (1 << 20),
+            0,
+            "SIGTTIN が pending へ立つ"
+        );
+    }
+
+    #[test]
+    fn foreground_terminal_read_unaffected() {
+        use crate::x86_64 as abi;
+        // foreground グループの端末読みは SIGTTIN を起こさない。
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.stdin_buf = vec![0x42];
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1, "foreground は普通に読める");
+        assert_eq!(sys.shared_pending.get() & (1 << 20), 0);
+    }
+
+    #[test]
+    fn tcgetpgrp_and_tcsetpgrp() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // TIOCGPGRP は foreground（初期はセッションリーダの 1）を返す。
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x540f);
+        set64(&mut env, Gpr(2), 0x1000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 1, "初期 fg はリーダの 1");
+        // TIOCSPGRP で 55 へ変えられる。foreground からの設定なので
+        // SIGTTOU は起きない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &55u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x5410);
+        set64(&mut env, Gpr(2), 0x1000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.shared_pending.get() & (1 << 21), 0);
+        // 読み戻すと 55。
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x540f);
+        set64(&mut env, Gpr(2), 0x1000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x1000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 55);
+    }
+
+    #[test]
     fn setitimer_real_fires_sigalrm() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
@@ -10543,11 +10715,28 @@ mod tests {
     #[test]
     fn setsid_returns_pid() {
         use crate::x86_64 as abi;
+        // 初期プロセスはプロセスグループの先頭なので setsid は EPERM。
+        // fork した子は先頭ではないので新しいセッションを作れる。
         let mut sys = Linux::x86_64();
         let mut env = bare();
         set64(&mut env, Gpr(0), abi::SETSID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        assert_eq!(
+            get64(&mut env, Gpr(0)),
+            neg_errno64(EPERM),
+            "グループリーダの setsid は EPERM"
+        );
+        // fork 子はリーダではないので成功し、自分の pid を返す。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1);
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::SETSID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child, "子は新セッションを作れる");
     }
 
     #[test]

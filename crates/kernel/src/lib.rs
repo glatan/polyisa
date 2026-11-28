@@ -25,6 +25,9 @@ pub struct ThreadId(pub u64);
 pub struct ProcessTable {
     next: u64,
     procs: Vec<Proc>,
+    /// 制御端末の foreground プロセスグループ。キーはセッション。
+    /// エントリがなければセッションリーダのグループが foreground。
+    term_fg: std::collections::HashMap<u64, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +43,8 @@ struct Proc {
     /// 停止からの継続がまだ wait へ報告されていない。
     continued: bool,
     pgid: u64,
+    /// セッション識別子。作ったときは親と同じ、初期プロセスは自分。
+    sid: u64,
     /// CLONE_THREAD で作られたスレッド。親の wait 対象にせず、
     /// 終了時の SIGCHLD も送らない。
     thread: bool,
@@ -69,6 +74,7 @@ impl ProcessTable {
     pub fn spawn(&mut self, parent: Option<ProcessId>) -> ProcessId {
         self.next += 1;
         let id = ProcessId(self.next);
+        let sid = parent.and_then(|p| self.sid(p)).unwrap_or(id.0);
         self.procs.push(Proc {
             id,
             parent,
@@ -78,9 +84,59 @@ impl ProcessTable {
             stop_reported: false,
             continued: false,
             pgid: id.0,
+            sid,
             thread: false,
         });
         id
+    }
+
+    /// セッション識別子。
+    #[must_use]
+    pub fn sid(&self, id: ProcessId) -> Option<u64> {
+        self.procs
+            .iter()
+            .find(|proc| proc.id == id)
+            .map(|proc| proc.sid)
+    }
+
+    /// 新しいセッションを作る。プロセスグループの先頭は EPERM で
+    /// 失敗する。成功すると自分がセッションとグループの先頭になる。
+    pub fn make_session(&mut self, id: ProcessId) -> bool {
+        let Some(proc) = self.procs.iter().find(|proc| proc.id == id) else {
+            return false;
+        };
+        // プロセスグループリーダ（pgid が自分）は session を作れない。
+        if proc.pgid == id.0 {
+            return false;
+        }
+        if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) {
+            proc.sid = id.0;
+            proc.pgid = id.0;
+        }
+        true
+    }
+
+    /// 制御端末の foreground プロセスグループ。未設定ならセッション
+    /// リーダのグループ（sid はリーダ pid で、リーダは自分がグループ
+    /// 先頭なので値が一致する）。
+    #[must_use]
+    pub fn tc_getpgrp(&self, sid: u64) -> u64 {
+        self.term_fg.get(&sid).copied().unwrap_or(sid)
+    }
+
+    /// foreground プロセスグループを設定する。
+    pub fn tc_setpgrp(&mut self, sid: u64, pgid: u64) {
+        self.term_fg.insert(sid, pgid);
+    }
+
+    /// セッションのメンバー。
+    #[must_use]
+    pub fn pids_in_session(&self, sid: u64) -> Vec<ProcessId> {
+        self.procs
+            .iter()
+            .filter(|proc| proc.sid == sid)
+            .map(|proc| proc.id)
+            .collect()
     }
 
     /// プロセスグループ。作ったときの値は自分の識別子。
