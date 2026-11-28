@@ -51,7 +51,17 @@ static u32 b16[16] __attribute__((aligned(64))) = {
     0x3c003c00,0x00003c00,0xbc003c00,0x3c003c00,
     0xbc003c00,0x3c003c00,0x3c00bc00,0x00010001,
 };
-static u32 dst[32] __attribute__((aligned(64))) = {0};
+// complex FP16 用 corpus。u32 lo=real/hi=imag。inf/nan/denormal を混ぜる。
+static u8 cfg2[64] __attribute__((aligned(64))) = {0};
+static u32 ac[4] __attribute__((aligned(64))) = {
+    0x3c003c00,0xbc004000, // row0: (1+1i),(2-1i)
+    0x00007c00,0x3c007e00, // row1: (inf+0i),(nan+1i)
+};
+static u32 bc[4] __attribute__((aligned(64))) = {
+    0xbc003c00,0x00003c00, // row0: (1-1i),(1+0i)
+    0x3c000000,0x3c003c00, // row1: (0+1i),(1+1i)
+};
+static u32 dst[40] __attribute__((aligned(64))) = {0};
 
 void _start(void) {
     (void)sys3(158, 0x1023, 17, 0); // ARCH_REQ_XCOMP_PERM XTILECFG
@@ -61,11 +71,17 @@ void _start(void) {
         cfg[16 + i * 2] = 16;
         cfg[48 + i] = 4;
     }
+    cfg2[0] = 1;
+    for (int i = 0; i < 4; i++) {
+        cfg2[16 + i * 2] = 8;
+        cfg2[48 + i] = 2;
+    }
     // tile 命令の .byte encoding が rsi/rdi/rbx を固定的に使うため、
     // これらは pinned input にせず "r" input から asm 内でロードし、
     // clobber として宣言する。pinned input を asm 内で壊すと、asm 後に
     // コンパイラがそのレジスタを再利用する経路でアドレスがずれる。
     asm volatile(
+        "mov %0, %%rax\n\t"
         "mov %1, %%rsi\n\t"
         "mov %2, %%rdi\n\t"
         "mov %3, %%rbx\n\t"
@@ -84,10 +100,28 @@ void _start(void) {
         ".byte 0xC4,0xE2,0x6B,0x5C,0xC1\n\t"      // tdpfp16ps %tmm2,%tmm1,%tmm0
         "add $64, %%rbx\n\t"
         ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        // complex FP16 round。cfg2 を読み直し、colsb=8/rows=2 で
+        // tcmmrlfp16ps(real→tmm0)/tcmmimfp16ps(imag→tmm3) を通す。
+        "mov %7, %%rax\n\t"
+        ".byte 0xC4,0xE2,0x78,0x49,0x00\n\t"       // ldtilecfg (%rax)
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"       // tilezero tmm0
+        ".byte 0xC4,0xE2,0x7B,0x49,0xD8\n\t"       // tilezero tmm3
+        "mov %8, %%rsi\n\t"
+        "mov $8, %%rdi\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x4B,0x0C,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm1
+        "mov %9, %%rsi\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x4B,0x14,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm2
+        ".byte 0xC4,0xE2,0x68,0x6C,0xC1\n\t"      // tcmmrlfp16ps %tmm2,%tmm1,%tmm0
+        ".byte 0xC4,0xE2,0x69,0x6C,0xD9\n\t"      // tcmmimfp16ps %tmm2,%tmm1,%tmm3
+        "add $64, %%rbx\n\t"
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        "add $16, %%rbx\n\t"
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x1C,0x3B\n\t" // tilestored %tmm3,(%rbx,%rdi)
         :
-        : "a"(cfg), "r"(a), "r"((u64)16), "r"(dst), "r"(b), "r"(a16), "r"(b16)
-        : "memory", "rsi", "rdi", "rbx");
-    (void)sys3(1, 1, (long)dst, 128);
+        : "r"(cfg), "r"(a), "r"((u64)16), "r"(dst), "r"(b), "r"(a16), "r"(b16),
+          "r"(cfg2), "r"(ac), "r"(bc)
+        : "memory", "rsi", "rdi", "rbx", "rax");
+    (void)sys3(1, 1, (long)dst, 160);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }
@@ -135,7 +169,7 @@ fn poly_run(bytes: &[u8], path: &str) -> (Vec<u8>, Option<u64>) {
         polyisa_guest_x86::FEATURE_DEFS,
         polyisa_guest_x86::FEAT_BITS,
         "x86_64_v4",
-        &["amx_tile", "amx_bf16", "amx_fp16"],
+        &["amx_tile", "amx_bf16", "amx_fp16", "amx_complex"],
         &[],
     )
     .unwrap();
@@ -171,10 +205,10 @@ fn diff_sde_amx_bf16_numeric() {
     assert!(out.status.success(), "sde status {:?}", out.status);
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(poly.len(), 128, "poly stdout len");
-    assert_eq!(out.stdout.len(), 128, "sde stdout len");
+    assert_eq!(poly.len(), 160, "poly stdout len");
+    assert_eq!(out.stdout.len(), 160, "sde stdout len");
     if poly != out.stdout {
-        for i in 0..32 {
+        for i in 0..40 {
             let p = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let s = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if p != s {
