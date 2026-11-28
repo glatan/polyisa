@@ -13620,27 +13620,45 @@ pub fn fbstp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     let top = b.get(sem::top_ref());
     let (sig, exp, fault) = sem::read_st_source(b, top);
     let commit = sem::x87_commit_after_fault(b, fault);
-    let v = sem::f80_to_i64(b, sig, exp);
-    let indef = b.konst::<W64>(1u64 << 63);
-    let raw_indef = b.cmp::<W64>(Cmp::Eq, v, indef);
+    // fist と同じく occ 形で例外発生を拾う。inexact は PE、
+    // NaN/Inf/int64 範囲外と 18 桁に収まらない値は IE。
+    let (v, inexact, bad64) = sem::f80_to_i64_occ(b, sig, exp);
+    let lim = b.konst::<W64>(1_000_000_000_000_000_000);
+    let nlim = b.konst::<W64>(1_000_000_000_000_000_000u64.wrapping_neg());
+    let pos_big = b.cmp::<W64>(Cmp::GeS, v, lim);
+    let neg_big = b.cmp::<W64>(Cmp::LeS, v, nlim);
+    let width_bad = sem::bit_or(b, pos_big, neg_big);
+    let invalid = sem::bit_or(b, bad64, width_bad);
+    sem::x87_exception_flag(b, invalid, 1);
+    sem::x87_exception_flag(b, inexact, 1 << 5);
+    // denormal 入力の DE。fist と同じ判定。
+    let z64 = b.konst::<W64>(0);
     let exp64 = b.zext::<W16, W64>(exp);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(exp64, mask15);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, z64);
+    let sig_nz = b.cmp::<W64>(Cmp::Ne, sig, z64);
+    let denormal = sem::bit_and(b, exp_zero, sig_nz);
+    sem::x87_exception_flag(b, denormal, 1 << 1);
+    let is_indef = sem::bit_or(b, invalid, fault);
     let s15 = b.konst::<W64>(15);
     let sgn = b.shr_l::<W64>(exp64, s15);
     let one = b.konst::<W64>(1);
     let neg = b.cmp::<W64>(Cmp::Eq, sgn, one);
-    let zero = b.konst::<W64>(0);
+    let zero = z64;
     let negv = b.sub::<W64>(zero, v);
     let mag = b.select::<W64>(neg, negv, v);
-    // 18 桁（< 10^18）に収まる範囲だけを書く。
-    let lim = b.konst::<W64>(1_000_000_000_000_000_000);
-    let big = b.cmp::<W64>(Cmp::GeU, mag, lim);
-    let is_indef0 = sem::bit_or(b, raw_indef, big);
-    let is_indef = sem::bit_or(b, is_indef0, fault);
     let ten = b.konst::<W64>(10);
     let s4 = b.konst::<W64>(4);
     let ff8 = b.konst::<W8>(0xFF);
     let mut m = mag;
-    b.if_then(commit, |b| {
+    // unmasked invalid では store/pop を抑止する。masked なら
+    // indefinite を書いて pop する（fist と同じ規則）。
+    let ie_masked = sem::x87_ie_masked(b);
+    let no_invalid = sem::bit_not(b, invalid);
+    let write_ok = sem::bit_or(b, no_invalid, ie_masked);
+    let do_write = sem::bit_and(b, commit, write_ok);
+    b.if_then(do_write, |b| {
         for i in 0..9u64 {
             let addr = decode::wseg_byte_addr(b, a, woff, i);
             let d0 = b.urem::<W64>(m, ten);

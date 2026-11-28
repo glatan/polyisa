@@ -13075,6 +13075,118 @@ fn run_x87_fbstp_empty_source_masked_and_unmasked() {
 }
 
 #[test]
+fn run_x87_fbstp_fractional_sets_pe() {
+    // 42.5 は整数部へ丸めると inexact。PE が立つ。
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2100);
+    // 42.5 = 1.010101b * 2^5。exp=0x4004, sig=0xA800000000000000。
+    let mut v42_5 = [0u8; 10];
+    v42_5[..8].copy_from_slice(&0xAA00000000000000u64.to_le_bytes());
+    v42_5[8..].copy_from_slice(&0x4004u16.to_le_bytes());
+    env.backend.mem.write(VirtAddr(0x2000), &v42_5).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xDB, 0x2B, // fld tbyte [rbx]  (rbx=0x2100 ではないので修正)
+            ],
+        )
+        .unwrap();
+    // rbx を値のある 0x2000 へ向け直す
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xDB, 0x2B, // fld tbyte [rbx]
+                0xDF, 0x35, 0xF8, 0x10, 0x00, 0x00, // fbstp tbyte [0x2100] (rip 相対)
+            ],
+        )
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
+    let fsw: u16 = env.backend.get(polyisa_guest_x86::sem::fsw_ref());
+    assert_ne!(fsw & 0x20, 0, "fractional 入力で PE が立つ");
+    assert_eq!(fsw & 1, 0, "42.5 は IE にならない");
+    // BCD 出力は 42。
+    let mut buf = [0u8; 10];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(buf[0], 0x42, "nearest-even で 42");
+    assert!(buf[1..9].iter().all(|b| *b == 0));
+}
+
+#[test]
+fn run_x87_fbstp_out_of_range_masked_and_unmasked() {
+    // 2^63 は int64 の範囲外で IE。masked では indefinite+pop、
+    // unmasked では store/pop 抑止。
+    fn once(fcw: u16) -> (u16, u16, [u8; 10]) {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        // 2^63: exp=0x403E, sig=0x8000000000000000。
+        let mut v = [0u8; 10];
+        v[..8].copy_from_slice(&0x8000000000000000u64.to_le_bytes());
+        v[8..].copy_from_slice(&0x403Eu16.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x2000), &v).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend
+            .mem
+            .write(
+                VirtAddr(0x1000),
+                &[
+                    0xDB, 0x2B, // fld tbyte [rbx]
+                    0xDF, 0x35, 0xF8, 0x10, 0x00, 0x00, // fbstp tbyte [0x2100] (rip 相対)
+                ],
+            )
+            .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), fcw);
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
+        let mut buf = [0u8; 10];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        (
+            env.backend.get(polyisa_guest_x86::sem::fsw_ref()),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+            buf,
+        )
+    }
+    // masked (IM=1): indefinite を書き pop する。
+    // fld で top は 0→7 へ進み、pop で 7→0 へ戻る。
+    let (fsw, top, mem) = once(0x037F);
+    assert_ne!(fsw & 1, 0, "IE が立つ");
+    assert_eq!(fsw & 0x8080, 0, "masked では ES/B が立たない");
+    assert_eq!(top, 0, "fld の push を pop が相殺する");
+    assert_eq!(
+        mem,
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xFF, 0xFF],
+        "BCD indefinite"
+    );
+    // unmasked (IM=0): store/pop を抑止し ES/B が立つ。
+    let (fsw, top, mem) = once(0x037E);
+    assert_ne!(fsw & 1, 0, "IE が立つ");
+    assert_ne!(fsw & 0x80, 0, "unmasked で ES が立つ");
+    assert_eq!(top, 7, "fld の push だけが残り pop しない");
+    assert_eq!(mem, [0; 10], "store しない");
+}
+
+#[test]
 fn run_x87_fistp_empty_source_masked_and_unmasked() {
     fn once(fcw: u16) -> (u16, u16, u32) {
         let mut env = bare_x86_env();
