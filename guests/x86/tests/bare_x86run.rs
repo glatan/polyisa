@@ -28369,20 +28369,25 @@ fn run64_amx() {
         cfg[48 + i] = 2;
     }
     env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
-    // A(src1) at 0x2100: 2 行×8B = [[1..=8],[9..=16]]。ストライド 8。
-    // B(src2) at 0x2110: 2 行×8B = 4x2 単位的な配置。
-    let a: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-    let bmat: [u8; 16] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-    env.backend.mem.write(VirtAddr(0x2100), &a).unwrap();
-    env.backend.mem.write(VirtAddr(0x2110), &bmat).unwrap();
+    // A(src1): 2 行×8B = [[1..=8],[9..=16]]。ストライド 16 を使い、
+    // row1 は連続領域ではなく 0x2110 に置く。
+    // B(src2) も row0=0x2120、row1=0x2130 のストライド配置にする。
+    let a0: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let a1: [u8; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
+    let b0: [u8; 8] = [1, 0, 0, 0, 0, 1, 0, 0];
+    let b1: [u8; 8] = [0, 0, 1, 0, 0, 0, 0, 1];
+    env.backend.mem.write(VirtAddr(0x2100), &a0).unwrap();
+    env.backend.mem.write(VirtAddr(0x2110), &a1).unwrap();
+    env.backend.mem.write(VirtAddr(0x2120), &b0).unwrap();
+    env.backend.mem.write(VirtAddr(0x2130), &b1).unwrap();
     let prog: &[u8] = &[
         0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
         0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
         0x48, 0xBE, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2100
-        0x48, 0xBF, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, // movabs rdi,8（stride）
+        0x48, 0xBF, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // movabs rdi,16（stride）
         0xC4, 0xE2, 0x7B, 0x4A, 0x0C, 0x3E, // tileloaddrs (%rsi,%rdi),tmm1
-        0x48, 0xBE, 0x10, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2110
+        0x48, 0xBE, 0x20, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2120
         0xC4, 0xE2, 0x79, 0x4A, 0x14, 0x3E, // tileloaddrst1 (%rsi,%rdi),tmm2
         0xC4, 0xE2, 0x6B, 0x5E, 0xC1, // tdpbssd %tmm2,%tmm1,%tmm0
         0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
@@ -28421,7 +28426,7 @@ fn run64_amx() {
         u64::from_le_bytes(b)
     };
     assert_eq!(q(0), 0x0000_000A_0000_0008, "tdpbssd row0 got {:x}", q(0));
-    assert_eq!(q(8), 0x0000_001A_0000_0018, "tdpbssd row1");
+    assert_eq!(q(0x10), 0x0000_001A_0000_0018, "tdpbssd row1");
     // STTILECFG は設定をそのまま書き戻す。
     let mut back = [0u8; 64];
     env.backend
