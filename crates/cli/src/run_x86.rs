@@ -7186,6 +7186,26 @@ fn avx10_exec(
         r.bits() as u8
     };
     let mut out = [0u8; 64];
+    // この dispatcher で発生した MXCSR status bit。各 conversion が
+    // softfloat/入力形状から集め、命令終了時に sticky flag へ OR する。
+    let mut mx_status = 0u32;
+    // FP16/FP32 -> integer byte conversion の例外。NaN/Inf または
+    // 丸め後の整数が符号付き/符号なし byte に入らなければ invalid、
+    // 有限値の小数部を捨てたときは precision とする。
+    let int_byte_status = |v: f64, rounded: f64, unsigned: bool| -> u32 {
+        let out_of_range = if unsigned {
+            rounded < 0.0 || rounded > 255.0
+        } else {
+            rounded < -128.0 || rounded > 127.0
+        };
+        if rounded.is_nan() || rounded.is_infinite() || out_of_range {
+            1
+        } else if rounded != v {
+            1 << 5
+        } else {
+            0
+        }
+    };
     let lanes16 = vbytes / 2;
     let insn = md.insn;
     let merge16 = |out: &mut [u8; 64], old: &[u8; 64], d: &polyisa_guest_x86::MapDec| {
@@ -7247,6 +7267,10 @@ fn avx10_exec(
                         _ => v.round_ties_even(),
                     }
                 };
+                if h & 0x7c00 == 0 && h & 0x3ff != 0 && vcvt2_mxcsr & 0x40 == 0 {
+                    mx_status |= 1 << 1;
+                }
+                mx_status |= int_byte_status(v, rounded, unsigned);
                 let byte = if rounded.is_nan() {
                     0
                 } else if unsigned {
@@ -7537,6 +7561,7 @@ fn avx10_exec(
                         _ => v.round_ties_even(),
                     }
                 };
+                mx_status |= int_byte_status(v, rounded, unsigned);
                 let byte = if rounded.is_nan() {
                     0
                 } else if unsigned {
@@ -8626,16 +8651,24 @@ fn avx10_exec(
         Insn::Vcvt2ps2phxXvHvWv => {
             let half = vbytes / 4;
             for i in 0..lanes16 {
+                if k >> i & 1 == 0 {
+                    continue;
+                }
                 let bits = if i < half {
                     rd32(&y, i)
                 } else {
                     rd32(&x, i - half)
                 };
+                let input_denormal = (bits & 0x7f80_0000) == 0 && bits & 0x007f_ffff != 0;
+                if input_denormal && vcvt2_mxcsr & 0x40 == 0 {
+                    mx_status |= 1 << 1;
+                }
                 let mut f = F32::from_bits(u64::from(bits));
-                if (bits & 0x7f80_0000) == 0 && bits & 0x007f_ffff != 0 && vcvt2_mxcsr & 0x40 != 0 {
+                if input_denormal && vcvt2_mxcsr & 0x40 != 0 {
                     f = F32::from_bits(u64::from(bits & 0x8000_0000));
                 }
-                let (h, _) = f.to_f16(Rm::Rne);
+                let (h, fl) = f.to_f16(Rm::Rne);
+                mx_status |= ace_mxcsr_status(fl);
                 out[i * 2..i * 2 + 2].copy_from_slice(&(h.bits() as u16).to_le_bytes());
             }
             merge16(&mut out, &old, md);
@@ -8939,10 +8972,30 @@ fn avx10_exec(
                     accb &= 0x8000_0000;
                 }
                 let acc = F32::from_bits(u64::from(accb));
-                let s1o = f16f(rd16(&x, 2 * i + 1));
-                let s2o = f16f(rd16(&y, 2 * i + 1));
-                let s1e = f16f(rd16(&x, 2 * i));
-                let s2e = f16f(rd16(&y, 2 * i));
+                let h1o = rd16(&x, 2 * i + 1);
+                let h2o = rd16(&y, 2 * i + 1);
+                let h1e = rd16(&x, 2 * i);
+                let h2e = rd16(&y, 2 * i);
+                let nan32 = |h: u16| -> Option<u32> {
+                    if h & 0x7c00 != 0x7c00 || h & 0x3ff == 0 {
+                        return None;
+                    }
+                    // FP16 NaN の payload は FP32 へそのまま拡張する
+                    // （fraction は 13 bit 左へ移る）。fmadd の
+                    // canonical NaN より入力 NaN の伝播を優先する。
+                    Some((u32::from(h & 0x8000) << 16) | 0x7f80_0000 | (u32::from(h & 0x3ff) << 13))
+                };
+                // 偶数側の積から見る実機の NaN 伝播に合わせ、
+                // src1 even/src2 even/src1 odd/src2 odd の順で最初の
+                // NaN payload を返す。
+                if let Some(n) = [h1e, h2e, h1o, h2o].iter().find_map(|&h| nan32(h)) {
+                    out[i * 4..i * 4 + 4].copy_from_slice(&n.to_le_bytes());
+                    continue;
+                }
+                let s1o = f16f(h1o);
+                let s2o = f16f(h2o);
+                let s1e = f16f(h1e);
+                let s2e = f16f(h2e);
                 let (mid, f1) = s1o.fmadd_rm(s2o, acc, Rm::Rne);
                 let (res, f2) = s1e.fmadd_rm(s2e, mid, Rm::Rne);
                 flags |= f1 | f2;
@@ -9105,6 +9158,10 @@ fn avx10_exec(
         }
     }
     zput(env, dst_r, &out);
+    if mx_status != 0 {
+        let mxcsr: u32 = env.backend.get(sem::mxcsr_ref());
+        env.backend.set(sem::mxcsr_ref(), mxcsr | mx_status);
+    }
     env.backend.fp_flags |= flags;
     Ok(())
 }
