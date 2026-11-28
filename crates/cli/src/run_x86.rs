@@ -20558,6 +20558,10 @@ fn run_image_x86_32_impl(
     env.backend
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    // EFLAGS: bit1 は常時 1、ユーザーモードでは IF(ring3 では
+    // クリア不能)も 1 で始まる。popf と演算 flag 更新はどちらも
+    // この 2 ビットを保全するので初期値だけ足せばよい。
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x202);
     for i in 0..16usize {
         env.backend.set(
             polyisa_guest_x86::sem::scaledata_qref(i),
@@ -20844,6 +20848,10 @@ fn run_image_x86_64_impl(
     env.backend
         .set(polyisa_guest_x86::sem::ftw_ref(), 0xffffu16);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    // EFLAGS: bit1 は常時 1、ユーザーモードでは IF(ring3 では
+    // クリア不能)も 1 で始まる。popf と演算 flag 更新はどちらも
+    // この 2 ビットを保全するので初期値だけ足せばよい。
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x202);
     for i in 0..16usize {
         env.backend.set(
             polyisa_guest_x86::sem::scaledata_qref(i),

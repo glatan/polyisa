@@ -132,12 +132,45 @@ void _start(void) {
         "movups %%xmm2, 384(%0)\n\t"
         "pextrw $7, %%xmm0, %%eax\n\t"
         "movl %%eax, 400(%0)\n\t"
+
+        // --- cmp 系。packed は述語マスク、scalar は同様、
+        // comiss/ucomiss は EFLAGS を退避して出す ---
+        "movups %%xmm0, %%xmm2\n\t"
+        "cmpps $0, %%xmm1, %%xmm2\n\t"   // EQ
+        "movups %%xmm2, 416(%0)\n\t"
+        "movups %%xmm0, %%xmm2\n\t"
+        "cmpps $1, %%xmm1, %%xmm2\n\t"   // LT
+        "movups %%xmm2, 432(%0)\n\t"
+        "movups %%xmm0, %%xmm2\n\t"
+        "cmpps $7, %%xmm1, %%xmm2\n\t"   // ORD
+        "movups %%xmm2, 448(%0)\n\t"
+        "movupd %%xmm4, %%xmm3\n\t"
+        "cmppd $4, %%xmm5, %%xmm3\n\t"   // NEQ
+        "movups %%xmm3, 464(%0)\n\t"
+        "movups %%xmm0, %%xmm2\n\t"
+        "cmpss $2, %%xmm1, %%xmm2\n\t"   // LE
+        "movups %%xmm2, 480(%0)\n\t"
+        "movupd %%xmm4, %%xmm3\n\t"
+        "cmpsd $3, %%xmm5, %%xmm3\n\t"   // NLE
+        "movups %%xmm3, 496(%0)\n\t"
+        "comiss %%xmm1, %%xmm0\n\t"      // 1.5 vs NaN → unordered
+        "pushfq\n\t"
+        "pop %%rax\n\t"
+        "movl %%eax, 512(%0)\n\t"
+        "ucomiss %%xmm0, %%xmm0\n\t"     // 1.5 vs 1.5 → equal
+        "pushfq\n\t"
+        "pop %%rax\n\t"
+        "movl %%eax, 516(%0)\n\t"
+        "comiss %%xmm6, %%xmm0\n\t"      // 1.5 vs 1.5(fi) → equal
+        "pushfq\n\t"
+        "pop %%rax\n\t"
+        "movl %%eax, 520(%0)\n\t"
         :
         : "r"(out), "r"(fa), "r"(fb), "r"(da), "r"(db), "r"(fi)
         : "eax", "ebx", "edx", "memory",
           "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7",
           "xmm8","xmm9","xmm10","xmm11","xmm12");
-    (void)sys3(1, 1, (long)out, 416);
+    (void)sys3(1, 1, (long)out, 524);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }
@@ -219,11 +252,11 @@ fn diff_sde_sse() {
     assert!(out.status.success(), "sde status {:?}", out.status);
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(out.stdout.len(), 416, "sde stdout len");
-    assert_eq!(poly.len(), 416, "poly stdout len");
+    assert_eq!(out.stdout.len(), 524, "sde stdout len");
+    assert_eq!(poly.len(), 524, "poly stdout len");
     if poly != out.stdout {
         let mut bad = Vec::new();
-        for i in 0..104 {
+        for i in 0..131 {
             let a = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let b = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if a != b {
