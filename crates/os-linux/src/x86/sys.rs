@@ -78,7 +78,7 @@ pub struct Linux {
     stdin_pos: usize,
     /// シグナルハンドラの表（添字はシグナル番号-1）。空は全て
     /// SIG_DFL。i386 では配送はしないが設定の保持は共通。
-    sigacts: Vec<crate::x86::SigAct>,
+    sigacts: std::rc::Rc<std::cell::RefCell<Vec<crate::x86::SigAct>>>,
     /// ブロック中のシグナルのビット集合。
     sig_mask: u64,
     /// `rt_sigsuspend` が一時 mask に入る前の本来の mask。
@@ -1032,7 +1032,7 @@ impl Linux {
             stdin_buf: self.stdin_buf.clone(),
             stdin_pos: self.stdin_pos,
             // fork: ハンドラ表とマスクは継承、保留は引き継がない。
-            sigacts: self.sigacts.clone(),
+            sigacts: std::rc::Rc::new(std::cell::RefCell::new(self.sigacts.borrow().clone())),
             sig_mask: self.sig_mask,
             sigsuspend_mask: None,
             pwait_orig_mask: None,
@@ -1114,6 +1114,7 @@ impl Linux {
         let bit = 1u64 << (sig - 1);
         let act = self
             .sigacts
+            .borrow()
             .get(sig as usize - 1)
             .copied()
             .unwrap_or_default();
@@ -1129,7 +1130,7 @@ impl Linux {
                 0
             };
         if act.flags & crate::x86::SA_RESETHAND != 0 {
-            self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
+            self.sigacts.borrow_mut()[sig as usize - 1] = crate::x86::SigAct::default();
         }
         let ok = if self.x32 {
             crate::x86::rt_sigframe_x32_write_ex(
@@ -1173,7 +1174,7 @@ impl Linux {
             return TrapOutcome::Handled;
         }
         self.sig_mask = old;
-        self.sigacts[sig as usize - 1] = act;
+        self.sigacts.borrow_mut()[sig as usize - 1] = act;
         self.terminate_by_signal(11)
     }
 
@@ -1195,6 +1196,7 @@ impl Linux {
         self.sig_pending &= !bit;
         let act = self
             .sigacts
+            .borrow()
             .get(sig as usize - 1)
             .copied()
             .unwrap_or_default();
@@ -1237,7 +1239,7 @@ impl Linux {
                 0
             };
         if act.flags & crate::x86::SA_RESETHAND != 0 {
-            self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
+            self.sigacts.borrow_mut()[sig as usize - 1] = crate::x86::SigAct::default();
         }
         let pid = self.pid;
         let ok = if self.x32 {
@@ -1272,7 +1274,7 @@ impl Linux {
                 self.sigsuspend_mask = Some(frame_old);
             }
             self.sig_pending |= bit;
-            self.sigacts[sig as usize - 1] = act;
+            self.sigacts.borrow_mut()[sig as usize - 1] = act;
         }
     }
 
@@ -1537,6 +1539,7 @@ impl Linux {
         let sig = deliver.trailing_zeros() + 1;
         let act = self
             .sigacts
+            .borrow()
             .get(sig as usize - 1)
             .copied()
             .unwrap_or_default();
@@ -3435,6 +3438,7 @@ fn signal_is_pending_target(linux: &Linux, sig: u64) -> bool {
     let bit = 1u64 << (sig - 1);
     let act = linux
         .sigacts
+        .borrow()
         .get(sig as usize - 1)
         .copied()
         .unwrap_or_default();
@@ -3448,6 +3452,7 @@ fn signal_is_pending_target(linux: &Linux, sig: u64) -> bool {
 fn signal_is_ignored(linux: &Linux, sig: u64) -> bool {
     linux
         .sigacts
+        .borrow()
         .get(sig as usize - 1)
         .is_some_and(|a| a.handler == 1)
 }
@@ -3483,6 +3488,7 @@ fn signal_stop_applies(linux: &Linux, sig: u64) -> bool {
     let bit = 1u64 << (sig - 1);
     let act = linux
         .sigacts
+        .borrow()
         .get(sig as usize - 1)
         .copied()
         .unwrap_or_default();
@@ -3499,7 +3505,11 @@ fn notify_parent_sigchld(sys: &mut Linux, child: polyisa_kernel::ProcessId, job_
     };
     if job_control {
         let flags = if parent.0 == sys.pid {
-            sys.sigacts.get(16).map(|act| act.flags).unwrap_or(0)
+            sys.sigacts
+                .borrow()
+                .get(16)
+                .map(|act| act.flags)
+                .unwrap_or(0)
         } else {
             sys.queue
                 .0
@@ -3507,7 +3517,7 @@ fn notify_parent_sigchld(sys: &mut Linux, child: polyisa_kernel::ProcessId, job_
                 .parked
                 .iter()
                 .find(|task| task.linux.pid == parent.0)
-                .and_then(|task| task.linux.sigacts.get(16).map(|act| act.flags))
+                .and_then(|task| task.linux.sigacts.borrow().get(16).map(|act| act.flags))
                 .unwrap_or(0)
         };
         if flags & crate::x86::SA_NOCLDSTOP != 0 {
@@ -3528,7 +3538,7 @@ fn autoreap_child_if_configured(sys: &mut Linux, child: polyisa_kernel::ProcessI
         return;
     };
     let act = if parent.0 == sys.pid {
-        sys.sigacts.get(16).copied()
+        sys.sigacts.borrow().get(16).copied()
     } else {
         sys.queue
             .0
@@ -3536,7 +3546,7 @@ fn autoreap_child_if_configured(sys: &mut Linux, child: polyisa_kernel::ProcessI
             .parked
             .iter()
             .find(|task| task.linux.pid == parent.0)
-            .and_then(|task| task.linux.sigacts.get(16).copied())
+            .and_then(|task| task.linux.sigacts.borrow().get(16).copied())
     };
     let autoreap =
         act.is_some_and(|act| act.handler == 1 || act.flags & crate::x86::SA_NOCLDWAIT != 0);
@@ -3663,6 +3673,7 @@ fn send_signal_to_parked(sys: &mut Linux, tid: u64, sig: u64) -> ParkedSignal {
             let caught_unmasked = task
                 .linux
                 .sigacts
+                .borrow()
                 .get(sig as usize - 1)
                 .is_some_and(|a| a.handler > 1)
                 && task.linux.sig_mask & bit == 0;
@@ -4733,13 +4744,15 @@ fn sys_rt_sigaction(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
         }
         Some(a)
     };
-    if sys.sigacts.len() < 64 {
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
+    if sys.sigacts.borrow().len() < 64 {
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
     }
     let i = sig as usize - 1;
-    let old = sys.sigacts[i];
+    let old = sys.sigacts.borrow_mut()[i];
     if let Some(a) = act {
-        sys.sigacts[i] = a;
+        sys.sigacts.borrow_mut()[i] = a;
     }
     if old_p != 0 && !crate::x86::sigact_write(env, old_p, &old, sys.is64 && !sys.x32) {
         set64(env, Gpr(0), cx.neg(EFAULT));
@@ -5648,6 +5661,10 @@ fn spawn_thread(
     sys.mm_group = Some(group);
     child_linux.mm_group = Some(group);
     child_linux.tgid = if sys.tgid != 0 { sys.tgid } else { parent.0 };
+    // CLONE_THREAD には CLONE_SIGHAND が要る（カーネルは組合せを
+    // 強制する）ので、スレッドは常にハンドラ表を共有する。
+    // Ref: SRC-LINUX (7.3)。
+    child_linux.sigacts = std::rc::Rc::clone(&sys.sigacts);
     sys.queue
         .0
         .borrow_mut()
@@ -6009,7 +6026,7 @@ fn install_exec(
     env.backend.set(polyisa_guest_x86::sem::fs_base_ref(), 0);
     // execve は捕捉済みハンドラを SIG_DFL に戻す。SIG_IGN と
     // マスク・保留は維持される。
-    for a in &mut sys.sigacts {
+    for a in sys.sigacts.borrow_mut().iter_mut() {
         if a.handler > 1 {
             *a = crate::x86::SigAct::default();
         }
@@ -7438,8 +7455,10 @@ mod tests {
             polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
             0x1122_3344,
         );
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[10] = crate::x86::SigAct {
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[10] = crate::x86::SigAct {
             handler: 0x9000,
             flags: crate::x86::SA_RESTORER,
             restorer: 0x9100,
@@ -7543,8 +7562,10 @@ mod tests {
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOMEM));
 
         // SA_ONSTACK の配送は通常スタックではなく代替スタック上へ置く。
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9] = crate::x86::SigAct {
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9] = crate::x86::SigAct {
             handler: 0x9000,
             flags: crate::x86::SA_RESTORER | crate::x86::SA_ONSTACK,
             restorer: 0x9100,
@@ -7607,8 +7628,10 @@ mod tests {
             polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
             0x1122_3344,
         );
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[10] = crate::x86::SigAct {
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[10] = crate::x86::SigAct {
             handler: 0x9000,
             flags: crate::x86::SA_RESTORER,
             restorer: 0x9100,
@@ -8096,14 +8119,19 @@ mod tests {
         // 他スレッドが受けていればそちらへ届く。
         const SIGUSR1: u64 = 10;
         let handler = 0x1100u64;
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[SIGUSR1 as usize - 1] = crate::x86::SigAct {
             handler,
             ..crate::x86::SigAct::default()
         };
         for task in &mut sys.queue.0.borrow_mut().parked {
-            task.linux.sigacts.resize(64, crate::x86::SigAct::default());
-            task.linux.sigacts[SIGUSR1 as usize - 1] = crate::x86::SigAct {
+            task.linux
+                .sigacts
+                .borrow_mut()
+                .resize(64, crate::x86::SigAct::default());
+            task.linux.sigacts.borrow_mut()[SIGUSR1 as usize - 1] = crate::x86::SigAct {
                 handler,
                 ..crate::x86::SigAct::default()
             };
@@ -8435,8 +8463,10 @@ mod tests {
             .set(polyisa_guest_x86::sem::cpuid_ref(1, 2), 1u32 << 26);
         // ハンドラは clone で子へ写るように先に張る。
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[SIGUSR1 as usize - 1].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[SIGUSR1 as usize - 1].handler = 0x1000;
         env.backend
             .mem
             .write(VirtAddr(0x2000), &1u32.to_le_bytes())
@@ -8773,6 +8803,92 @@ mod tests {
             child,
             "ctid は edi から読む"
         );
+    }
+
+    #[test]
+    fn thread_sigaction_is_visible_across_threads() {
+        // ハンドラ表はスレッドグループで共有される。片方のスレッドが
+        // 設定したハンドラが、もう片方の配送判定に効く。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 2, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // clone でスレッドを作る。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // rt_sigaction でハンドラ 0x2000 を親から設定する。parked な
+        // 子はメモリを持たない（移転モデル）ので syscall は親で行う。
+        // x86-64 では SA_RESTORER が必須。
+        env.backend
+            .mem
+            .write(VirtAddr(0x1800), &0x2000u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1808), &crate::x86::SA_RESTORER.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 10); // SIGUSR1
+        set64(&mut env, Gpr(6), 0x1800); // act
+        set64(&mut env, Gpr(2), 0); // oldact なし
+        set64(&mut env, Gpr(10), 8); // sigsetsize
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 子スレッド側の表にも反映されている。
+        let q = sys.queue.0.borrow();
+        let task = q.parked.first().expect("子スレッド");
+        let act = task
+            .linux
+            .sigacts
+            .borrow()
+            .get(9)
+            .copied()
+            .unwrap_or_default();
+        assert_eq!(act.handler, 0x2000, "親の設定が子から見える");
+    }
+
+    #[test]
+    fn fork_sigaction_is_not_shared() {
+        // fork 子はハンドラ表を複写するので、子の変更は親に見えない。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 2, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::FORK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut q = sys.queue.0.borrow_mut();
+        let mut task = q.parked.pop().expect("fork 子");
+        drop(q);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1800), &0x2000u64.to_le_bytes())
+            .unwrap();
+        task.env
+            .backend
+            .mem
+            .write(VirtAddr(0x1800), &0x2000u64.to_le_bytes())
+            .unwrap();
+        set64(&mut task.env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut task.env, Gpr(7), 10);
+        set64(&mut task.env, Gpr(6), 0x1800);
+        set64(&mut task.env, Gpr(2), 0);
+        set64(&mut task.env, Gpr(10), 8);
+        assert!(matches!(
+            task.linux.handle_trap(&mut task.env, 0),
+            TrapOutcome::Handled
+        ));
+        let act = sys.sigacts.borrow().get(9).copied().unwrap_or_default();
+        assert_eq!(act.handler, 0, "fork 子の変更は親に見えない");
     }
 
     #[test]
@@ -9577,9 +9693,11 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
-        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
+        sys.sigacts.borrow_mut()[9].flags = crate::x86::SA_RESTART;
         sys.sig_pending = 1 << 9;
         env.backend
             .mem
@@ -9672,8 +9790,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_pending = 1 << 9;
         env.backend
             .mem
@@ -9935,8 +10055,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_mask = 1 << 9;
         set64(&mut env, Gpr(4), 0x1800);
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
@@ -9991,8 +10113,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -10022,8 +10146,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -10053,8 +10179,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         let original = 1u64 << 9;
         sys.sig_mask = original;
         set64(&mut env, Gpr(4), 0x1800);
@@ -11073,8 +11201,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000; // SIGUSR1
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000; // SIGUSR1
         set64(&mut env, Gpr(4), 0x1800);
         env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037f);
         env.backend
@@ -11115,8 +11245,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::PIPE);
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11183,8 +11315,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_mask = 1 << 9;
         sys.sig_pending = 1 << 9;
         env.backend
@@ -11207,8 +11341,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_pending = 1 << 9;
         env.backend
             .mem
@@ -11226,8 +11362,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_mask = 1 << 9;
         sys.sig_pending = 1 << 9;
         env.backend
@@ -11271,8 +11409,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::EPOLL_CREATE1);
         set64(&mut env, Gpr(7), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11350,9 +11490,11 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
-        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
+        sys.sigacts.borrow_mut()[9].flags = crate::x86::SA_RESTART;
         set64(&mut env, Gpr(0), abi::PIPE);
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11399,8 +11541,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -11497,8 +11641,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::PIPE);
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11574,8 +11720,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[12].handler = 1;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[12].handler = 1;
         close_pipe_reader_and_write(&mut sys, &mut env);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPIPE));
@@ -11587,7 +11735,9 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
         sys.sig_mask = 1 << 12;
         close_pipe_reader_and_write(&mut sys, &mut env);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11601,9 +11751,11 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
-        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
+        sys.sigacts.borrow_mut()[9].flags = crate::x86::SA_RESTART;
         set64(&mut env, Gpr(0), abi::PIPE);
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
@@ -11643,8 +11795,10 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         sys.sig_pending = 1 << 9;
         env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
         set64(&mut env, Gpr(0), abi::WAIT4);
@@ -11665,9 +11819,11 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare_signal_env();
         sys.ensure_self();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
-        sys.sigacts[9].flags = crate::x86::SA_RESTART;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
+        sys.sigacts.borrow_mut()[9].flags = crate::x86::SA_RESTART;
         sys.sig_pending = 1 << 9;
         env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x300);
         set64(&mut env, Gpr(0), abi::WAIT4);
@@ -11764,8 +11920,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 1;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 1;
         sys.sig_mask = 1 << 9;
         let pid = sys.ensure_self().0;
         set64(&mut env, Gpr(0), abi::KILL);
@@ -11781,8 +11939,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -11808,8 +11968,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[9].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[9].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -12042,8 +12204,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[16].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[16].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -12056,7 +12220,7 @@ mod tests {
         assert_ne!(sys.sig_pending & (1 << 16), 0);
 
         sys.sig_pending = 0;
-        sys.sigacts[16].flags = crate::x86::SA_NOCLDSTOP;
+        sys.sigacts.borrow_mut()[16].flags = crate::x86::SA_NOCLDSTOP;
         set64(&mut env, Gpr(0), abi::KILL);
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 18);
@@ -12069,8 +12233,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[16].handler = 0x1000;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[16].handler = 0x1000;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
@@ -12085,8 +12251,10 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
-        sys.sigacts.resize(64, crate::x86::SigAct::default());
-        sys.sigacts[16].flags = crate::x86::SA_NOCLDWAIT;
+        sys.sigacts
+            .borrow_mut()
+            .resize(64, crate::x86::SigAct::default());
+        sys.sigacts.borrow_mut()[16].flags = crate::x86::SA_NOCLDWAIT;
         set64(&mut env, Gpr(0), abi::CLONE);
         set64(&mut env, Gpr(7), 17);
         set64(&mut env, Gpr(6), 0);
