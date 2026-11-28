@@ -32768,3 +32768,55 @@ fn run64_vex_xcr0_gating() {
         }
     }
 }
+
+#[test]
+fn run64_evex_xcr0_gating() {
+    // EVEX のベクトル命令は XCR0[2:1]=11（SSE+AVX）と XCR0[7:5]=111
+    // （opmask/zmm_hi256/hi16_zmm）の両方が許可されているときだけ実行
+    // でき、どちらか欠ければ #UD。0xe7 = x87|SSE|AVX|opmask|zmm|hi16。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v4");
+    let vmovdqu32 = &[0x62, 0xF1, 0x7E, 0x08, 0x6F, 0xC0][..]; // xmm0,xmm0
+    let vmovdqu64z = &[0x62, 0xF1, 0xFE, 0x48, 0x6F, 0xC0][..]; // zmm0,zmm0
+    for (prog, xcr0, expect_ud, name) in [
+        (vmovdqu32, 0xe7u64, false, "vmovdqu32 xcr0=0xe7"),
+        (vmovdqu32, 0x7u64, true, "vmovdqu32 xcr0=7（opmask 系なし）"),
+        (vmovdqu32, 0xe1u64, true, "vmovdqu32 xcr0=0xe1（AVX なし）"),
+        (
+            vmovdqu32,
+            0x61u64,
+            true,
+            "vmovdqu32 xcr0=0x61（SSE+AVX なし）",
+        ),
+        (vmovdqu64z, 0xe7u64, false, "vmovdqu64 zmm xcr0=0xe7"),
+        (
+            vmovdqu64z,
+            0x27u64,
+            true,
+            "vmovdqu64 zmm xcr0=0x27（zmm_hi256 なし）",
+        ),
+    ] {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), xcr0);
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            1,
+            true,
+            feats,
+            &polyisa_guest_x86::DEFAULT_PARAMS,
+        );
+        if expect_ud {
+            assert!(
+                matches!(out, Outcome::Unimplemented { .. }),
+                "{name}: {out:?}"
+            );
+        } else {
+            assert!(matches!(out, Outcome::StepLimit { .. }), "{name}: {out:?}");
+        }
+    }
+}
