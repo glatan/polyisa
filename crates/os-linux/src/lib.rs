@@ -151,6 +151,7 @@ use polyisa_mem::Endian;
 pub mod clone_flag {
     pub const VM: u64 = 0x100;
     pub const THREAD: u64 = 0x0001_0000;
+    pub const SETTLS: u64 = 0x0008_0000;
 }
 
 /// 正常終了の wait ステータス。終了コードは 8–15 ビットに置く。

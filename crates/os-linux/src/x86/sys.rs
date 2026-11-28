@@ -128,6 +128,12 @@ pub struct Linux {
     /// fd 待ちの単調時計起点。初使用で張る。時刻報告（`mono_start`）
     /// とは別系統で、最初の clock_gettime が来る前の待ちにも動く。
     wait_start: std::cell::OnceCell<std::time::Instant>,
+    /// スレッドグループのリーダ pid。0 は自分がリーダまたは単独プロセス。
+    /// getpid は 0 でなければこの値を返す。
+    tgid: u64,
+    /// CLONE_VM でアドレス空間を共有するグループの識別子。None は私有メモリ。
+    /// 実メモリは実行中スレッドの env にあり、park 時は queue のホルダーへ移る。
+    mm_group: Option<u64>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -149,6 +155,10 @@ struct ParkedTask {
 struct SchedQueue {
     meta: polyisa_kernel::GuestScheduler,
     parked: Vec<ParkedTask>,
+    /// CLONE_VM グループの実メモリ。グループのスレッドが実行中なら
+    /// その env にあり、実行中でなければここに置く。キーはグループ識別子
+    /// （グループを作ったリーダの pid）。
+    mms: std::collections::HashMap<u64, polyisa_mem::AddressSpace>,
 }
 
 #[derive(Clone)]
@@ -1033,6 +1043,10 @@ impl Linux {
                 self.wait_start.get_or_init(std::time::Instant::now);
                 self.wait_start.clone()
             },
+            // fork の子は新しいプロセスなので thread group には入らない。
+            // spawn_thread が上書きする。
+            tgid: 0,
+            mm_group: None,
         }
     }
 
@@ -1284,6 +1298,21 @@ impl Linux {
             };
             borrowed.parked.remove(idx)
         };
+        // CLONE_VM グループの実メモリの移転。実行を離れるスレッドの env から
+        // ホルダーへ出し、これから実行するスレッドの env へ入れる。
+        // 一度に一つのスレッドしか走らないので、物理的に一つのメモリが
+        // 実行中スレッドを追いかける形で共有意味論になる。
+        if let Some(g) = self.mm_group {
+            let mem = core::mem::take(&mut env.backend.mem);
+            if mem.page_count() != 0 {
+                queue.0.borrow_mut().mms.insert(g, mem);
+            }
+        }
+        if let Some(g) = other.linux.mm_group
+            && let Some(mem) = queue.0.borrow_mut().mms.remove(&g)
+        {
+            other.env.backend.mem = mem;
+        }
         std::mem::swap(self, &mut other.linux);
         std::mem::swap(env, &mut other.env);
         let exited = queue
@@ -2901,6 +2930,41 @@ fn sys_exit(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
 }
 
 fn sys_exit_group(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // スレッドグループの全スレッドを終える。parked なメンバーは
+    // scheduler で exited にし、もう走らないようにする。自分自身は
+    // sys_exit が処理する。メモリホルダーに残る共有メモリは、全員が
+    // 終わった後は参照されないので emulator ではそのまま残す。
+    if sys.pid != 0 {
+        let me = sys.ensure_self();
+        let leader = if sys.tgid != 0 { sys.tgid } else { me.0 };
+        let code = get64(env, cx.r_a) as u32;
+        let tids: Vec<u64> = {
+            let queue = sys.queue.0.borrow();
+            queue
+                .parked
+                .iter()
+                .filter(|task| {
+                    let l = if task.linux.tgid != 0 {
+                        task.linux.tgid
+                    } else {
+                        task.linux.pid
+                    };
+                    l == leader
+                })
+                .map(|task| task.linux.pid)
+                .collect()
+        };
+        for tid in tids {
+            sys.procs
+                .borrow_mut()
+                .exit(polyisa_kernel::ProcessId(tid), code);
+            sys.queue
+                .0
+                .borrow_mut()
+                .meta
+                .mark_exited(polyisa_kernel::ThreadId(tid));
+        }
+    }
     sys_exit(sys, env, cx)
 }
 
@@ -2955,9 +3019,10 @@ fn sys_gettid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
 }
 
 fn sys_getpid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // スレッドはリーダの pid を返す。tgid が 0 のときは自分がリーダ。
     let me = sys.ensure_self().0;
-    crate::x86::sys_getpid(me, env, cx)
+    let id = if sys.tgid != 0 { sys.tgid } else { me };
+    crate::x86::sys_getpid(id, env, cx)
 }
 
 fn sys_getppid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5172,10 +5237,85 @@ fn sys_vfork(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let flags = get64(env, cx.r_a);
     let stack = get64(env, cx.r_b);
-    if flags & (crate::clone_flag::VM | crate::clone_flag::THREAD) != 0 {
+    let have = flags & (crate::clone_flag::VM | crate::clone_flag::THREAD);
+    if have == 0 {
+        return spawn_child(sys, env, stack);
+    }
+    // CLONE_THREAD には CLONE_VM が要る。片方だけの指定は Linux と同じく EINVAL。
+    // Ref: SRC-LINUX (7.3).
+    if have != (crate::clone_flag::VM | crate::clone_flag::THREAD) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 引数の並びは x86-64 の clone(flags, stack, ptid, ctid, tls)。
+    // i386/x32 は並びが違うので今は受けない。
+    if !sys.is64 || sys.x32 {
         return Some(TrapOutcome::Unimplemented);
     }
-    spawn_child(sys, env, stack)
+    let tls = get64(env, cx.r_e);
+    let set_tls = flags & crate::clone_flag::SETTLS != 0;
+    spawn_thread(sys, env, stack, tls, set_tls)
+}
+
+/// CLONE_VM|CLONE_THREAD のスレッド生成。子は新しいスタックで syscall の
+/// 次の命令から戻り、アドレス空間は親と共有する。共有は、実メモリを
+/// 実行中スレッドの env にだけ置き、park 時に queue のホルダーへ移す
+/// 移転モデルで実現する。fs base は CLONE_SETTLS のとき tls 引数を使う。
+fn spawn_thread(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    stack: u64,
+    tls: u64,
+    set_tls: bool,
+) -> Option<TrapOutcome> {
+    let parent = sys.ensure_self();
+    let child_pid = sys.procs.borrow_mut().fork(parent);
+    let mut child_env = env.clone();
+    // メモリはコピーしない。複製された実体を空へ差し替え、共有グループの
+    // 実メモリは親（実行中）の env に残す。子が初めて走るときに親から
+    // ホルダー経由で移る。frame_limit だけは設定なので引き継ぐ。
+    let frame_limit = child_env.backend.mem.frame_limit;
+    child_env.backend.mem = polyisa_mem::AddressSpace::new();
+    child_env.backend.mem.frame_limit = frame_limit;
+    set64(&mut child_env, Gpr(0), 0);
+    if stack != 0 {
+        set64(&mut child_env, Gpr(4), stack);
+    }
+    if set_tls {
+        child_env
+            .backend
+            .set(polyisa_guest_x86::sem::fs_base_ref(), tls);
+    }
+    let eip = eip_of(&mut child_env);
+    child_env
+        .backend
+        .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
+    let mut child_linux = sys.duplicate();
+    child_linux.pid = child_pid.0;
+    child_linux.steps = 0;
+    child_linux.wait = None;
+    // スレッドグループ。リーダの pid をグループ識別子に使い、
+    // 親がまだグループを持たなければここで張る。実メモリは実行中の
+    // 親の env にあるので、ホルダーは空のままでよい。
+    let group = sys.mm_group.unwrap_or(parent.0);
+    sys.mm_group = Some(group);
+    child_linux.mm_group = Some(group);
+    child_linux.tgid = if sys.tgid != 0 { sys.tgid } else { parent.0 };
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .insert(polyisa_kernel::ThreadId(child_pid.0));
+    sys.queue.0.borrow_mut().meta.copy_steps(
+        polyisa_kernel::ThreadId(parent.0),
+        polyisa_kernel::ThreadId(child_pid.0),
+    );
+    sys.queue.0.borrow_mut().parked.push(ParkedTask {
+        env: child_env,
+        linux: child_linux,
+    });
+    set64(env, Gpr(0), child_pid.0);
+    Some(TrapOutcome::Handled)
 }
 
 fn spawn_child(sys: &mut Linux, env: &mut BareEnv, stack: u64) -> Option<TrapOutcome> {
@@ -7344,6 +7484,231 @@ mod tests {
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
         assert!(sys.task_pids().contains(&child));
+    }
+
+    #[test]
+    fn clone_vm_thread_shares_memory() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // 親が書いた値は、スレッドからそのまま見える（コピーではない）。
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x1122_3344u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD | crate::clone_flag::SETTLS,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        set64(&mut env, Gpr(8), 0xbeef_0000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1, "child tid {child}");
+        assert!(sys.task_pids().contains(&child));
+        let parent = sys.pid;
+        // 子へ切り替える。共有メモリがホルダー経由で子の env へ移る。
+        assert!(sys.swap_in(&mut env, child));
+        assert_eq!(sys.pid, child);
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 0x1122_3344, "共有メモリの初期値");
+        // 子の rsp は新しいスタック、fs base は TLS 引数、rax は 0。
+        assert_eq!(get64(&mut env, Gpr(4)), 0x9800);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::fs_base_ref()),
+            0xbeef_0000
+        );
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 子の書き込みは親から見える。
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0xaabb_ccddu32.to_le_bytes())
+            .unwrap();
+        assert!(sys.swap_in(&mut env, parent));
+        assert_eq!(sys.pid, parent);
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf),
+            0xaabb_ccdd,
+            "子の書き込みが親へ見える"
+        );
+    }
+
+    #[test]
+    fn clone_thread_getpid_returns_leader_pid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        assert!(sys.swap_in(&mut env, child));
+        // スレッドの getpid はリーダの pid、gettid は自分の tid。
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), parent, "getpid はリーダ");
+        set64(&mut env, Gpr(0), abi::GETTID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child, "gettid は自分");
+    }
+
+    #[test]
+    fn clone_vm_or_thread_alone_is_einval() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        for flags in [crate::clone_flag::VM, crate::clone_flag::THREAD] {
+            set64(&mut env, Gpr(0), abi::CLONE);
+            set64(&mut env, Gpr(7), flags);
+            set64(&mut env, Gpr(6), 0x9800);
+            assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+            assert_eq!(
+                get64(&mut env, Gpr(0)) as i64,
+                -22,
+                "EINVAL flags {flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_thread_memory_survives_unrelated_process() {
+        use crate::x86_64 as abi;
+        // グループのスレッドが両方 parked の間に無関係のプロセスが走っても、
+        // 共有メモリはホルダーに残り、次に走るスレッドへ正しく戻る。
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x5555u32.to_le_bytes())
+            .unwrap();
+        // スレッドを作り、さらに fork で無関係のプロセスを作る。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::FORK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let grandchild = get64(&mut env, Gpr(0));
+        assert_ne!(child, grandchild);
+        // 親 → fork 子（無関係）→ スレッド の順に切り替える。
+        assert!(sys.swap_in(&mut env, grandchild));
+        assert!(sys.swap_in(&mut env, child));
+        // スレッドの env には共有メモリが戻っている。
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2000), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(buf),
+            0x5555,
+            "無関係プロセスを挟んでも共有メモリは生きている"
+        );
+    }
+
+    #[test]
+    fn exit_group_kills_sibling_threads() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 親が exit_group すると、parked な子スレッドは scheduler 上死ぬ。
+        set64(&mut env, Gpr(0), abi::EXIT_GROUP);
+        set64(&mut env, Gpr(7), 3);
+        // 親は root プロセスなので Exit が返る。
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Exit(3)));
+        assert!(
+            sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_exited(polyisa_kernel::ThreadId(child)),
+            "子スレッドは exit_group で終わる"
+        );
+        // 親自体の scheduler 上の退出処理は、TrapOutcome::Exit を受けた
+        // 実行ループ側（take_exit）が行う。ここでは子だけを検査する。
+        let _ = parent;
+    }
+
+    #[test]
+    fn exit_of_single_thread_leaves_leader() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        assert!(sys.swap_in(&mut env, child));
+        // 子スレッドが exit しても、親は exited にならない。
+        set64(&mut env, Gpr(0), abi::EXIT);
+        set64(&mut env, Gpr(7), 0);
+        let _ = sys.handle_trap(&mut env, 0);
+        assert!(
+            !sys.queue
+                .0
+                .borrow()
+                .meta
+                .is_exited(polyisa_kernel::ThreadId(parent)),
+            "exit は自分だけを終わらせる"
+        );
     }
 
     #[test]
