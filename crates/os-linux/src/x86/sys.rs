@@ -1488,6 +1488,55 @@ impl Linux {
                 .meta
                 .unblock_futex(ctid, 1, u32::MAX);
         }
+        // robust futex リストの書き戻し。終了スレッドが所有者の
+        // futex word は OWNER_DIED を立てて所有者を落とし、waiter を
+        // 一つ起こす。pthread の robust mutex が対象。
+        // Ref: kernel/futex/core.c の exit_robust_list。
+        if self.robust_head != 0 {
+            const OWNER_DIED: u32 = 0x4000_0000;
+            const TID_MASK: u32 = 0x3fff_ffff;
+            let head = self.robust_head;
+            fn read64(mem: &polyisa_mem::AddressSpace, a: u64) -> Option<u64> {
+                let mut buf = [0u8; 8];
+                mem.read(VirtAddr(a), &mut buf, data_access())
+                    .ok()
+                    .map(|()| u64::from_le_bytes(buf))
+            }
+            let first = read64(&env.backend.mem, head);
+            let off = read64(&env.backend.mem, head + 8).unwrap_or(0);
+            let mut entry = first;
+            let mut limit = 2048u32;
+            while let Some(e) = entry {
+                if e == head || limit == 0 {
+                    break;
+                }
+                limit -= 1;
+                let futex_addr = e.wrapping_add(off);
+                let next = read64(&env.backend.mem, e);
+                let mut wbuf = [0u8; 4];
+                let word = env
+                    .backend
+                    .mem
+                    .read(VirtAddr(futex_addr), &mut wbuf, data_access())
+                    .ok()
+                    .map(|()| u32::from_le_bytes(wbuf));
+                if let Some(word) = word
+                    && word & TID_MASK == me.0 as u32
+                {
+                    let cleared = (word & !TID_MASK) | OWNER_DIED;
+                    let _ = env
+                        .backend
+                        .mem
+                        .write(VirtAddr(futex_addr), &cleared.to_le_bytes());
+                    self.queue
+                        .0
+                        .borrow_mut()
+                        .meta
+                        .unblock_futex(futex_addr, 1, u32::MAX);
+                }
+                entry = next;
+            }
+        }
         let nfd = self.fds.borrow().len();
         for fd in 0..3u32 {
             self.close_fd(fd);
@@ -9052,6 +9101,116 @@ mod tests {
         set64(&mut env, Gpr(2), 3); // 実際は 7
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -11, "EAGAIN");
+    }
+
+    #[test]
+    fn robust_futex_owner_died_on_exit() {
+        use crate::x86_64 as abi;
+        // 終了スレッドが所有する futex word には FUTEX_OWNER_DIED が
+        // 立ち、所有者 tid が落ちる。
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(sys.swap_in(&mut env, child));
+        // robust list: head=0x2000。next=0x2100、futex_offset=0x10。
+        // entry 0x2100 の next は head へ戻す。futex word は 0x2110。
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x2100u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2008), &0x10u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2100), &0x2000u64.to_le_bytes())
+            .unwrap();
+        // futex word: owner=child tid に WAITERS 相当の上位ビット。
+        let word = (child as u32) | 0x8000_0000;
+        env.backend
+            .mem
+            .write(VirtAddr(0x2110), &word.to_le_bytes())
+            .unwrap();
+        // set_robust_list(head, 24)
+        set64(&mut env, Gpr(0), abi::SET_ROBUST_LIST);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 24);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 子が終了すると書き戻される。
+        assert!(sys.take_exit(&mut env, 0));
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2110), &mut buf, data_access())
+            .unwrap();
+        let got = u32::from_le_bytes(buf);
+        assert_ne!(got & 0x4000_0000, 0, "OWNER_DIED が立つ");
+        assert_eq!(got & 0x3fff_ffff, 0, "所有者 tid は落ちる");
+    }
+
+    #[test]
+    fn robust_futex_unowned_word_untouched_on_exit() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(sys.swap_in(&mut env, child));
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &0x2100u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2008), &0x10u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2100), &0x2000u64.to_le_bytes())
+            .unwrap();
+        // 他人（tid=9999）所有の word は触らない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x2110), &9999u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SET_ROBUST_LIST);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 24);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert!(sys.take_exit(&mut env, 0));
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2110), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 9999, "他人所有はそのまま");
     }
 
     #[test]
