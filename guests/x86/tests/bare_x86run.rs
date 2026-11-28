@@ -32392,6 +32392,65 @@ fn run_xstate_fault_conditions() {
 }
 
 #[test]
+fn run_xrstor_xstate_bv_inconsistent_gp() {
+    use polyisa_sem::ExceptionKind;
+    // XSTATE_BV が XCR0 にない成分 bit を立てる復元は #GP。
+    let feats = polyisa_guest_x86::model_feats("x86_64");
+    let run = |xbv: u64, xcr0: u64| {
+        let mut env = bare_x86_env();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(
+                VirtAddr(0x1000),
+                &[
+                    0x0F, 0xAE, 0x2B, // xrstor [rbx]
+                    0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+                    0x48, 0x31, 0xFF, // xor rdi,rdi
+                    0x0F, 0x05, // syscall
+                ],
+            )
+            .unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), 0xffff_ffffu32);
+        env.backend.set(Gpr(2).state(), 0xffff_ffffu32);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), xcr0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 512), &xbv.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 24), &0x1f80u32.to_le_bytes())
+            .unwrap();
+        let mut sys = ExcProbe {
+            kind: None,
+            addr: None,
+        };
+        let out = run_x86::run_mode_ex(
+            &mut env,
+            0x1000,
+            &mut sys,
+            40,
+            true,
+            feats,
+            &polyisa_guest_x86::model_params("x86_64"),
+        );
+        let _ = out;
+        sys.kind
+    };
+    assert_eq!(
+        run(0x200, 0x3),
+        Some(ExceptionKind::Protection),
+        "XSTATE_BV bit9 は XCR0=0x3 にないので #GP"
+    );
+    assert_eq!(run(0x3, 0x3), None, "XCR0 内の bit は正常");
+    assert_eq!(run(0x200, 0x203), None, "bit9 が XCR0 にあれば正常");
+}
+
+#[test]
 fn run64_avx10_saturating_conversion_unmasked_xm() {
     use polyisa_sem::ExceptionKind;
     // vcvttps2ibs で 1.5 を trunc すると inexact。MXCSR の precision

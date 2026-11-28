@@ -15375,6 +15375,23 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         return Ok(());
     };
     xsave_align_chk(b, *a)?;
+    // XSTATE_BV に XCR0 で有効でない成分 bit がある復元は #GP。
+    let a512 = madd(b, *a, 512);
+    let xbv: B::V<W64> = decode::mem_load(b, a512, *wseg)?;
+    let x0 = b.get(sem::xcr0_ref());
+    let nx0 = b.not::<W64>(x0);
+    let outside = b.and::<W64>(xbv, nx0);
+    let z64 = b.konst::<W64>(0);
+    let bad_bv = b.cmp::<W64>(Cmp::Ne, outside, z64);
+    use polyisa_sem::{ExceptionKind, GuestException};
+    b.if_then(bad_bv, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 13,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
     let m = xsave_mask(b);
     xrstor_area_mask(b, *a, *wseg, mode, m)
 }
