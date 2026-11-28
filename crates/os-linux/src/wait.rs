@@ -211,6 +211,13 @@ fn expired(prev: Option<&Wait>, now: u64) -> bool {
     prev.is_some_and(|w| w.deadline.is_some_and(|dl| now >= dl))
 }
 
+/// 再実行時に引き継ぐ期限。`prev` に期限があればそれを使い、
+/// なければ今回計算した期限を使う。restart_block 相当で、シグナル
+/// 後の SA_RESTART 再開でも残り時間だけ眠る。
+fn carry_deadline(prev: Option<&Wait>, recomputed: Option<u64>) -> Option<u64> {
+    prev.and_then(|w| w.deadline).or(recomputed)
+}
+
 /// 再実行で使う残り時間（ナノ秒）。`prev` があればその期限との
 /// 差、なければ `full`（初回評価）を返す。
 fn remaining_ns(prev: Option<&Wait>, now: u64, full: u64) -> u64 {
@@ -353,7 +360,7 @@ fn do_poll(
     }
     Ok(Out::Wait(Wait {
         fds: watches,
-        deadline,
+        deadline: carry_deadline(prev, deadline),
     }))
 }
 
@@ -473,11 +480,14 @@ fn do_select(
     }
     Ok(Out::Wait(Wait {
         fds: watches,
-        deadline: if tv_null {
-            None
-        } else {
-            timeout.map(|ns| now.saturating_add(ns))
-        },
+        deadline: carry_deadline(
+            prev,
+            if tv_null {
+                None
+            } else {
+                timeout.map(|ns| now.saturating_add(ns))
+            },
+        ),
     }))
 }
 
@@ -655,7 +665,7 @@ fn sys_epoll_wait(
         }
         return Ok(Out::Wait(Wait {
             fds: vec![(epfd as u32, WANT_READ)],
-            deadline,
+            deadline: carry_deadline(prev, deadline),
         }));
     }
     for (i, (events, data)) in ready.iter().enumerate() {
@@ -1296,5 +1306,28 @@ pub fn drive_write(
             }
             r => return r,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carry_deadline_preserves_the_original_across_restart() {
+        // SA_RESTART 再開では初回の絶対期限を引き継ぐ。再計算すると
+        // シグナルごとに待ちが延びる。
+        let prev = Wait {
+            fds: Vec::new(),
+            deadline: Some(1000),
+        };
+        assert_eq!(carry_deadline(Some(&prev), Some(5000)), Some(1000));
+        assert_eq!(carry_deadline(None, Some(5000)), Some(5000));
+        assert_eq!(carry_deadline(Some(&prev), None), Some(1000));
+        let inf = Wait {
+            fds: Vec::new(),
+            deadline: None,
+        };
+        assert_eq!(carry_deadline(Some(&inf), Some(5000)), Some(5000));
     }
 }
