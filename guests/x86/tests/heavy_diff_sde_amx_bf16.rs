@@ -61,7 +61,23 @@ static u32 bc[4] __attribute__((aligned(64))) = {
     0xbc003c00,0x00003c00, // row0: (1-1i),(1+0i)
     0x3c000000,0x3c003c00, // row1: (0+1i),(1+1i)
 };
-static u32 dst[40] __attribute__((aligned(64))) = {0};
+// FP8 用 corpus。u32 lane に FP8 を 4 個詰める。
+// E5M2: 1.0=3C -1.0=BC denorm=01 zero=00 Inf=7C NaN=7F max=7B。
+// E4M3: 1.0=38 -1.0=B8 denorm=01 NaN=7F max=7E。
+// 型の組合せは命令側で決まるため、同じビット列を両用する。
+static u32 ab8[32] __attribute__((aligned(64))) = {
+    // a8（先頭 16 要素）
+    0x3c3c3c3c,0xbcbcbcbc,0x01010101,0x3c38bc38,
+    0x7c7c7c7c,0x3c3c3c3c,0x00000000,0x38383838,
+    0x7f7f7f7f,0x3c3c3c3c,0x7e7e7e7e,0xbcbcbcbc,
+    0x7b7b7b7b,0x00000000,0x01010000,0x3c3c3c3c,
+    // b8（後半 16 要素）
+    0x3c3c3c3c,0x00000000,0x3c3c3c3c,0x38383838,
+    0x3c3c3c3c,0x3c3c3c3c,0x3c3c3c3c,0x3c3c3c3c,
+    0x3c3c3c3c,0x00003c3c,0xbcbc3c3c,0x3c3c3c3c,
+    0xbcbcbcbc,0x3c3c3c3c,0x3c3cbcbc,0x01010101,
+};
+static u32 dst[104] __attribute__((aligned(64))) = {0};
 
 void _start(void) {
     (void)sys3(158, 0x1023, 17, 0); // ARCH_REQ_XCOMP_PERM XTILECFG
@@ -117,11 +133,38 @@ void _start(void) {
         ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
         "add $16, %%rbx\n\t"
         ".byte 0xC4,0xE2,0x7A,0x4B,0x1C,0x3B\n\t" // tilestored %tmm3,(%rbx,%rdi)
+        // FP8 round。cfg（colsb=16/rows=4）へ戻し、a8/b8 で
+        // tdpbf8ps/tdpbhf8ps/tdphbf8ps/tdphf8ps の 4 組合せを通す。
+        // 出力は dst+160 から 64 バイト刻み。
+        "mov %0, %%rax\n\t"
+        ".byte 0xC4,0xE2,0x78,0x49,0x00\n\t"       // ldtilecfg (%rax)
+        "mov %3, %%rbx\n\t"
+        "add $160, %%rbx\n\t"
+        "mov $16, %%rdi\n\t"
+        "mov %10, %%rsi\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x4B,0x0C,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm1
+        "add $64, %%rsi\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x4B,0x14,0x3E\n\t" // tileloadd (%rsi,%rdi),tmm2
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"       // tilezero tmm0
+        ".byte 0xC4,0xE5,0x68,0xFD,0xC1\n\t"      // tdpbf8ps tmm0,tmm1,tmm2
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        "add $64, %%rbx\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"       // tilezero tmm0
+        ".byte 0xC4,0xE5,0x6B,0xFD,0xC1\n\t"      // tdpbhf8ps tmm0,tmm1,tmm2
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        "add $64, %%rbx\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"       // tilezero tmm0
+        ".byte 0xC4,0xE5,0x6A,0xFD,0xC1\n\t"      // tdphbf8ps tmm0,tmm1,tmm2
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
+        "add $64, %%rbx\n\t"
+        ".byte 0xC4,0xE2,0x7B,0x49,0xC0\n\t"       // tilezero tmm0
+        ".byte 0xC4,0xE5,0x69,0xFD,0xC1\n\t"      // tdphf8ps tmm0,tmm1,tmm2
+        ".byte 0xC4,0xE2,0x7A,0x4B,0x04,0x3B\n\t" // tilestored %tmm0,(%rbx,%rdi)
         :
         : "r"(cfg), "r"(a), "r"((u64)16), "r"(dst), "r"(b), "r"(a16), "r"(b16),
-          "r"(cfg2), "r"(ac), "r"(bc)
+          "r"(cfg2), "r"(ac), "r"(bc), "r"(ab8)
         : "memory", "rsi", "rdi", "rbx", "rax");
-    (void)sys3(1, 1, (long)dst, 160);
+    (void)sys3(1, 1, (long)dst, 416);
     (void)sys3(60, 0, 0, 0);
     __builtin_unreachable();
 }
@@ -169,7 +212,7 @@ fn poly_run(bytes: &[u8], path: &str) -> (Vec<u8>, Option<u64>) {
         polyisa_guest_x86::FEATURE_DEFS,
         polyisa_guest_x86::FEAT_BITS,
         "x86_64_v4",
-        &["amx_tile", "amx_bf16", "amx_fp16", "amx_complex"],
+        &["amx_tile", "amx_bf16", "amx_fp16", "amx_complex", "amx_fp8"],
         &[],
     )
     .unwrap();
@@ -205,10 +248,10 @@ fn diff_sde_amx_bf16_numeric() {
     assert!(out.status.success(), "sde status {:?}", out.status);
     let (poly, code) = poly_run(&bytes, elf.to_str().unwrap());
     assert_eq!(code, Some(0), "poly exit");
-    assert_eq!(poly.len(), 160, "poly stdout len");
-    assert_eq!(out.stdout.len(), 160, "sde stdout len");
+    assert_eq!(poly.len(), 416, "poly stdout len");
+    assert_eq!(out.stdout.len(), 416, "sde stdout len");
     if poly != out.stdout {
-        for i in 0..40 {
+        for i in 0..104 {
             let p = u32::from_le_bytes(poly[i * 4..i * 4 + 4].try_into().unwrap());
             let s = u32::from_le_bytes(out.stdout[i * 4..i * 4 + 4].try_into().unwrap());
             if p != s {
