@@ -310,6 +310,10 @@ pub enum ThreadWait {
     Timer,
     /// シグナル到着待ち（pause/sigsuspend）。
     Signal,
+    /// futex のアドレス待ち。`addr` はゲスト仮想アドレス。
+    /// CLONE_VM のスレッド間ではアドレス空間を共有するので、
+    /// アドレスがそのまま待ち合わせのキーになる。
+    Futex { addr: u64 },
 }
 
 #[derive(Debug)]
@@ -386,6 +390,36 @@ impl GuestScheduler {
                 thread.wait = None;
             }
         }
+    }
+
+    /// futex のアドレスを待っているスレッドを最大 `max` まで実行可能に戻す。
+    /// 戻したスレッド数を返す。
+    pub fn unblock_futex(&mut self, addr: u64, max: u32) -> u32 {
+        let mut woken = 0;
+        for thread in &mut self.threads {
+            if woken >= max {
+                break;
+            }
+            if matches!(
+                thread.wait,
+                Some(ThreadWait::Futex { addr: waiting }) if waiting == addr
+            ) {
+                thread.wait = None;
+                woken += 1;
+            }
+        }
+        woken
+    }
+
+    /// そのアドレスを futex で待っているスレッドがいるか。
+    #[must_use]
+    pub fn has_futex_waiter(&self, addr: u64) -> bool {
+        self.threads.iter().any(|thread| {
+            matches!(
+                thread.wait,
+                Some(ThreadWait::Futex { addr: waiting }) if waiting == addr
+            )
+        })
     }
 
     /// シグナルで停止する。既存の wait は保持し、継続後に元の待ちへ戻れるようにする。

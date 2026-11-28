@@ -134,6 +134,9 @@ pub struct Linux {
     /// CLONE_VM でアドレス空間を共有するグループの識別子。None は私有メモリ。
     /// 実メモリは実行中スレッドの env にあり、park 時は queue のホルダーへ移る。
     mm_group: Option<u64>,
+    /// futex wait で眠っているアドレス。wake 後に syscall が再実行された
+    /// とき、初回の待ち入りと区別して 0 を返すために使う。
+    futex_wait: Option<u64>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -789,6 +792,9 @@ impl Linux {
                 polyisa_kernel::ThreadWait::Signal => {
                     eprintln!("run: pid {} waits for signal", id.0);
                 }
+                polyisa_kernel::ThreadWait::Futex { addr } => {
+                    eprintln!("run: pid {} waits for futex {addr:#x}", id.0);
+                }
             }
         }
     }
@@ -1047,6 +1053,7 @@ impl Linux {
             // spawn_thread が上書きする。
             tgid: 0,
             mm_group: None,
+            futex_wait: None,
         }
     }
 
@@ -1656,6 +1663,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("rt_sigsuspend", sys_rt_sigsuspend),
     ("pause", sys_pause),
     ("tgkill", sys_tgkill),
+    ("futex", sys_futex),
     ("set_robust_list", sys_set_robust_list),
     ("rseq", sys_rseq),
     ("getrandom", sys_getrandom),
@@ -1739,6 +1747,7 @@ const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
     ("rt_sigsuspend", sys_rt_sigsuspend),
     ("pause", sys_pause),
     ("tgkill", sys_tgkill),
+    ("futex", sys_futex),
     ("readlinkat", sys_readlinkat),
     ("readlink", sys_readlink),
     ("dup", sys_dup),
@@ -3901,6 +3910,56 @@ fn sys_getpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     let me = sys.ensure_self().0;
     let borrowed = sys.procs.borrow();
     crate::x86::sys_getpgid(&borrowed, me, env, cx)
+}
+
+/// futex の WAIT/WAKE。CLONE_VM のスレッドはアドレス空間を共有するので、
+/// ゲスト仮想アドレスがそのまま待ち合わせのキーになる。pthread の
+/// mutex/join が使う最小構成で、タイムアウトと bitset 系は未対応。
+/// シグナルによる中断も現状はモデル化しない。
+fn sys_futex(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    const FUTEX_WAIT: u64 = 0;
+    const FUTEX_WAKE: u64 = 1;
+    let uaddr = get64(env, cx.r_a);
+    let op = get64(env, cx.r_b) & 0x7f; // PRIVATE/REALTIME の旗を外す
+    let val = get64(env, cx.r_c) as u32;
+    match op {
+        FUTEX_WAIT => {
+            // wake 後の再実行。待ちへ入った記憶があるときは 0 で完了する。
+            if sys.futex_wait == Some(uaddr) {
+                sys.futex_wait = None;
+                set64(env, Gpr(0), 0);
+                return Some(TrapOutcome::Handled);
+            }
+            sys.futex_wait = None;
+            let mut buf = [0u8; 4];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(uaddr), &mut buf, data_access())
+                .is_err()
+            {
+                set64(env, Gpr(0), cx.neg(EFAULT));
+                return Some(TrapOutcome::Handled);
+            }
+            if u32::from_le_bytes(buf) != val {
+                set64(env, Gpr(0), cx.neg(EAGAIN));
+                return Some(TrapOutcome::Handled);
+            }
+            let pid = sys.ensure_self();
+            sys.futex_wait = Some(uaddr);
+            sys.queue.0.borrow_mut().meta.block(
+                polyisa_kernel::ThreadId(pid.0),
+                polyisa_kernel::ThreadWait::Futex { addr: uaddr },
+            );
+            Some(TrapOutcome::Blocked)
+        }
+        FUTEX_WAKE => {
+            let n = sys.queue.0.borrow_mut().meta.unblock_futex(uaddr, val);
+            set64(env, Gpr(0), u64::from(n));
+            Some(TrapOutcome::Handled)
+        }
+        _ => Some(TrapOutcome::Unimplemented),
+    }
 }
 
 /// スレッドのリーダ pid。parked なスレッドまたは自分自身について、
@@ -7880,6 +7939,80 @@ mod tests {
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -3, "ESRCH");
+    }
+
+    #[test]
+    fn futex_wait_blocks_and_wake_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 子が値 1 のままの futex を待つと block する。
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0); // FUTEX_WAIT
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(
+            sys.queue.0.borrow().meta.has_futex_waiter(0x2000),
+            "子は futex 待ちに入る"
+        );
+        // 親へ戻り、値を書き換えて wake する。
+        assert!(sys.swap_in(&mut env, parent));
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &2u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 1); // FUTEX_WAKE
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1, "1 スレッド起こした");
+        // 起きた子が syscall を再実行すると 0 で完了する。
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0, "wake 後の再実行は 0");
+    }
+
+    #[test]
+    fn futex_wait_mismatched_value_is_eagain() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &7u32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::FUTEX);
+        set64(&mut env, Gpr(7), 0x2000);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 3); // 実際は 7
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)) as i64, -11, "EAGAIN");
     }
 
     #[test]

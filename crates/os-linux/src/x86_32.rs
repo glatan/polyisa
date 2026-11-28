@@ -22,6 +22,7 @@ pub const SET_TID_ADDRESS: u64 = 258;
 pub const GETTID: u64 = 224;
 pub const GETPID: u64 = 20;
 pub const TGKILL: u64 = 270;
+pub const FUTEX: u64 = 240;
 pub const GETUID: u64 = 24;
 pub const GETGID: u64 = 47;
 pub const GETEUID: u64 = 49;
