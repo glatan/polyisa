@@ -156,6 +156,12 @@ pub struct Linux {
     /// 値へ同期する（一度に一つしか走らないので最後の書き手が常に
     /// 直前の実行スレッドである）。
     share_fs: bool,
+    /// setitimer の期限と間隔（ナノ秒、wait 時計）。which は
+    /// REAL/VIRTUAL/PROF。emulator は同一の実時間時計で近似する。
+    /// プロセス単位なので fork 子は持たず、スレッドは共有しない
+    /// （Linux でも itimer はプロセス単位だが、ここでは生成スレッド
+    /// 単位の近似とする）。
+    itimer: [Option<(u64, u64)>; 3],
 }
 
 /// fd 表の参照。CLONE_FILES で共有する表は RefCell 経由の Ref、
@@ -1157,6 +1163,7 @@ impl Linux {
             clear_child_tid: None,
             futex_deadline: None,
             share_fs: false,
+            itimer: [None; 3],
         }
     }
 
@@ -1286,6 +1293,26 @@ impl Linux {
     }
 
     fn deliver_pending(&mut self, env: &mut BareEnv) {
+        // setitimer の満了をプロセス宛てシグナルへ変える。
+        // REAL は SIGALRM(14)、VIRTUAL は SIGVTALRM(26)、PROF は
+        // SIGPROF(27)。interval があれば再装填する。
+        const TIMER_SIGS: [u64; 3] = [14, 26, 27];
+        let now = self.mono_ns();
+        for (which, signo) in TIMER_SIGS.iter().enumerate() {
+            let Some((deadline, interval)) = self.itimer[which] else {
+                continue;
+            };
+            if now < deadline {
+                continue;
+            }
+            self.shared_pending
+                .set(self.shared_pending.get() | (1u64 << (signo - 1)));
+            self.itimer[which] = if interval != 0 {
+                Some((now + interval, interval))
+            } else {
+                None
+            };
+        }
         let deliver = self.effective_pending() & !self.sig_mask;
         if deliver == 0 {
             return;
@@ -3347,9 +3374,79 @@ fn sys_getitimer(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     crate::x86::sys_getitimer(env, cx)
 }
 
-fn sys_setitimer(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_setitimer(env, cx)
+fn sys_setitimer(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setitimer(which, new, old)。itimerval は it_interval が先、
+    // it_value が後。期限の管理は wait 時計のナノ秒で行い、満了は
+    // deliver_pending で SIGALRM 系のシグナルへ変える。
+    let which = get64(env, cx.r_a);
+    let newp = get64(env, cx.r_b);
+    let oldp = get64(env, cx.r_c);
+    if which > 2 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let wide = cx.is64;
+    let secw = if wide { 8 } else { 4 };
+    let now = sys.mono_ns();
+    // old へ残り時間を書く。
+    if oldp != 0 {
+        let mut out = [0u8; 32];
+        if let Some((deadline, interval)) = sys.itimer[which as usize] {
+            let remain = deadline.saturating_sub(now);
+            let iv_sec = interval / 1_000_000_000;
+            let iv_usec = (interval % 1_000_000_000) / 1000;
+            let v_sec = remain / 1_000_000_000;
+            let v_usec = (remain % 1_000_000_000) / 1000;
+            let wr = |off: usize, val: u64, out: &mut [u8; 32]| {
+                if wide {
+                    out[off..off + 8].copy_from_slice(&val.to_le_bytes());
+                } else {
+                    out[off..off + 4].copy_from_slice(&(val as u32).to_le_bytes());
+                }
+            };
+            wr(0, iv_sec, &mut out);
+            wr(secw, iv_usec, &mut out);
+            wr(secw * 2, v_sec, &mut out);
+            wr(secw * 3, v_usec, &mut out);
+        }
+        if env
+            .backend
+            .mem
+            .write(VirtAddr(oldp), &out[..secw * 4])
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    if newp != 0 {
+        let mut buf = [0u8; 32];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(newp), &mut buf[..secw * 4], data_access())
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        let rd = |off: usize| -> u64 {
+            if wide {
+                u64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+            } else {
+                u64::from(u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()))
+            }
+        };
+        let iv = rd(0) * 1_000_000_000 + rd(secw) * 1000;
+        let val = rd(secw * 2) * 1_000_000_000 + rd(secw * 3) * 1000;
+        sys.itimer[which as usize] = if val == 0 {
+            None
+        } else {
+            Some((now + val, iv))
+        };
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_socket(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -9101,6 +9198,89 @@ mod tests {
         set64(&mut env, Gpr(2), 3); // 実際は 7
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)) as i64, -11, "EAGAIN");
+    }
+
+    #[test]
+    fn setitimer_real_fires_sigalrm() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // ITIMER_REAL(0) に 1ms の one-shot を設定。it_interval=0、
+        // it_value={0sec,1000usec}。x86-64 では itimerval は 8 バイト幅。
+        env.backend.mem.write(VirtAddr(0x2000), &[0u8; 32]).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 24), &1000u64.to_le_bytes())
+            .unwrap();
+        // SIGALRM を block し、配送で消費されず pending に残るようにする。
+        sys.sig_mask = 1 << 13;
+        set64(&mut env, Gpr(0), abi::SETITIMER);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x2000);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 設定直後は発火しない。
+        sys.after_step(&mut env);
+        assert_eq!(sys.shared_pending.get() & (1 << 13), 0, "直後は未発火");
+        // 1ms 以上経てば SIGALRM(bit13)が pending へ立つ。
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        sys.after_step(&mut env);
+        assert_ne!(
+            sys.shared_pending.get() & (1 << 13),
+            0,
+            "期限後に SIGALRM が pending へ立つ"
+        );
+        // one-shot なので二度は発火しない。
+        sys.shared_pending.set(0);
+        sys.after_step(&mut env);
+        assert_eq!(
+            sys.shared_pending.get() & (1 << 13),
+            0,
+            "one-shot は一度だけ"
+        );
+    }
+
+    #[test]
+    fn setitimer_interval_reloads() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // interval=1ms、value=1ms。
+        env.backend.mem.write(VirtAddr(0x2000), &[0u8; 32]).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 8), &1000u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000 + 24), &1000u64.to_le_bytes())
+            .unwrap();
+        sys.sig_mask = 1 << 13;
+        set64(&mut env, Gpr(0), abi::SETITIMER);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x2000);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        sys.after_step(&mut env);
+        assert_ne!(sys.shared_pending.get() & (1 << 13), 0, "初回の発火");
+        sys.shared_pending.set(0);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        sys.after_step(&mut env);
+        assert_ne!(
+            sys.shared_pending.get() & (1 << 13),
+            0,
+            "interval で再発火する"
+        );
     }
 
     #[test]
