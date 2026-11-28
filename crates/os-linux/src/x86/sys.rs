@@ -151,6 +151,11 @@ pub struct Linux {
     /// futex wait の期限。wait 時計の絶対時刻で、wake か期限切れで
     /// 再実行された syscall が ETIMEDOUT と完了を区別するために使う。
     futex_deadline: Option<u64>,
+    /// CLONE_FS で生成されたスレッド。cwd/umask/guest_root は
+    /// スレッドグループで共有し、切り替え時に直前の実行スレッドの
+    /// 値へ同期する（一度に一つしか走らないので最後の書き手が常に
+    /// 直前の実行スレッドである）。
+    share_fs: bool,
 }
 
 /// fd 表の参照。CLONE_FILES で共有する表は RefCell 経由の Ref、
@@ -1151,6 +1156,7 @@ impl Linux {
             sigtimedwait_set: None,
             clear_child_tid: None,
             futex_deadline: None,
+            share_fs: false,
         }
     }
 
@@ -1424,6 +1430,17 @@ impl Linux {
             && let Some(mem) = queue.0.borrow_mut().mms.remove(&g)
         {
             other.env.backend.mem = mem;
+        }
+        // CLONE_FS の共有。実行を離れるスレッドが最新の cwd/umask/
+        // guest_root を持つので、これから走るスレッドへ写す。
+        if self.share_fs
+            && other.linux.share_fs
+            && self.mm_group.is_some()
+            && self.mm_group == other.linux.mm_group
+        {
+            other.linux.cwd = self.cwd.clone();
+            other.linux.umask = self.umask;
+            other.linux.guest_root = self.guest_root.clone();
         }
         std::mem::swap(self, &mut other.linux);
         std::mem::swap(env, &mut other.env);
@@ -5981,6 +5998,10 @@ fn spawn_thread(
     if flags & crate::clone_flag::FILES != 0 {
         child_linux.fds = std::rc::Rc::clone(&sys.fds);
     }
+    if flags & crate::clone_flag::FS != 0 {
+        child_linux.share_fs = true;
+        sys.share_fs = true;
+    }
     sys.queue
         .0
         .borrow_mut()
@@ -8349,6 +8370,73 @@ mod tests {
             1,
             "子の close は親の複製に影響しない"
         );
+    }
+
+    #[test]
+    fn clone_fs_shares_cwd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        sys.ensure_cwd();
+        let orig_cwd = sys.cwd.clone();
+        // CLONE_FS 付きでスレッドを作る。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD | crate::clone_flag::FS,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        // 子で chdir("/") する。
+        env.backend.mem.write(VirtAddr(0x2000), b"/ ").unwrap();
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0, "chdir は成功する");
+        assert_eq!(sys.cwd, "/");
+        // 親へ戻ると cwd が同期されている。
+        assert!(sys.swap_in(&mut env, parent));
+        assert_eq!(sys.cwd, "/", "子の chdir が親へ見える");
+        // 戻った親でさらに chdir しなければ子側も影響しない。
+        let _ = orig_cwd;
+    }
+
+    #[test]
+    fn fork_child_does_not_share_cwd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        sys.ensure_cwd();
+        let orig_cwd = sys.cwd.clone();
+        // fork（flags=0）は複製。子で chdir しても親は変わらない。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1);
+        let parent = sys.pid;
+        assert!(sys.swap_in(&mut env, child));
+        env.backend.mem.write(VirtAddr(0x2000), b"/ ").unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(sys.swap_in(&mut env, parent));
+        assert_eq!(sys.cwd, orig_cwd, "fork 子の chdir は親に影響しない");
     }
 
     #[test]
