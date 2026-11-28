@@ -1366,9 +1366,14 @@ pub fn pop_v<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Result<B::V<W64
 
 /// PUSH2 Ev, vvvv（APX）。第1被演算子（vvvv）→第2被演算子（rm）の順に
 /// 64 ビット値を push する。push2p の p はペアリング性能ヒントで、
-/// 結果の順序は変わらない。スタックオペランドは常に 64 ビット
-/// （W は 2P 形の選択に使われる）。仕様上は push 前の RSP が 16 バイト
-/// 整列でなければ #GP だが、ここでは逐次 push として近似する。
+/// 結果の順序は変わらない。例外条件（APX 仕様書 Table 3.4 と
+/// exception class APX-EVEX-PP2）:
+/// - B/V のいずれかのレジスタ id が 4（RSP）なら #UD
+/// - エントリ時の RSP が 16 バイト整列でなければ #GP（書き込む
+///   16 バイトがスタック上で整列する必要がある）
+/// - fault 時は 2 つの書き込みのどちらもコミットされない。
+///   ここでは両番地を読み probe してから書き込むことで不可分性を
+///   近似し、RSP の更新は最後に一度だけ行う。
 pub fn push2<B: Backend>(
     b: &mut B,
     rm: &Rm<B::V<W64>>,
@@ -1377,11 +1382,52 @@ pub fn push2<B: Backend>(
     sseg: u64,
     pp: bool,
 ) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    // RSP 被演算子の禁止は encoding 条件なので無条件に #UD。
+    if d.vex_v == 4 || matches!(rm, Rm::Reg(g) if g.0 == 4) {
+        return Err(b.raise(GuestException {
+            kind: ExceptionKind::Undefined,
+            code: 0x06,
+            addr: None,
+            in_delay_slot: false,
+        }));
+    }
     let v_rm = rd_w::<B, W64>(b, rm, d)?;
     let v_nd = sem::read64(b, Gpr(d.vex_v));
     let _ = pp;
-    push_v(b, 64, v_nd, sa, sseg)?;
-    push_v(b, 64, v_rm, sa, sseg)
+    if sa != 64 {
+        push_v(b, 64, v_nd, sa, sseg)?;
+        return push_v(b, 64, v_rm, sa, sseg);
+    }
+    let rsp = sem::read64(b, Gpr(4));
+    // 16 バイト整列の検査。違反なら #GP で、何もコミットしない。
+    let align_mask = b.konst::<W64>(15);
+    let low = b.and::<W64>(rsp, align_mask);
+    let z64 = b.konst::<W64>(0);
+    let misaligned = b.cmp::<W64>(Cmp::Ne, low, z64);
+    b.if_then(misaligned, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 0x0D,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    let sixteen = b.konst::<W64>(16);
+    let np = b.sub::<W64>(rsp, sixteen);
+    let sg = b.konst::<W64>(sseg);
+    let a_lo = b.add::<W64>(np, sg);
+    let eight = b.konst::<W64>(8);
+    let np8 = b.add::<W64>(np, eight);
+    let a_hi = b.add::<W64>(np8, sg);
+    // 書き込み不可分性の近似: 両番地を先に読み probe し、
+    // fault はどの書き込みより前に起こす。
+    let _p1 = b.load::<W64>(a_lo, sem::DATA_READ)?;
+    let _p2 = b.load::<W64>(a_hi, sem::DATA_READ)?;
+    b.store::<W64>(a_hi, v_nd, sem::DATA_WRITE)?;
+    b.store::<W64>(a_lo, v_rm, sem::DATA_WRITE)?;
+    sem::write64(b, Gpr(4), np);
+    Ok(())
 }
 
 /// POP2 Ev, vvvv（APX）。スタックトップから第1被演算子（vvvv）→
@@ -1395,11 +1441,54 @@ pub fn pop2<B: Backend>(
     sseg: u64,
     pp: bool,
 ) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    // RSP 被演算子の禁止と、POP2 では B/V が同一でないこと。
+    // 違反は encoding 条件なので無条件に #UD。
+    let dup = matches!(rm, Rm::Reg(g) if g.0 == d.vex_v);
+    if d.vex_v == 4 || matches!(rm, Rm::Reg(g) if g.0 == 4) || dup {
+        return Err(b.raise(GuestException {
+            kind: ExceptionKind::Undefined,
+            code: 0x06,
+            addr: None,
+            in_delay_slot: false,
+        }));
+    }
     let _ = pp;
-    let v_nd = pop_v(b, 64, sa, sseg)?;
-    let v_rm = pop_v(b, 64, sa, sseg)?;
+    if sa != 64 {
+        let v_nd = pop_v(b, 64, sa, sseg)?;
+        let v_rm = pop_v(b, 64, sa, sseg)?;
+        wr_w::<B, W64>(b, rm, d, v_rm)?;
+        W64::put(b, Gpr(d.vex_v), d, v_nd);
+        return Ok(());
+    }
+    let rsp = sem::read64(b, Gpr(4));
+    // 16 バイト整列の検査。違反なら #GP で、何もコミットしない。
+    let align_mask = b.konst::<W64>(15);
+    let low = b.and::<W64>(rsp, align_mask);
+    let z64 = b.konst::<W64>(0);
+    let misaligned = b.cmp::<W64>(Cmp::Ne, low, z64);
+    b.if_then(misaligned, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Protection,
+            code: 0x0D,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    let sg = b.konst::<W64>(sseg);
+    let a0 = b.add::<W64>(rsp, sg);
+    let eight = b.konst::<W64>(8);
+    let rsp8 = b.add::<W64>(rsp, eight);
+    let a1 = b.add::<W64>(rsp8, sg);
+    // 両方の値を先に読み、レジスタと RSP の更新はすべての
+    // 読み込みが成功した後に一度だけ行う（fault 非 commit）。
+    let v_nd = b.load::<W64>(a0, sem::DATA_READ)?;
+    let v_rm = b.load::<W64>(a1, sem::DATA_READ)?;
     wr_w::<B, W64>(b, rm, d, v_rm)?;
     W64::put(b, Gpr(d.vex_v), d, v_nd);
+    let sixteen = b.konst::<W64>(16);
+    let np = b.add::<W64>(rsp, sixteen);
+    sem::write64(b, Gpr(4), np);
     Ok(())
 }
 

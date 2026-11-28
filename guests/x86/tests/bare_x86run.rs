@@ -32061,3 +32061,132 @@ fn run_vdpbf16ps_accumulation_order_and_nan_priority() {
     assert_eq!(lane(2), 0x00000000, "denormal 入力は zero 扱い");
     assert_eq!(lane(3), 0x00000000, "denormal の acc は zero 扱い");
 }
+
+/// PUSH2/POP2 の例外条件。#UD は RSP 被演算子と POP2 の同一レジスタ、
+/// #GP は 16 バイト非整列の RSP。
+struct ExcProbe {
+    kind: Option<polyisa_sem::ExceptionKind>,
+    addr: Option<u64>,
+}
+impl TrapHandler for ExcProbe {
+    fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        let nr = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+        if nr == 60 {
+            let code = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7));
+            TrapOutcome::Exit(code as u32)
+        } else {
+            TrapOutcome::Unimplemented
+        }
+    }
+    fn handle_exception(
+        &mut self,
+        _env: &mut BareEnv,
+        e: polyisa_sem::GuestException,
+    ) -> TrapOutcome {
+        self.kind = Some(e.kind);
+        self.addr = e.addr;
+        TrapOutcome::Exit(0)
+    }
+}
+
+fn run_apx_exc(prog: &[u8], rsp: u64) -> (Option<polyisa_sem::ExceptionKind>, u64) {
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), rsp as u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x8_0003);
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExcProbe {
+        kind: None,
+        addr: None,
+    };
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        50,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let rsp_after = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
+    (sys.kind, rsp_after)
+}
+
+#[test]
+fn run64_apx_push2pop2_exceptions() {
+    use polyisa_sem::ExceptionKind;
+    // push2 %rsp,%r12 → B/V が RSP で #UD。RSP は変わらない。
+    let (k, rsp) = run_apx_exc(&[0x62, 0xF4, 0x1C, 0x18, 0xFF, 0xF4], 0x2800);
+    assert_eq!(k, Some(ExceptionKind::Undefined), "rsp 被演算子は #UD");
+    assert_eq!(rsp, 0x2800, "rsp は不変");
+
+    // push2 %r12,%rsp → V が RSP で #UD。
+    let (k, _) = run_apx_exc(&[0x62, 0xD4, 0x5C, 0x18, 0xFF, 0xF4], 0x2800);
+    assert_eq!(k, Some(ExceptionKind::Undefined), "v が rsp でも #UD");
+
+    // pop2 %r12,%r12 → 同一レジスタで #UD。
+    let (k, _) = run_apx_exc(&[0x62, 0xD4, 0x1C, 0x18, 0x8F, 0xC4], 0x2800);
+    assert_eq!(k, Some(ExceptionKind::Undefined), "pop2 の重複は #UD");
+
+    // push2 %r13,%r12 で rsp が 16 バイト非整列 → #GP。
+    // スタックにも RSP にも変更がないことを確かめる。
+    let (k, rsp) = run_apx_exc(&[0x62, 0xD4, 0x1C, 0x18, 0xFF, 0xF5], 0x2808);
+    assert_eq!(k, Some(ExceptionKind::Protection), "非整列は #GP");
+    assert_eq!(rsp, 0x2808, "rsp は不変");
+
+    // 整列していれば正常に 2 語積まれる。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
+    let mut env = bare_x86_env();
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x8_0003);
+    env.backend.set(Gpr(12).state(), 0x1111);
+    env.backend.set(Gpr(13).state(), 0x2222);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x62, 0xD4, 0x1C, 0x18, 0xFF, 0xF5])
+        .unwrap();
+    let mut sys = ExcProbe {
+        kind: None,
+        addr: None,
+    };
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        1,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+    assert_eq!(sys.kind, None, "整列時は例外なし");
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4)),
+        0x27F0,
+        "rsp は 16 減る"
+    );
+    let mut buf = [0u8; 16];
+    env.backend
+        .mem
+        .read(VirtAddr(0x27F0), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(
+        u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+        0x2222,
+        "b64(rm) が低位"
+    );
+    assert_eq!(
+        u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        0x1111,
+        "v64(ndd) が高位"
+    );
+}
