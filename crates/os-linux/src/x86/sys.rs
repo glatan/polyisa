@@ -23,7 +23,8 @@ use polyisa_mem::VirtAddr;
 pub struct Linux {
     reported: Vec<u64>,
     /// 開いたファイルの表（ゲスト fd 3 以降）。仮想カーネルの fd 管理を使う.
-    fds: polyisa_kernel::FdTable,
+    /// CLONE_FILES のスレッドグループで Rc 共有する。fork の子は複製を持つ。
+    fds: std::rc::Rc<std::cell::RefCell<polyisa_kernel::FdTable>>,
     /// 標準 fd (0/1/2) の付け替え先。close 後に open した対象が入る.
     /// uniq のように stdin をファイルに付け替える applet のため.
     /// ファイル・パイプ端・ソケットなどあらゆる対象を保持する.
@@ -152,6 +153,64 @@ pub struct Linux {
     futex_deadline: Option<u64>,
 }
 
+/// fd 表の参照。CLONE_FILES で共有する表は RefCell 経由の Ref、
+/// 標準 fd の付け替え先は素の参照。Deref で FdTarget に揃える。
+enum TargetRef<'a> {
+    Table(std::cell::Ref<'a, polyisa_kernel::FdTarget>),
+    Std(&'a polyisa_kernel::FdTarget),
+}
+
+impl std::ops::Deref for TargetRef<'_> {
+    type Target = polyisa_kernel::FdTarget;
+    fn deref(&self) -> &polyisa_kernel::FdTarget {
+        match self {
+            TargetRef::Table(r) => r,
+            TargetRef::Std(r) => r,
+        }
+    }
+}
+
+/// ホストファイルの参照。fd 表経由は Ref、標準 fd は素の参照。
+enum FileRef<'a> {
+    Table(std::cell::Ref<'a, std::fs::File>),
+    Std(&'a std::fs::File),
+}
+
+impl std::ops::Deref for FileRef<'_> {
+    type Target = std::fs::File;
+    fn deref(&self) -> &std::fs::File {
+        match self {
+            FileRef::Table(r) => r,
+            FileRef::Std(r) => r,
+        }
+    }
+}
+
+/// ホストファイルの可変参照。
+enum FileMut<'a> {
+    Table(std::cell::RefMut<'a, std::fs::File>),
+    Std(&'a mut std::fs::File),
+}
+
+impl std::ops::Deref for FileMut<'_> {
+    type Target = std::fs::File;
+    fn deref(&self) -> &std::fs::File {
+        match self {
+            FileMut::Table(r) => r,
+            FileMut::Std(r) => r,
+        }
+    }
+}
+
+impl std::ops::DerefMut for FileMut<'_> {
+    fn deref_mut(&mut self) -> &mut std::fs::File {
+        match self {
+            FileMut::Table(r) => r,
+            FileMut::Std(r) => r,
+        }
+    }
+}
+
 /// `wait4` を完了するときに使う引数。
 struct WaitSlot {
     which: i64,
@@ -249,31 +308,45 @@ impl Linux {
     }
 
     /// fd の対象。標準 fd の付け替え先も見る。
-    fn fd_target(&self, fd: u32) -> Option<&polyisa_kernel::FdTarget> {
+    fn fd_target(&self, fd: u32) -> Option<TargetRef<'_>> {
         if fd < 3 {
-            self.std_targets[fd as usize].as_ref()
+            self.std_targets[fd as usize].as_ref().map(TargetRef::Std)
         } else {
-            self.fds.target(fd)
+            std::cell::Ref::filter_map(self.fds.borrow(), |t| t.target(fd))
+                .ok()
+                .map(TargetRef::Table)
         }
     }
 
     /// fd に対応する開ファイルの参照。対象がホストファイルのときだけ。
-    fn file_ref(&self, fd: u32) -> Option<&std::fs::File> {
-        match self.fd_target(fd) {
-            Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
-            _ => None,
+    fn file_ref(&self, fd: u32) -> Option<FileRef<'_>> {
+        match self.fd_target(fd)? {
+            TargetRef::Table(r) => match &*r {
+                polyisa_kernel::FdTarget::File(_) => {
+                    Some(FileRef::Table(std::cell::Ref::map(r, |t| match t {
+                        polyisa_kernel::FdTarget::File(f) => f,
+                        _ => unreachable!(),
+                    })))
+                }
+                _ => None,
+            },
+            TargetRef::Std(r) => match r {
+                polyisa_kernel::FdTarget::File(f) => Some(FileRef::Std(f)),
+                _ => None,
+            },
         }
     }
 
     /// fd に対応する開ファイルの可変参照。対象がホストファイルのときだけ。
-    fn file_mut(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+    fn file_mut(&mut self, fd: u32) -> Option<FileMut<'_>> {
         if fd < 3 {
             match self.std_targets[fd as usize].as_mut() {
-                Some(polyisa_kernel::FdTarget::File(f)) => Some(f),
+                Some(polyisa_kernel::FdTarget::File(f)) => Some(FileMut::Std(f)),
                 _ => None,
             }
         } else {
-            self.fds.file_mut(fd)
+            let fm = std::cell::RefMut::filter_map(self.fds.borrow_mut(), |t| t.file_mut(fd));
+            fm.ok().map(FileMut::Table)
         }
     }
 
@@ -289,7 +362,7 @@ impl Linux {
 
     /// パイプ端なら (id, read)。
     fn pipe_end(&self, fd: u32) -> Option<(u64, bool)> {
-        match self.fd_target(fd) {
+        match self.fd_target(fd).as_deref() {
             Some(polyisa_kernel::FdTarget::PipeEnd { id, read }) => Some((*id, *read)),
             _ => None,
         }
@@ -299,8 +372,8 @@ impl Linux {
     /// 複製に失敗した対象は None。
     fn dup_open(&self, fd: u32) -> Option<(polyisa_kernel::FdTarget, Option<String>)> {
         let target = self.fd_target(fd)?;
-        let dup = self.fds.dup_of(target)?;
-        let path = self.path_of(fd).map(str::to_string);
+        let dup = self.fds.borrow().dup_of(&target)?;
+        let path = self.path_of(fd);
         Some((dup, path))
     }
 
@@ -310,12 +383,13 @@ impl Linux {
         let target = if fd < 3 {
             self.std_targets[fd as usize].take()
         } else {
-            self.fds.take(fd).map(|ent| ent.target)
+            self.fds.borrow_mut().take(fd).map(|ent| ent.target)
         };
         let Some(target) = target else {
             return false;
         };
-        for (id, wake_r, wake_w) in self.fds.close_target(&target) {
+        let closed_targets = self.fds.borrow_mut().close_target(&target);
+        for (id, wake_r, wake_w) in closed_targets {
             if wake_r {
                 self.wake_pipe(id, true);
             }
@@ -338,7 +412,7 @@ impl Linux {
             self.std_is_stdin[i] = false;
             return;
         }
-        self.fds.place(newfd, t);
+        self.fds.borrow_mut().place(newfd, t);
     }
 
     /// そのパイプ端の待ちを実行可能に戻す。`read` は待ちの方向。
@@ -418,7 +492,7 @@ impl Linux {
         let pending = self.effective_pending();
         let mut pwait_mask = None;
         let r = crate::wait::dispatch(
-            &mut self.fds,
+            &mut self.fds.borrow_mut(),
             &abi,
             env,
             name,
@@ -450,7 +524,7 @@ impl Linux {
         #[cfg(unix)]
         {
             let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-            let r = crate::sock::sys_accept(&mut self.fds, &abi, env, a, b, c, flags);
+            let r = crate::sock::sys_accept(&mut self.fds.borrow_mut(), &abi, env, a, b, c, flags);
             self.sock_finish(env, r)
         }
         #[cfg(not(unix))]
@@ -466,7 +540,7 @@ impl Linux {
         #[cfg(unix)]
         {
             let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-            let r = crate::sock::sys_getname(&mut self.fds, &abi, env, a, b, c, peer)
+            let r = crate::sock::sys_getname(&mut self.fds.borrow_mut(), &abi, env, a, b, c, peer)
                 .map(crate::sock::Out::Done);
             self.sock_finish(env, r)
         }
@@ -505,7 +579,7 @@ impl Linux {
         #[cfg(unix)]
         if w.fds
             .iter()
-            .any(|&(fd, ev)| !self.fds.host_watches(fd, ev).is_empty())
+            .any(|&(fd, ev)| !self.fds.borrow().host_watches(fd, ev).is_empty())
         {
             return polyisa_kernel::ThreadWait::HostFd;
         }
@@ -601,7 +675,12 @@ impl Linux {
             let Some(w) = &task.linux.fd_wait else {
                 continue;
             };
-            if Self::wait_ready(&task.linux.fds, w, now, task.linux.effective_pending()) {
+            if Self::wait_ready(
+                &task.linux.fds.borrow(),
+                w,
+                now,
+                task.linux.effective_pending(),
+            ) {
                 task.linux.fd_wait_prev = task.linux.fd_wait.take();
                 ready.push(polyisa_kernel::ThreadId(task.linux.pid));
             }
@@ -610,10 +689,9 @@ impl Linux {
             borrowed.meta.unblock(id);
         }
         drop(borrowed);
-        let self_ready = self
-            .fd_wait
-            .as_ref()
-            .is_some_and(|w| Self::wait_ready(&self.fds, w, now, self.effective_pending()));
+        let self_ready = self.fd_wait.as_ref().is_some_and(|w| {
+            Self::wait_ready(&self.fds.borrow(), w, now, self.effective_pending())
+        });
         if self_ready {
             self.fd_wait_prev = self.fd_wait.take();
             let pid = self.pid;
@@ -649,11 +727,11 @@ impl Linux {
         };
         for task in &self.queue.0.borrow().parked {
             if let Some(w) = &task.linux.fd_wait {
-                take(w, &task.linux.fds);
+                take(w, &task.linux.fds.borrow());
             }
         }
         if let Some(w) = &self.fd_wait {
-            take(w, &self.fds);
+            take(w, &self.fds.borrow());
         }
         (list, earliest)
     }
@@ -675,6 +753,7 @@ impl Linux {
                 return task
                     .linux
                     .fds
+                    .borrow()
                     .host_watches(fd, ev)
                     .iter()
                     .any(|&(raw, _)| events.iter().any(|&(r, _)| r == raw));
@@ -699,6 +778,7 @@ impl Linux {
                 #[cfg(unix)]
                 return self
                     .fds
+                    .borrow()
                     .host_watches(fd, ev)
                     .iter()
                     .any(|&(raw, _)| events.iter().any(|&(r, _)| r == raw));
@@ -826,7 +906,7 @@ impl Linux {
             };
             borrowed.parked.remove(idx)
         };
-        let n = task.linux.fds.len();
+        let n = task.linux.fds.borrow_mut().len();
         for fd in 0..n as u32 {
             task.linux.remove_fd(3 + fd);
         }
@@ -879,13 +959,13 @@ impl Linux {
                 return i as u32;
             }
         }
-        self.fds.alloc(t)
+        self.fds.borrow_mut().alloc(t)
     }
 
     /// FD_CLOEXEC を立てる/下ろす。標準 fd の付け替え先は記録しない。
     fn set_cloexec(&mut self, fd: u32, on: bool) {
         if fd >= 3 {
-            let _ = self.fds.set_cloexec(fd, on);
+            let _ = self.fds.borrow_mut().set_cloexec(fd, on);
         }
     }
 
@@ -895,15 +975,15 @@ impl Linux {
             self.std_paths[fd as usize] = Some(path);
             return;
         }
-        self.fds.remember_path(fd, path);
+        self.fds.borrow_mut().remember_path(fd, path);
     }
 
-    /// ゲスト fd に覚えたホストパス。
-    fn path_of(&self, fd: u32) -> Option<&str> {
+    /// ゲスト fd に覚えたホストパス。共有表の参照を返せないので複製で返す。
+    fn path_of(&self, fd: u32) -> Option<String> {
         if fd < 3 {
-            self.std_paths[fd as usize].as_deref()
+            self.std_paths[fd as usize].clone()
         } else {
-            self.fds.path_of(fd)
+            self.fds.borrow().path_of(fd).map(str::to_string)
         }
     }
 
@@ -912,7 +992,7 @@ impl Linux {
         if fd < 3 {
             self.std_paths[fd as usize] = None;
         } else {
-            self.fds.forget_path(fd);
+            self.fds.borrow_mut().forget_path(fd);
         }
         self.dir_done.retain(|d| *d != fd);
         self.dir_pos.retain(|(id, _)| *id != fd);
@@ -1010,11 +1090,11 @@ impl Linux {
     fn duplicate(&self) -> Self {
         Self {
             reported: self.reported.clone(),
-            fds: self.fds.try_clone(),
+            fds: std::rc::Rc::new(std::cell::RefCell::new(self.fds.borrow().try_clone())),
             std_targets: std::array::from_fn(|i| {
                 self.std_targets[i]
                     .as_ref()
-                    .and_then(|t| self.fds.dup_of(t))
+                    .and_then(|t| self.fds.borrow_mut().dup_of(t))
             }),
             std_is_stdin: self.std_is_stdin,
             std_closed: self.std_closed,
@@ -1090,7 +1170,7 @@ impl Linux {
     /// status を作れるようにする。
     fn terminate_by_signal(&mut self, sig: u32) -> TrapOutcome {
         let me = self.ensure_self();
-        let nfd = self.fds.len();
+        let nfd = self.fds.borrow().len();
         for fd in 0..3u32 {
             self.close_fd(fd);
         }
@@ -1391,7 +1471,7 @@ impl Linux {
                 .meta
                 .unblock_futex(ctid, 1, u32::MAX);
         }
-        let nfd = self.fds.len();
+        let nfd = self.fds.borrow().len();
         for fd in 0..3u32 {
             self.close_fd(fd);
         }
@@ -2217,7 +2297,7 @@ fn pipe_read(
         return Some(TrapOutcome::Handled);
     }
     let max = usize::try_from(left.min(4096)).unwrap_or(0);
-    let got = sys.fds.pipes().borrow_mut().read(end.0, max);
+    let got = sys.fds.borrow_mut().pipes().borrow_mut().read(end.0, max);
     match got {
         polyisa_kernel::PipeRead::Bytes(bytes) => {
             if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
@@ -2232,7 +2312,7 @@ fn pipe_read(
             Some(TrapOutcome::Handled)
         }
         polyisa_kernel::PipeRead::Empty => {
-            if sys.fds.pipes().borrow().nonblock(end.0, true) {
+            if sys.fds.borrow_mut().pipes().borrow().nonblock(end.0, true) {
                 set64(env, Gpr(0), cx.neg(EAGAIN));
                 return Some(TrapOutcome::Handled);
             }
@@ -2285,7 +2365,12 @@ fn pipe_write(
     {
         return Some(TrapOutcome::Unimplemented);
     }
-    let wrote = sys.fds.pipes().borrow_mut().write(end.0, &chunk);
+    let wrote = sys
+        .fds
+        .borrow_mut()
+        .pipes()
+        .borrow_mut()
+        .write(end.0, &chunk);
     match wrote {
         polyisa_kernel::PipeWrite::Broken => {
             if let Some(out) = raise_sigpipe(sys) {
@@ -2295,7 +2380,7 @@ fn pipe_write(
             Some(TrapOutcome::Handled)
         }
         polyisa_kernel::PipeWrite::Full => {
-            if sys.fds.pipes().borrow().nonblock(end.0, false) {
+            if sys.fds.borrow_mut().pipes().borrow().nonblock(end.0, false) {
                 set64(env, Gpr(0), cx.neg(EAGAIN));
                 return Some(TrapOutcome::Handled);
             }
@@ -2345,12 +2430,12 @@ fn open_pipe(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx, flags: u64) -> Opt
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let (rd, wr) = sys.fds.pipe_pair();
+    let (rd, wr) = sys.fds.borrow_mut().pipe_pair();
     let read_fd = sys.alloc_target(rd);
     let write_fd = sys.alloc_target(wr);
     if flags & O_NONBLOCK != 0 {
-        let _ = sys.fds.set_nonblock(read_fd, true);
-        let _ = sys.fds.set_nonblock(write_fd, true);
+        let _ = sys.fds.borrow_mut().set_nonblock(read_fd, true);
+        let _ = sys.fds.borrow_mut().set_nonblock(write_fd, true);
     }
     if flags & O_CLOEXEC != 0 {
         sys.set_cloexec(read_fd, true);
@@ -2406,14 +2491,14 @@ fn sys_read(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
         set64(env, Gpr(0), done);
         return Some(TrapOutcome::Handled);
     }
-    let Some(file) = sys.file_mut(fd) else {
+    let Some(mut file) = sys.file_mut(fd) else {
         return fd_read_other(sys, env, cx, fd, buf, left);
     };
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
     while left > 0 {
         let take = left.min(IO_CHUNK as u64) as usize;
-        let n = match std::io::Read::read(file, &mut chunk[..take]) {
+        let n = match std::io::Read::read(&mut *file, &mut chunk[..take]) {
             Ok(0) => break,
             Ok(n) => n,
             Err(_) => break,
@@ -2447,14 +2532,18 @@ fn fd_read_other(
     left: u64,
 ) -> Option<TrapOutcome> {
     use polyisa_kernel::FdRead;
-    if sys.fds.target(fd).is_none() {
+    if sys.fds.borrow_mut().target(fd).is_none() {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
     let max = usize::try_from(left.min(IO_CHUNK as u64)).unwrap_or(0);
     // TimerFd は ready が catch_up を進める。
-    let _ = sys.fds.ready(fd, sys.mono_ns(), sys.sig_pending);
-    match sys.fds.read(fd, max) {
+    let _ = sys
+        .fds
+        .borrow_mut()
+        .ready(fd, sys.mono_ns(), sys.sig_pending);
+    let fd_read = sys.fds.borrow_mut().read(fd, max);
+    match fd_read {
         FdRead::Bytes(bytes) => {
             if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
                 return Some(TrapOutcome::Unimplemented);
@@ -2478,12 +2567,12 @@ fn fd_read_other(
             set64(env, Gpr(0), 0);
             Some(TrapOutcome::Handled)
         }
-        FdRead::Empty if sys.fds.nonblock(fd) => {
+        FdRead::Empty if sys.fds.borrow_mut().nonblock(fd) => {
             set64(env, Gpr(0), cx.neg(EAGAIN));
             Some(TrapOutcome::Handled)
         }
         FdRead::Empty => {
-            let r = crate::wait::read_wait(&sys.fds, fd)
+            let r = crate::wait::read_wait(&sys.fds.borrow(), fd)
                 .map(crate::sock::Out::Wait)
                 .ok_or(EAGAIN);
             sys.sock_finish(env, r)
@@ -2523,10 +2612,10 @@ fn fd_write_other(
 ) -> Option<TrapOutcome> {
     use polyisa_kernel::FdWrite;
     let is_eventfd = matches!(
-        sys.fds.target(fd),
+        sys.fds.borrow_mut().target(fd),
         Some(polyisa_kernel::FdTarget::EventFd(_))
     );
-    if sys.fds.target(fd).is_none() {
+    if sys.fds.borrow_mut().target(fd).is_none() {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
@@ -2547,17 +2636,18 @@ fn fd_write_other(
             return Some(TrapOutcome::Unimplemented);
         }
         let v = u64::from_le_bytes(chunk);
-        return match sys.fds.write_eventfd(fd, v) {
+        let ev_written = sys.fds.borrow_mut().write_eventfd(fd, v);
+        return match ev_written {
             FdWrite::Done(n) => {
                 set64(env, Gpr(0), n as u64);
                 Some(TrapOutcome::Handled)
             }
-            FdWrite::Full if sys.fds.nonblock(fd) => {
+            FdWrite::Full if sys.fds.borrow_mut().nonblock(fd) => {
                 set64(env, Gpr(0), cx.neg(EAGAIN));
                 Some(TrapOutcome::Handled)
             }
             FdWrite::Full => {
-                let r = crate::wait::write_wait(&sys.fds, fd)
+                let r = crate::wait::write_wait(&sys.fds.borrow_mut(), fd)
                     .map(crate::sock::Out::Wait)
                     .ok_or(EAGAIN);
                 sys.sock_finish(env, r)
@@ -2581,7 +2671,8 @@ fn fd_write_other(
     {
         return Some(TrapOutcome::Unimplemented);
     }
-    match sys.fds.write(fd, &chunk) {
+    let fd_written = sys.fds.borrow_mut().write(fd, &chunk);
+    match fd_written {
         FdWrite::Done(n) => {
             set64(env, Gpr(0), n as u64);
             Some(TrapOutcome::Handled)
@@ -2593,12 +2684,12 @@ fn fd_write_other(
             set64(env, Gpr(0), cx.neg(EPIPE));
             Some(TrapOutcome::Handled)
         }
-        FdWrite::Full if sys.fds.nonblock(fd) => {
+        FdWrite::Full if sys.fds.borrow_mut().nonblock(fd) => {
             set64(env, Gpr(0), cx.neg(EAGAIN));
             Some(TrapOutcome::Handled)
         }
         FdWrite::Full => {
-            let r = crate::wait::write_wait(&sys.fds, fd)
+            let r = crate::wait::write_wait(&sys.fds.borrow_mut(), fd)
                 .map(crate::sock::Out::Wait)
                 .ok_or(EAGAIN);
             sys.sock_finish(env, r)
@@ -2671,7 +2762,7 @@ fn sys_write(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     }
     // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
     // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
-    let Some(file) = sys.file_mut(fd) else {
+    let Some(mut file) = sys.file_mut(fd) else {
         return fd_write_other(sys, env, cx, fd, buf, left);
     };
     let mut done = 0u64;
@@ -2687,7 +2778,7 @@ fn sys_write(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         {
             return Some(TrapOutcome::Unimplemented);
         }
-        match std::io::Write::write(file, &chunk[..take]) {
+        match std::io::Write::write(&mut *file, &chunk[..take]) {
             Ok(0) => break,
             Ok(n) => {
                 done += n as u64;
@@ -2780,8 +2871,8 @@ fn writev_opened(
             {
                 return Some(TrapOutcome::Unimplemented);
             }
-            let file = sys.file_mut(fd).expect("opened fd");
-            match std::io::Write::write(file, &chunk[..take]) {
+            let mut file = sys.file_mut(fd).expect("opened fd");
+            match std::io::Write::write(&mut *file, &chunk[..take]) {
                 Ok(0) => {
                     set64(env, Gpr(0), done);
                     return Some(TrapOutcome::Handled);
@@ -2952,8 +3043,8 @@ fn sys_readv(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
             let n = if empty_stdin {
                 sys.take_stdin(&mut chunk[..take])
             } else {
-                let f = sys.file_mut(fd).unwrap();
-                match std::io::Read::read(f, &mut chunk[..take]) {
+                let mut f = sys.file_mut(fd).unwrap();
+                match std::io::Read::read(&mut *f, &mut chunk[..take]) {
                     Ok(0) => 0,
                     Ok(n) => n,
                     Err(_) => 0,
@@ -3199,7 +3290,7 @@ fn sys_socket(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     // 正準層は os-linux::sock。引数は rbx/rcx/rdx（i386 は socketcall 経由）。
     let abi = sys.sock_abi();
     let r = crate::sock::sys_socket(
-        &mut sys.fds,
+        &mut sys.fds.borrow_mut(),
         &abi,
         get64(env, cx.r_a),
         get64(env, cx.r_b),
@@ -3217,7 +3308,7 @@ fn sys_socketpair(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         get64(env, cx.r_c),
         get64(env, cx.r_d),
     );
-    let r = crate::sock::sys_socketpair(&mut sys.fds, &abi, env, a, b, c, d)
+    let r = crate::sock::sys_socketpair(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, d)
         .map(crate::sock::Out::Done);
     sys.sock_finish(env, r)
 }
@@ -3228,7 +3319,7 @@ fn sys_bind(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     #[cfg(unix)]
     {
         let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-        let r = crate::sock::sys_bind(&mut sys.fds, &abi, env, a, b, c, &map)
+        let r = crate::sock::sys_bind(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, &map)
             .map(crate::sock::Out::Done);
         sys.sock_finish(env, r)
     }
@@ -3245,7 +3336,7 @@ fn sys_connect(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     #[cfg(unix)]
     {
         let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-        let r = crate::sock::sys_connect(&mut sys.fds, &abi, env, a, b, c, &map);
+        let r = crate::sock::sys_connect(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, &map);
         sys.sock_finish(env, r)
     }
     #[cfg(not(unix))]
@@ -3260,7 +3351,8 @@ fn sys_listen(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     #[cfg(unix)]
     {
         let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
-        let r = crate::sock::sys_listen(&mut sys.fds, &abi, a, b).map(crate::sock::Out::Done);
+        let r = crate::sock::sys_listen(&mut sys.fds.borrow_mut(), &abi, a, b)
+            .map(crate::sock::Out::Done);
         sys.sock_finish(env, r)
     }
     #[cfg(not(unix))]
@@ -3286,7 +3378,8 @@ fn sys_getpeername(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 fn sys_shutdown(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let abi = sys.sock_abi();
     let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
-    let r = crate::sock::sys_shutdown(&mut sys.fds, &abi, a, b).map(crate::sock::Out::Done);
+    let r = crate::sock::sys_shutdown(&mut sys.fds.borrow_mut(), &abi, a, b)
+        .map(crate::sock::Out::Done);
     sys.sock_finish(env, r)
 }
 
@@ -3301,7 +3394,7 @@ fn sys_setsockopt(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
             get64(env, cx.r_d),
             get64(env, cx.r_e),
         );
-        let r = crate::sock::sys_setsockopt(&mut sys.fds, &abi, env, a, b, c, d, e)
+        let r = crate::sock::sys_setsockopt(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, d, e)
             .map(crate::sock::Out::Done);
         sys.sock_finish(env, r)
     }
@@ -3323,7 +3416,7 @@ fn sys_getsockopt(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
             get64(env, cx.r_d),
             get64(env, cx.r_e),
         );
-        let r = crate::sock::sys_getsockopt(&mut sys.fds, &abi, env, a, b, c, d, e)
+        let r = crate::sock::sys_getsockopt(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, d, e)
             .map(crate::sock::Out::Done);
         sys.sock_finish(env, r)
     }
@@ -3345,7 +3438,7 @@ fn sys_sendto(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         get64(env, cx.r_e),
         get64(env, cx.r_f),
     );
-    let r = crate::sock::sys_sendto(&mut sys.fds, &abi, env, a, b, c, d, e, f, &map);
+    let r = crate::sock::sys_sendto(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, d, e, f, &map);
     sys.sock_finish(env, r)
 }
 
@@ -3359,7 +3452,7 @@ fn sys_recvfrom(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         get64(env, cx.r_e),
         get64(env, cx.r_f),
     );
-    let r = crate::sock::sys_recvfrom(&mut sys.fds, &abi, env, a, b, c, d, e, f);
+    let r = crate::sock::sys_recvfrom(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, d, e, f);
     sys.sock_finish(env, r)
 }
 
@@ -3367,14 +3460,14 @@ fn sys_sendmsg(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     let abi = sys.sock_abi();
     let map = sys.unix_path_map();
     let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-    let r = crate::sock::sys_sendmsg(&mut sys.fds, &abi, env, a, b, c, &map);
+    let r = crate::sock::sys_sendmsg(&mut sys.fds.borrow_mut(), &abi, env, a, b, c, &map);
     sys.sock_finish(env, r)
 }
 
 fn sys_recvmsg(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let abi = sys.sock_abi();
     let (a, b, c) = (get64(env, cx.r_a), get64(env, cx.r_b), get64(env, cx.r_c));
-    let r = crate::sock::sys_recvmsg(&mut sys.fds, &abi, env, a, b, c);
+    let r = crate::sock::sys_recvmsg(&mut sys.fds.borrow_mut(), &abi, env, a, b, c);
     sys.sock_finish(env, r)
 }
 
@@ -3387,7 +3480,7 @@ fn sys_socketcall(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     let abi = sys.sock_abi();
     let map = sys.unix_path_map();
     let (a, b) = (get64(env, cx.r_a), get64(env, cx.r_b));
-    let r = crate::sock::sys_socketcall(&mut sys.fds, &abi, env, a, b, &map);
+    let r = crate::sock::sys_socketcall(&mut sys.fds.borrow_mut(), &abi, env, a, b, &map);
     sys.sock_finish(env, r)
 }
 
@@ -4441,7 +4534,7 @@ fn sys_chdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 fn sys_fchdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let mut cwd = sys.cwd.clone();
-    let r = crate::x86::sys_fchdir(&sys.fds, &sys.std_paths, &mut cwd, env, cx);
+    let r = crate::x86::sys_fchdir(&sys.fds.borrow_mut(), &sys.std_paths, &mut cwd, env, cx);
     sys.cwd = cwd;
     r
 }
@@ -4459,7 +4552,7 @@ fn sys_chroot(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
 fn sys_getdents64(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     crate::x86::sys_getdents64(
-        &sys.fds,
+        &sys.fds.borrow_mut(),
         &sys.std_paths,
         &mut sys.dir_pos,
         &mut sys.dir_done,
@@ -4479,7 +4572,7 @@ fn sys_fstat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     } else {
         None
     };
-    crate::x86::sys_fstat(&sys.fds, std, &sys.std_paths, env, cx)
+    crate::x86::sys_fstat(&sys.fds.borrow_mut(), std, &sys.std_paths, env, cx)
 }
 
 fn sys_stat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -4539,7 +4632,7 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         let mut done = 0u64;
         while left > 0 {
             let max = usize::try_from(left.min(4096)).unwrap_or(0);
-            let got = sys.fds.pipes().borrow_mut().read(end.0, max);
+            let got = sys.fds.borrow_mut().pipes().borrow_mut().read(end.0, max);
             match got {
                 polyisa_kernel::PipeRead::Bytes(bytes) => {
                     let n = bytes.len();
@@ -4608,10 +4701,10 @@ fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     while left > 0 {
         let take = left.min(IO_CHUNK as u64) as usize;
         let n = {
-            let Some(file) = sys.file_mut(in_fd) else {
+            let Some(mut file) = sys.file_mut(in_fd) else {
                 break;
             };
-            match std::io::Read::read(file, &mut chunk[..take]) {
+            match std::io::Read::read(&mut *file, &mut chunk[..take]) {
                 Ok(n) => n,
                 Err(_) => break,
             }
@@ -4645,7 +4738,7 @@ fn sys_lseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     } else {
         None
     };
-    crate::x86::sys_lseek(&mut sys.fds, std, env, cx)
+    crate::x86::sys_lseek(&mut sys.fds.borrow_mut(), std, env, cx)
 }
 
 fn sys_llseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -4659,7 +4752,7 @@ fn sys_llseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     } else {
         None
     };
-    crate::x86::sys_llseek(&mut sys.fds, std, env, cx)
+    crate::x86::sys_llseek(&mut sys.fds.borrow_mut(), std, env, cx)
 }
 
 fn sys_ftruncate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -4674,7 +4767,7 @@ fn sys_ftruncate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     } else {
         None
     };
-    crate::x86::sys_ftruncate(&mut sys.fds, std, env, cx)
+    crate::x86::sys_ftruncate(&mut sys.fds.borrow_mut(), std, env, cx)
 }
 
 fn sys_fallocate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -4689,7 +4782,7 @@ fn sys_fallocate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     } else {
         None
     };
-    crate::x86::sys_fallocate(&mut sys.fds, std, env, cx)
+    crate::x86::sys_fallocate(&mut sys.fds.borrow_mut(), std, env, cx)
 }
 
 fn sys_getgroups(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5383,7 +5476,15 @@ fn sys_readlinkat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
     let exe = sys.exe_path.clone();
-    crate::x86::sys_readlinkat(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
+    crate::x86::sys_readlinkat(
+        &root,
+        &cwd,
+        &exe,
+        &sys.fds.borrow_mut(),
+        &sys.std_paths,
+        env,
+        cx,
+    )
 }
 
 fn sys_readlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5392,7 +5493,15 @@ fn sys_readlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
     let exe = sys.exe_path.clone();
-    crate::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
+    crate::x86::sys_readlink(
+        &root,
+        &cwd,
+        &exe,
+        &sys.fds.borrow_mut(),
+        &sys.std_paths,
+        env,
+        cx,
+    )
 }
 
 fn sys_arch_prctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5629,7 +5738,7 @@ fn sys_unlinkat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     sys.ensure_cwd();
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
-    crate::x86::sys_unlinkat(&root, &cwd, &sys.fds, &sys.std_paths, env, cx)
+    crate::x86::sys_unlinkat(&root, &cwd, &sys.fds.borrow_mut(), &sys.std_paths, env, cx)
 }
 
 fn sys_access(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -5705,25 +5814,29 @@ fn sys_fcntl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     const FD_CLOEXEC: u64 = 1;
     const O_NONBLOCK: u64 = 0o4000;
     // 表に載る fd の旗は仮想カーネルが応える。
-    if fd >= 3 && sys.fds.ent(fd).is_some() {
+    if fd >= 3 && sys.fds.borrow_mut().ent(fd).is_some() {
         match cmd {
             F_GETFD => {
-                set64(env, Gpr(0), u64::from(sys.fds.cloexec(fd)));
+                set64(env, Gpr(0), u64::from(sys.fds.borrow_mut().cloexec(fd)));
                 return Some(TrapOutcome::Handled);
             }
             F_SETFD => {
-                let _ = sys.fds.set_cloexec(fd, arg & FD_CLOEXEC != 0);
+                let _ = sys.fds.borrow_mut().set_cloexec(fd, arg & FD_CLOEXEC != 0);
                 set64(env, Gpr(0), 0);
                 return Some(TrapOutcome::Handled);
             }
             F_GETFL => {
                 // 記録しているのは O_NONBLOCK だけ。
-                let fl = if sys.fds.nonblock(fd) { O_NONBLOCK } else { 0 };
+                let fl = if sys.fds.borrow_mut().nonblock(fd) {
+                    O_NONBLOCK
+                } else {
+                    0
+                };
                 set64(env, Gpr(0), fl);
                 return Some(TrapOutcome::Handled);
             }
             F_SETFL => {
-                let _ = sys.fds.set_nonblock(fd, arg & O_NONBLOCK != 0);
+                let _ = sys.fds.borrow_mut().set_nonblock(fd, arg & O_NONBLOCK != 0);
                 set64(env, Gpr(0), 0);
                 return Some(TrapOutcome::Handled);
             }
@@ -5797,6 +5910,7 @@ fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
         ptid,
         parent_settid,
         child_settid,
+        flags,
     )
 }
 
@@ -5816,6 +5930,7 @@ fn spawn_thread(
     ptid: u64,
     parent_settid: bool,
     child_settid: bool,
+    flags: u64,
 ) -> Option<TrapOutcome> {
     let parent = sys.ensure_self();
     // スレッドは wait 対象にも SIGCHLD にもしない区別付きで登録する。
@@ -5859,6 +5974,13 @@ fn spawn_thread(
     // Ref: SRC-LINUX (7.3)。
     child_linux.sigacts = std::rc::Rc::clone(&sys.sigacts);
     child_linux.shared_pending = std::rc::Rc::clone(&sys.shared_pending);
+    // CLONE_FILES では fd 表を共有する。musl/glibc の pthread は常に
+    // 立てる。複製は duplicate() が fork 意味で作っているので、
+    // 共有する側は捨てて Rc を差し替える。
+    // Ref: SRC-LINUX (7.3)。
+    if flags & crate::clone_flag::FILES != 0 {
+        child_linux.fds = std::rc::Rc::clone(&sys.fds);
+    }
     sys.queue
         .0
         .borrow_mut()
@@ -6227,10 +6349,10 @@ fn install_exec(
     }
     // FD_CLOEXEC の fd を掃討する。パイプ端を閉じた結果の
     // 待ち解除はここで配る。
-    let taken = sys.fds.take_cloexec();
+    let taken = sys.fds.borrow_mut().take_cloexec();
     let mut wakes = Vec::new();
     for t in &taken {
-        wakes.extend(sys.fds.close_target(t));
+        wakes.extend(sys.fds.borrow_mut().close_target(t));
     }
     for (id, wake_r, wake_w) in wakes {
         if wake_r {
@@ -8129,6 +8251,107 @@ mod tests {
     }
 
     #[test]
+    fn clone_files_shares_fd_table() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // 親で pipe を作る。fd 3/4 が開く。
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // CLONE_FILES 付きでスレッドを作る。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD | crate::clone_flag::FILES,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1);
+        let parent = sys.pid;
+        // 子へ切り替え、親の開いた pipe の書き端(fd 4)へ書く。
+        // fd 表を共有していなければ EBADF になる。
+        assert!(sys.swap_in(&mut env, child));
+        env.backend
+            .mem
+            .write(VirtAddr(0x2010), &[0xAA, 0xBB, 0xCC, 0xDD])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 4);
+        set64(&mut env, Gpr(6), 0x2010);
+        set64(&mut env, Gpr(2), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 4, "共有表で write できる");
+        // 親へ戻り、読み端(fd 3)から読める。
+        assert!(sys.swap_in(&mut env, parent));
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x2020);
+        set64(&mut env, Gpr(2), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 4);
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2020), &mut buf, data_access())
+            .unwrap();
+        assert_eq!(buf, [0xAA, 0xBB, 0xCC, 0xDD], "子の書き込みが親で読める");
+    }
+
+    #[test]
+    fn clone_without_files_copies_fd_table() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x9000), 1, Perms::RW).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // FILES なしでスレッドを作ると表は複製。複製された表でも
+        // fd 4 は開いているが、別エントリなので子で close しても
+        // 親では開いたままである。
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(
+            &mut env,
+            Gpr(7),
+            crate::clone_flag::VM | crate::clone_flag::THREAD,
+        );
+        set64(&mut env, Gpr(6), 0x9800);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        let parent = sys.pid;
+        assert!(sys.swap_in(&mut env, child));
+        set64(&mut env, Gpr(0), abi::CLOSE);
+        set64(&mut env, Gpr(7), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0, "複製表で close できる");
+        assert!(sys.swap_in(&mut env, parent));
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 4);
+        set64(&mut env, Gpr(6), 0x2010);
+        set64(&mut env, Gpr(2), 1);
+        env.backend.mem.write(VirtAddr(0x2010), &[0x42]).unwrap();
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(
+            get64(&mut env, Gpr(0)),
+            1,
+            "子の close は親の複製に影響しない"
+        );
+    }
+
+    #[test]
     fn clone_thread_getpid_returns_leader_pid() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
@@ -9766,7 +9989,12 @@ mod tests {
         let mut sys = Linux::x86_64();
         // /proc/self/exe を入力に積む（必ず存在する実行ファイル）。
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
+        assert_eq!(
+            sys.fds
+                .borrow_mut()
+                .alloc(polyisa_kernel::FdTarget::File(f)),
+            3
+        );
         let mut env = bare();
         // sendfile(1, 3, NULL, 16) は 16 を返して stdout に書く。
         set64(&mut env, Gpr(0), abi::SENDFILE);
@@ -9807,7 +10035,12 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
+        assert_eq!(
+            sys.fds
+                .borrow_mut()
+                .alloc(polyisa_kernel::FdTarget::File(f)),
+            3
+        );
         let mut env = bare();
         // lseek(3, 16, SEEK_SET) は 16 を返す。
         set64(&mut env, Gpr(0), abi::LSEEK);
@@ -10915,7 +11148,12 @@ mod tests {
         let path = format!("/tmp/polyisa_ftruncate_{}", std::process::id());
         std::fs::write(&path, b"abcdef").unwrap();
         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
+        assert_eq!(
+            sys.fds
+                .borrow_mut()
+                .alloc(polyisa_kernel::FdTarget::File(f)),
+            3
+        );
         // ftruncate(3, 3) -> 0、大きさ 3.
         set64(&mut env, Gpr(0), abi::FTRUNCATE);
         set64(&mut env, Gpr(7), 3);
@@ -10941,7 +11179,12 @@ mod tests {
         let path = format!("/tmp/polyisa_fallocate_{}", std::process::id());
         let _ = std::fs::remove_file(&path);
         let f = std::fs::File::create(&path).unwrap();
-        assert_eq!(sys.fds.alloc(polyisa_kernel::FdTarget::File(f)), 3);
+        assert_eq!(
+            sys.fds
+                .borrow_mut()
+                .alloc(polyisa_kernel::FdTarget::File(f)),
+            3
+        );
         set64(&mut env, Gpr(0), abi::FALLOCATE);
         set64(&mut env, Gpr(7), 3);
         set64(&mut env, Gpr(6), 0);
@@ -11602,7 +11845,7 @@ mod tests {
         let mut sys = Linux::x86_64();
         let mut env = bare();
         assert_eq!(
-            sys.fds.alloc(polyisa_kernel::FdTarget::File(
+            sys.fds.borrow_mut().alloc(polyisa_kernel::FdTarget::File(
                 std::fs::File::open("/dev/null").unwrap()
             )),
             3
@@ -12008,12 +12251,16 @@ mod tests {
         set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x1000);
-        let pipe_id = match sys.fd_target(write_fd) {
+        let pipe_id = match sys.fd_target(write_fd).as_deref() {
             Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
             other => panic!("unexpected pipe write target: {other:?}"),
         };
         assert_eq!(
-            sys.fds.pipes().borrow_mut().write(pipe_id, b"z"),
+            sys.fds
+                .borrow_mut()
+                .pipes()
+                .borrow_mut()
+                .write(pipe_id, b"z"),
             polyisa_kernel::PipeWrite::Wrote(1)
         );
         let rsp = get64(&mut env, Gpr(4));
@@ -12112,13 +12359,13 @@ mod tests {
             .read(VirtAddr(0x104), &mut fds, data_access())
             .unwrap();
         let write_fd = u32::from_le_bytes(fds);
-        let id = match sys.fd_target(write_fd) {
+        let id = match sys.fd_target(write_fd).as_deref() {
             Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
             other => panic!("unexpected pipe write target: {other:?}"),
         };
         let fill = vec![b'x'; polyisa_kernel::PIPE_CAPACITY];
         assert_eq!(
-            sys.fds.pipes().borrow_mut().write(id, &fill),
+            sys.fds.borrow_mut().pipes().borrow_mut().write(id, &fill),
             polyisa_kernel::PipeWrite::Wrote(polyisa_kernel::PIPE_CAPACITY)
         );
         env.backend.mem.write(VirtAddr(0x400), b"z").unwrap();
@@ -12149,13 +12396,13 @@ mod tests {
             .read(VirtAddr(0x104), &mut fds, data_access())
             .unwrap();
         let write_fd = u32::from_le_bytes(fds);
-        let id = match sys.fd_target(write_fd) {
+        let id = match sys.fd_target(write_fd).as_deref() {
             Some(polyisa_kernel::FdTarget::PipeEnd { id, read: false }) => *id,
             other => panic!("unexpected pipe write target: {other:?}"),
         };
         let fill = vec![b'x'; polyisa_kernel::PIPE_CAPACITY];
         assert_eq!(
-            sys.fds.pipes().borrow_mut().write(id, &fill),
+            sys.fds.borrow_mut().pipes().borrow_mut().write(id, &fill),
             polyisa_kernel::PipeWrite::Wrote(polyisa_kernel::PIPE_CAPACITY)
         );
         env.backend.mem.write(VirtAddr(0x400), b"z").unwrap();
